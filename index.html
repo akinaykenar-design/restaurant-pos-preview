@@ -569,6 +569,16 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .pp-toggle.pp-off{opacity:.42;text-decoration:line-through;}
 .pp-inline-input{font:inherit;color:inherit;background:#fffbe8;border:1.5px dashed #b90;border-radius:3px;padding:1px 6px;text-align:center;max-width:200px;}
 .pp-inline-input:focus{outline:none;}
+/* Items page: group headings + selection checkbox + tap-to-edit price */
+.item-group-head{display:flex;align-items:center;gap:7px;background:none;border:none;cursor:pointer;font-family:var(--font-display);font-size:13px;font-weight:700;color:var(--text-primary);padding:8px 2px 0;text-align:left;}
+.item-group-head .igh-count{font-size:11px;color:var(--charcoal-soft);font-weight:700;background:var(--steel-100);border-radius:99px;padding:2px 8px;}
+.menu-item-select-cb{width:15px;height:15px;flex-shrink:0;accent-color:var(--orange);cursor:pointer;}
+.price-quick-wrap{display:inline-flex;align-items:center;flex-shrink:0;font-size:13.5px;color:var(--charcoal-soft);font-weight:600;font-family:var(--font-mono);border-bottom:1.5px dashed var(--steel-300);cursor:text;}
+.price-quick-wrap:hover,.price-quick-wrap:focus-within{border-bottom-color:var(--orange);}
+.menu-item-price-quick-edit{width:46px;border:none;background:transparent;font:inherit;color:inherit;padding:2px 0 2px 1px;-moz-appearance:textfield;appearance:textfield;}
+.menu-item-price-quick-edit::-webkit-inner-spin-button,.menu-item-price-quick-edit::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
+.menu-item-price-quick-edit:focus{outline:none;}
+
 /* Admin nav: recent-pages row above the groups */
 .admin-recent-cap{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--charcoal-soft);padding:2px 10px 4px;}
 .admin-nav-recent{padding:8px 10px;font-size:12.5px;color:var(--charcoal-soft);}
@@ -4659,6 +4669,7 @@ let state = {
   menuModal: null,    // { mode: 'add'|'edit', id, name, category, price }
   adminError: '',
   selectedMenuItemIds: [],
+  collapsedItemGroups: [], // "Section ▸ Subsection" headings folded shut on the Items page
   selectedCategoryIds: [],
   selectedModifierIds: [], // bulk-select on the Modifiers admin
   expandedModifierId: null, // which modifier card is expanded for inline editing
@@ -10116,18 +10127,30 @@ function renderMenuAdmin() {
   </div>
   <div class="menu-items-list" style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${items.length === 0 ? `<div class="empty-hist">No items match.</div>` : ''}
-    ${items.map(m => `
+    ${(() => {
+      // Group the flat list under "Section ▸ Subsection" headings (collapsible).
+      // Headers are flat siblings of the rows, so drag-reorder keeps working.
+      const collapsed = state.collapsedItemGroups || [];
+      const groups = [];
+      items.forEach(m => {
+        const sub = m.subcategoryId ? ((state.subcategories.find(s => s.id === m.subcategoryId) || {}).name || '') : '';
+        const key = (m.category || 'Uncategorised') + (sub ? ' ▸ ' + sub : '');
+        let g = groups.find(x => x.key === key);
+        if (!g) { g = { key, items: [] }; groups.push(g); }
+        g.items.push(m);
+      });
+      const rowHtml = (m) => `
       <div class="menu-item-expandable${state.selectedMenuItemIds.includes(m.id) ? ' selected' : ''}" data-id="${m.id}" draggable="true" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${m.disabled ? 'opacity:0.55;' : ''}">
-        <div class="menu-item-header" data-id="${m.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:${state.expandedMenuItemIds.length ? 'default' : 'grab'};">
+        <div class="menu-item-header" data-id="${m.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:${state.expandedMenuItemIds.length ? 'default' : 'grab'};" title="Tap to open">
+          <input type="checkbox" class="menu-item-select-cb" ${state.selectedMenuItemIds.includes(m.id) ? 'checked' : ''} onclick="event.stopPropagation();toggleMenuItemSelection('${m.id}');" title="Select for bulk actions">
           <button style="background:none;border:none;cursor:pointer;width:18px;height:18px;padding:0;flex-shrink:0;color:var(--charcoal-soft);display:flex;align-items:center;justify-content:center;" data-id="${m.id}" onclick="event.stopPropagation();toggleMenuItemExpand('${m.id}');">${expandCollapseArrow(state.expandedMenuItemIds && state.expandedMenuItemIds.includes(m.id) || false)}</button>
           ${colorDotButton('menu-item', m.id, m.color, { size: 20, image: m.image, photo: true })}
           ${m.icon && m.iconEnabled ? `<span style="font-size:13.5px;flex-shrink:0;">${m.icon}</span>` : ''}
           <input type="text" class="menu-item-name-quick-edit" data-id="${m.id}" value="${esc(m.name)}" placeholder="Name" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:140px;padding:2px 0;" onclick="event.stopPropagation();" onblur="saveMenuItemQuickEdit('${m.id}', 'name', this.value);">
           <span style="flex:1;"></span>
-          <span style="font-size:13.5px;color:var(--charcoal-soft);flex-shrink:0;font-weight:600;">$</span>
-          <input type="number" step="0.01" min="0" class="menu-item-price-quick-edit" data-id="${m.id}" value="${(m.price || 0).toFixed(2)}" style="width:66px;font-size:13.5px;color:var(--charcoal-soft);font-weight:600;text-align:right;font-family:'IBM Plex Mono',monospace;" onclick="event.stopPropagation();" onblur="saveMenuItemQuickEdit('${m.id}', 'price', this.value);">
+          <span class="price-quick-wrap" title="Tap to edit the price" onclick="event.stopPropagation();">$<input type="number" step="0.01" min="0" class="menu-item-price-quick-edit" data-id="${m.id}" value="${(m.price || 0).toFixed(2)}" onblur="saveMenuItemQuickEdit('${m.id}', 'price', this.value);"></span>
           <button class="status-chip ${m.disabled ? 'void' : 'paid'}" style="border:none;cursor:pointer;flex-shrink:0;" data-act="toggle-menu-item-active" data-id="${m.id}" title="${m.disabled ? 'Off — click to activate' : 'On — click to deactivate'}" onclick="event.stopPropagation();">${m.disabled ? 'Off' : 'On'}</button>
-          
+
         </div>
 
         ${state.expandedMenuItemIds.includes(m.id) ? `
@@ -10194,7 +10217,13 @@ function renderMenuAdmin() {
               <button class="btn-secondary sm" style="flex:none;" data-act="edit-menu-item" data-id="${m.id}">✎ All settings…</button>
             </div>
           </div>` : ''}
-      </div>`).join('')}
+      </div>`;
+      return groups.map(g => `
+        <button type="button" class="item-group-head" data-act="toggle-item-group" data-key="${esc(g.key)}">
+          ${expandCollapseArrow(!collapsed.includes(g.key))} <span>${esc(g.key)}</span> <span class="igh-count">${g.items.length}</span>
+        </button>
+        ${collapsed.includes(g.key) ? '' : g.items.map(rowHtml).join('')}`).join('');
+    })()}
   </div>
   `;
 }
@@ -13682,6 +13711,7 @@ function toggleMenuItemSelection(id) {
   const idx = state.selectedMenuItemIds.indexOf(id);
   if (idx === -1) state.selectedMenuItemIds.push(id);
   else state.selectedMenuItemIds.splice(idx, 1);
+  state._lastMenuSelectId = id;
   render();
 }
 function toggleSelectAllMenuItems(checked) {
@@ -14183,6 +14213,12 @@ function bindEvents() {
       else if (act === 'add-menu-item') { quickAddMenuItem(); }
       else if (act === 'duplicate-menu-item') { duplicateMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-active') { toggleMenuItemActive(el.dataset.id); }
+      else if (act === 'toggle-item-group') {
+        const key = el.dataset.key;
+        const i = state.collapsedItemGroups.indexOf(key);
+        if (i === -1) state.collapsedItemGroups.push(key); else state.collapsedItemGroups.splice(i, 1);
+        render();
+      }
       else if (act === 'toggle-category-active') { toggleCategoryActive(el.dataset.id); }
       else if (act === 'edit-menu-item') { openEditMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-edit') { toggleMenuItemEdit(el.dataset.id); }
@@ -14960,8 +14996,8 @@ function bindEvents() {
     el.addEventListener('change', (e) => { renameMenuItemInline(el.dataset.id, e.target.value); });
   });
   // Expandable menu item rows
-  // Click the row itself to select it (chevron still expands). Modifier-aware:
-  // plain/ctrl toggles one (accumulates), shift selects the run.
+  // Click the row to open it; the checkbox (or ctrl/cmd-click) selects,
+  // shift-click selects the run.
   document.querySelectorAll('.menu-item-header').forEach(header => {
     // Shift-clicking to range-select would otherwise sweep a browser text selection
     // across the admin — block the text-selection default (not on the inline inputs).
@@ -14972,8 +15008,10 @@ function bindEvents() {
       if (e.target.closest('input, button, select')) return;
       const id = header.getAttribute('data-id');
       if (!id) return;
-      const ordered = visibleMenuItemsForAdmin().map(m => m.id);
+      // Plain click opens the row (the everyday action). Selection is the
+      // checkbox, or ctrl/cmd-click; shift-click still selects the run.
       if (e.shiftKey && state._lastMenuSelectId != null) {
+        const ordered = visibleMenuItemsForAdmin().map(m => m.id);
         const lastIdx = ordered.indexOf(state._lastMenuSelectId), idx = ordered.indexOf(id);
         if (lastIdx !== -1 && idx !== -1) {
           const [a, b] = lastIdx < idx ? [lastIdx, idx] : [idx, lastIdx];
@@ -14981,12 +15019,17 @@ function bindEvents() {
           for (let i = a; i <= b; i++) set.add(ordered[i]);
           state.selectedMenuItemIds = [...set];
         }
-      } else {
-        const i = state.selectedMenuItemIds.indexOf(id);
-        if (i === -1) state.selectedMenuItemIds.push(id); else state.selectedMenuItemIds.splice(i, 1);
+        state._lastMenuSelectId = id;
+        render();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        state._lastMenuSelectId = id;
+        toggleMenuItemSelection(id);
+        return;
       }
       state._lastMenuSelectId = id;
-      render();
+      toggleMenuItemExpand(id);
     });
   });
   // Input listeners for inline editing

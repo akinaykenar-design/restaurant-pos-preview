@@ -259,7 +259,8 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
 .admin-nav-btn.active{background:var(--orange-dim);color:var(--text-primary);}
 .admin-nav-sub{padding-left:32px;font-size:12.5px;}
 .admin-content{flex:1;overflow-y:auto;padding:20px 26px;}
-.admin-savebar{display:flex;align-items:center;gap:10px;padding:9px 14px;margin-bottom:16px;background:var(--surface);border:1px solid var(--steel-200);border-radius:10px;max-width:640px;}
+/* Floats over the page so appearing/disappearing never shifts the layout. */
+.admin-savebar{position:fixed;right:18px;bottom:18px;z-index:70;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--steel-200);border-radius:99px;box-shadow:0 8px 26px rgba(20,24,25,.18);}
 .admin-savebar-status{font-size:12px;color:var(--charcoal-soft);margin-right:auto;font-weight:600;}
 .admin-savebar-status.dirty{color:var(--orange);}
 .admin-save-btn,.admin-discard-btn{border:1px solid var(--steel-300);background:var(--surface);border-radius:var(--btn-radius);padding:6px 14px;font-weight:700;font-size:12.5px;cursor:pointer;font-family:inherit;transition:background .12s;}
@@ -1839,6 +1840,12 @@ function readData() {
     data.modifierGroups.forEach(g => { if (g.min === undefined) g.min = 1; if (g.max === undefined) g.max = 1; });
     writeData(data);
   }
+  // When the group is offered: while ordering (default) or added later from
+  // the line editor (a "plus" group of extras).
+  if (data.modifierGroups.some(g => g.promptAt === undefined)) {
+    data.modifierGroups.forEach(g => { if (g.promptAt === undefined) g.promptAt = 'ordering'; });
+    writeData(data);
+  }
   if (data.menu.some(m => !m.modifierGroupIds)) {
     data.menu.forEach(m => { if (!m.modifierGroupIds) m.modifierGroupIds = []; });
     writeData(data);
@@ -2500,6 +2507,7 @@ app.post('/api/modifier-groups', (req, res) => {
     name,
     min: gmin,
     max: gmax,
+    promptAt: req.body.promptAt === 'later' ? 'later' : 'ordering',
     options: options.map((o, i) => ({ id: 'mo' + Date.now() + i, label: o.label, priceDelta: parseFloat(o.priceDelta) || 0 })),
   };
   data.modifierGroups.push(group);
@@ -2519,6 +2527,7 @@ app.put('/api/modifier-groups/:id', (req, res) => {
   }
   if (min !== undefined) group.min = Math.max(0, parseInt(min) || 0);
   if (max !== undefined) group.max = Math.max(1, parseInt(max) || 1);
+  if (req.body.promptAt !== undefined) group.promptAt = req.body.promptAt === 'later' ? 'later' : 'ordering';
   if ((group.max == null ? 1 : group.max) < (group.min || 0)) group.max = group.min || 1;
   if (color !== undefined) {
     group.color = color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null;
@@ -10044,15 +10053,19 @@ function renderAdminSubcatTree(categoryId, parentId, depth) {
     .filter(s => s.categoryId === categoryId && (s.parentSubcategoryId || null) === (parentId || null))
     .map(s => {
       const kids = childSubcats(s.id);
+      const expanded = state.expandedSubcatIds.includes(s.id);
       return `
       <div class="subcategory-row" draggable="true" data-id="${s.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;min-height:46px;box-sizing:border-box;cursor:grab;border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);margin-left:${depth * 22}px;">
+        ${kids.length > 0
+          ? `<button style="background:none;border:none;cursor:pointer;width:16px;height:16px;padding:0;flex-shrink:0;color:var(--charcoal-soft);display:flex;align-items:center;justify-content:center;" data-act="toggle-subcat-tree" data-id="${s.id}" title="${expanded ? 'Collapse' : 'Expand'}">${expandCollapseArrow(expanded)}</button>`
+          : `<span style="width:16px;flex-shrink:0;"></span>`}
         ${iconDotButton('subcategory', s.id, s.icon, s.iconEnabled)}
         <input class="subcategory-name-quick-input" data-id="${s.id}" type="text" value="${esc(s.name)}" style="border:none;background:transparent;color:inherit;font-size:13.5px;width:${Math.max((s.name || '').length, 6)}ch;min-width:6ch;padding:2px 0;" oninput="this.style.width = Math.max(this.value.length, 6) + 'ch'">
         <span style="flex:1;min-width:14px;"></span>
         ${depth < 1 ? `<button class="icon-sq" data-act="add-child-subcategory" data-parent="${s.id}" title="Add a subsection inside ${esc(s.name)}">+</button>` : ''}
         ${deleteIconButton('delete-subcategory', s.id, 'Delete')}
       </div>
-      ${kids.length > 0 ? renderAdminSubcatTree(categoryId, s.id, depth + 1) : ''}
+      ${kids.length > 0 && expanded ? renderAdminSubcatTree(categoryId, s.id, depth + 1) : ''}
     `;
     }).join('');
 }
@@ -10071,19 +10084,22 @@ function renderCategoriesAdmin() {
   <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${state.categories.length === 0 ? `<div class="empty-hist">No sections yet.</div>` : ''}
     ${state.categories.map(cat => {
+      const collapsed = !state.expandedCategoryIds.includes(cat.id);
       return `
       <div class="category-row${state.selectedCategoryIds.includes(cat.id) ? ' selected' : ''}" draggable="true" data-id="${cat.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${cat.disabled ? 'opacity:0.55;' : ''}">
         <div class="sel-head" data-sellist="category" data-selkey="${cat.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:grab;">
+          <button style="background:none;border:none;cursor:pointer;width:18px;height:18px;padding:0;flex-shrink:0;color:var(--charcoal-soft);display:flex;align-items:center;justify-content:center;" data-act="toggle-category-tree" data-id="${cat.id}">${expandCollapseArrow(!collapsed)}</button>
           ${iconDotButton('category', cat.id, cat.icon, cat.iconEnabled, CATEGORY_ICONS[cat.name])}
           <input class="category-name-quick-input" data-id="${cat.id}" type="text" value="${esc(cat.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:140px;padding:2px 0;">
           <span style="flex:1;"></span>
           <button class="status-chip ${cat.disabled ? 'void' : 'paid'}" style="border:none;cursor:pointer;flex-shrink:0;" data-act="toggle-category-active" data-id="${cat.id}" title="${cat.disabled ? 'Off — click to activate' : 'On — click to deactivate'}" onclick="event.stopPropagation();">${cat.disabled ? 'Off' : 'On'}</button>
           ${deleteIconButton('delete-category', cat.id, 'Delete')}
         </div>
-        <div style="padding:0 12px 10px 22px;display:flex;flex-direction:column;gap:6px;">
+        ${!collapsed ? `
+        <div style="padding:0 12px 10px 44px;display:flex;flex-direction:column;gap:6px;">
           ${renderAdminSubcatTree(cat.id, null, 0)}
           <button class="btn-add inline" data-act="add-subcategory-for" data-category="${cat.id}" title="Add subsection" style="align-self:flex-start;margin-top:2px;">+ Add subsection</button>
-        </div>
+        </div>` : ''}
       </div>`;
     }).join('')}
   </div>
@@ -10686,6 +10702,14 @@ function renderModifiersAdmin() {
             <input class="modifier-min" data-id="${g.id}" type="number" min="0" step="1" value="${g.min != null ? g.min : 1}" style="width:56px;padding:6px 9px;border:1px solid var(--steel-300);border-radius:6px;font-size:12.5px;background:var(--surface);color:inherit;">
             <label class="field-label" style="margin:0;">Max</label>
             <input class="modifier-max" data-id="${g.id}" type="number" min="1" step="1" value="${g.max != null ? g.max : 1}" style="width:56px;padding:6px 9px;border:1px solid var(--steel-300);border-radius:6px;font-size:12.5px;background:var(--surface);color:inherit;">
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+            <label class="field-label" style="margin:0;">Ask for it</label>
+            <div class="seg" style="width:fit-content;">
+              <button class="${(g.promptAt || 'ordering') !== 'later' ? 'active' : ''}" data-act="set-modifier-prompt" data-id="${g.id}" data-val="ordering">While ordering</button>
+              <button class="${g.promptAt === 'later' ? 'active' : ''}" data-act="set-modifier-prompt" data-id="${g.id}" data-val="later">Added later</button>
+            </div>
+            <span class="ts">${g.promptAt === 'later' ? 'Skipped when adding the item — offered from the line editor as extras.' : 'Prompts as part of adding the item.'}</span>
           </div>
           <label class="field-label" style="display:block;margin-bottom:6px;">Options</label>
           ${g.options.map((o, oIdx) => `
@@ -11438,7 +11462,7 @@ function renderItemOptionsMiddle() {
   const item = state.menu.find(m => m.id === state.itemOptions.itemId);
   if (!item) return '';
   const io = state.itemOptions;
-  const groups = item.modifierGroupIds.map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean);
+  const groups = item.modifierGroupIds.map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean).filter(g => g.promptAt !== 'later');
   // No seat picker in the options pane when an active seat is already chosen —
   // the add uses that seat automatically.
   const needsSeat = itemAddNeedsSeatPrompt() && !(state.activeSeat === 'all' || (state.activeSeat && state.activeSeat <= state.covers));
@@ -11521,7 +11545,9 @@ function renderItemOptionsMiddle() {
 function closeItemOptions() { state.itemOptions = null; render(); }
 function ioGroups(io) {
   const item = io && state.menu.find(m => m.id === io.itemId);
-  return item ? item.modifierGroupIds.map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean) : [];
+  // 'Added later' groups never prompt while ordering — they live in the
+  // line editor as extras.
+  return item ? item.modifierGroupIds.map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean).filter(g => g.promptAt !== 'later') : [];
 }
 // True once every required choice is made: size, each modifier group's selected
 // count within its [min,max], and seat (if prompted).
@@ -14335,6 +14361,7 @@ function bindEvents() {
       else if (act === 'add-menu-item') { quickAddMenuItem(); }
       else if (act === 'duplicate-menu-item') { duplicateMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-active') { toggleMenuItemActive(el.dataset.id); }
+      else if (act === 'set-modifier-prompt') { saveModifierGroupInline(el.dataset.id, { promptAt: el.dataset.val }); }
       else if (act === 'toggle-inv-usage') { state.usageOpenInvId = state.usageOpenInvId === el.dataset.id ? null : el.dataset.id; render(); }
       else if (act === 'toggle-category-active') { toggleCategoryActive(el.dataset.id); }
       else if (act === 'edit-menu-item') { openEditMenuItem(el.dataset.id); }

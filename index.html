@@ -10187,8 +10187,26 @@ function renderSalesCatItemsPanel(sc, items) {
   const uncatable = addable.filter(m => !m.salesCategoryId || !catIds.has(m.salesCategoryId));
   const elsewhere = addable.filter(m => m.salesCategoryId && catIds.has(m.salesCategoryId));
   const catName = (id) => { const c = state.salesCategories.find(x => x.id === id); return c ? c.name : ''; };
+  // Sections whose items aren't all in this category yet, with how many would move.
+  const sectionOpts = state.categories.map(sec => {
+    const n = state.menu.filter(m => m.category === sec.name && m.salesCategoryId !== sc.id).length;
+    return n > 0 ? { id: sec.id, name: sec.name, n } : null;
+  }).filter(Boolean);
   return `
   <div style="padding:2px 12px 10px 40px;display:flex;flex-direction:column;gap:5px;border-top:1px solid var(--steel-200);">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+      ${addable.length > 0 ? `
+      <select class="tb-ctl" style="max-width:240px;" onchange="if (this.value) saveMenuItemQuickEdit(this.value, 'salesCategoryId', '${sc.id}')">
+        <option value="">+ Add item…</option>
+        ${uncatable.length ? `<optgroup label="Uncategorised">${uncatable.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</optgroup>` : ''}
+        ${elsewhere.length ? `<optgroup label="In another category">${elsewhere.map(m => `<option value="${m.id}">${esc(m.name)} — ${esc(catName(m.salesCategoryId))}</option>`).join('')}</optgroup>` : ''}
+      </select>` : ''}
+      ${sectionOpts.length > 0 ? `
+      <select class="tb-ctl" style="max-width:240px;" onchange="if (this.value) addSectionToSalesCategory(this.value, '${sc.id}')">
+        <option value="">+ Add whole section…</option>
+        ${sectionOpts.map(s => `<option value="${s.id}">${esc(s.name)} (${s.n} item${s.n === 1 ? '' : 's'})</option>`).join('')}
+      </select>` : ''}
+    </div>
     ${items.length === 0 ? `<div class="ts" style="padding-top:6px;">No items in this category yet.</div>` : ''}
     ${items.map(m => `
       <div style="display:flex;align-items:center;gap:8px;font-size:13px;padding-top:6px;">
@@ -10197,13 +10215,25 @@ function renderSalesCatItemsPanel(sc, items) {
         <span style="flex:1;"></span>
         <button style="border:1px solid var(--steel-300);border-radius:6px;background:var(--surface);font-size:11.5px;font-weight:600;padding:3px 8px;cursor:pointer;color:var(--charcoal-soft);font-family:inherit;flex-shrink:0;" data-act="salescat-drop-item" data-id="${m.id}" title="Move to Uncategorised">Remove</button>
       </div>`).join('')}
-    ${addable.length > 0 ? `
-    <select class="tb-ctl" style="margin-top:6px;max-width:260px;" onchange="if (this.value) saveMenuItemQuickEdit(this.value, 'salesCategoryId', '${sc.id}')">
-      <option value="">+ Add item…</option>
-      ${uncatable.length ? `<optgroup label="Uncategorised">${uncatable.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</optgroup>` : ''}
-      ${elsewhere.length ? `<optgroup label="In another category">${elsewhere.map(m => `<option value="${m.id}">${esc(m.name)} — ${esc(catName(m.salesCategoryId))}</option>`).join('')}</optgroup>` : ''}
-    </select>` : ''}
   </div>`;
+}
+
+// "Add whole section": every item in the chosen Section moves into this
+// category in one go.
+async function addSectionToSalesCategory(sectionId, scId) {
+  const sec = state.categories.find(c => c.id === sectionId);
+  if (!sec) return;
+  const items = state.menu.filter(m => m.category === sec.name && m.salesCategoryId !== scId);
+  if (!items.length) return;
+  await Promise.all(items.map(m => {
+    m.salesCategoryId = scId;
+    return api(`/api/menu/${m.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ salesCategoryId: scId })
+    }).catch(() => { state.toast = 'Could not move some items.'; });
+  }));
+  render();
 }
 
 // Virtual bucket at the foot of the Categories list: every item that has no

@@ -14123,7 +14123,8 @@ function makeSortable(rowClass, onReorder, opts) {
   const container = rows[0].parentElement;
   rows.forEach(item => {
     item.setAttribute('draggable', 'false');
-    item.style.touchAction = 'none';
+    // pan-y keeps native finger-scrolling alive; drag arms via long-press.
+    item.style.touchAction = 'pan-y';
     item.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       if (e.target.closest('button,input,select,textarea,a,[contenteditable]')) return;
@@ -14134,7 +14135,8 @@ function makeSortable(rowClass, onReorder, opts) {
 }
 function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
   const startX = downEvt.clientX, startY = downEvt.clientY;
-  let started = false, raf = 0, lastX = startX, lastY = startY;
+  const isTouch = downEvt.pointerType === 'touch';
+  let started = false, raf = 0, lastX = startX, lastY = startY, holdTimer = 0, dead = false;
   let slots = [], itemsList = [], fromIdx = -1, pitch = 0, horizontal = false, target = -1;
 
   const begin = () => {
@@ -14177,19 +14179,31 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
   const move = (e) => {
     lastX = e.clientX; lastY = e.clientY;
     if (!started) {
-      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 6) return; // stay a click
+      const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+      if (isTouch) {
+        // Finger moved before the hold fired → it's a scroll, stand down.
+        if (dist > 10) up();
+        return;
+      }
+      if (dist < 6) return; // stay a click
       begin();
     }
     e.preventDefault();
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; update(); });
   };
+  // Once a touch-drag is live, block native panning so the list doesn't
+  // scroll underneath the card.
+  const blockScroll = (e) => { if (started) e.preventDefault(); };
   const up = () => {
     if (raf) cancelAnimationFrame(raf);
+    if (holdTimer) clearTimeout(holdTimer);
+    dead = true;
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
-    if (!started) return; // never crossed the threshold → it was a click, leave it alone
+    document.removeEventListener('touchmove', blockScroll);
+    if (!started) return; // never crossed the threshold → it was a click/scroll, leave it alone
     item.classList.remove('sort-dragging');
     ['position', 'z-index', 'pointer-events', 'transform', 'will-change'].forEach(p => item.style.removeProperty(p));
     itemsList.forEach((el, i) => { if (i !== fromIdx) { el.style.transition = ''; el.style.transform = ''; el.style.willChange = ''; } });
@@ -14205,6 +14219,16 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', up);
   document.addEventListener('pointercancel', up);
+  document.addEventListener('touchmove', blockScroll, { passive: false });
+  if (isTouch) {
+    // Long-press picks the card up; a buzz says "you're holding it".
+    holdTimer = setTimeout(() => {
+      if (dead || started) return;
+      begin();
+      update();
+      try { navigator.vibrate && navigator.vibrate(12); } catch (e) {}
+    }, 300);
+  }
 }
 
 // Generic click-to-select for admin list rows (no per-row checkbox). Each row's

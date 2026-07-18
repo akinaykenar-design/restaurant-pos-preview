@@ -587,9 +587,6 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .menu-item-price-quick-edit::-webkit-inner-spin-button,.menu-item-price-quick-edit::-webkit-outer-spin-button{-webkit-appearance:none;margin:0;}
 .menu-item-price-quick-edit:focus{outline:none;}
 
-/* Admin nav: recent-pages row above the groups */
-.admin-recent-cap{font-size:10.5px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--charcoal-soft);padding:2px 10px 4px;}
-.admin-nav-recent{padding:8px 10px;font-size:12.5px;color:var(--charcoal-soft);}
 .paper-preview .print-doc{color:#000;}
 
 /* ============================================================
@@ -961,6 +958,17 @@ input:focus, select:focus, textarea:focus{
   width: auto !important;
   min-width: 70px;
   max-width: 100%;
+}
+
+/* Phone portrait: the admin nav is a compact horizontal chip strip, so the
+   page content gets the whole screen. */
+@media (max-width: 768px) and (orientation: portrait) {
+  .admin-sidebar{ max-height:none; display:flex; flex-direction:row; align-items:center; gap:6px; overflow-x:auto; overflow-y:hidden; padding:8px 10px; scrollbar-width:none; }
+  .admin-sidebar::-webkit-scrollbar{ display:none; }
+  .admin-sidebar > div:first-child{ flex:0 0 auto; width:150px; padding:0 !important; }
+  .admin-sidebar .admin-nav-btn{ flex:0 0 auto; width:auto; border:1px solid var(--steel-200); border-radius:99px; padding:8px 12px; white-space:nowrap; }
+  .admin-sidebar .admin-nav-sub{ padding-left:12px !important; }
+  .admin-sidebar .admin-nav-btn.active{ border-color: var(--orange); }
 }
 
 </style>
@@ -2346,6 +2354,18 @@ app.post('/api/sales-categories', (req, res) => {
   logAudit(data, staffFromReq(req), `Added sales category: ${cat.name}`);
   writeData(data);
   res.json(cat);
+});
+
+app.put('/api/sales-categories/reorder', (req, res) => {
+  const data = readData();
+  const { ids } = req.body;
+  if (!Array.isArray(ids)) return res.status(400).json({ error: 'ids required' });
+  const byId = new Map(data.salesCategories.map(c => [c.id, c]));
+  const ordered = ids.map(id => byId.get(id)).filter(Boolean);
+  const rest = data.salesCategories.filter(c => !ids.includes(c.id));
+  data.salesCategories = [...ordered, ...rest];
+  writeData(data);
+  res.json(data.salesCategories);
 });
 
 app.put('/api/sales-categories/:id', (req, res) => {
@@ -9510,14 +9530,9 @@ function openAdminGroupFor(key) {
   if (group) state.adminOpenGroup = group.group.split('.')[0].replace(/\s/g, '-').toLowerCase();
   try { localStorage.setItem('pos-admin-group', state.adminOpenGroup || ''); } catch (e) {}
 }
-// The nav remembers where you've been: last 3 pages surface in a Recent row,
-// and the open group + current page survive a reload.
+// The nav remembers the open group and current page across reloads.
 function rememberAdminTab(key) {
-  state.adminRecent = [key, ...(state.adminRecent || []).filter(k => k !== key)].slice(0, 4);
-  try {
-    localStorage.setItem('pos-admin-recent', JSON.stringify(state.adminRecent));
-    localStorage.setItem('pos-admin-tab', key);
-  } catch (e) {}
+  try { localStorage.setItem('pos-admin-tab', key); } catch (e) {}
 }
 
 function renderAdminSearchResults() {
@@ -9590,15 +9605,6 @@ function renderAdminView() {
       <div style="padding:0 4px 10px;">
         <input id="admin-search-input" type="text" placeholder="Search admin…" value="${state.adminSearch}" style="width:100%;padding:9px 10px;border-radius:8px;border:1px solid var(--steel-300);font-size:12.5px;background:var(--surface);color:var(--text-primary);">
       </div>
-      ${(() => {
-        if (state.adminSearch.trim()) return '';
-        const recent = (state.adminRecent || []).filter(k => k !== state.adminTab && adminPageMeta(k)).slice(0, 3);
-        if (recent.length === 0) return '';
-        return `<div class="admin-recent-cap">Recent</div>` + recent.map(k => {
-          const c = adminPageMeta(k);
-          return `<button class="admin-nav-btn admin-nav-recent" data-act="admin-tab" data-val="${k}">↩ ${esc(c.label)}</button>`;
-        }).join('');
-      })()}
       ${state.adminSearch.trim() ? renderAdminSearchResults() : ADMIN_SECTIONS.map(s => {
         const groupKey = s.group.split('.')[0].replace(/\s/g, '-').toLowerCase();
         const open = state.adminOpenGroup === groupKey;
@@ -10125,7 +10131,7 @@ function renderSalesCategoriesAdmin() {
       const itemCount = state.menu.filter(m => m.salesCategoryId === sc.id).length;
       const selected = state.selectedSalesCategoryIds.includes(sc.id);
       return `
-      <div class="menu-item-expandable menu-item-header sel-head${selected ? ' selected' : ''}" data-sellist="sales-category" data-selkey="${sc.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);display:flex;align-items:center;gap:8px;padding:9px 12px;">
+      <div class="menu-item-expandable sales-cat-row menu-item-header sel-head${selected ? ' selected' : ''}" data-id="${sc.id}" data-sellist="sales-category" data-selkey="${sc.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);display:flex;align-items:center;gap:8px;padding:9px 12px;">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="sales-category" data-key="${sc.id}" ${selected ? 'checked' : ''}>
         <input class="sales-category-name-quick-input" data-id="${sc.id}" type="text" value="${esc(sc.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:180px;padding:2px 0;" onclick="event.stopPropagation();">
         <span style="flex:1;"></span>
@@ -12855,6 +12861,21 @@ async function saveCategoryModal() {
   }
 }
 
+async function reorderSalesCategories(draggedId, targetId) {
+  const list = [...state.salesCategories];
+  const fromIdx = list.findIndex(c => c.id === draggedId);
+  const toIdx = list.findIndex(c => c.id === targetId);
+  if (fromIdx === -1 || toIdx === -1 || fromIdx === toIdx) return;
+  const [moved] = list.splice(fromIdx, 1);
+  list.splice(toIdx, 0, moved);
+  state.salesCategories = list;
+  render();
+  try {
+    state.salesCategories = await api('/api/sales-categories/reorder', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: list.map(c => c.id) }) });
+  } catch (e) { state.toast = 'Could not save the new order.'; }
+  render();
+}
+
 async function deleteSelectedSections() {
   const cats = [...state.selectedCategoryIds], subs = [...state.selectedSubcatIds];
   const n = cats.length + subs.length;
@@ -15154,7 +15175,8 @@ function bindEvents() {
   makeSortable('allergy-preset-row', reorderAllergyPresets);
   makeSortable('course-template-row', reorderCourseTemplates);
   makeSortable('panel-tile', (from, to) => reorderPanels(from, to));
-  makeSortable('menu-item-expandable', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderMenuItems(els[from].dataset.id, t.dataset.id); }, { canStart: () => !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+  makeSortable('menu-item-expandable', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderMenuItems(els[from].dataset.id, t.dataset.id); }, { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+  makeSortable('sales-cat-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderSalesCategories(els[from].dataset.id, t.dataset.id); });
   makeSortable('category-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderCategories(els[from].dataset.id, t.dataset.id); });
   makeSortable('subcategory-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderSubcategories(els[from].dataset.id, t.dataset.id); });
   document.querySelectorAll('.category-name-quick-input').forEach(el => {
@@ -15411,7 +15433,6 @@ setInterval(() => {
 (async () => {
   // Restore the admin nav's memory: recent pages, open group, last page.
   try {
-    state.adminRecent = JSON.parse(localStorage.getItem('pos-admin-recent') || '[]');
     const g = localStorage.getItem('pos-admin-group');
     if (g) state.adminOpenGroup = g;
     const t = localStorage.getItem('pos-admin-tab');

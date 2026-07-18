@@ -972,6 +972,12 @@ input:focus, select:focus, textarea:focus{
   .admin-sidebar .admin-nav-btn.active{ border-color: var(--orange); }
 }
 
+/* Phone portrait: the selection bar sticks to the top of the scrolling list,
+   so bulk actions stay in reach no matter how far down you've ticked. */
+@media (max-width: 768px) and (orientation: portrait) {
+  .select-all-row{ position:sticky; top:0; z-index:5; background:var(--steel-100); margin:0 -14px 4px; padding:6px 14px 6px 31px; }
+}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -4727,6 +4733,7 @@ let state = {
   expandedModifierId: null, // which modifier card is expanded for inline editing
   selectedComboIds: [], // bulk-select on the Set Menu admin
   selectedSalesCategoryIds: [], // bulk-select on the reporting Categories admin
+  salesCatOpenId: null, // Categories row expanded to show/edit its items ('__uncat__' = the virtual Uncategorised bucket)
   selectedSizeIdxs: [], // bulk-select on the Sizes admin (index-based)
   bulkCategoryModal: null, // { colorMode, color }
   expandedMenuItemIds: [],
@@ -5712,6 +5719,7 @@ function logOut() {
   // A fresh login starts with the admin nav collapsed.
   state.adminOpenGroup = null;
   try { localStorage.removeItem('pos-admin-group'); } catch (e) {}
+  try { localStorage.removeItem('pos-view'); } catch (e) {}
   state.currentStaff = null;
   state.loginSelectedId = null;
   state.loginPin = '';
@@ -6636,6 +6644,9 @@ function render() {
     bindEvents();
     return;
   }
+
+  // Remember which screen is showing so a page refresh lands back on it.
+  try { localStorage.setItem('pos-view', state.view); } catch (e) {}
 
   // Every scrollable surface keeps its position across the full re-render —
   // otherwise any tap "snaps" panels back to their start.
@@ -10128,19 +10139,80 @@ function renderSalesCategoriesAdmin() {
   <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${cats.length === 0 ? `<div class="empty-hist">No categories yet — they bucket sales for reports, e.g. Food vs Beverage.</div>` : ''}
     ${cats.map(sc => {
-      const itemCount = state.menu.filter(m => m.salesCategoryId === sc.id).length;
+      const items = state.menu.filter(m => m.salesCategoryId === sc.id);
       const selected = state.selectedSalesCategoryIds.includes(sc.id);
+      const open = state.salesCatOpenId === sc.id;
       return `
-      <div class="menu-item-expandable sales-cat-row menu-item-header sel-head${selected ? ' selected' : ''}" data-id="${sc.id}" data-sellist="sales-category" data-selkey="${sc.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);display:flex;align-items:center;gap:8px;padding:9px 12px;">
-        <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="sales-category" data-key="${sc.id}" ${selected ? 'checked' : ''}>
-        <input class="sales-category-name-quick-input" data-id="${sc.id}" type="text" value="${esc(sc.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:180px;padding:2px 0;" onclick="event.stopPropagation();">
-        <span style="flex:1;"></span>
-        <span class="ts" style="flex-shrink:0;">${itemCount} item${itemCount === 1 ? '' : 's'}</span>
-
+      <div class="sales-cat-row" data-id="${sc.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
+        <div class="sel-head${selected ? ' selected' : ''}" data-sellist="sales-category" data-selkey="${sc.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="sales-category" data-key="${sc.id}" ${selected ? 'checked' : ''}>
+          <input class="sales-category-name-quick-input" data-id="${sc.id}" type="text" value="${esc(sc.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:180px;padding:2px 0;" onclick="event.stopPropagation();">
+          <span style="flex:1;"></span>
+          <span class="ts" style="flex-shrink:0;">${items.length} item${items.length === 1 ? '' : 's'}</span>
+        </div>
+        ${open ? renderSalesCatItemsPanel(sc, items) : ''}
       </div>`;
     }).join('')}
+    ${renderUncategorisedRow(cats)}
   </div>
   `;
+}
+
+// The expanded body of a Categories row: its items, each removable, plus a
+// picker to pull any other item into this category.
+function renderSalesCatItemsPanel(sc, items) {
+  const addable = state.menu.filter(m => m.salesCategoryId !== sc.id);
+  const catIds = new Set(state.salesCategories.map(c => c.id));
+  const uncatable = addable.filter(m => !m.salesCategoryId || !catIds.has(m.salesCategoryId));
+  const elsewhere = addable.filter(m => m.salesCategoryId && catIds.has(m.salesCategoryId));
+  const catName = (id) => { const c = state.salesCategories.find(x => x.id === id); return c ? c.name : ''; };
+  return `
+  <div style="padding:2px 12px 10px 40px;display:flex;flex-direction:column;gap:5px;border-top:1px solid var(--steel-200);">
+    ${items.length === 0 ? `<div class="ts" style="padding-top:6px;">No items in this category yet.</div>` : ''}
+    ${items.map(m => `
+      <div style="display:flex;align-items:center;gap:8px;font-size:13px;padding-top:6px;">
+        <span style="font-weight:600;">${esc(m.name)}</span>
+        <span class="ts">${money(m.price || 0)}</span>
+        <span style="flex:1;"></span>
+        <button style="border:1px solid var(--steel-300);border-radius:6px;background:var(--surface);font-size:11.5px;font-weight:600;padding:3px 8px;cursor:pointer;color:var(--charcoal-soft);font-family:inherit;flex-shrink:0;" data-act="salescat-drop-item" data-id="${m.id}" title="Move to Uncategorised">Remove</button>
+      </div>`).join('')}
+    ${addable.length > 0 ? `
+    <select class="tb-ctl" style="margin-top:6px;max-width:260px;" onchange="if (this.value) saveMenuItemQuickEdit(this.value, 'salesCategoryId', '${sc.id}')">
+      <option value="">+ Add item…</option>
+      ${uncatable.length ? `<optgroup label="Uncategorised">${uncatable.map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}</optgroup>` : ''}
+      ${elsewhere.length ? `<optgroup label="In another category">${elsewhere.map(m => `<option value="${m.id}">${esc(m.name)} — ${esc(catName(m.salesCategoryId))}</option>`).join('')}</optgroup>` : ''}
+    </select>` : ''}
+  </div>`;
+}
+
+// Virtual bucket at the foot of the Categories list: every item that has no
+// (or a dangling) category lands here, with a picker to file it somewhere.
+function renderUncategorisedRow(cats) {
+  const catIds = new Set(cats.map(c => c.id));
+  const uncat = state.menu.filter(m => !m.salesCategoryId || !catIds.has(m.salesCategoryId));
+  const open = state.salesCatOpenId === '__uncat__';
+  return `
+  <div style="border:1px dashed var(--steel-300);border-radius:12px;background:var(--surface);overflow:hidden;">
+    <div data-act="salescat-toggle-uncat" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+      <span style="font-weight:700;font-size:13.5px;color:var(--charcoal-soft);">Uncategorised</span>
+      <span style="flex:1;"></span>
+      <span class="ts" style="flex-shrink:0;">${uncat.length} item${uncat.length === 1 ? '' : 's'}</span>
+    </div>
+    ${open ? `
+    <div style="padding:2px 12px 10px 12px;display:flex;flex-direction:column;gap:5px;border-top:1px solid var(--steel-200);">
+      ${uncat.length === 0 ? `<div class="ts" style="padding-top:6px;">Every item has a category.</div>` : ''}
+      ${uncat.map(m => `
+        <div style="display:flex;align-items:center;gap:8px;font-size:13px;padding-top:6px;">
+          <span style="font-weight:600;">${esc(m.name)}</span>
+          <span class="ts">${money(m.price || 0)}</span>
+          <span style="flex:1;"></span>
+          <select class="tb-ctl" style="height:32px;max-width:170px;font-size:12.5px;" onchange="if (this.value) saveMenuItemQuickEdit('${m.id}', 'salesCategoryId', this.value)">
+            <option value="">Move to…</option>
+            ${cats.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
+          </select>
+        </div>`).join('')}
+    </div>` : ''}
+  </div>`;
 }
 
 function renderMenuVariantsAdmin() {
@@ -14251,6 +14323,11 @@ const SEL_OPENERS = {
     state.expandedCategoryIds = state.expandedCategoryIds.includes(id) ? state.expandedCategoryIds.filter(x => x !== id) : [...state.expandedCategoryIds, id];
     render();
   },
+  'sales-category': (head) => {
+    const id = head.dataset.selkey;
+    state.salesCatOpenId = state.salesCatOpenId === id ? null : id;
+    render();
+  },
 };
 // Checkbox selection for any sel-head list (mirrors the Items checkboxes).
 function selListToggle(list, key) {
@@ -14475,6 +14552,8 @@ function bindEvents() {
       else if (act === 'add-sales-category') { addSalesCategory(); }
       else if (act === 'delete-selected-sales-categories') { deleteSelectedSalesCategories(); }
       else if (act === 'clear-sales-category-selection') { clearSalesCategorySelection(); }
+      else if (act === 'salescat-toggle-uncat') { state.salesCatOpenId = state.salesCatOpenId === '__uncat__' ? null : '__uncat__'; render(); }
+      else if (act === 'salescat-drop-item') { saveMenuItemQuickEdit(el.dataset.id, 'salesCategoryId', ''); }
       else if (act === 'delete-sales-category') { deleteSalesCategoryAction(el.dataset.id); }
       else if (act === 'add-subcategory') { quickAddSubcategory(); }
       else if (act === 'add-subcategory-for') { quickAddSubcategory(el.dataset.category); }
@@ -15464,10 +15543,21 @@ setInterval(() => {
   const staff = savedId && state.staffList.find(s => String(s.id) === savedId);
   if (staff) {
     state.currentStaff = staff;
-    state.view = staff.role === 'chef' ? 'kitchen' : 'order';
+    // Land back on whatever screen was showing before the refresh —
+    // a reload shouldn't yank you off the page you were working on.
+    let savedView = null;
+    try { savedView = localStorage.getItem('pos-view'); } catch (e) {}
+    if (staff.role === 'chef') state.view = 'kitchen';
+    else if (savedView === 'admin' && staff.role === 'manager') state.view = 'admin';
+    else if (savedView === 'kitchen') state.view = 'kitchen';
+    else state.view = 'order';
     render();
     await loadInitial();
-    if (staff.role === 'chef') loadKdsData();
+    if (state.view === 'kitchen') loadKdsData();
+    if (state.view === 'admin') {
+      snapshotAdminConfig();
+      if (state.adminTab === 'register') loadRegisterData();
+    }
   }
 })();
 loadInventoryData();

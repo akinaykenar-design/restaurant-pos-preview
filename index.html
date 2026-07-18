@@ -8255,7 +8255,7 @@ function renderRecipesAdmin() {
   // plus a "missing" count so the gaps stand out per section.
   const groups = [];
   state.menu.forEach(m => {
-    const sub = m.subcategoryId ? ((state.subcategories.find(s => s.id === m.subcategoryId) || {}).name || '') : '';
+    const sub = m.subcategoryId ? subcatPathName(m.subcategoryId) : '';
     const key = (m.category || 'Uncategorised') + (sub ? ' ▸ ' + sub : '');
     let g = groups.find(x => x.key === key);
     if (!g) { g = { key, items: [] }; groups.push(g); }
@@ -9486,6 +9486,18 @@ const SETTINGS_INDEX = [
   { page: 'sales-categories', label: 'Sales groups (reporting)', terms: 'sales groups reporting revenue' },
   { page: 'audit', label: 'Audit log', terms: 'audit log history who changed' },
 ];
+// Full nested path of a subsection ("Red ▸ Shiraz"), capped at 3 levels total.
+function subcatPathName(subId) {
+  const names = [];
+  let s = state.subcategories.find(x => x.id === subId);
+  let guard = 0;
+  while (s && guard++ < 4) {
+    names.unshift(s.name);
+    s = s.parentSubcategoryId ? state.subcategories.find(x => x.id === s.parentSubcategoryId) : null;
+  }
+  return names.join(' ▸ ');
+}
+
 function adminPageMeta(key) {
   for (const s of ADMIN_SECTIONS) {
     const c = s.children.find(x => x.key === key);
@@ -10069,7 +10081,7 @@ function renderAdminSubcatTree(categoryId, parentId, depth) {
         ${iconDotButton('subcategory', s.id, s.icon, s.iconEnabled)}
         <input class="subcategory-name-quick-input" data-id="${s.id}" type="text" value="${esc(s.name)}" style="border:none;background:transparent;color:inherit;font-size:13.5px;width:${Math.max((s.name || '').length, 6)}ch;min-width:6ch;padding:2px 0;" oninput="this.style.width = Math.max(this.value.length, 6) + 'ch'">
         <span style="flex:1;min-width:14px;"></span>
-        <button class="icon-sq" data-act="add-child-subcategory" data-parent="${s.id}" title="Add a subsection inside ${esc(s.name)}">+</button>
+        ${depth < 1 ? `<button class="icon-sq" data-act="add-child-subcategory" data-parent="${s.id}" title="Add a subsection inside ${esc(s.name)}">+</button>` : ''}
         ${deleteIconButton('delete-subcategory', s.id, 'Delete')}
       </div>
       ${kids.length > 0 ? renderAdminSubcatTree(categoryId, s.id, depth + 1) : ''}
@@ -10235,16 +10247,7 @@ function renderMenuAdmin() {
   <div class="menu-items-list" style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${items.length === 0 ? `<div class="empty-hist">No items match.</div>` : ''}
     ${(() => {
-      // Group the flat list under quiet "Section ▸ Subsection" labels.
-      // Headers are flat siblings of the rows, so drag-reorder keeps working.
-      const groups = [];
-      items.forEach(m => {
-        const sub = m.subcategoryId ? ((state.subcategories.find(s => s.id === m.subcategoryId) || {}).name || '') : '';
-        const key = (m.category || 'Uncategorised') + (sub ? ' ▸ ' + sub : '');
-        let g = groups.find(x => x.key === key);
-        if (!g) { g = { key, items: [] }; groups.push(g); }
-        g.items.push(m);
-      });
+      // Flat list — the section/subsection dropdowns above provide the context.
       const rowHtml = (m) => `
       <div class="menu-item-expandable${state.selectedMenuItemIds.includes(m.id) ? ' selected' : ''}" data-id="${m.id}" draggable="true" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${m.disabled ? 'opacity:0.55;' : ''}">
         <div class="menu-item-header" data-id="${m.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:${state.expandedMenuItemIds.length ? 'default' : 'grab'};" title="Tap to open">
@@ -10267,13 +10270,33 @@ function renderMenuAdmin() {
                   ${state.categories.map(c => `<option value="${esc(c.name)}" ${m.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
                 </select>
               </div>
+              ${(() => {
+                // Three levels total: Section, Subsection, and — only when the
+                // chosen subsection has children — a third box for the sub-sub.
+                const co = state.categories.find(c => c.name === m.category);
+                if (!co) return '';
+                const cur = state.subcategories.find(s => s.id === m.subcategoryId) || null;
+                const topSel = cur && cur.parentSubcategoryId ? state.subcategories.find(s => s.id === cur.parentSubcategoryId) : cur;
+                const tops = state.subcategories.filter(s => s.categoryId === co.id && !s.parentSubcategoryId);
+                const kids = topSel ? state.subcategories.filter(s => s.parentSubcategoryId === topSel.id) : [];
+                const selStyle = 'padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:13.5px;background:var(--surface);color:var(--text-primary);';
+                return `
               <div style="display:flex;flex-direction:column;gap:6px;">
                 <label class="field-label">Subsection</label>
-                <select class="menu-item-subcat-edit" data-id="${m.id}" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:13.5px;background:var(--surface);color:var(--text-primary);" onchange="saveMenuItemQuickEdit('${m.id}', 'subcategoryId', this.value)">
+                <select class="menu-item-subcat-edit" data-id="${m.id}" style="${selStyle}" onchange="saveMenuItemQuickEdit('${m.id}', 'subcategoryId', this.value)">
                   <option value="">None</option>
-                  ${(() => { const co = state.categories.find(c => c.name === m.category); return co ? subcatOptionsHtml(co.id, m.subcategoryId) : ''; })()}
+                  ${tops.map(s => `<option value="${s.id}" ${topSel && topSel.id === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
                 </select>
               </div>
+              ${kids.length > 0 ? `
+              <div style="display:flex;flex-direction:column;gap:6px;">
+                <label class="field-label">Sub-subsection</label>
+                <select class="menu-item-subsub-edit" data-id="${m.id}" style="${selStyle}" onchange="saveMenuItemQuickEdit('${m.id}', 'subcategoryId', this.value || '${topSel.id}')">
+                  <option value="">None</option>
+                  ${kids.map(k => `<option value="${k.id}" ${cur && cur.id === k.id ? 'selected' : ''}>${esc(k.name)}</option>`).join('')}
+                </select>
+              </div>` : ''}`;
+              })()}
               <div style="display:flex;flex-direction:column;gap:6px;">
                 <label class="field-label">Sales group</label>
                 <select class="menu-item-salescat-edit" data-id="${m.id}" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:13.5px;background:var(--surface);color:var(--text-primary);" onchange="saveMenuItemQuickEdit('${m.id}', 'salesCategoryId', this.value)">
@@ -10323,9 +10346,7 @@ function renderMenuAdmin() {
             </div>
           </div>` : ''}
       </div>`;
-      return groups.map(g => `
-        <div class="item-group-head"><span>${esc(g.key)}</span> <span class="igh-count">${g.items.length}</span></div>
-        ${g.items.map(rowHtml).join('')}`).join('');
+      return items.map(rowHtml).join('');
     })()}
   </div>
   `;

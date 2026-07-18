@@ -3874,6 +3874,9 @@ app.post('/api/combos', (req, res) => {
     id: 'c' + Date.now(),
     name,
     price: parseFloat(price),
+    color: req.body.color || null,
+    // Section this set menu is sold under; null = the dedicated "Set menus" tab.
+    category: req.body.category || null,
     groups: groups.map((g, i) => ({ id: 'g' + Date.now() + i, label: g.label || `Choice ${i + 1}`, type: g.type === 'fixed' ? 'fixed' : 'choice', course: (g.course === null || g.course === undefined || g.course === '') ? null : (parseInt(g.course) || null), itemIds: g.itemIds || [] })),
   };
   data.combos.push(combo);
@@ -3886,9 +3889,11 @@ app.put('/api/combos/:id', (req, res) => {
   const data = readData();
   const combo = data.combos.find(c => c.id === req.params.id);
   if (!combo) return res.status(404).json({ error: 'Combo not found' });
-  const { name, price, groups } = req.body;
+  const { name, price, groups, color, category } = req.body;
   if (name) combo.name = name;
   if (price !== undefined && !isNaN(parseFloat(price))) combo.price = parseFloat(price);
+  if (color !== undefined) { combo.color = color || null; addSavedColor(data, color); }
+  if (category !== undefined) combo.category = category || null;
   if (Array.isArray(groups)) {
     combo.groups = groups.map((g, i) => ({ id: g.id || ('g' + Date.now() + i), label: g.label || `Choice ${i + 1}`, type: g.type === 'fixed' ? 'fixed' : 'choice', course: (g.course === null || g.course === undefined || g.course === '') ? null : (parseInt(g.course) || null), itemIds: g.itemIds || [] }));
   }
@@ -5345,6 +5350,14 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'floor-table-new') { state.floorTableColor = color || null; render(); }
   else if (kind === 'table-color') updateTableColor(id, color);
   else if (kind === 'modifier-group') quickUpdateModifierGroupColor(id, color);
+  else if (kind === 'combo') quickUpdateComboColor(id, color);
+}
+async function quickUpdateComboColor(id, color) {
+  try {
+    await api(`/api/combos/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ color: color || null }) });
+    state.combos = await api('/api/combos');
+    render();
+  } catch (e) { state.toast = 'Could not update colour.'; render(); }
 }
 function updateTableColor(id, color) {
   const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
@@ -6819,9 +6832,18 @@ function renderOrderView() {
   const showingCombos = state.activeCat === '__combos__' && !state.search;
   const catsToShow = state.search ? categories : categories.filter(c => c === state.activeCat);
 
+  // Set menus assigned to a section sell inside that section's grid; only the
+  // unassigned ones get the dedicated "Set menus" tab (no combos there → no tab).
+  const unassignedCombos = state.combos.filter(c => !c.category);
+  const comboCard = (combo) => `
+    <button class="item-card" data-act="open-combo" data-id="${combo.id}" ${combo.color ? `style="background:${combo.color};color:${contrastTextColor(combo.color)};"` : ''}>
+      <div class="item-name">${esc(combo.name)}</div>
+      ${state.settings.showPrices ? `<div class="item-tile-price">${money(combo.price)}</div>` : ''}
+    </button>`;
+
   const catrailHtml = `
     <div class="catrail">
-      ${state.combos.length > 0 ? `
+      ${unassignedCombos.length > 0 ? `
         <button class="cat-btn ${showingCombos ? 'active' : ''}" data-act="cat" data-val="__combos__">
           <span style="font-size:20px;">🍱</span>Set menus
         </button>` : ''}
@@ -6882,17 +6904,14 @@ function renderOrderView() {
         })() : ''}
         ${showingCombos ? `
           <div class="grid">
-            ${state.combos.map(combo => `
-              <button class="item-card" data-act="open-combo" data-id="${combo.id}">
-                <div class="item-name">${esc(combo.name)}</div>
-                <div class="ts" style="color:var(--charcoal-soft);">${combo.groups.map(g => esc(g.label)).join(' + ')}</div>
-              </button>`).join('')}
+            ${unassignedCombos.map(comboCard).join('')}
           </div>
         ` : catsToShow.map(cat => {
           const catObj = state.categories.find(c => c.name === cat);
           const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
           const items = sortMenuItems(filtered.filter(m => m.category === cat));
-          if (items.length === 0) return '';
+          const catCombos = state.search ? [] : state.combos.filter(c => c.category === cat);
+          if (items.length === 0 && catCombos.length === 0) return '';
           const subcats = catObj ? state.subcategories.filter(s => s.categoryId === catObj.id) : [];
           const isManager = state.currentStaff && state.currentStaff.role === 'manager';
           const renderItemCard = (item, sizeClass = '') => {
@@ -6910,7 +6929,7 @@ function renderOrderView() {
           if (subcats.length === 0) {
             return `
               ${state.search ? `<div class="cat-title">${catIcon} ${cat}</div>` : ''}
-              <div class="grid">${items.map(renderItemCard).join('')}</div>`;
+              <div class="grid">${catCombos.map(comboCard).join('')}${items.map(renderItemCard).join('')}</div>`;
           }
           const itemsWithoutSub = items.filter(i => !i.subcategoryId);
           // A subsection counts as having items if anything in its whole subtree does.
@@ -6946,6 +6965,7 @@ function renderOrderView() {
             <div class="seg subcat-seg" style="margin-bottom:12px;">
               ${subTabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${activeSub === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
             </div>
+            ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
             ${activeSub === '__all__' ? groupedAll
             : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>`
             : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
@@ -10958,11 +10978,11 @@ function renderAppearanceAdmin() {
 function renderQtyPad() {
   if (!state.settings.qtyPadEnabled || state.qtyPadCollapsed) return '';
   const buf = state.qtyPadBuffer || '';
-  const keys = ['.', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'back'];
+  const keys = ['.', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear'];
   return `
   <div class="qty-pad">
-    <div class="qty-pad-display ${buf ? 'filled' : ''}">${buf ? esc(buf) : ''}</div>
-    ${keys.map(k => `<button class="qty-pad-key" data-act="qty-pad-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
+    ${buf ? `<div class="qty-pad-display filled">${esc(buf)}</div>` : ''}
+    ${keys.map(k => `<button class="qty-pad-key" data-act="qty-pad-key" data-key="${k}">${k === 'clear' ? 'C' : k}</button>`).join('')}
   </div>`;
 }
 
@@ -11013,6 +11033,7 @@ function renderCombosAdmin() {
       <div class="menu-item-expandable${selected ? ' selected' : ''}" style="border:1px solid ${editing ? 'var(--orange)' : 'var(--steel-200)'};border-radius:12px;background:var(--surface);overflow:hidden;">
         <div class="menu-item-header sel-head" data-sellist="combo" data-selkey="${c.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="combo" data-key="${c.id}" ${selected ? 'checked' : ''}>
+          ${colorDotButton('combo', c.id, c.color, { size: 20 })}
           <div style="flex:1;min-width:0;">
             <input type="text" class="menu-item-name-quick-edit" data-id="${c.id}" value="${esc(c.name)}" placeholder="Name" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:100%;padding:2px 0;" onclick="event.stopPropagation();" onblur="saveComboQuickEdit('${c.id}', 'name', this.value);">
             <div class="t2" style="font-size:12.5px;color:var(--charcoal-soft);white-space:normal;">${c.groups.map(g => esc(g.label)).join(' + ')}</div>
@@ -11035,6 +11056,13 @@ function renderComboEditorInline() {
   return `
     <div class="pay-pane" style="padding:0 14px 14px 44px;">
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+        <label class="field-label" style="margin:0;flex-shrink:0;">Sold under</label>
+        <select class="combo-category-select" style="flex:1;">
+          <option value="">Set menus tab</option>
+          ${state.categories.map(cat => `<option value="${esc(cat.name)}" ${m.category === cat.name ? 'selected' : ''}>${esc(cat.name)}</option>`).join('')}
+        </select>
+      </div>
       <label>Sections</label>
       ${m.groups.map((g, gIdx) => {
         const type = g.type === 'fixed' ? 'fixed' : 'choice';
@@ -12472,7 +12500,8 @@ async function setQuickRepeatEnabled(val) {
 }
 function tapQtyPad(key) {
   const buf = state.qtyPadBuffer || '';
-  if (key === 'back') state.qtyPadBuffer = buf.slice(0, -1);
+  if (key === 'clear') state.qtyPadBuffer = '';
+  else if (key === 'back') state.qtyPadBuffer = buf.slice(0, -1);
   else if (key === '.') { if (!buf.includes('.')) state.qtyPadBuffer = (buf || '0') + '.'; }
   else state.qtyPadBuffer = (buf === '0' ? '' : buf) + key;
   render();
@@ -14136,7 +14165,7 @@ async function saveComboQuickEdit(id, field, value) {
 function openEditCombo(id) {
   const c = state.combos.find(x => x.id === id);
   state.comboModal = withDirtyCheck({
-    mode: 'edit', id: c.id, name: c.name, price: c.price,
+    mode: 'edit', id: c.id, name: c.name, price: c.price, category: c.category || '',
     groups: c.groups.map(g => ({ label: g.label, type: g.type === 'fixed' ? 'fixed' : 'choice', course: (g.course != null ? g.course : null), itemIds: [...g.itemIds] })),
   });
   state.adminError = '';
@@ -14212,7 +14241,7 @@ async function saveComboAdminModal() {
     render();
     return;
   }
-  const payload = { name, price, groups: validGroups };
+  const payload = { name, price, groups: validGroups, category: m.category || null };
   try {
     if (m.mode === 'add') {
       await api('/api/combos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -15250,6 +15279,9 @@ function bindEvents() {
   });
   document.querySelectorAll('.combo-group-course').forEach(el => {
     el.addEventListener('change', (e) => { setComboGroupCourse(parseInt(el.dataset.gidx), e.target.value); });
+  });
+  document.querySelectorAll('.combo-category-select').forEach(el => {
+    el.addEventListener('change', (e) => { if (state.comboModal) state.comboModal.category = e.target.value; });
   });
 
   document.querySelectorAll('.variant-label-input').forEach(el => {

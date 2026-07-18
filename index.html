@@ -559,6 +559,16 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .print-preview-cap{font-size:12px;font-weight:700;color:var(--charcoal-soft);margin-bottom:6px;}
 .print-preview-cap span{font-weight:500;opacity:0.7;}
 .paper-preview{background:#fff;color:#000;padding:12px 14px;border-radius:4px;box-shadow:0 2px 12px rgba(0,0,0,0.18);width:fit-content;}
+/* Editable print sample: the paper is the form. Tappable bits get a dashed
+   underline; hidden lines stay visible but struck through and dimmed. */
+.pp-edit{cursor:pointer;border-bottom:1.5px dashed #999;padding-bottom:1px;}
+.pp-edit:hover{background:#fff3c9;}
+.pp-edit.pp-empty{color:#999;font-style:italic;font-weight:600;}
+.pp-toggle{cursor:pointer;}
+.pp-toggle:hover{background:#fff3c9;}
+.pp-toggle.pp-off{opacity:.42;text-decoration:line-through;}
+.pp-inline-input{font:inherit;color:inherit;background:#fffbe8;border:1.5px dashed #b90;border-radius:3px;padding:1px 6px;text-align:center;max-width:200px;}
+.pp-inline-input:focus{outline:none;}
 .paper-preview .print-doc{color:#000;}
 
 /* ============================================================
@@ -4600,6 +4610,7 @@ let state = {
   printerStations: [],
   printerStationModal: null, // { mode, id, name }
   printersTab: 'setup',      // Printers page: 'setup' | 'docket' | 'receipt'
+  printEdit: null,           // field being edited inline on the print sample
   happyHours: [],
   happyHourModal: null, // { mode, id, name, days, startTime, endTime, discountPercent }
   giftCards: [],
@@ -4798,12 +4809,29 @@ function printDocClasses() {
     + (s.printFontScale === 'large' ? ' fs-large' : ' fs-normal');
 }
 
-function buildReceiptDoc(order) {
+// `edit` renders the Settings sample: the header, footer and show/hide lines
+// become tappable right on the paper, so the sample IS the form — and because
+// the same builder does the real print, what you edit is exactly what prints.
+function sampleEditable(field, value, placeholder, cls) {
+  if (state.printEdit === field) {
+    return `<input id="print-sample-edit-input" class="pp-inline-input ${cls || ''}" data-field="${field}" type="text" value="${esc(value || '')}" placeholder="${esc(placeholder)}">`;
+  }
+  return `<span class="pp-edit ${value ? '' : 'pp-empty'}" data-act="print-sample-edit" data-field="${field}" title="Tap to edit">${value ? esc(value) : '+ ' + esc(placeholder)}</span>`;
+}
+function sampleToggleLine(on, act, inner) {
+  return `<div class="print-line pp-toggle ${on ? '' : 'pp-off'}" data-act="${act}" data-val="${!on}" title="Tap to ${on ? 'hide this line' : 'show this line'}">${inner}</div>`;
+}
+function buildReceiptDoc(order, edit) {
+  const s = state.settings;
+  const coversOn = s.showCoversOnTicket !== false;
+  const coversSeg = order.covers ? (edit
+    ? `<span class="pp-toggle ${coversOn ? '' : 'pp-off'}" data-act="set-show-covers-ticket" data-val="${!coversOn}" title="Tap to ${coversOn ? 'hide' : 'show'} covers"> · ${order.covers} covers</span>`
+    : (coversOn ? ' · ' + order.covers + ' covers' : '')) : '';
   return `
     <div class="${printDocClasses()}">
-      ${state.settings.ticketHeader ? `<h3>${esc(state.settings.ticketHeader)}</h3>` : ''}
+      ${edit ? `<h3>${sampleEditable('ticketHeader', s.ticketHeader, 'Add header', '')}</h3>` : (s.ticketHeader ? `<h3>${esc(s.ticketHeader)}</h3>` : '')}
       <div class="print-sub">Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>
-      <div class="print-sub">${order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType)}${order.covers ? ' · ' + order.covers + ' covers' : ''}</div>
+      <div class="print-sub">${order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType)}${coversSeg}</div>
       <hr>
       ${order.items.map(i => `<div class="print-line"><span>${i.qty}× ${esc(i.name)}${i.seat ? ' (' + esc(seatText(i.seat)) + ')' : ''}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`).join('')}
       <hr>
@@ -4813,8 +4841,10 @@ function buildReceiptDoc(order) {
       <div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>` : ''}
       ${order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`}
-      ${state.settings.showStaffOnTicket ? `<div class="print-line"><span>Served by</span><span>${esc(order.staffName || '')}</span></div>` : ''}
-      ${state.settings.ticketFooter ? `<div class="print-footer">${esc(state.settings.ticketFooter)}</div>` : ''}
+      ${edit
+        ? sampleToggleLine(!!s.showStaffOnTicket, 'set-show-staff-ticket', `<span>Served by</span><span>${esc(order.staffName || '')}</span>`)
+        : (s.showStaffOnTicket ? `<div class="print-line"><span>Served by</span><span>${esc(order.staffName || '')}</span></div>` : '')}
+      ${edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : '')}
     </div>`;
 }
 
@@ -4837,10 +4867,10 @@ function stationTag(line) {
 // lines:[{qty,name,seat,note,tag}]}] }. The "new course" is marked with a ★ NEW
 // label + a bordered block (inverse black on thermal) — no course colours print
 // on the docket, though colours are kept everywhere else in the app.
-function buildDocketDoc(ctx) {
+function buildDocketDoc(ctx, edit) {
   return `
     <div class="${printDocClasses()}">
-      ${ctx.headerText ? `<h3>${esc(ctx.headerText)}</h3>` : ''}
+      ${edit ? `<h3>${sampleEditable('ticketHeader', state.settings.ticketHeader, 'Add header', '')}</h3>` : (ctx.headerText ? `<h3>${esc(ctx.headerText)}</h3>` : '')}
       <div class="print-sub">KITCHEN · ${ctx.subLabel}</div>
       ${ctx.covers ? `<div class="print-sub">${ctx.covers} covers</div>` : ''}
       ${ctx.vip ? `<div class="print-flag">🌟 VIP — ${esc(ctx.vip)}</div>` : ''}
@@ -8822,11 +8852,11 @@ function renderPrintersDocketTab() {
     </div>
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:6px;">Layout</div>
-      <div class="ts" style="margin-bottom:14px;">Exactly how a docket comes out of the kitchen printer. Paper width, print type and font size are under Setup.</div>
+      <div class="ts" style="margin-bottom:14px;">This sample is exactly what prints — tap the header on the paper to change it. Paper width, print type and font size are under Setup.</div>
       <div class="print-preview-grid">
         <div>
           <div class="print-preview-cap">🍳 Kitchen docket <span>fired course</span></div>
-          <div class="paper-preview">${buildDocketDoc(sampleDocketCtx())}</div>
+          <div class="paper-preview">${buildDocketDoc(sampleDocketCtx(), true)}</div>
         </div>
       </div>
     </div>
@@ -8838,32 +8868,19 @@ function renderPrintersReceiptTab() {
   return `
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:14px;">Customer receipts</div>
-      <label style="font-size:12.5px;font-weight:600;color:var(--charcoal-soft);display:block;margin-bottom:5px;">Header text</label>
-      <input id="ticket-header-input" type="text" value="${state.settings.ticketHeader || ''}" placeholder="e.g. The Blue Anchor" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);margin-bottom:12px;">
-      <label style="font-size:12.5px;font-weight:600;color:var(--charcoal-soft);display:block;margin-bottom:5px;">Footer message</label>
-      <input id="ticket-footer-input" type="text" value="${state.settings.ticketFooter || ''}" placeholder="e.g. Thank you for dining with us!" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);margin-bottom:14px;">
-      <div class="th" style="margin-bottom:8px;font-size:12.5px;">Show staff name on ticket</div>
-      <div class="pay-options" style="margin-bottom:${state.settings.coversEnabled || s.printEnabled ? '14px' : '0'};">
-        ${togglePill(state.settings.showStaffOnTicket, 'set-show-staff-ticket')}
-      </div>
-      ${state.settings.coversEnabled ? `
-      <div class="th" style="margin-bottom:8px;font-size:12.5px;">Show covers on ticket</div>
-      <div class="pay-options" style="margin-bottom:${s.printEnabled ? '14px' : '0'};">
-        ${togglePill(state.settings.showCoversOnTicket, 'set-show-covers-ticket')}
-      </div>` : ''}
       ${s.printEnabled ? `
       <div class="th" style="margin-bottom:8px;font-size:12.5px;">Auto-print receipt on payment</div>
       <div class="pay-options">
         ${togglePill(s.autoPrintReceipt, 'set-auto-print-receipt')}
-      </div>` : ''}
+      </div>` : `<div class="ts">Printing is switched off — turn it on under Setup.</div>`}
     </div>
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:6px;">Layout</div>
-      <div class="ts" style="margin-bottom:14px;">Exactly how the check comes out of the receipt printer. Paper width, print type and font size are under Setup.</div>
+      <div class="ts" style="margin-bottom:14px;">This sample is exactly what prints — tap the header or footer on the paper to type them, and tap the covers or Served-by lines to show or hide them. Paper width, print type and font size are under Setup.</div>
       <div class="print-preview-grid">
         <div>
           <div class="print-preview-cap">🧾 Customer receipt <span>the check</span></div>
-          <div class="paper-preview">${buildReceiptDoc(sampleReceiptOrder())}</div>
+          <div class="paper-preview">${buildReceiptDoc(sampleReceiptOrder(), true)}</div>
         </div>
       </div>
     </div>
@@ -14296,7 +14313,8 @@ function bindEvents() {
       else if (act === 'set-show-prices') { saveTicketSetting({ showPrices: el.dataset.val === 'true' }); }
       else if (act === 'set-takeaway-enabled') { saveTicketSetting({ takeawayEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-delivery-enabled') { saveTicketSetting({ deliveryEnabled: el.dataset.val === 'true' }); }
-      else if (act === 'printers-tab') { state.printersTab = el.dataset.val; render(); }
+      else if (act === 'printers-tab') { state.printersTab = el.dataset.val; state.printEdit = null; render(); }
+      else if (act === 'print-sample-edit') { state.printEdit = el.dataset.field; render(); }
       else if (act === 'set-print-enabled') { saveTicketSetting({ printEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-auto-print-kitchen') { saveTicketSetting({ autoPrintKitchenDocket: el.dataset.val === 'true' }); }
@@ -14916,10 +14934,22 @@ function bindEvents() {
   });
   document.querySelectorAll('.item-mod-pills').forEach(c => makePillSortable(c, '.item-mod-pill', '.item-mod-pill', commitItemModifierOrder));
   document.querySelectorAll('.item-size-pills').forEach(c => makePillSortable(c, '.item-size-unit.on', '.item-size-pill', commitItemSizeOrder));
-  const ticketHeaderInput = document.getElementById('ticket-header-input');
-  if (ticketHeaderInput) ticketHeaderInput.addEventListener('change', (e) => { saveTicketSetting({ ticketHeader: e.target.value }); });
-  const ticketFooterInput = document.getElementById('ticket-footer-input');
-  if (ticketFooterInput) ticketFooterInput.addEventListener('change', (e) => { saveTicketSetting({ ticketFooter: e.target.value }); });
+  // Inline editing right on the print sample (Printers → dockets/receipts):
+  // Enter or tapping away saves; Escape cancels.
+  const sampleEditInput = document.getElementById('print-sample-edit-input');
+  if (sampleEditInput) {
+    sampleEditInput.focus();
+    sampleEditInput.select();
+    sampleEditInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sampleEditInput.blur();
+      if (e.key === 'Escape') { state.printEdit = null; render(); }
+    });
+    sampleEditInput.addEventListener('blur', () => {
+      if (state.printEdit !== sampleEditInput.dataset.field) return;
+      state.printEdit = null;
+      saveTicketSetting({ [sampleEditInput.dataset.field]: sampleEditInput.value.trim() });
+    });
+  }
   const seatPrefixInput = document.getElementById('seat-prefix-input');
   if (seatPrefixInput) seatPrefixInput.addEventListener('change', (e) => { saveTicketSetting({ seatPrefix: e.target.value.trim() }); });
   const sharedSeatInput = document.getElementById('shared-seat-input');

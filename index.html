@@ -4810,6 +4810,8 @@ let state = {
   expandedCategoryIds: [],
   expandedSubcatIds: [], // nested subsections expanded in the admin Sections tree
   expandedStaffIds: [],
+  selectedStaffIds: [], // bulk-select on the Staff admin
+  bulkStaffModal: null, // { role } bulk role change
   bulkEditModal: null, // { category, out, priceMode, priceValue }
   savedColors: [],
   colorPopover: null, // { key, kind, id } — the one click-to-open colour picker popover currently open, if any
@@ -6708,6 +6710,7 @@ function render() {
     ${state.discountPresetModal ? renderDiscountPresetModal() : ''}
     ${state.bulkEditModal ? renderBulkEditModal() : ''}
     ${state.bulkCategoryModal ? renderBulkCategoryModal() : ''}
+    ${state.bulkStaffModal ? renderBulkStaffModal() : ''}
     ${state.reservationModal ? renderReservationModal() : ''}
     ${state.customerModal ? renderCustomerModal() : ''}
     ${state.printerStationModal ? renderPrinterStationModal() : ''}
@@ -9959,22 +9962,30 @@ function renderGeneralSettingsAdmin() {
 }
 
 function renderStaffAdmin() {
+  const staff = state.staffList.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const sel = state.selectedStaffIds || [];
   return `
-  <div style="margin-bottom:14px;">
+  <div class="admin-toolbar">
     <button class="btn-add inline tb-add" data-act="add-staff" title="Add staff">+</button>
   </div>
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-staff" ${staff.length > 0 && staff.every(s => sel.includes(s.id)) ? 'checked' : ''}></label>${sel.length > 0 ? `
+      <span class="ts">${sel.length} selected</span>
+      <button class="icon-sq" title="Bulk edit role" data-act="open-bulk-staff">${ACT_PENCIL_SVG}</button>
+      <button class="icon-sq" title="Delete selected" data-act="delete-selected-staff">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" title="Clear selection" data-act="clear-staff-selection">${ACT_X_SVG}</button>` : ''}</div>
   <div class="menu-items-list" style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
-    ${state.staffList.length === 0 ? `<div class="empty-hist">No staff yet.</div>` : ''}
-    ${state.staffList.map(s => {
+    ${staff.length === 0 ? `<div class="empty-hist">No staff yet.</div>` : ''}
+    ${staff.map(s => {
       const expanded = state.expandedStaffIds.includes(s.id);
+      const selected = sel.includes(s.id);
       return `
-      <div class="menu-item-expandable${expanded ? ' open' : ''}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
-        <div class="menu-item-header" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open" onclick="if(!event.target.closest('input,button,select'))toggleStaffExpand('${s.id}')">
+      <div class="menu-item-expandable${selected ? ' selected' : ''}${expanded ? ' open' : ''}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
+        <div class="menu-item-header sel-head" data-sellist="staff" data-selkey="${s.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <button type="button" class="row-back" onclick="event.stopPropagation();toggleStaffExpand('${s.id}')" title="Back">←</button>
-          <div class="order-badge" style="background:${s.role === 'manager' ? 'var(--orange)' : 'var(--charcoal)'};flex-shrink:0;">${s.role}</div>
-          <input class="staff-name-quick-input" data-id="${s.id}" type="text" value="${esc(s.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:180px;padding:2px 0;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="staff" data-key="${s.id}" ${selected ? 'checked' : ''}>
+          <input class="staff-name-quick-input" data-id="${s.id}" type="text" value="${esc(s.name)}" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:180px;padding:2px 0;" onclick="event.stopPropagation();">
           <span style="flex:1;"></span>
-          ${deleteIconButton('delete-staff', s.id, 'Remove')}
+          <span class="ts" style="flex-shrink:0;text-transform:capitalize;">${esc(s.role)}</span>
         </div>
         ${expanded ? `
           <div style="padding:0 12px 12px 44px;display:flex;flex-direction:column;gap:12px;">
@@ -9996,6 +10007,25 @@ function renderStaffAdmin() {
     }).join('')}
   </div>
   `;
+}
+
+function renderBulkStaffModal() {
+  const m = state.bulkStaffModal;
+  const n = (state.selectedStaffIds || []).length;
+  return `
+  <div class="modal-bg" data-act="bulk-staff-modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>Set role for ${n} staff member${n === 1 ? '' : 's'}</h2>
+      <label>Role</label>
+      <div class="pay-options" style="flex-wrap:wrap;">
+        ${STAFF_ROLE_OPTIONS.map(r => `<div class="pay-opt ${m.role === r ? 'active' : ''}" style="flex:none;text-transform:capitalize;" data-act="bulk-staff-role" data-val="${r}">${r}</div>`).join('')}
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" data-act="close-bulk-staff">Cancel</button>
+        <button class="btn-confirm" data-act="save-bulk-staff">Apply</button>
+      </div>
+    </div>
+  </div>`;
 }
 
 // --- Nested subsection helpers -------------------------------------------
@@ -13461,6 +13491,30 @@ async function deleteStaffMember(id) {
     render();
   }
 }
+async function deleteSelectedStaff() {
+  const ids = (state.selectedStaffIds || []).slice();
+  if (!ids.length || !confirm(`Delete ${ids.length} staff member${ids.length === 1 ? '' : 's'}?`)) return;
+  try {
+    for (const id of ids) await api(`/api/staff/${id}`, { method: 'DELETE' });
+    state.selectedStaffIds = [];
+    state.staffList = await api('/api/staff');
+    render();
+  } catch (e) { state.toast = 'Could not delete some staff.'; render(); }
+}
+async function saveBulkStaff() {
+  const role = state.bulkStaffModal && state.bulkStaffModal.role;
+  const ids = (state.selectedStaffIds || []).slice();
+  if (!role || !ids.length) { state.bulkStaffModal = null; render(); return; }
+  try {
+    for (const id of ids) {
+      const s = state.staffList.find(x => x.id === id);
+      if (s) await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: s.name, role }) });
+    }
+    state.bulkStaffModal = null; state.selectedStaffIds = [];
+    state.staffList = await api('/api/staff');
+    render();
+  } catch (e) { state.toast = 'Could not update roles.'; render(); }
+}
 
 function openAddMenuItem() {
   const defaultCat = state.menuAdminCategoryFilter || (state.categories[0] ? state.categories[0].name : '');
@@ -14353,6 +14407,7 @@ const SEL_LISTS = {
   combo: { arr: 'selectedComboIds' },
   size: { arr: 'selectedSizeIdxs', numeric: true },
   allergy: { arr: 'selectedAllergyNames' },
+  staff: { arr: 'selectedStaffIds' },
 };
 // Rows with a hidden editor open on plain click (ctrl/cmd-click selects);
 // rows that are fully inline-editable keep plain click = select.
@@ -14370,6 +14425,7 @@ const SEL_OPENERS = {
     state.salesCatOpenId = state.salesCatOpenId === id ? null : id;
     render();
   },
+  staff: (head) => toggleStaffExpand(head.dataset.selkey),
 };
 // Checkbox selection for any sel-head list (mirrors the Items checkboxes).
 function selListToggle(list, key) {
@@ -14539,6 +14595,13 @@ function bindEvents() {
       else if (act === 'save-staff-modal') { saveStaffModal(); }
       else if (act === 'toggle-staff-expand') { toggleStaffExpand(el.dataset.id); }
       else if (act === 'save-staff-pin') { saveStaffPin(el.dataset.id); }
+      else if (act === 'clear-staff-selection') { state.selectedStaffIds = []; render(); }
+      else if (act === 'delete-selected-staff') { deleteSelectedStaff(); }
+      else if (act === 'open-bulk-staff') { state.bulkStaffModal = { role: 'staff' }; render(); }
+      else if (act === 'close-bulk-staff') { state.bulkStaffModal = null; render(); }
+      else if (act === 'bulk-staff-modal-bg') { if (e.target === el) { state.bulkStaffModal = null; render(); } }
+      else if (act === 'bulk-staff-role') { state.bulkStaffModal.role = el.dataset.val; render(); }
+      else if (act === 'save-bulk-staff') { saveBulkStaff(); }
       else if (act === 'add-menu-item') { quickAddMenuItem(); }
       else if (act === 'duplicate-menu-item') { duplicateMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-active') { toggleMenuItemActive(el.dataset.id); }
@@ -15168,6 +15231,8 @@ function bindEvents() {
   if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
   const selectAllCombos = document.getElementById('select-all-combos');
   if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
+  const selectAllStaff = document.getElementById('select-all-staff');
+  if (selectAllStaff) selectAllStaff.addEventListener('change', () => { const all = state.staffList.every(s => state.selectedStaffIds.includes(s.id)); state.selectedStaffIds = all ? [] : state.staffList.map(s => s.id); render(); });
   const selectAllSalesCats = document.getElementById('select-all-sales-categories');
   if (selectAllSalesCats) selectAllSalesCats.addEventListener('change', () => toggleSelectAllSalesCategories());
   const selectAllSizes = document.getElementById('select-all-sizes');

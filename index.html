@@ -4812,7 +4812,8 @@ let state = {
   expandedStaffIds: [],
   selectedStaffIds: [], // bulk-select on the Staff admin
   bulkStaffModal: null, // { role } bulk role change
-  selectedNotePresetIdxs: [], // bulk-select on the Order Notes preset list (per active section)
+  selectedNotePresetIdxs: [], // bulk-select on the Order Notes preset list (per open type)
+  notesOpenId: null, // which note type is expanded on the Order Notes page
   bulkEditModal: null, // { category, out, priceMode, priceValue }
   savedColors: [],
   colorPopover: null, // { key, kind, id } — the one click-to-open colour picker popover currently open, if any
@@ -9767,65 +9768,79 @@ function renderVipSettingsAdmin() {
   `;
 }
 
+// Order Notes: a Sections-style list of note TYPES. Each type is a row that
+// expands to reveal what's inside. Built-in VIP and Allergies expand to their
+// own editors; custom types expand to a simple checkbox note list. Collapsed
+// by default — you see every type and its count at a glance, drill in on demand.
 function renderOrderNotesAdmin() {
   const cats = state.noteCategories;
-  // One unified page for every note "type": VIP and Allergies are fixed tabs,
-  // followed by the custom note sections. Switch tabs at the top to edit each.
   const hidden = state.settings.hiddenNoteTypes || [];
-  const typeTabs = [
-    ...(!hidden.includes('vip') ? [{ id: 'vip', label: 'VIP', builtin: true }] : []),
-    ...(!hidden.includes('allergy') ? [{ id: 'allergy', label: 'Allergies', builtin: true }] : []),
-    ...cats.map((c, i) => ({ id: c.id, label: esc(c.name), color: c.color, idx: i, removable: true })),
-  ];
-  const active = typeTabs.some(t => t.id === state.notesAdminSection) ? state.notesAdminSection : (typeTabs[0] && typeTabs[0].id);
-  const cat = cats.find(c => c.id === active);
-  const idx = cats.findIndex(c => c.id === active);
-  // Tabs mirror the order screen's course tabs. Every tab has a paired ✕:
-  // built-in VIP/Allergies hide (restorable via "Restore defaults"), custom
-  // sections delete. A trailing "+" adds a new section.
-  const removeBtn = (t) => t.builtin
-    ? `<button type="button" class="pay-opt" title="Remove ${t.label}" style="flex:none;padding:9px 11px;font-size:12.5px;color:var(--red);" data-act="hide-note-type" data-type="${t.id}">✕</button>`
-    : `<button type="button" class="pay-opt" title="Delete section" style="flex:none;padding:9px 11px;font-size:12.5px;color:var(--red);" data-act="remove-note-section" data-idx="${t.idx}">✕</button>`;
-  const tabsBar = `
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:18px;">
-    ${typeTabs.map(t => `
-      <span style="display:inline-flex;gap:2px;align-items:center;">
-        <button type="button" class="pay-opt ${active === t.id ? 'active' : ''}" style="flex:none;padding:9px 16px;font-size:13.5px;" data-act="notes-admin-section" data-id="${t.id}">${t.label}</button>
-        ${removeBtn(t)}
-      </span>`).join('')}
-    <button type="button" class="pay-opt" title="Add note type" style="flex:none;padding:9px 15px;font-size:15px;font-weight:800;" data-act="add-note-section">+</button>
-    ${hidden.length ? `<button class="icon-sq" title="Restore defaults" data-act="restore-note-types" style="margin-left:4px;">↺</button>` : ''}
-  </div>`;
+  const openId = state.notesOpenId;
   const selP = state.selectedNotePresetIdxs || [];
-  const presets = (cat && cat.presets) || [];
-  const body = active === 'vip' ? renderVipSettingsAdmin()
-    : active === 'allergy' ? renderAllergySettingsAdmin()
-    : cat ? `
-      <div style="margin-bottom:16px;max-width:640px;">
-        <input class="note-section-name-input" data-idx="${idx}" type="text" value="${esc(cat.name)}" placeholder="Section name" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-weight:700;">
+
+  const typeRow = (id, name, color, count, builtin, catId) => {
+    const open = openId === id;
+    return `
+    <div class="menu-item-expandable" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
+      <div class="sel-head" data-act="notes-toggle-open" data-id="${id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+        ${builtin
+          ? `<span class="tbl-sq" style="width:20px;height:20px;border-width:0;border-radius:6px;background:${color};"></span>`
+          : colorDotButton('note-category', catId, color, { size: 20 })}
+        ${builtin
+          ? `<span style="font-weight:700;font-size:13.5px;">${esc(name)}</span>`
+          : `<input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === catId)}" type="text" value="${esc(name)}" placeholder="Name" style="border:none;background:transparent;color:inherit;font-weight:700;font-size:13.5px;width:${Math.max(name.length, 6)}ch;min-width:6ch;padding:2px 0;" onclick="event.stopPropagation();">`}
+        <span style="flex:1;"></span>
+        <span class="ts" style="flex-shrink:0;">${count} note${count === 1 ? '' : 's'}</span>
       </div>
-      <div class="admin-toolbar">
-        <button class="btn-add inline tb-add" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+</button>
-      </div>
-      <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${selP.length > 0 ? `
-          <span class="ts">${selP.length} selected</span>
-          <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-presets">${ACT_TRASH_SVG}</button>
-          <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}</div>
-      <div style="max-width:640px;display:flex;flex-direction:column;gap:8px;">
-        ${presets.length === 0 ? `<div class="empty-hist">No notes yet.</div>` : ''}
-        ${presets.map((p, pIdx) => {
-          const selected = selP.includes(pIdx);
-          return `
-          <div class="order-row${selected ? ' selected' : ''}" data-idx="${pIdx}">
-            <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
-            <div class="order-info">
-              <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="border:none;background:transparent;color:inherit;font-weight:700;width:100%;font-size:13.5px;padding:2px 0;">
-            </div>
-          </div>`;
-        }).join('')}
-      </div>
-    ` : `<div class="empty-hist">No section selected.</div>`;
-  return tabsBar + body;
+      ${open ? `<div style="border-top:1px solid var(--steel-200);padding:12px;">${
+        id === 'vip' ? renderVipSettingsAdmin()
+        : id === 'allergy' ? renderAllergySettingsAdmin()
+        : renderNotePresetList(cats.find(c => c.id === catId), selP)
+      }</div>` : ''}
+    </div>`;
+  };
+
+  const rows = [
+    ...(!hidden.includes('vip') ? [typeRow('vip', 'VIP', '#C08A00', state.vipPresets.length, true)] : []),
+    ...(!hidden.includes('allergy') ? [typeRow('allergy', 'Allergies', '#A8483A', state.allergyPresets.length, true)] : []),
+    ...cats.map(c => typeRow(c.id, c.name, c.color, (c.presets || []).length, false, c.id)),
+  ];
+
+  return `
+  <div class="admin-toolbar">
+    <button class="btn-add inline tb-add" data-act="add-note-section" title="Add note type">+</button>
+    ${hidden.length ? `<button class="icon-sq" title="Restore VIP / Allergies" data-act="restore-note-types">↺</button>` : ''}
+  </div>
+  <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
+    ${rows.join('')}
+  </div>`;
+}
+
+// The inner note list for a custom note type: inline add + checkbox rows + one trash.
+function renderNotePresetList(cat, selP) {
+  if (!cat) return '';
+  const presets = cat.presets || [];
+  return `
+  <div class="admin-toolbar" style="margin-bottom:6px;">
+    <button class="btn-add inline tb-add" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+</button>
+  </div>
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${selP.length > 0 ? `
+      <span class="ts">${selP.length} selected</span>
+      <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-presets">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}</div>
+  <div style="display:flex;flex-direction:column;gap:8px;">
+    ${presets.length === 0 ? `<div class="empty-hist">No notes yet.</div>` : ''}
+    ${presets.map((p, pIdx) => {
+      const selected = selP.includes(pIdx);
+      return `
+      <div class="order-row${selected ? ' selected' : ''}" data-idx="${pIdx}">
+        <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
+        <div class="order-info">
+          <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="border:none;background:transparent;color:inherit;font-weight:700;width:100%;font-size:13.5px;padding:2px 0;">
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
 }
 
 function renderVoidReasonsSettingsAdmin() {
@@ -14833,6 +14848,7 @@ function bindEvents() {
       else if (act === 'remove-note-category') { removeNoteCategory(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-category') { openEditNoteCategory(parseInt(el.dataset.idx)); }
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
+      else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'delete-selected-note-presets') { deleteSelectedNotePresets(); }
       else if (act === 'hide-note-type') { hideNoteType(el.dataset.type); }

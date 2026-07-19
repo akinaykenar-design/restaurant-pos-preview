@@ -2173,7 +2173,6 @@ app.put('/api/allergy-presets', (req, res) => {
     }))
     .filter(p => p.name)
     .slice(0, 30);
-  if (cleaned.length === 0) return res.status(400).json({ error: 'Keep at least one preset' });
   data.allergyPresets = cleaned;
   logAudit(data, staffFromReq(req), 'Updated allergy presets');
   writeData(data);
@@ -9792,7 +9791,7 @@ function renderOrderNotesAdmin() {
     const open = openId === id;
     const selected = selT.includes(id);
     return `
-    <div class="menu-item-expandable${selected ? ' selected' : ''}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
+    <div class="menu-item-expandable${builtin ? '' : ' note-type-row'}${selected ? ' selected' : ''}" data-typeid="${id}" draggable="${builtin ? 'false' : 'true'}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
       <div class="menu-item-header sel-head" data-act="notes-toggle-open" data-id="${id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
         ${builtin
@@ -9851,7 +9850,7 @@ function renderNotePresetList(cat, selP) {
     ${presets.map((p, pIdx) => {
       const selected = selP.includes(pIdx);
       return `
-      <div class="order-row${selected ? ' selected' : ''}" data-idx="${pIdx}">
+      <div class="order-row note-preset-drag${selected ? ' selected' : ''}" data-idx="${pIdx}" draggable="true">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
         <div class="order-info">
           <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="border:none;background:transparent;color:inherit;font-weight:700;width:100%;font-size:13.5px;padding:2px 0;">
@@ -12644,7 +12643,6 @@ function bulkDeleteAllergies() {
   const sel = new Set(state.selectedAllergyNames);
   if (sel.size === 0) return;
   const remaining = state.allergyPresets.filter(p => !sel.has(p.name));
-  if (remaining.length === 0) { state.toast = 'Keep at least one allergy preset.'; render(); return; }
   state.selectedAllergyNames = [];
   saveAllergyPresets(remaining);
 }
@@ -15530,6 +15528,26 @@ function bindEvents() {
   makeSortable('panel-tile', (from, to) => reorderPanels(from, to));
   makeSortable('menu-item-expandable', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderMenuItems(els[from].dataset.id, t.dataset.id); }, { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
   makeSortable('sales-cat-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderSalesCategories(els[from].dataset.id, t.dataset.id); });
+  // Order Notes: custom note TYPES reorder among themselves (built-ins pinned);
+  // a type only drags while collapsed so it never fights its content.
+  makeSortable('note-type-row', (from, to) => {
+    const cats = state.noteCategories.slice();
+    const [moved] = cats.splice(from, 1);
+    cats.splice(to, 0, moved);
+    saveNoteCategories(cats);
+  }, { canStart: (el) => state.notesOpenId !== el.dataset.typeid });
+  // Notes inside the open type reorder freely.
+  makeSortable('note-preset-drag', (from, to) => {
+    const catId = state.notesOpenId;
+    const cats = state.noteCategories.map(c => {
+      if (c.id !== catId) return c;
+      const presets = (c.presets || []).slice();
+      const [moved] = presets.splice(from, 1);
+      presets.splice(to, 0, moved);
+      return { ...c, presets };
+    });
+    saveNoteCategories(cats);
+  });
   // Choices inside the set-menu editor: drag to set the on-screen and
   // print sequence (saved with the set menu).
   // Collapsed choices drag to reorder; an open choice stays put so dragging

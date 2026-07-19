@@ -4813,6 +4813,7 @@ let state = {
   selectedStaffIds: [], // bulk-select on the Staff admin
   bulkStaffModal: null, // { role } bulk role change
   selectedNotePresetIdxs: [], // bulk-select on the Order Notes preset list (per open type)
+  selectedNoteTypeIds: [], // bulk-select on the Order Notes type list
   notesOpenId: null, // which note type is expanded on the Order Notes page
   bulkEditModal: null, // { category, out, priceMode, priceValue }
   savedColors: [],
@@ -5371,6 +5372,7 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-category-modal') { state.bulkCategoryModal.color = color; render(); }
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
   else if (kind === 'note-category') quickUpdateNoteCategoryColor(id, color);
+  else if (kind === 'bulk-note-type') bulkSetNoteTypeColor(color);
   else if (kind === 'bulk-allergy') bulkSetAllergyColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
@@ -9777,14 +9779,24 @@ function renderOrderNotesAdmin() {
   const hidden = state.settings.hiddenNoteTypes || [];
   const openId = state.notesOpenId;
   const selP = state.selectedNotePresetIdxs || [];
+  const selT = state.selectedNoteTypeIds || [];
+
+  // The full list of visible note types (built-ins first), used for select-all.
+  const allTypeIds = [
+    ...(!hidden.includes('vip') ? ['vip'] : []),
+    ...(!hidden.includes('allergy') ? ['allergy'] : []),
+    ...cats.map(c => c.id),
+  ];
 
   const typeRow = (id, name, color, count, builtin, catId) => {
     const open = openId === id;
+    const selected = selT.includes(id);
     return `
-    <div class="menu-item-expandable" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
-      <div class="sel-head" data-act="notes-toggle-open" data-id="${id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+    <div class="menu-item-expandable${selected ? ' selected' : ''}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
+      <div class="menu-item-header sel-head" data-act="notes-toggle-open" data-id="${id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+        <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
         ${builtin
-          ? `<span class="tbl-sq" style="width:20px;height:20px;border-width:0;border-radius:6px;background:${color};"></span>`
+          ? `<span class="color-dot-btn" style="width:20px;height:20px;background:${color};cursor:default;"></span>`
           : colorDotButton('note-category', catId, color, { size: 20 })}
         ${builtin
           ? `<span style="font-weight:700;font-size:13.5px;">${esc(name)}</span>`
@@ -9811,6 +9823,12 @@ function renderOrderNotesAdmin() {
     <button class="btn-add inline tb-add" data-act="add-note-section" title="Add note type">+</button>
     ${hidden.length ? `<button class="icon-sq" title="Restore VIP / Allergies" data-act="restore-note-types">↺</button>` : ''}
   </div>
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-types" ${allTypeIds.length > 0 && allTypeIds.every(id => selT.includes(id)) ? 'checked' : ''}></label>${selT.length > 0 ? `
+      <span class="ts">${selT.length} selected</span>
+      <span style="display:inline-flex;align-items:center;gap:6px;">${colorDotButton('bulk-note-type', 'x', null, { size: 22, allowClear: true, title: 'Set colour for selected' })}</span>
+      <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-note-types">${ACT_COPY_SVG}</button>
+      <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-types">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" title="Clear selection" data-act="clear-note-type-selection">${ACT_X_SVG}</button>` : ''}</div>
   <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${rows.join('')}
   </div>`;
@@ -12782,6 +12800,39 @@ function deleteSelectedNotePresets() {
   state.selectedNotePresetIdxs = [];
   saveNoteCategories(cats);
 }
+// Bulk colour on selected note types — applies to the custom ones (built-in
+// VIP/Allergies keep their fixed colour).
+function bulkSetNoteTypeColor(color) {
+  const sel = new Set(state.selectedNoteTypeIds || []);
+  const cats = state.noteCategories.map(c => sel.has(c.id) ? { ...c, color: color || '#999' } : c);
+  saveNoteCategories(cats);
+}
+function duplicateSelectedNoteTypes() {
+  const sel = new Set(state.selectedNoteTypeIds || []);
+  const dupes = state.noteCategories.filter(c => sel.has(c.id)).map(c => ({
+    id: 'note-' + Date.now() + '-' + Math.floor(state.noteCategories.length + Math.random() * 1000),
+    name: c.name + ' copy', color: c.color, presets: [...(c.presets || [])],
+  }));
+  if (!dupes.length) return;
+  state.selectedNoteTypeIds = [];
+  saveNoteCategories([...state.noteCategories, ...dupes]);
+}
+function deleteSelectedNoteTypes() {
+  const sel = new Set(state.selectedNoteTypeIds || []);
+  if (!sel.size) return;
+  const nCustom = state.noteCategories.filter(c => sel.has(c.id)).length;
+  const nBuiltin = ['vip', 'allergy'].filter(id => sel.has(id)).length;
+  if (!confirm(`Delete ${nCustom + nBuiltin} note type${nCustom + nBuiltin === 1 ? '' : 's'}?${nBuiltin ? ' (VIP/Allergies are hidden, restorable with ↺.)' : ''}`)) return;
+  // Hide built-ins, delete custom.
+  const hide = ['vip', 'allergy'].filter(id => sel.has(id));
+  const keepCats = state.noteCategories.filter(c => !sel.has(c.id));
+  state.selectedNoteTypeIds = [];
+  if (hide.length) {
+    const hidden = Array.from(new Set([...(state.settings.hiddenNoteTypes || []), ...hide]));
+    saveTicketSetting({ hiddenNoteTypes: hidden });
+  }
+  saveNoteCategories(keepCats);
+}
 function quickUpdateNoteCategoryColor(id, color) {
   const cats = state.noteCategories.map(c => c.id === id ? { ...c, color: color || '#999' } : c);
   saveNoteCategories(cats);
@@ -14445,6 +14496,7 @@ const SEL_LISTS = {
   allergy: { arr: 'selectedAllergyNames' },
   staff: { arr: 'selectedStaffIds' },
   'note-preset': { arr: 'selectedNotePresetIdxs', numeric: true },
+  'note-type': { arr: 'selectedNoteTypeIds' },
 };
 // Rows with a hidden editor open on plain click (ctrl/cmd-click selects);
 // rows that are fully inline-editable keep plain click = select.
@@ -14850,6 +14902,9 @@ function bindEvents() {
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }
+      else if (act === 'clear-note-type-selection') { state.selectedNoteTypeIds = []; render(); }
+      else if (act === 'duplicate-selected-note-types') { duplicateSelectedNoteTypes(); }
+      else if (act === 'delete-selected-note-types') { deleteSelectedNoteTypes(); }
       else if (act === 'delete-selected-note-presets') { deleteSelectedNotePresets(); }
       else if (act === 'hide-note-type') { hideNoteType(el.dataset.type); }
       else if (act === 'restore-note-types') { restoreNoteTypes(); }
@@ -15271,6 +15326,14 @@ function bindEvents() {
   if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
   const selectAllCombos = document.getElementById('select-all-combos');
   if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
+  const selectAllNoteTypes = document.getElementById('select-all-note-types');
+  if (selectAllNoteTypes) selectAllNoteTypes.addEventListener('change', () => {
+    const hidden = state.settings.hiddenNoteTypes || [];
+    const ids = [...(!hidden.includes('vip') ? ['vip'] : []), ...(!hidden.includes('allergy') ? ['allergy'] : []), ...state.noteCategories.map(c => c.id)];
+    const all = ids.every(id => (state.selectedNoteTypeIds || []).includes(id));
+    state.selectedNoteTypeIds = all ? [] : ids;
+    render();
+  });
   const selectAllNotePresets = document.getElementById('select-all-note-presets');
   if (selectAllNotePresets) selectAllNotePresets.addEventListener('change', () => {
     const cat = state.noteCategories.find(c => c.id === state.notesAdminSection);

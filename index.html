@@ -10979,7 +10979,6 @@ function renderAppearanceAdmin() {
       <div class="pay-opt ${(state.theme.itemSize || 'md') === 'md' ? 'active' : ''}" data-act="set-theme-itemsize" data-val="md">M</div>
       <div class="pay-opt ${(state.theme.itemSize || 'md') === 'lg' ? 'active' : ''}" data-act="set-theme-itemsize" data-val="lg">L</div>
     </div>
-    <button class="btn-confirm" data-act="save-appearance">Save appearance</button>
   </div>
   <div class="settings-card">
     <div class="th" style="margin-bottom:14px;">Quick repeat</div>
@@ -11196,11 +11195,6 @@ function renderComboEditorInline() {
         </div>`;
       }).join('')}
       <button class="btn-cancel" style="width:100%;margin-bottom:10px;" data-act="add-combo-group">+ Add choice</button>
-      <div class="modal-actions">
-        <button class="btn-cancel" data-act="close-combo-admin-modal">Cancel</button>
-        ${state.comboModal && state.comboModal.id ? `<button type="button" class="btn-modal-delete" data-act="modal-delete-combo">Delete</button>` : ''}
-        <button class="btn-confirm" data-act="save-combo-admin-modal">Save</button>
-      </div>
     </div>`;
 }
 
@@ -12575,8 +12569,8 @@ async function deleteModifierGroupAction(id) {
   }
 }
 
-function setThemeModeDraft(mode) { state.theme = { ...state.theme, mode }; applyTheme(); render(); }
-function setThemeItemSizeDraft(itemSize) { state.theme = { ...state.theme, itemSize }; applyTheme(); render(); }
+function setThemeModeDraft(mode) { state.theme = { ...state.theme, mode }; applyTheme(); render(); saveAppearance(); }
+function setThemeItemSizeDraft(itemSize) { state.theme = { ...state.theme, itemSize }; applyTheme(); render(); saveAppearance(); }
 
 async function setCoversEnabled(val) {
   state.settings.coversEnabled = val;
@@ -13038,9 +13032,6 @@ async function saveAppearance() {
     const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize }) });
     state.theme = theme;
     applyTheme();
-    state.toast = 'Appearance saved';
-    render();
-    setTimeout(() => { state.toast = null; render(); }, 2000);
   } catch (e) {
     state.toast = 'Could not save appearance.';
     render();
@@ -14279,6 +14270,19 @@ function openEditCombo(id) {
   render();
 }
 function closeComboAdminModal() { state.comboModal = null; state.adminError = ''; render(); }
+// The choice editor saves itself after every change — no Save button;
+// the floating save bar stays the only save UI in admin.
+async function autosaveCombo() {
+  const m = state.comboModal;
+  if (!m || m.mode !== 'edit' || !state.combos.find(c => c.id === m.id)) return;
+  const validGroups = m.groups
+    .filter(g => g.itemIds.length > 0)
+    .map(g => ({ label: (g.label && g.label.trim()) || 'Choose', all: !!g.all, min: g.min, max: g.max, course: (g.course != null ? g.course : null), itemIds: g.itemIds }));
+  try {
+    await api(`/api/combos/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups: validGroups, category: m.category || null }) });
+    state.combos = await api('/api/combos');
+  } catch (e) { state.toast = 'Could not save the set menu.'; render(); }
+}
 function toggleComboExpand(id) {
   if (state.comboModal && state.comboModal.mode === 'edit' && state.comboModal.id === id) {
     state.comboModal = null; state.adminError = ''; render();
@@ -14320,6 +14324,7 @@ function addComboItem(idx, itemId) {
   const g = state.comboModal.groups[idx];
   if (itemId && !g.itemIds.includes(itemId)) g.itemIds.push(itemId);
   render();
+  autosaveCombo();
 }
 function removeComboItem(idx, itemId) {
   const g = state.comboModal.groups[idx];
@@ -14726,8 +14731,8 @@ function bindEvents() {
       else if (act === 'combo-admin-modal-bg') { if (e.target === el) closeComboAdminModal(); }
       else if (act === 'save-combo-admin-modal') { saveComboAdminModal(); }
       else if (act === 'add-combo-group') { addComboGroup(); }
-      else if (act === 'combo-item-toggle') { const g = state.comboModal.groups[parseInt(el.dataset.gidx)]; const id = el.dataset.item; if (g.itemIds.includes(id)) g.itemIds = g.itemIds.filter(x => x !== id); else g.itemIds.push(id); render(); }
-      else if (act === 'combo-group-all') { const g = state.comboModal.groups[parseInt(el.dataset.gidx)]; g.all = !g.all; render(); }
+      else if (act === 'combo-item-toggle') { const g = state.comboModal.groups[parseInt(el.dataset.gidx)]; const id = el.dataset.item; if (g.itemIds.includes(id)) g.itemIds = g.itemIds.filter(x => x !== id); else g.itemIds.push(id); render(); autosaveCombo(); }
+      else if (act === 'combo-group-all') { const g = state.comboModal.groups[parseInt(el.dataset.gidx)]; g.all = !g.all; render(); autosaveCombo(); }
       else if (act === 'combo-choice-toggle') { const g = state.comboModal.groups[parseInt(el.dataset.gidx)]; g._open = !g._open; render(); }
       else if (act === 'combo-choice-select') { const m = state.comboModal; const i = parseInt(el.dataset.gidx); m._sel = (m._sel || []).includes(i) ? m._sel.filter(x => x !== i) : [...(m._sel || []), i]; render(); }
       else if (act === 'combo-choice-select-all') { const m = state.comboModal; m._sel = (m._sel || []).length === m.groups.length ? [] : m.groups.map((_, i) => i); render(); }
@@ -14738,6 +14743,7 @@ function bindEvents() {
         if (m.groups.length === 0) m.groups.push({ label: '', min: 1, max: 1, course: null, itemIds: [], _open: true });
         m._sel = [];
         render();
+        autosaveCombo();
       }
       else if (act === 'remove-combo-item') { removeComboItem(parseInt(el.dataset.gidx), el.dataset.item); }
       else if (act === 'io-pick-variant') { pickIoVariant(el.dataset.variant); }
@@ -15386,9 +15392,10 @@ function bindEvents() {
   if (subcategoryIconInput) subcategoryIconInput.addEventListener('input', (e) => { state.subcategoryModal.icon = e.target.value; });
   document.querySelectorAll('.combo-group-label').forEach(el => {
     el.addEventListener('input', (e) => { state.comboModal.groups[parseInt(el.dataset.gidx)].label = e.target.value; });
+    el.addEventListener('change', () => autosaveCombo());
   });
   document.querySelectorAll('.combo-group-course').forEach(el => {
-    el.addEventListener('change', (e) => { setComboGroupCourse(parseInt(el.dataset.gidx), e.target.value); });
+    el.addEventListener('change', (e) => { setComboGroupCourse(parseInt(el.dataset.gidx), e.target.value); autosaveCombo(); });
   });
   document.querySelectorAll('.combo-add-item-select').forEach(el => {
     el.addEventListener('change', (e) => {
@@ -15408,7 +15415,7 @@ function bindEvents() {
     });
   });
   document.querySelectorAll('.combo-category-select').forEach(el => {
-    el.addEventListener('change', (e) => { if (state.comboModal) state.comboModal.category = e.target.value; });
+    el.addEventListener('change', (e) => { if (state.comboModal) state.comboModal.category = e.target.value; autosaveCombo(); render(); });
   });
   // Typed min/max picks per choice; each keeps the other consistent on blur.
   document.querySelectorAll('.combo-group-min').forEach(el => {
@@ -15417,6 +15424,7 @@ function bindEvents() {
       g.min = Math.max(0, parseInt(e.target.value) || 0);
       if ((g.max || 1) < Math.max(1, g.min)) g.max = Math.max(1, g.min);
       render();
+      autosaveCombo();
     });
   });
   document.querySelectorAll('.combo-group-max').forEach(el => {
@@ -15425,6 +15433,7 @@ function bindEvents() {
       g.max = Math.max(1, parseInt(e.target.value) || 1);
       if ((g.min || 0) > g.max) g.min = g.max;
       render();
+      autosaveCombo();
     });
   });
 
@@ -15520,6 +15529,7 @@ function bindEvents() {
     const [moved] = gs.splice(from, 1);
     gs.splice(to, 0, moved);
     render();
+    autosaveCombo();
   }, { canStart: (item) => !(state.comboModal && state.comboModal.groups[parseInt(item.dataset.gidx)] && state.comboModal.groups[parseInt(item.dataset.gidx)]._open) });
   // Item pills inside each choice drag to set the serving/print sequence.
   // One sortable per choice (per-group class) so pills can't cross choices.
@@ -15529,6 +15539,7 @@ function bindEvents() {
       const [moved] = ids.splice(from, 1);
       ids.splice(to, 0, moved);
       render();
+      autosaveCombo();
     }));
   }
   makeSortable('category-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderCategories(els[from].dataset.id, t.dataset.id); });

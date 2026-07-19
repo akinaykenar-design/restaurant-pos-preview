@@ -4812,6 +4812,7 @@ let state = {
   expandedStaffIds: [],
   selectedStaffIds: [], // bulk-select on the Staff admin
   bulkStaffModal: null, // { role } bulk role change
+  selectedNotePresetIdxs: [], // bulk-select on the Order Notes preset list (per active section)
   bulkEditModal: null, // { category, out, priceMode, priceValue }
   savedColors: [],
   colorPopover: null, // { key, kind, id } — the one click-to-open colour picker popover currently open, if any
@@ -9795,21 +9796,33 @@ function renderOrderNotesAdmin() {
     <button type="button" class="pay-opt" title="Add note type" style="flex:none;padding:9px 15px;font-size:15px;font-weight:800;" data-act="add-note-section">+</button>
     ${hidden.length ? `<button class="icon-sq" title="Restore defaults" data-act="restore-note-types" style="margin-left:4px;">↺</button>` : ''}
   </div>`;
+  const selP = state.selectedNotePresetIdxs || [];
+  const presets = (cat && cat.presets) || [];
   const body = active === 'vip' ? renderVipSettingsAdmin()
     : active === 'allergy' ? renderAllergySettingsAdmin()
     : cat ? `
       <div style="margin-bottom:16px;max-width:640px;">
         <input class="note-section-name-input" data-idx="${idx}" type="text" value="${esc(cat.name)}" placeholder="Section name" style="width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-weight:700;">
       </div>
-      <div style="margin-bottom:12px;"><button class="btn-add inline" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+ Add note</button></div>
-      <div class="grid" style="max-width:640px;">
-        ${(cat.presets || []).length === 0 ? `<div class="empty-hist" style="grid-column:1/-1;padding:30px 0;">No preset notes yet.</div>` : ''}
-        ${(cat.presets || []).map((p, pIdx) => `
-          <div class="item-card" style="cursor:default;">
-            <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="border:none;background:transparent;color:inherit;font-weight:700;width:100%;font-size:var(--item-name-size,13.5px);padding-right:16px;">
-            <button class="tl-remove" data-act="remove-note-preset" data-id="${cat.id}" data-idx="${pIdx}" title="Delete" style="position:absolute;top:6px;right:8px;line-height:1;">${ACT_TRASH_SVG}</button>
-          </div>
-        `).join('')}
+      <div class="admin-toolbar">
+        <button class="btn-add inline tb-add" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+</button>
+      </div>
+      <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${selP.length > 0 ? `
+          <span class="ts">${selP.length} selected</span>
+          <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-presets">${ACT_TRASH_SVG}</button>
+          <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}</div>
+      <div style="max-width:640px;display:flex;flex-direction:column;gap:8px;">
+        ${presets.length === 0 ? `<div class="empty-hist">No notes yet.</div>` : ''}
+        ${presets.map((p, pIdx) => {
+          const selected = selP.includes(pIdx);
+          return `
+          <div class="order-row${selected ? ' selected' : ''}" data-idx="${pIdx}">
+            <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
+            <div class="order-info">
+              <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="border:none;background:transparent;color:inherit;font-weight:700;width:100%;font-size:13.5px;padding:2px 0;">
+            </div>
+          </div>`;
+        }).join('')}
       </div>
     ` : `<div class="empty-hist">No section selected.</div>`;
   return tabsBar + body;
@@ -12746,6 +12759,14 @@ function removeNotePreset(catId, idx) {
   const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: (c.presets || []).filter((_, i) => i !== idx) } : c);
   saveNoteCategories(cats);
 }
+function deleteSelectedNotePresets() {
+  const sel = new Set(state.selectedNotePresetIdxs || []);
+  if (!sel.size) return;
+  const catId = state.notesAdminSection;
+  const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: (c.presets || []).filter((_, i) => !sel.has(i)) } : c);
+  state.selectedNotePresetIdxs = [];
+  saveNoteCategories(cats);
+}
 function quickUpdateNoteCategoryColor(id, color) {
   const cats = state.noteCategories.map(c => c.id === id ? { ...c, color: color || '#999' } : c);
   saveNoteCategories(cats);
@@ -14408,6 +14429,7 @@ const SEL_LISTS = {
   size: { arr: 'selectedSizeIdxs', numeric: true },
   allergy: { arr: 'selectedAllergyNames' },
   staff: { arr: 'selectedStaffIds' },
+  'note-preset': { arr: 'selectedNotePresetIdxs', numeric: true },
 };
 // Rows with a hidden editor open on plain click (ctrl/cmd-click selects);
 // rows that are fully inline-editable keep plain click = select.
@@ -14810,7 +14832,9 @@ function bindEvents() {
       else if (act === 'add-note-category') { addNoteCategory(); }
       else if (act === 'remove-note-category') { removeNoteCategory(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-category') { openEditNoteCategory(parseInt(el.dataset.idx)); }
-      else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; render(); }
+      else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
+      else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }
+      else if (act === 'delete-selected-note-presets') { deleteSelectedNotePresets(); }
       else if (act === 'hide-note-type') { hideNoteType(el.dataset.type); }
       else if (act === 'restore-note-types') { restoreNoteTypes(); }
       else if (act === 'add-note-section') { addNoteSection(); }
@@ -15231,6 +15255,14 @@ function bindEvents() {
   if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
   const selectAllCombos = document.getElementById('select-all-combos');
   if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
+  const selectAllNotePresets = document.getElementById('select-all-note-presets');
+  if (selectAllNotePresets) selectAllNotePresets.addEventListener('change', () => {
+    const cat = state.noteCategories.find(c => c.id === state.notesAdminSection);
+    const n = ((cat && cat.presets) || []).length;
+    const all = (state.selectedNotePresetIdxs || []).length === n;
+    state.selectedNotePresetIdxs = all ? [] : Array.from({ length: n }, (_, i) => i);
+    render();
+  });
   const selectAllStaff = document.getElementById('select-all-staff');
   if (selectAllStaff) selectAllStaff.addEventListener('change', () => { const all = state.staffList.every(s => state.selectedStaffIds.includes(s.id)); state.selectedStaffIds = all ? [] : state.staffList.map(s => s.id); render(); });
   const selectAllSalesCats = document.getElementById('select-all-sales-categories');

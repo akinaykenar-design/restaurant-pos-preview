@@ -270,16 +270,7 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
 .admin-nav-btn.current{background:var(--steel-200);color:var(--text-primary);font-weight:700 !important;} /* beats the group button's inline 600 */
 .admin-nav-sub{padding-left:32px;font-size:12.5px;}
 .admin-content{flex:1;overflow-y:auto;padding:20px 26px;}
-/* Floats over the page so appearing/disappearing never shifts the layout. */
-.admin-savebar{position:fixed;right:18px;bottom:18px;z-index:70;display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border:1px solid var(--steel-200);border-radius:99px;box-shadow:0 8px 26px rgba(20,24,25,.18);}
-.admin-savebar-status{font-size:12px;color:var(--charcoal-soft);margin-right:auto;font-weight:600;}
-.admin-savebar-status.dirty{color:var(--orange);}
-.admin-save-btn,.admin-discard-btn{border:1px solid var(--steel-300);background:var(--surface);border-radius:var(--btn-radius);padding:6px 14px;font-weight:700;font-size:12.5px;cursor:pointer;font-family:inherit;transition:background .12s;}
-.admin-save-btn{border-color:var(--green);color:var(--green);}
-.admin-save-btn:hover:not(:disabled){background:var(--green-dim);}
-.admin-discard-btn{border-color:var(--red);color:var(--red);}
-.admin-discard-btn:hover:not(:disabled){background:rgba(199,64,44,0.1);}
-.admin-save-btn:disabled,.admin-discard-btn:disabled{opacity:0.4;cursor:default;}
+
 .hist-summary{display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
 .sum-card{background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--radius);padding:14px 20px;min-width:140px;}
 .sum-label{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--charcoal-soft);font-weight:600;}
@@ -4806,10 +4797,6 @@ let state = {
   adminTab: 'register',
   adminOpenGroup: 'today',
   adminSearch: '',
-  adminDirty: false, // unsaved edits on the current admin page
-  // (Discard baseline now lives server-side — see /api/admin-snapshot.)
-  adminLeavePrompt: null, // { proceed } when leaving a dirty page
-  _suppressDirty: false, // internal: don't flag dirty during snapshot restore
   staffModal: null,   // { mode: 'add'|'edit', id, name, pin, role }
   menuModal: null,    // { mode: 'add'|'edit', id, name, category, price }
   adminError: '',
@@ -5138,17 +5125,6 @@ async function api(path, opts) {
       if (body && body.error) message = body.error;
     } catch (e2) {}
     throw new Error(message);
-  }
-  // Any successful write while on an admin page marks it unsaved (for the
-  // per-page Save/Discard flow). Suppressed during snapshot restore, and never
-  // triggered by the internal snapshot/restore calls themselves (they're page
-  // bookkeeping, not user edits).
-  if (opts.method && opts.method !== 'GET' && state.view === 'admin' && !state._suppressDirty
-      && path !== '/api/admin-snapshot' && path !== '/api/admin-restore'
-      && !path.startsWith('/api/floorplans')) {
-    // The table-layout editor saves every change live (place/move/delete), so it
-    // never marks the page "unsaved" or gets reverted by Discard.
-    state.adminDirty = true;
   }
   return await res.json();
 }
@@ -5735,49 +5711,6 @@ async function loadInitial() {
 }
 
 // ---- Per-page admin Save/Discard ----------------------------------------
-// Admin edits still auto-persist as you make them; the baseline captured here
-// lets Discard roll a page back to how it was when you opened it.
-function snapshotAdminConfig() {
-  state.adminDirty = false;
-  // Ask the SERVER to capture its own current config as the Discard baseline.
-  // (The old approach snapshotted browser state, which could be stale/empty and
-  // wipe live data on restore — this is server-truth, always complete.) Fired on
-  // page entry, before the user can edit, so it captures the pre-edit state.
-  api('/api/admin-snapshot', { method: 'POST' }).catch(() => {});
-}
-function saveAdminChanges() {
-  // Edits already persisted; committing just re-baselines the page.
-  snapshotAdminConfig();
-  state.toast = 'Changes saved';
-  render();
-}
-async function restoreAdminSnapshot() {
-  state._suppressDirty = true;
-  try {
-    await api('/api/admin-restore', { method: 'POST' });
-    await loadInitial();
-    state.staffList = await api('/api/staff');
-  } catch (e) {
-    state.toast = 'Could not discard changes.';
-  }
-  state._suppressDirty = false;
-  state.adminDirty = false;
-}
-async function discardAdminChanges() {
-  await restoreAdminSnapshot();
-  snapshotAdminConfig();
-  state.toast = 'Changes discarded';
-  render();
-}
-// Intercept navigation away from a dirty admin page to prompt Save/Discard.
-function guardAdminLeave(proceed) {
-  if (state.view === 'admin' && state.adminDirty) {
-    state.adminLeavePrompt = { proceed };
-    render();
-    return;
-  }
-  proceed();
-}
 
 function selectLoginStaff(id) {
   state.loginSelectedId = id;
@@ -6801,7 +6734,6 @@ function render() {
     ${state.inventoryItemModal ? renderInventoryItemModal() : ''}
     ${state.supplierModal ? renderSupplierModal() : ''}
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
-    ${state.adminLeavePrompt ? renderAdminLeavePrompt() : ''}
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
   bindEvents();
@@ -9711,30 +9643,6 @@ function renderAdminSearchResults() {
 // Pages whose edits participate in the snapshot Save/Discard flow. Live-data
 // pages (open orders, kitchen, bookings, logs…) have nothing to save, so the
 // bar never shows there — and even here it only appears once something changed.
-const SAVEBAR_PAGES = ['menu', 'categories', 'sales-categories', 'menu-variants', 'modifiers', 'combos', 'settings', 'settings-tax', 'appearance', 'layout', 'settings-printers', 'settings-payments', 'kitchen-instructions', 'settings-void', 'settings-notes', 'settings-courses', 'settings-discounts', 'settings-happyhour', 'settings-tips'];
-function renderAdminSaveBar() {
-  if (!SAVEBAR_PAGES.includes(state.adminTab) || !state.adminDirty) return '';
-  return `
-  <div class="admin-savebar">
-    <span class="admin-savebar-status dirty">● Unsaved changes on this page</span>
-    <button class="admin-save-btn" data-act="admin-save">✓ Save</button>
-    <button class="admin-discard-btn" data-act="admin-discard">✕ Discard</button>
-  </div>`;
-}
-function renderAdminLeavePrompt() {
-  return `
-  <div class="modal-bg" data-act="admin-leave-cancel">
-    <div class="modal" data-stop="1" style="max-width:400px;">
-      <h2>Unsaved changes</h2>
-      <div class="sub">You made changes on this page. Save them or discard before leaving?</div>
-      <div class="modal-actions" style="flex-wrap:wrap;">
-        <button class="btn-cancel" data-act="admin-leave-cancel">Keep editing</button>
-        <button class="btn-cancel" style="color:var(--red);" data-act="admin-leave-discard">Discard</button>
-        <button class="btn-confirm" data-act="admin-leave-save">Save</button>
-      </div>
-    </div>
-  </div>`;
-}
 function renderAdminView() {
   return `
   <div class="admin-shell">
@@ -9751,7 +9659,6 @@ function renderAdminView() {
       }).join('')}
     </div>
     <div class="admin-content">
-      ${renderAdminSaveBar()}
       ${state.adminTab === 'staff' ? renderStaffAdmin()
         : state.adminTab === 'hours' ? renderHoursAdmin()
         : state.adminTab === 'kitchen' ? renderKitchenAdmin()
@@ -14583,7 +14490,7 @@ function bindEvents() {
         const cur = state[key];
         if (cur && cur.id && confirm(msg)) { state[key] = null; state.adminError = ''; fn(cur.id); }
       }
-      else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return; guardAdminLeave(() => { state.view = 'order'; render(); }); }
+      else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return; state.view = 'order'; render(); }
       else if (act === 'toggle-mobile-cart') { state.mobileCartOpen = !state.mobileCartOpen; render(); }
       else if (act === 'cat') {
         state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
@@ -14645,26 +14552,18 @@ function bindEvents() {
       else if (act === 'login-back') { backToStaffGrid(); }
       else if (act === 'pin-digit') { pressPinDigit(el.dataset.val); }
       else if (act === 'pin-back') { pressPinBackspace(); }
-      else if (act === 'logout') { guardAdminLeave(() => logOut()); }
+      else if (act === 'logout') { logOut(); }
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }
-      else if (act === 'view-admin') { state.view = 'admin'; snapshotAdminConfig(); render(); if (state.adminTab === 'register') loadRegisterData(); }
-      else if (act === 'view-kitchen') { guardAdminLeave(() => { state.view = 'kitchen'; render(); loadKdsData(); }); }
+      else if (act === 'view-admin') { state.view = 'admin'; render(); if (state.adminTab === 'register') loadRegisterData(); }
+      else if (act === 'view-kitchen') { state.view = 'kitchen'; render(); loadKdsData(); }
       else if (act === 'admin-tab') {
         const val = el.dataset.val;
-        guardAdminLeave(() => {
-          state.adminTab = val;
-          rememberAdminTab(val);
-          snapshotAdminConfig();
-          render();
-          loadAdminTabData(val);
-        });
+        state.adminTab = val;
+        rememberAdminTab(val);
+        render();
+        loadAdminTabData(val);
       }
-      else if (act === 'admin-save') { saveAdminChanges(); }
-      else if (act === 'admin-discard') { discardAdminChanges(); }
-      else if (act === 'admin-leave-save') { const p = state.adminLeavePrompt && state.adminLeavePrompt.proceed; state.adminLeavePrompt = null; state.adminDirty = false; if (p) p(); }
-      else if (act === 'admin-leave-discard') { const p = state.adminLeavePrompt && state.adminLeavePrompt.proceed; state.adminLeavePrompt = null; (async () => { await restoreAdminSnapshot(); if (p) p(); else render(); })(); }
-      else if (act === 'admin-leave-cancel') { state.adminLeavePrompt = null; render(); }
       else if (act === 'search-open-admin-tab' || act === 'search-open-setting') {
         const key = el.dataset.id;
         state.adminTab = key;
@@ -15820,10 +15719,7 @@ setInterval(() => {
     render();
     await loadInitial();
     if (state.view === 'kitchen') loadKdsData();
-    if (state.view === 'admin') {
-      snapshotAdminConfig();
-      if (state.adminTab === 'register') loadRegisterData();
-    }
+    if (state.view === 'admin' && state.adminTab === 'register') loadRegisterData();
   }
 })();
 loadInventoryData();

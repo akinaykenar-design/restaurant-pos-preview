@@ -1222,6 +1222,47 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
   .select-all-row{ position:sticky; top:calc(var(--admin-toolbar-h, 57px) - 16px); z-index:5; background:var(--steel-100); margin:0 -14px 4px; padding:6px 14px 6px 31px; min-height:46px; box-sizing:border-box; }
 }
 
+/* ── Kitchen Display System (KDS) ──────────────────────────────────────────
+   Status lanes (Ordered / Preparing / Ready), each holding ticket cards that
+   group items by course. Tap a card to advance; the ‹ button recalls a step.
+   ──────────────────────────────────────────────────────────────────────── */
+.kds-board{ display:flex; gap:16px; align-items:flex-start; }
+.kds-col{ flex:1; min-width:240px; border:1px solid var(--steel-200); border-radius:12px; background:var(--steel-100); display:flex; flex-direction:column; }
+.kds-col-head{ display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--steel-200); }
+.kds-col-count{ margin-left:auto; font-family:var(--font-mono); font-weight:700; font-size:12px; color:var(--charcoal-soft); background:var(--surface); border:1px solid var(--steel-200); border-radius:20px; padding:1px 9px; }
+.kds-col-body{ padding:12px; display:flex; flex-direction:column; gap:12px; }
+.kds-empty{ padding:4px 2px; }
+
+.kds-ticket{ background:var(--surface); border:1px solid var(--steel-200); border-radius:12px; padding:10px 10px 4px; }
+.kds-ticket-head{ display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.kds-ticket-name{ font-weight:800; font-size:14px; color:var(--text-primary); }
+.kds-ticket-meta{ margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+.kds-fired{ font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.2px; padding:3px 8px; border-radius:20px; background:color-mix(in srgb, var(--red) 14%, var(--surface)); color:var(--red); white-space:nowrap; }
+.kds-age{ font-family:var(--font-mono); font-size:11px; font-weight:700; padding:3px 8px; border-radius:20px; background:var(--steel-100); color:var(--charcoal-soft); border:1px solid var(--steel-200); white-space:nowrap; }
+.kds-age.kds-age-warn{ background:color-mix(in srgb, var(--gold) 16%, var(--surface)); color:var(--gold); border-color:transparent; }
+.kds-age.kds-age-late{ background:color-mix(in srgb, var(--red) 15%, var(--surface)); color:var(--red); border-color:transparent; }
+
+.kds-course{ margin-bottom:6px; }
+.kds-course-label{ display:flex; align-items:center; font-family:var(--font-mono); font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.4px; color:var(--charcoal-soft); margin:2px 0 5px; }
+
+.order-row.kds-item{ margin-bottom:6px; gap:10px; }
+.order-row.kds-item:last-child{ margin-bottom:2px; }
+.kds-item .order-info{ flex:1; min-width:0; }
+.kds-item .t1{ font-weight:700; }
+/* Recall (‹ back) control — clearly a button, not decoration. */
+.kds-back{ flex-shrink:0; width:34px; height:34px; border-radius:8px; border:1px solid var(--steel-300); background:var(--surface); color:var(--charcoal-soft); font-size:20px; line-height:1; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center; padding:0; }
+.kds-back:hover{ border-color:var(--orange); color:var(--orange); }
+/* Forward-advance control — a solid, obviously tappable pill. */
+.kds-advance{ flex-shrink:0; font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:.3px; padding:7px 12px; border-radius:20px; background:var(--green); color:#fff; white-space:nowrap; }
+.order-row.kds-item:hover .kds-advance{ background:var(--green-hover); }
+
+@media (max-width: 768px){
+  .kds-board{ flex-direction:column; }
+  .kds-col{ width:100%; min-width:0; }
+  .kds-advance{ padding:8px 12px; }
+  .kds-back{ width:38px; height:38px; }
+}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -8798,9 +8839,25 @@ function kdsItemRows() {
   state.orders.forEach(o => {
     if (o.status === 'void') return;
     if (o.status !== 'open' && o.createdAt < cutoff) return;
+    // Map each item object back to the round it was sent in, so the KDS can
+    // show a live age timer from when the kitchen actually received it. Round
+    // items share object identity with order.items (see /api/orders/:id/rounds),
+    // so a reference lookup is exact.
+    const sentAtByItem = new Map();
+    (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { if (!sentAtByItem.has(it)) sentAtByItem.set(it, rd.sentAt); }));
     (o.items || []).forEach((item, idx) => {
       if (!item.status || item.status === 'served') return;
-      rows.push({ orderId: o.id, idx, item, table: o.orderType === 'dine-in' ? 'Table ' + esc(o.table) : esc(o.customerName || o.orderType) });
+      rows.push({
+        orderId: o.id,
+        idx,
+        item,
+        sentAt: sentAtByItem.get(item) || o.createdAt,
+        // Called-away is the only fire state persisted on the order (order-level,
+        // set by the floor-map "call away" action) — there is no per-course fire
+        // flag in the order data, so the KDS surfaces it at the ticket level.
+        calledAway: !!o.calledAwayAt,
+        table: o.orderType === 'dine-in' ? 'Table ' + (o.table == null ? '' : o.table) : (o.customerName || o.orderType),
+      });
     });
   });
   return rows;
@@ -8818,29 +8875,84 @@ function renderKitchenView() {
   return `<div style="flex:1;overflow-y:auto;padding:20px 26px;background:var(--steel-100);">${renderKitchenAdmin()}</div>`;
 }
 
+// KDS columns are the item-status lanes. `next` is the tap-to-advance target,
+// `prev` the recall (‹ back) target — both drive the same PATCH endpoint that
+// forward-advance already used, just with a different status.
+const KDS_COLUMNS = [
+  { status: 'ordered', label: 'Ordered', next: 'preparing', nextLabel: 'Preparing', prev: null, prevLabel: null, empty: 'Orders appear here as staff send them.' },
+  { status: 'preparing', label: 'Preparing', next: 'ready', nextLabel: 'Ready', prev: 'ordered', prevLabel: 'Ordered', empty: 'Tap an ordered item to start preparing it.' },
+  { status: 'ready', label: 'Ready', next: 'served', nextLabel: 'Served', prev: 'preparing', prevLabel: 'Preparing', empty: 'Tap a preparing item when it\'s ready to go out.' },
+];
+
+// Group a column's item rows into tickets (by order), and each ticket's rows
+// into courses (ascending). Order is preserved by first appearance.
+function kdsGroupByTicket(colRows) {
+  const tickets = [];
+  const tmap = new Map();
+  colRows.forEach(r => {
+    let t = tmap.get(r.orderId);
+    if (!t) { t = { orderId: r.orderId, table: r.table, calledAway: r.calledAway, sentAt: r.sentAt, rows: [] }; tmap.set(r.orderId, t); tickets.push(t); }
+    t.rows.push(r);
+    if (r.sentAt < t.sentAt) t.sentAt = r.sentAt;
+    if (r.calledAway) t.calledAway = true;
+  });
+  tickets.forEach(t => {
+    const cmap = new Map();
+    t.courses = [];
+    t.rows.forEach(r => {
+      const cn = r.item.course || 1;
+      let c = cmap.get(cn);
+      if (!c) { c = { course: cn, rows: [] }; cmap.set(cn, c); t.courses.push(c); }
+      c.rows.push(r);
+    });
+    t.courses.sort((a, b) => a.course - b.course);
+  });
+  return tickets;
+}
+
 function renderKitchenAdmin() {
   const rows = kdsItemRows();
-  const columns = [
-    { status: 'ordered', label: 'Ordered', next: 'preparing', empty: 'Orders appear here as staff send them.' },
-    { status: 'preparing', label: 'Preparing', next: 'ready', empty: 'Tap an ordered item to start preparing it.' },
-    { status: 'ready', label: 'Ready', next: 'served', empty: 'Tap a preparing item when it\'s ready to go out.' },
-  ];
   return `
-  <div style="display:flex;gap:16px;flex-wrap:wrap;">
-    ${columns.map(col => {
+  <div class="kds-board">
+    ${KDS_COLUMNS.map(col => {
       const colRows = rows.filter(r => r.item.status === col.status);
+      const tickets = kdsGroupByTicket(colRows);
       return `
-      <div style="flex:1;min-width:240px;border:1px solid var(--steel-200);border-radius:12px;padding:14px;background:var(--surface);">
-        <div class="th" style="margin-bottom:10px;">${esc(col.label)} (${colRows.length})</div>
-        ${colRows.length === 0 ? `<div class="ts">${esc(col.empty)}</div>` : colRows.map(r => `
-          <div class="order-row" style="cursor:pointer;" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-status="${col.next}">
-            <div class="order-info">
-              <div class="t1">${r.item.qty}× ${esc(r.item.name)}${r.item.seat ? ' (' + esc(seatText(r.item.seat)) + ')' : ''}</div>
-              <div class="t2">${esc(r.table)}${r.item.note ? ' · ' + esc(r.item.note) + '' : ''}</div>
+      <div class="kds-col">
+        <div class="kds-col-head"><span class="th">${esc(col.label)}</span><span class="kds-col-count">${colRows.length}</span></div>
+        <div class="kds-col-body">
+        ${tickets.length === 0 ? `<div class="ts kds-empty">${esc(col.empty)}</div>` : tickets.map(t => {
+          const mins = Math.floor((Date.now() - t.sentAt) / 60000);
+          const ageClass = mins >= 20 ? ' kds-age-late' : (mins >= 10 ? ' kds-age-warn' : '');
+          return `
+          <div class="kds-ticket">
+            <div class="kds-ticket-head">
+              <span class="kds-ticket-name">${esc(t.table)}</span>
+              <span class="kds-ticket-meta">
+                ${t.calledAway ? '<span class="kds-fired" title="Called away — fire now">🔥 Called away</span>' : ''}
+                <span class="elapsed-timer kds-age${ageClass}" data-fired="${t.sentAt}" title="Time since sent to kitchen">⏱ ${elapsedMinLabel(t.sentAt)}</span>
+              </span>
             </div>
-            <span class="status-chip course" title="Tap to bump">✓</span>
-          </div>
-        `).join('')}
+            ${t.courses.map(c => {
+              const info = courseInfo(c.course);
+              return `
+              <div class="kds-course">
+                <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>
+                ${c.rows.map(r => `
+                  <div class="order-row kds-item" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-status="${col.next}" title="Tap to move to ${esc(col.nextLabel)}">
+                    ${col.prev ? `<button class="kds-back" data-stop="1" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-status="${col.prev}" title="Recall to ${esc(col.prevLabel)}" aria-label="Recall to ${esc(col.prevLabel)}">‹</button>` : ''}
+                    <div class="order-info">
+                      <div class="t1">${r.item.qty}× ${esc(r.item.name)}${r.item.seat ? ' (' + esc(seatText(r.item.seat)) + ')' : ''}</div>
+                      ${r.item.note ? `<div class="t2">${esc(r.item.note)}</div>` : ''}
+                    </div>
+                    <span class="kds-advance">${col.next === 'served' ? '✓ Serve' : esc(col.nextLabel)} ›</span>
+                  </div>
+                `).join('')}
+              </div>`;
+            }).join('')}
+          </div>`;
+        }).join('')}
+        </div>
       </div>`;
     }).join('')}
   </div>

@@ -136,7 +136,7 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
 .qty-pad-toggle{flex:none;height:41px;padding:0 13px;border:1px solid var(--steel-300);background:var(--surface);border-radius:var(--btn-radius);font-family:var(--font-mono);font-size:13px;font-weight:700;color:var(--charcoal-soft);cursor:pointer;}
 .qty-pad-toggle:hover{color:var(--text-primary);background:var(--steel-100);}
 /* Square "table top" badge in the ticket header — the number IS the label. */
-.tbl-sq{display:inline-flex;width:24px;height:24px;border:2px solid currentColor;border-radius:6px;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex-shrink:0;line-height:1;}
+.tbl-sq{display:inline-flex;width:30px;height:30px;border:2px solid currentColor;border-radius:7px;align-items:center;justify-content:center;font-weight:800;font-size:14px;flex-shrink:0;line-height:1;}
 .tbl-sq-plan{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;}
 .qty-pad-toggle.active{border-color:var(--orange);color:var(--orange);background:var(--orange-dim);}
 /* Always one line: keys shrink toward min-width first, and if the screen is
@@ -983,6 +983,16 @@ input:focus, select:focus, textarea:focus{
 /* One-row ticket head: table button + covers chip + notes + call-away */
 .ticket-head-row{display:flex;gap:6px;margin-top:2px;align-items:stretch;}
 .covers-chip{width:auto;padding:0 10px;font-family:var(--font-mono);font-size:13px;font-weight:700;}
+
+/* Covers number-pad popup */
+.covers-pad-display{ font-family:var(--font-mono); font-size:38px; font-weight:800; text-align:center; padding:6px 0 14px; color:var(--text-primary); }
+.covers-pad-display.placeholder{ color:var(--text-secondary); }
+.covers-pad-grid{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.covers-pad-key{ height:56px; border:1px solid var(--steel-200); border-radius:var(--btn-radius); background:var(--surface); font-size:22px; font-weight:700; color:var(--text-primary); cursor:pointer; font-family:inherit; transition:background-color .12s ease, transform .08s ease; }
+.covers-pad-key:hover{ background:var(--steel-100); }
+.covers-pad-key:active{ transform:translateY(1px); }
+.covers-pad-key.util{ background:var(--steel-100); font-size:19px; color:var(--text-secondary); }
+.covers-pad-key.util:hover{ background:var(--steel-200); }
 
 /* Running total above the actions — tap to expand the breakdown */
 .ticket-running{padding:8px 18px;border-top:1px dashed var(--chit-line);flex-shrink:0;cursor:pointer;user-select:none;}
@@ -4931,6 +4941,7 @@ let state = {
   qtyPadCollapsed: false, // hide the order-screen quantity pad without touching the setting
   searchOpen: false, // menu search collapses to a magnifier until tapped
   coversEditOpen: false, // covers stepper reveals on tapping the covers chip
+  coversPad: null, // { buffer } number-pad popup for entering covers
   totalsExpanded: false, // ticket running total expands to a breakdown on tap
   customerName: '',
   cart: [],
@@ -6886,6 +6897,51 @@ function renderStockWarnModal() {
     </div>
   </div>`;
 }
+// Covers number-pad popup — mobile-friendly way to key in the guest count
+// instead of a +/- stepper. Tapping the covers chip opens it.
+function openCoversPad() {
+  state.coversPad = { buffer: '' };
+  state.coversEditOpen = false;
+  render();
+  const m = document.querySelector('.covers-pad-modal');
+  if (m) m.scrollIntoView({ block: 'center' });
+}
+function tapCoversKey(key) {
+  const cp = state.coversPad; if (!cp) return;
+  if (key === 'back') cp.buffer = cp.buffer.slice(0, -1);
+  else if (key === 'clear') cp.buffer = '';
+  else if (cp.buffer.length < 3) cp.buffer = (cp.buffer === '0' ? '' : cp.buffer) + key;
+  render();
+}
+function confirmCoversPad() {
+  const cp = state.coversPad; if (!cp) return;
+  if (cp.buffer !== '') {
+    const n = parseInt(cp.buffer, 10);
+    if (!isNaN(n)) { state.covers = Math.max(0, n); saveTableCovers(state.table, state.covers); }
+  }
+  state.coversPad = null;
+  render();
+}
+function renderCoversPadModal() {
+  const cp = state.coversPad;
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'];
+  const typing = cp.buffer !== '';
+  const shown = typing ? cp.buffer : (state.covers || '—');
+  return `
+  <div class="modal-bg" data-act="close-covers-pad">
+    <div class="modal covers-pad-modal" data-stop="1" style="max-width:300px;">
+      <h2>👥 Covers</h2>
+      <div class="covers-pad-display ${typing ? '' : 'placeholder'}">${esc(String(shown))}</div>
+      <div class="covers-pad-grid">
+        ${keys.map(k => `<button class="covers-pad-key ${k === 'clear' || k === 'back' ? 'util' : ''}" data-act="covers-pad-key" data-key="${k}">${k === 'back' ? '⌫' : k === 'clear' ? 'C' : k}</button>`).join('')}
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" data-act="close-covers-pad">Cancel</button>
+        <button class="btn-confirm" data-act="confirm-covers-pad">Done</button>
+      </div>
+    </div>
+  </div>`;
+}
 async function sendToKitchen() {
   if (state.cart.length === 0 || state.sending) return;
   // Heads-up (not a block) when the order exceeds what's in stock. "Send anyway"
@@ -7149,6 +7205,7 @@ function render() {
     ${state.supplierModal ? renderSupplierModal() : ''}
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
     ${state.stockWarnModal ? renderStockWarnModal() : ''}
+    ${state.coversPad ? renderCoversPadModal() : ''}
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
   bindEvents();
@@ -7619,17 +7676,10 @@ function renderTicketPanel() {
       ${state.orderType === 'dine-in' ? `
         <div class="ticket-head-row">
           <button class="table-picker-btn ticket-table-btn" style="flex:1;min-width:0;margin-top:0;display:flex;align-items:center;justify-content:center;gap:8px;" data-act="open-table-picker" title="${tableDisplayLabel(state.table)}">${tableSquareLabel(state.table)}</button>
-          ${state.settings.coversEnabled ? `<button class="tkt-icon-btn lg covers-chip ${state.coversEditOpen ? 'active' : ''}" title="Covers — tap to change" data-act="toggle-covers-edit">👥${state.covers || '—'}</button>` : ''}
+          ${state.settings.coversEnabled ? `<button class="tkt-icon-btn lg covers-chip ${state.coversPad ? 'active' : ''}" title="Covers — tap to change" data-act="open-covers-pad">👥${state.covers || '—'}</button>` : ''}
           <button class="tkt-icon-btn lg ${state.notesPanel ? 'active' : ''}" title="Notes" data-act="toggle-notes-panel">📝</button>
-          <button class="tkt-icon-btn lg ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">📣</button>
+          <button class="tkt-icon-btn lg ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">🔔</button>
         </div>
-        ${state.coversEditOpen && state.settings.coversEnabled ? `
-        <div class="ticket-controls">
-          <div class="covers-ctl" title="Covers">
-            <span class="cov-face">👥</span>
-            <button data-act="covers-dec">−</button><span class="covers-n">${state.covers || '—'}</span><button data-act="covers-inc">+</button>
-          </div>
-        </div>` : ''}
         ${(state.vipType || state.allergies.length || state.notes.length) ? `
         <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
           ${state.vipType ? `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border-color:var(--orange);">VIP — ${state.vipType} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>` : ''}
@@ -15696,7 +15746,10 @@ function bindEvents() {
       else if (act === 'layout-device') { state.layoutDevice = el.dataset.val; render(); }
       else if (act === 'open-search') { state.searchOpen = true; render(); const si = document.getElementById('search-input'); if (si) si.focus(); }
       else if (act === 'close-search') { state.searchOpen = false; state.search = ''; render(); }
-      else if (act === 'toggle-covers-edit') { state.coversEditOpen = !state.coversEditOpen; render(); }
+      else if (act === 'open-covers-pad') { openCoversPad(); }
+      else if (act === 'covers-pad-key') { tapCoversKey(el.dataset.key); }
+      else if (act === 'confirm-covers-pad') { confirmCoversPad(); }
+      else if (act === 'close-covers-pad') { state.coversPad = null; render(); }
       else if (act === 'toggle-ticket-totals') { state.totalsExpanded = !state.totalsExpanded; render(); }
       else if (act === 'set-tax-mode') { saveTaxSettings({ mode: el.dataset.val }); }
       else if (act === 'backup-now') { backupNow(); }

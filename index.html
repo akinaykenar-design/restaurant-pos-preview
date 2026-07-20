@@ -280,7 +280,10 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
    fills grey so you can see at a glance which drawer is open. */
 .admin-nav-btn.active{background:var(--orange-dim);color:var(--orange);font-weight:700;}
 .admin-nav-btn.current{background:var(--steel-200);color:var(--text-primary);font-weight:700 !important;} /* beats the group button's inline 600 */
-.admin-nav-sub{padding-left:32px;font-size:12.5px;}
+/* The open group's pages sit on light grey under its darker-grey header, so the
+   open section of the admin menu reads as one block (like an expanded row). */
+.admin-nav-sub{padding-left:32px;font-size:12.5px;background:var(--steel-100);}
+.admin-nav-sub.active{background:var(--orange-dim);}
 .admin-content{flex:1;overflow-y:auto;padding:20px 26px;}
 
 .hist-summary{display:flex;gap:14px;margin-bottom:18px;flex-wrap:wrap;}
@@ -382,6 +385,11 @@ input[type=number]{-moz-appearance:textfield;appearance:textfield;}
 input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
 .menu-item-price-quick-edit:hover{border-color:var(--steel-300);}
 .menu-item-price-quick-edit:focus{border-color:var(--orange);outline:none;background:var(--surface);}
+/* An expanded row is tinted so the open section stands out from the white
+   closed rows around it: a darker-grey head over a light-grey body. (Selection
+   rules follow and win, keeping a selected row orange even while open.) */
+.menu-item-expandable.open,.category-row.open{background:var(--steel-100)!important;}
+.menu-item-expandable.open .menu-item-header,.category-row.open>.sel-head{background:var(--steel-200);}
 .menu-item-expandable.selected,.category-row.selected,.order-row.selected{border-color:var(--orange)!important;box-shadow:0 0 0 1px var(--orange);background:var(--orange-dim)!important;}
 .menu-item-expandable.selected .menu-item-header,.category-row.selected>div:first-child{background:var(--orange-dim);}
 /* Uniform admin list-row card height across every menu-list admin */
@@ -612,6 +620,15 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 
 /* Select-all sits at the head of the checkbox column it controls */
 .select-all-row{display:flex;align-items:center;gap:8px;padding:0 0 0 17px;margin:0 0 10px;min-height:41px;max-width:560px;font-size:12px;font-weight:600;color:var(--charcoal-soft);flex-wrap:wrap;}
+/* Sort ▾ control at the head of a list's toolbar */
+.sort-ctl{position:relative;display:inline-flex;}
+.sort-btn{height:30px;padding:0 10px;border:1px solid var(--steel-200);background:var(--surface);border-radius:8px;font-size:12px;font-weight:700;color:var(--charcoal-soft);cursor:pointer;font-family:inherit;white-space:nowrap;}
+.sort-btn.on{border-color:var(--orange);color:var(--orange);background:var(--orange-dim);}
+.sort-btn:hover{color:var(--text-primary);}
+.sort-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--surface);border:1px solid var(--steel-200);border-radius:10px;box-shadow:var(--shadow);padding:4px;min-width:150px;display:flex;flex-direction:column;gap:1px;}
+.sort-opt{text-align:left;padding:9px 10px;border:none;background:none;border-radius:6px;font-size:12.5px;font-weight:600;color:var(--charcoal-soft);cursor:pointer;font-family:inherit;}
+.sort-opt:hover{background:var(--steel-100);color:var(--text-primary);}
+.sort-opt.active{background:var(--orange-dim);color:var(--orange);}
 .select-all-row .sar-cb{display:flex;align-items:center;cursor:pointer;}
 .select-all-row input{width:15px;height:15px;accent-color:var(--orange);cursor:pointer;margin:0;}
 
@@ -2552,6 +2569,7 @@ app.put('/api/settings', (req, res) => {
     if (!isNaN(n)) data.settings.simpleTableCount = Math.max(1, Math.min(200, n));
   }
   if (quickRepeatEnabled !== undefined) data.settings.quickRepeatEnabled = !!quickRepeatEnabled;
+  if (req.body.showItemIcons !== undefined) data.settings.showItemIcons = !!req.body.showItemIcons;
   if (paperWidth !== undefined) data.settings.paperWidth = paperWidth === '58' ? '58' : '80';
   if (printColorMode !== undefined) data.settings.printColorMode = printColorMode === 'color' ? 'color' : 'thermal';
   if (printFontScale !== undefined) data.settings.printFontScale = printFontScale === 'large' ? 'large' : 'normal';
@@ -4871,6 +4889,8 @@ let state = {
   adminTab: 'register',
   adminOpenGroup: 'today',
   adminSearch: '',
+  listSort: (() => { try { return JSON.parse(localStorage.getItem('pos-list-sort') || '{}'); } catch (e) { return {}; } })(), // { listId: sortKey }
+  sortMenuOpen: null, // which list's sort dropdown is open
   staffModal: null,   // { mode: 'add'|'edit', id, name, pin, role }
   menuModal: null,    // { mode: 'add'|'edit', id, name, category, price }
   adminError: '',
@@ -7137,11 +7157,14 @@ function renderOrderView() {
           const renderItemCard = (item, sizeClass = '') => {
             const inCartQty = state.cart.filter(c => c.menuItemId === item.id).reduce((s, c) => s + c.qty, 0);
             const canRestore = item.out && isManager; // manager can un-86 by tapping the card
+            // One global switch: show an item's icon on the order screen whenever
+            // it has one (Design → Theme → Menu item icons).
+            const showIcon = state.settings.showItemIcons !== false && !!item.icon;
             return `
             <button class="item-card ${sizeClass} ${item.out ? 'out' : ''}${canRestore ? ' restorable' : ''} ${inCartQty ? 'in-cart' : ''}" data-act="${canRestore ? 'quick-un86' : 'add'}" data-id="${item.id}" ${item.out && !canRestore ? 'disabled' : ''} ${canRestore ? 'title="Sold out — tap to make available again"' : ''} ${item.color ? `style="background:${item.color};color:${contrastTextColor(item.color)};"` : ''}>
               ${item.image ? `<img src="${item.image}" alt="" style="width:100%;height:var(--item-img-h,70px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}
-              ${item.iconEnabled && item.icon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
-              <div class="item-name${item.image || (item.iconEnabled && item.icon) ? ' one-line' : ''}">${esc(item.name)}</div>
+              ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
+              <div class="item-name${item.image || showIcon ? ' one-line' : ''}">${esc(item.name)}</div>
               ${state.settings.showPrices ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' + money(Math.min(...item.variants.map(v => v.price))) : money(item.price)}</div>` : ''}
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots" title="Asks for options">⋯</span>` : ''}
             </button>`;
@@ -8448,6 +8471,7 @@ function renderInventoryItemsTab() {
   return `
   <div style="display:flex;gap:10px;align-items:center;margin-bottom:20px;">
     <button class="btn-add inline tb-add" data-act="open-add-inventory-item" title="Add inventory item">+</button>
+    ${sortControl('inventory')}
     <input id="inventory-search" type="text" placeholder="Search items…" value="${state.inventorySearch || ''}" style="flex:1;max-width:300px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;">
   </div>
   <div id="inventory-list" style="display:grid;gap:12px;">${renderInventoryRows()}</div>
@@ -8457,10 +8481,10 @@ function renderInventoryItemsTab() {
 // Inventory item cards, rendered into #inventory-list so the search box can
 // refresh just the list on keystroke without rebuilding the input.
 function renderInventoryRows() {
-  const items = state.inventoryItems || [];
   const suppliers = state.suppliers || [];
+  const items = applyListSort('inventory', (state.inventoryItems || []).filter(i => !state.inventorySearch || i.name.toLowerCase().includes(state.inventorySearch.toLowerCase())));
   return `
-    ${items.filter(i => !state.inventorySearch || i.name.toLowerCase().includes(state.inventorySearch.toLowerCase())).map(i => `
+    ${items.map(i => `
       <div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--surface);">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
           <div>
@@ -10264,10 +10288,10 @@ function renderGeneralSettingsAdmin() {
 }
 
 function renderStaffAdmin() {
-  const staff = state.staffList.slice().sort((a, b) => a.name.localeCompare(b.name));
+  const staff = applyListSort('staff', state.staffList.slice().sort((a, b) => a.name.localeCompare(b.name)));
   const sel = state.selectedStaffIds || [];
   return `
-  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-staff" ${staff.length > 0 && staff.every(s => sel.includes(s.id)) ? 'checked' : ''}></label>${sel.length > 0 ? `
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-staff" ${staff.length > 0 && staff.every(s => sel.includes(s.id)) ? 'checked' : ''}></label>${sortControl('staff')}${sel.length > 0 ? `
       <span class="ts">${sel.length} selected</span>
       <button class="icon-sq" title="Bulk edit role" data-act="open-bulk-staff">${ACT_PENCIL_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-staff">${ACT_TRASH_SVG}</button>
@@ -10381,17 +10405,17 @@ function renderAdminSubcatTree(categoryId, parentId, depth) {
 }
 function renderCategoriesAdmin() {
   return `
-  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-categories" ${state.categories.length > 0 && state.categories.every(c => state.selectedCategoryIds.includes(c.id)) ? 'checked' : ''}></label>${(state.selectedCategoryIds.length + state.selectedSubcatIds.length) > 0 ? `
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-categories" ${state.categories.length > 0 && state.categories.every(c => state.selectedCategoryIds.includes(c.id)) ? 'checked' : ''}></label>${sortControl('categories')}${(state.selectedCategoryIds.length + state.selectedSubcatIds.length) > 0 ? `
       <span class="ts">${state.selectedCategoryIds.length + state.selectedSubcatIds.length} selected</span>
       <button class="icon-sq" title="Bulk edit" data-act="open-bulk-category">${ACT_PENCIL_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-sections">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" title="Clear selection" data-act="clear-category-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline tb-add" data-act="add-category" title="Add section">+</button></div>
   <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${state.categories.length === 0 ? `<div class="empty-hist">No sections yet.</div>` : ''}
-    ${state.categories.map(cat => {
+    ${applyListSort('categories', state.categories).map(cat => {
       const collapsed = !state.expandedCategoryIds.includes(cat.id);
       return `
-      <div class="category-row${state.selectedCategoryIds.includes(cat.id) ? ' selected' : ''}" draggable="true" data-id="${cat.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${cat.disabled ? 'opacity:0.55;' : ''}">
+      <div class="category-row${state.selectedCategoryIds.includes(cat.id) ? ' selected' : ''}${collapsed ? '' : ' open'}" draggable="${isListSorted('categories') ? 'false' : 'true'}" data-id="${cat.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${cat.disabled ? 'opacity:0.55;' : ''}">
         <div class="sel-head" data-sellist="category" data-selkey="${cat.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="category" data-key="${cat.id}" ${state.selectedCategoryIds.includes(cat.id) ? 'checked' : ''}>
           ${iconDotButton('category', cat.id, cat.icon, cat.iconEnabled, CATEGORY_ICONS[cat.name])}
@@ -10569,6 +10593,76 @@ function renderMenuPricingAdmin() {
   `;
 }
 
+// ---- Reusable "Sort ▾" for admin lists ----
+// Each list keeps its own choice (persisted). "Manual" leaves the saved
+// drag order untouched — sorting only changes the view, never the stored
+// sequence, so switching back to Manual restores the hand-arranged order.
+const SORT_DEFS = {
+  'menu-items': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    za: { label: 'Z–A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
+    'price-lo': { label: 'Price ↑', cmp: (a, b) => itemSortPrice(a) - itemSortPrice(b) },
+    'price-hi': { label: 'Price ↓', cmp: (a, b) => itemSortPrice(b) - itemSortPrice(a) },
+  },
+  'inventory': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    'stock-lo': { label: 'Stock ↑', cmp: (a, b) => (a.currentStock || 0) - (b.currentStock || 0) },
+    'stock-hi': { label: 'Stock ↓', cmp: (a, b) => (b.currentStock || 0) - (a.currentStock || 0) },
+  },
+  'modifiers': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    za: { label: 'Z–A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
+  },
+  'staff': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    za: { label: 'Z–A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
+  },
+  'customers': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    'spend-hi': { label: 'Top spend', cmp: (a, b) => (b.totalSpent || 0) - (a.totalSpent || 0) },
+    'visits-hi': { label: 'Most visits', cmp: (a, b) => (b.visits || 0) - (a.visits || 0) },
+  },
+  'categories': {
+    az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
+    za: { label: 'Z–A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
+  },
+};
+// Lists whose default (unsorted) order is a hand-arranged drag sequence — for
+// these the reset option reads "Manual (drag)"; the rest read "Default".
+const SORT_MANUAL = { 'menu-items': true, 'modifiers': true, 'categories': true };
+function itemSortPrice(m) {
+  const vs = (m.variants || []);
+  return vs.length ? Math.min(...vs.map(v => v.price)) : (m.price || 0);
+}
+function getListSort(listId) { return state.listSort[listId] || 'manual'; }
+function applyListSort(listId, items) {
+  const key = getListSort(listId), defs = SORT_DEFS[listId];
+  if (key === 'manual' || !defs || !defs[key]) return items;
+  return items.slice().sort(defs[key].cmp);
+}
+function isListSorted(listId) { return getListSort(listId) !== 'manual'; }
+// The control that sits at the head of a list's select-all toolbar.
+function sortControl(listId) {
+  const defs = SORT_DEFS[listId];
+  if (!defs) return '';
+  const key = getListSort(listId);
+  const active = key !== 'manual' && defs[key];
+  const open = state.sortMenuOpen === listId;
+  return `<div class="sort-ctl">
+    <button type="button" class="sort-btn${active ? ' on' : ''}" data-act="toggle-sort" data-list="${listId}" title="Sort this list">↕${active ? ' ' + esc(defs[key].label) : ''}</button>
+    ${open ? `<div class="sort-menu">
+      <button type="button" class="sort-opt${key === 'manual' ? ' active' : ''}" data-act="set-sort" data-list="${listId}" data-key="manual">${SORT_MANUAL[listId] ? 'Manual (drag)' : 'Default'}</button>
+      ${Object.keys(defs).map(k => `<button type="button" class="sort-opt${key === k ? ' active' : ''}" data-act="set-sort" data-list="${listId}" data-key="${k}">${esc(defs[k].label)}</button>`).join('')}
+    </div>` : ''}
+  </div>`;
+}
+function setListSort(listId, key) {
+  if (key === 'manual') delete state.listSort[listId]; else state.listSort[listId] = key;
+  state.sortMenuOpen = null;
+  try { localStorage.setItem('pos-list-sort', JSON.stringify(state.listSort)); } catch (e) {}
+  render();
+}
+
 function visibleMenuItemsForAdmin() {
   let items = state.menu;
   if (state.menuAdminCategoryFilter) items = items.filter(m => m.category === state.menuAdminCategoryFilter);
@@ -10582,7 +10676,7 @@ function visibleMenuItemsForAdmin() {
     const q = state.menuAdminSearch.trim().toLowerCase();
     items = items.filter(m => m.name.toLowerCase().includes(q));
   }
-  return sortMenuItems(items);
+  return applyListSort('menu-items', sortMenuItems(items));
 }
 
 function renderMenuAdmin() {
@@ -10615,7 +10709,7 @@ function renderMenuAdmin() {
     </select>` : ''}
     <input id="menu-admin-search-input" class="tb-ctl" type="text" placeholder="Search items…" value="${state.menuAdminSearch}" style="width:160px;">
   </div>
-  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${state.selectedMenuItemIds.length > 0 ? `
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${sortControl('menu-items')}${state.selectedMenuItemIds.length > 0 ? `
       <span class="ts">${state.selectedMenuItemIds.length} selected</span>
       <button class="icon-sq" title="Bulk edit" data-act="open-bulk-edit">${ACT_PENCIL_SVG}</button>
       <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-menu-items">${ACT_COPY_SVG}</button>
@@ -10636,7 +10730,7 @@ function renderMenuAdminRows() {
     ${(() => {
       // Flat list — the section/subsection dropdowns above provide the context.
       const rowHtml = (m) => `
-      <div class="menu-item-expandable${state.selectedMenuItemIds.includes(m.id) ? ' selected' : ''}${state.expandedMenuItemIds.includes(m.id) ? ' open' : ''}" data-id="${m.id}" draggable="true" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${m.disabled ? 'opacity:0.55;' : ''}">
+      <div class="menu-item-expandable${state.selectedMenuItemIds.includes(m.id) ? ' selected' : ''}${state.expandedMenuItemIds.includes(m.id) ? ' open' : ''}" data-id="${m.id}" draggable="${isListSorted('menu-items') ? 'false' : 'true'}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${m.disabled ? 'opacity:0.55;' : ''}">
         <div class="menu-item-header" data-id="${m.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <button type="button" class="row-back" onclick="event.stopPropagation();toggleMenuItemExpand('${m.id}')" title="Back">←</button>
           <input type="checkbox" class="menu-item-select-cb" ${state.selectedMenuItemIds.includes(m.id) ? 'checked' : ''} onclick="event.stopPropagation();toggleMenuItemSelection('${m.id}');" title="Select for bulk actions">
@@ -11054,9 +11148,9 @@ function renderSubcategoryModal() {
 }
 
 function renderModifiersAdmin() {
-  const groups = state.modifierGroups;
+  const groups = applyListSort('modifiers', state.modifierGroups);
   return `
-  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-modifiers" ${groups.length > 0 && groups.every(g => state.selectedModifierIds.includes(g.id)) ? 'checked' : ''}></label>${state.selectedModifierIds.length > 0 ? `
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-modifiers" ${groups.length > 0 && groups.every(g => state.selectedModifierIds.includes(g.id)) ? 'checked' : ''}></label>${sortControl('modifiers')}${state.selectedModifierIds.length > 0 ? `
       <span class="ts">${state.selectedModifierIds.length} selected</span>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-modifiers">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" title="Clear selection" data-act="clear-modifier-selection">${ACT_X_SVG}</button>
@@ -11146,6 +11240,10 @@ function renderAppearanceAdmin() {
       <div class="pay-opt ${(state.theme.itemSize || 'md') === 'sm' ? 'active' : ''}" data-act="set-theme-itemsize" data-val="sm">S</div>
       <div class="pay-opt ${(state.theme.itemSize || 'md') === 'md' ? 'active' : ''}" data-act="set-theme-itemsize" data-val="md">M</div>
       <div class="pay-opt ${(state.theme.itemSize || 'md') === 'lg' ? 'active' : ''}" data-act="set-theme-itemsize" data-val="lg">L</div>
+    </div>
+    <div class="th" style="margin-bottom:14px;">Menu item icons</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.showItemIcons !== false, 'set-item-icons')}
     </div>
   </div>
   <div class="settings-card">
@@ -12619,9 +12717,10 @@ document.addEventListener('touchmove', (e) => {
   moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); });
-document.addEventListener('click', () => {
+document.addEventListener('click', (e) => {
   if (_cpEl) closeColorPopover();
   if (state.iconPopover) { state.iconPopover = null; render(); }
+  if (state.sortMenuOpen && !(e.target.closest && e.target.closest('.sort-ctl'))) { state.sortMenuOpen = null; render(); }
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && state.floorPlacing) { stopPlacing(); }
@@ -15148,6 +15247,9 @@ function bindEvents() {
       else if (act === 'set-seatnumbers-enabled') { setSeatNumbersEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-promptseatonadd-enabled') { setPromptSeatOnAddEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-qtypad-enabled') { setQtyPadEnabled(el.dataset.val === 'true'); }
+      else if (act === 'set-item-icons') { saveTicketSetting({ showItemIcons: el.dataset.val === 'true' }); }
+      else if (act === 'toggle-sort') { state.sortMenuOpen = state.sortMenuOpen === el.dataset.list ? null : el.dataset.list; render(); }
+      else if (act === 'set-sort') { setListSort(el.dataset.list, el.dataset.key); }
       else if (act === 'qty-pad-key') { tapQtyPad(el.dataset.key); }
       else if (act === 'open-color-popover') { e.stopPropagation(); openColorPopover(el); }
       else if (act === 'toggle-icon-popover') { toggleIconPopover(el.dataset.kind, el.dataset.id); }

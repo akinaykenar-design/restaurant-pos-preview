@@ -749,12 +749,15 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
   .catrail-toggles{ display:flex; gap:5px; align-items:center; position:sticky; right:0; margin-left:auto; flex:0 0 auto;
     padding:0 6px 0 14px; background:linear-gradient(to right, transparent, var(--surface) 22%); }
   .catrail-toggles .qty-pad-toggle{ height:34px; padding:0 10px; box-shadow:var(--shadow); }
-  /* All 13 keys fit the screen exactly — no horizontal scrolling. They stretch
-     full-width AND tall so the number bar reads at the same weight as an entry
-     row, not a thin cramped strip. */
-  .qty-pad{ padding-left:8px; padding-right:8px; gap:3px; }
-  .qty-pad-key{ min-width:0; flex:1 1 0; max-width:none; height:54px; font-size:20px; }
-  .qty-pad-display{ min-width:40px; height:54px; padding:0 8px; font-size:19px; }
+  /* The number bar covers the entire row edge-to-edge — no horizontal scroll,
+     no wasted padding. menu-float is hidden on mobile, so its reserved 130px
+     right-padding is reclaimed (otherwise keys got crushed into slivers). The
+     search row's own toggles are hidden — the category-rail toggles own them. */
+  .search-row .search-row-tog{ display:none; }
+  .menu-float + .qty-pad{ padding-right:6px; }
+  .qty-pad{ padding-left:6px; padding-right:6px; gap:5px; }
+  .qty-pad-key{ min-width:0; flex:1 1 0; max-width:none; height:50px; font-size:20px; font-weight:800; }
+  .qty-pad-display{ min-width:46px; height:50px; padding:0 10px; font-size:20px; }
 
   /* Ticket panel → bottom sheet that slides up over the menu, sitting just
      above the persistent handle bar. */
@@ -7379,19 +7382,104 @@ function renderOrderTypeSeg() {
     </div>`;
 }
 
-function renderOrderView() {
+// The scrolling menu results (repeat chips + category grids). Split out so the
+// menu search can refresh JUST this container on each keystroke — re-rendering
+// the whole panel tore down the search input and bounced the mobile keyboard.
+function renderMenuScrollBody() {
   const categories = state.categories.filter(c => !c.disabled).map(c => c.name);
-  // The dedicated set-menus tab is gone: a set menu sells only inside the
-  // section its editor assigns it to. Clear any stale tab selection.
-  if (state.activeCat === '__combos__') state.activeCat = categories[0] || null;
   const filtered = state.menu.filter(m => !m.disabled && (state.search === '' || m.name.toLowerCase().includes(state.search.toLowerCase())));
   const catsToShow = state.search ? categories : categories.filter(c => c === state.activeCat);
-
   const comboCard = (combo) => `
     <button class="item-card" data-act="open-combo" data-id="${combo.id}" ${combo.color ? `style="background:${combo.color};color:${contrastTextColor(combo.color)};"` : ''}>
       <div class="item-name">${esc(combo.name)}</div>
       ${state.settings.showPrices ? `<div class="item-tile-price">${money(combo.price)}</div>` : ''}
     </button>`;
+  return `
+        ${state.settings.quickRepeatEnabled && !state.search ? (() => {
+          const recents = recentRepeatableOrders(3);
+          if (recents.length === 0) return '';
+          return `<div class="repeat-row">
+            ${recents.map(o => {
+              const units = (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
+              const summary = (o.items || []).map(i => `${i.qty > 1 ? i.qty + ' ' : ''}${i.name}`).join(' · ');
+              const where = o.table ? (findTableById(o.table) ? tableDisplayLabel(o.table) : 'Table ' + esc(String(o.table))) : (o.customerName ? esc(o.customerName) : '');
+              return `<button class="repeat-chip" data-act="repeat-order" data-id="${o.id}" title="${esc(summary)}">
+                <span class="rc-top">↻ ${fmtTime(o.createdAt)}${where ? ' · ' + where : ''}</span>
+                <span class="rc-sub">${esc(summary)}</span>
+                <span class="rc-total">${units} · ${money(o.total)}</span>
+              </button>`;
+            }).join('')}
+          </div>`;
+        })() : ''}
+        ${catsToShow.map(cat => {
+          const catObj = state.categories.find(c => c.name === cat);
+          const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
+          const items = sortMenuItems(filtered.filter(m => m.category === cat));
+          const catCombos = state.search ? [] : state.combos.filter(c => c.category === cat);
+          if (items.length === 0 && catCombos.length === 0) return '';
+          const subcats = catObj ? state.subcategories.filter(s => s.categoryId === catObj.id) : [];
+          const isManager = state.currentStaff && state.currentStaff.role === 'manager';
+          const renderItemCard = (item, sizeClass = '') => {
+            const inCartQty = state.cart.filter(c => c.menuItemId === item.id).reduce((s, c) => s + c.qty, 0);
+            const canRestore = item.out && isManager; // manager can un-86 by tapping the card
+            const showIcon = state.settings.showItemIcons !== false && !!item.icon;
+            return `
+            <button class="item-card ${sizeClass} ${item.out ? 'out' : ''}${canRestore ? ' restorable' : ''} ${inCartQty ? 'in-cart' : ''}" data-act="${canRestore ? 'quick-un86' : 'add'}" data-id="${item.id}" ${canRestore ? 'title="Sold out — tap to make available again"' : (item.out ? 'title="Marked sold out — tap to add anyway"' : '')} ${item.color ? `style="background:${item.color};color:${contrastTextColor(item.color)};"` : ''}>
+              ${item.image ? `<img src="${item.image}" alt="" style="width:100%;height:var(--item-img-h,70px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}
+              ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
+              <div class="item-name${item.image || showIcon ? ' one-line' : ''}">${esc(item.name)}</div>
+              ${state.settings.showPrices ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' + money(Math.min(...item.variants.map(v => v.price))) : money(item.price)}</div>` : ''}
+              ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots" title="Asks for options">⋯</span>` : ''}
+            </button>`;
+          };
+          if (subcats.length === 0) {
+            return `
+              ${state.search ? `<div class="cat-title">${catIcon} ${cat}</div>` : ''}
+              <div class="grid">${catCombos.map(comboCard).join('')}${items.map(renderItemCard).join('')}</div>`;
+          }
+          const itemsWithoutSub = items.filter(i => !i.subcategoryId);
+          const subtreeHasItems = (sub) => { const ids = subcatSubtreeIds(sub.id); return items.some(i => ids.includes(i.subcategoryId)); };
+          const renderSubGroup = (sub, depth, withHeader) => {
+            const direct = items.filter(i => i.subcategoryId === sub.id);
+            const kids = childSubcats(sub.id).filter(subtreeHasItems);
+            if (direct.length === 0 && kids.length === 0) return '';
+            let h = '';
+            if (withHeader) h += `<div class="ts" style="font-weight:700;margin:12px 0 6px;padding-left:${depth * 12}px;">${depth ? '↳ ' : ''}${esc(sub.name)}</div>`;
+            if (direct.length) h += `<div class="grid">${direct.map(renderItemCard).join('')}</div>`;
+            kids.forEach(k => { h += renderSubGroup(k, depth + 1, true); });
+            return h;
+          };
+          const topSubs = subcats.filter(s => !s.parentSubcategoryId && subtreeHasItems(s));
+          const groupedAll = `
+            ${topSubs.map(s => renderSubGroup(s, 0, true)).join('')}
+            ${itemsWithoutSub.length > 0 ? `<div class="ts" style="font-weight:700;margin:12px 0 6px;">Other</div><div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>` : ''}`;
+          if (state.search) {
+            return `<div class="cat-title">${catIcon} ${cat}</div>${groupedAll}`;
+          }
+          const subTabs = [
+            { id: '__all__', label: 'All' },
+            ...topSubs.map(sub => ({ id: sub.id, label: sub.name })),
+            ...(itemsWithoutSub.length > 0 ? [{ id: '__none__', label: 'Other' }] : []),
+          ];
+          const activeSub = state.activeSubcat && subTabs.some(t => t.id === state.activeSubcat) ? state.activeSubcat : '__all__';
+          const activeTopSub = topSubs.find(s => s.id === activeSub);
+          return `
+            <div class="seg subcat-seg" style="margin-bottom:12px;">
+              ${subTabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${activeSub === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
+            </div>
+            ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
+            ${activeSub === '__all__' ? groupedAll
+            : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>`
+            : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
+            : `<div class="grid">${items.filter(i => i.subcategoryId === activeSub).map(renderItemCard).join('')}</div>`}
+          `;
+        }).join('')}`;
+}
+
+function renderOrderView() {
+  // The dedicated set-menus tab is gone: a set menu sells only inside the
+  // section its editor assigns it to. Clear any stale tab selection.
+  if (state.activeCat === '__combos__') state.activeCat = (state.categories.find(c => !c.disabled) || {}).name || null;
 
   const searching = state.searchOpen || state.search;
   const catrailHtml = `
@@ -7427,104 +7515,15 @@ function renderOrderView() {
       ${state.searchOpen || state.search ? `
       <div class="search-row">
         <input id="search-input" type="text" placeholder="Search menu…" value="${state.search}">
-        <button class="qty-pad-toggle active" data-act="close-search" title="Hide search">🔍</button>
-        ${state.settings.qtyPadEnabled ? `<button class="qty-pad-toggle ${state.qtyPadCollapsed ? '' : 'active'}" data-act="toggle-qty-pad" title="${state.qtyPadCollapsed ? 'Show the quantity pad' : 'Hide the quantity pad'}">123</button>` : ''}
+        <button class="qty-pad-toggle search-row-tog active" data-act="close-search" title="Hide search">🔍</button>
+        ${state.settings.qtyPadEnabled ? `<button class="qty-pad-toggle search-row-tog ${state.qtyPadCollapsed ? '' : 'active'}" data-act="toggle-qty-pad" title="${state.qtyPadCollapsed ? 'Show the quantity pad' : 'Hide the quantity pad'}">123</button>` : ''}
       </div>` : `
       <div class="menu-float">
         <button class="qty-pad-toggle" data-act="open-search" title="Search the menu">🔍</button>
         ${state.settings.qtyPadEnabled ? `<button class="qty-pad-toggle ${state.qtyPadCollapsed ? '' : 'active'}" data-act="toggle-qty-pad" title="${state.qtyPadCollapsed ? 'Show the quantity pad' : 'Hide the quantity pad'}">123</button>` : ''}
       </div>`}
       ${renderQtyPad()}
-      <div class="menu-scroll">
-        ${state.settings.quickRepeatEnabled && !state.search ? (() => {
-          const recents = recentRepeatableOrders(3);
-          if (recents.length === 0) return '';
-          return `<div class="repeat-row">
-            ${recents.map(o => {
-              const units = (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
-              const summary = (o.items || []).map(i => `${i.qty > 1 ? i.qty + ' ' : ''}${i.name}`).join(' · ');
-              // Time is the identifier — always present and unambiguous. The table is
-              // added only when it resolves: older orders stored the table LABEL where
-              // current ones store a generated id, so findTableById misses on those.
-              const where = o.table ? (findTableById(o.table) ? tableDisplayLabel(o.table) : 'Table ' + esc(String(o.table))) : (o.customerName ? esc(o.customerName) : '');
-              return `<button class="repeat-chip" data-act="repeat-order" data-id="${o.id}" title="${esc(summary)}">
-                <span class="rc-top">↻ ${fmtTime(o.createdAt)}${where ? ' · ' + where : ''}</span>
-                <span class="rc-sub">${esc(summary)}</span>
-                <span class="rc-total">${units} · ${money(o.total)}</span>
-              </button>`;
-            }).join('')}
-          </div>`;
-        })() : ''}
-        ${catsToShow.map(cat => {
-          const catObj = state.categories.find(c => c.name === cat);
-          const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
-          const items = sortMenuItems(filtered.filter(m => m.category === cat));
-          const catCombos = state.search ? [] : state.combos.filter(c => c.category === cat);
-          if (items.length === 0 && catCombos.length === 0) return '';
-          const subcats = catObj ? state.subcategories.filter(s => s.categoryId === catObj.id) : [];
-          const isManager = state.currentStaff && state.currentStaff.role === 'manager';
-          const renderItemCard = (item, sizeClass = '') => {
-            const inCartQty = state.cart.filter(c => c.menuItemId === item.id).reduce((s, c) => s + c.qty, 0);
-            const canRestore = item.out && isManager; // manager can un-86 by tapping the card
-            // One global switch: show an item's icon on the order screen whenever
-            // it has one (Design → Theme → Menu item icons).
-            const showIcon = state.settings.showItemIcons !== false && !!item.icon;
-            return `
-            <button class="item-card ${sizeClass} ${item.out ? 'out' : ''}${canRestore ? ' restorable' : ''} ${inCartQty ? 'in-cart' : ''}" data-act="${canRestore ? 'quick-un86' : 'add'}" data-id="${item.id}" ${canRestore ? 'title="Sold out — tap to make available again"' : (item.out ? 'title="Marked sold out — tap to add anyway"' : '')} ${item.color ? `style="background:${item.color};color:${contrastTextColor(item.color)};"` : ''}>
-              ${item.image ? `<img src="${item.image}" alt="" style="width:100%;height:var(--item-img-h,70px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}
-              ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
-              <div class="item-name${item.image || showIcon ? ' one-line' : ''}">${esc(item.name)}</div>
-              ${state.settings.showPrices ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' + money(Math.min(...item.variants.map(v => v.price))) : money(item.price)}</div>` : ''}
-              ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots" title="Asks for options">⋯</span>` : ''}
-            </button>`;
-          };
-          if (subcats.length === 0) {
-            return `
-              ${state.search ? `<div class="cat-title">${catIcon} ${cat}</div>` : ''}
-              <div class="grid">${catCombos.map(comboCard).join('')}${items.map(renderItemCard).join('')}</div>`;
-          }
-          const itemsWithoutSub = items.filter(i => !i.subcategoryId);
-          // A subsection counts as having items if anything in its whole subtree does.
-          const subtreeHasItems = (sub) => { const ids = subcatSubtreeIds(sub.id); return items.some(i => ids.includes(i.subcategoryId)); };
-          // Recursively render a subsection: its own items, then each nested
-          // subsection below it as an indented group heading.
-          const renderSubGroup = (sub, depth, withHeader) => {
-            const direct = items.filter(i => i.subcategoryId === sub.id);
-            const kids = childSubcats(sub.id).filter(subtreeHasItems);
-            if (direct.length === 0 && kids.length === 0) return '';
-            let h = '';
-            if (withHeader) h += `<div class="ts" style="font-weight:700;margin:12px 0 6px;padding-left:${depth * 12}px;">${depth ? '↳ ' : ''}${esc(sub.name)}</div>`;
-            if (direct.length) h += `<div class="grid">${direct.map(renderItemCard).join('')}</div>`;
-            kids.forEach(k => { h += renderSubGroup(k, depth + 1, true); });
-            return h;
-          };
-          const topSubs = subcats.filter(s => !s.parentSubcategoryId && subtreeHasItems(s));
-          const groupedAll = `
-            ${topSubs.map(s => renderSubGroup(s, 0, true)).join('')}
-            ${itemsWithoutSub.length > 0 ? `<div class="ts" style="font-weight:700;margin:12px 0 6px;">Other</div><div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>` : ''}`;
-          if (state.search) {
-            // Search spans every category at once, so show a flat grouped list.
-            return `<div class="cat-title">${catIcon} ${cat}</div>${groupedAll}`;
-          }
-          const subTabs = [
-            { id: '__all__', label: 'All' },
-            ...topSubs.map(sub => ({ id: sub.id, label: sub.name })),
-            ...(itemsWithoutSub.length > 0 ? [{ id: '__none__', label: 'Other' }] : []),
-          ];
-          const activeSub = state.activeSubcat && subTabs.some(t => t.id === state.activeSubcat) ? state.activeSubcat : '__all__';
-          const activeTopSub = topSubs.find(s => s.id === activeSub);
-          return `
-            <div class="seg subcat-seg" style="margin-bottom:12px;">
-              ${subTabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${activeSub === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
-            </div>
-            ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
-            ${activeSub === '__all__' ? groupedAll
-            : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>`
-            : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
-            : `<div class="grid">${items.filter(i => i.subcategoryId === activeSub).map(renderItemCard).join('')}</div>`}
-          `;
-        }).join('')}
-      </div>
+      <div class="menu-scroll">${renderMenuScrollBody()}</div>
     </div>
   `);
 }
@@ -11945,7 +11944,8 @@ function renderTableStatusColorsCard() {
 function renderQtyPad() {
   if (!state.settings.qtyPadEnabled || state.qtyPadCollapsed) return '';
   const buf = state.qtyPadBuffer || '';
-  const keys = ['.', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear'];
+  // Quantities are whole numbers — no decimal key. Natural 1-9, 0, clear order.
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'clear'];
   return `
   <div class="qty-pad">
     ${buf ? `<div class="qty-pad-display filled">${esc(buf)}</div>` : ''}
@@ -16212,11 +16212,12 @@ function bindEvents() {
   const searchInput = document.getElementById('search-input');
   if (searchInput) {
     searchInput.addEventListener('input', (e) => {
-      state.search = e.target.value; render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('search-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
+      state.search = e.target.value;
+      // Refresh only the results container, not the whole panel — keeps the
+      // search input (and the mobile keyboard) alive on every keystroke.
+      const body = document.querySelector('.menu-scroll');
+      if (body) body.innerHTML = renderMenuScrollBody();
+      else render();
     });
   }
   const exportFromInput = document.getElementById('export-from-input');

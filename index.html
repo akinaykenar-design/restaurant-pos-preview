@@ -5215,6 +5215,7 @@ let state = {
   voidReasons: [],
   voidModal: null, // { orderId, reason, note }
   refundModal: null, // { orderId, amount, reason, remaining }
+  confirmDialog: null, // { message, title, confirmLabel, danger, onConfirm } — styled replacement for native confirm()
 };
 
 function withDirtyCheck(obj) { return { ...obj, __snap: JSON.stringify(obj) }; }
@@ -6183,16 +6184,17 @@ async function clockIn() {
 }
 async function clockOut() {
   if (!state.currentStaff) return;
-  if (!confirm('Clock out now?')) return;
-  try {
-    await api('/api/shifts/clock-out', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ staffId: state.currentStaff.id }),
-    });
-    state.activeShift = null;
-    render();
-  } catch (e) {}
+  openConfirm({ message: 'Clock out now?', confirmLabel: 'Clock out', danger: false }, async () => {
+    try {
+      await api('/api/shifts/clock-out', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ staffId: state.currentStaff.id }),
+      });
+      state.activeShift = null;
+      render();
+    } catch (e) {}
+  });
 }
 
 async function refreshOrders() {
@@ -6220,21 +6222,22 @@ async function loadRegisterData() {
   render();
 }
 async function closeRegister() {
-  if (!confirm('Close the register now? This locks in the current period\'s totals and starts a fresh one.')) return;
-  try {
-    await api('/api/register/close', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cashCounted: state.registerCashCounted, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
-    });
-    await loadRegisterData();
-    state.toast = 'Register closed.';
-    render();
-    setTimeout(() => { state.toast = null; render(); }, 3200);
-  } catch (e) {
-    state.toast = 'Could not close the register — check the server.';
-    render();
-  }
+  openConfirm({ message: 'Close the register now? This locks in the current period\'s totals and starts a fresh one.', confirmLabel: 'Close register', danger: false }, async () => {
+    try {
+      await api('/api/register/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cashCounted: state.registerCashCounted, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+      });
+      await loadRegisterData();
+      state.toast = 'Register closed.';
+      render();
+      setTimeout(() => { state.toast = null; render(); }, 3200);
+    } catch (e) {
+      state.toast = 'Could not close the register — check the server.';
+      render();
+    }
+  });
 }
 
 function activeOpenOrder() { return state.openOrderId ? state.orders.find(o => o.id === state.openOrderId) : null; }
@@ -7049,6 +7052,37 @@ function renderStockWarnModal() {
     </div>
   </div>`;
 }
+
+// Styled replacement for the browser's native confirm(). Callback-based: the
+// post-confirm work is stored as a closure on state and run when the user
+// clicks the confirm button. opts is { message, title?, confirmLabel?, danger? }
+// or a plain string message.
+function openConfirm(opts, onConfirm) {
+  const o = typeof opts === 'string' ? { message: opts } : opts;
+  state.confirmDialog = {
+    message: o.message,
+    title: o.title || '',
+    confirmLabel: o.confirmLabel || 'Confirm',
+    danger: o.danger !== false,
+    onConfirm,
+  };
+  render();
+}
+function renderConfirmDialog() {
+  const c = state.confirmDialog;
+  if (!c) return '';
+  return `
+  <div class="modal-bg" data-act="confirm-dialog-cancel">
+    <div class="modal" data-stop="1" style="max-width:400px;">
+      ${c.title ? `<h2>${esc(c.title)}</h2>` : ''}
+      <div class="confirm-dialog-msg" style="white-space:pre-line;font-size:14.5px;line-height:1.45;color:var(--text-primary);margin-bottom:4px;">${esc(c.message)}</div>
+      <div class="modal-actions">
+        <button class="btn-cancel" data-act="confirm-dialog-cancel">Cancel</button>
+        <button class="${c.danger ? 'btn-danger' : 'btn-confirm'}" data-act="confirm-dialog-yes">${esc(c.confirmLabel)}</button>
+      </div>
+    </div>
+  </div>`;
+}
 // Covers number-pad popup — mobile-friendly way to key in the guest count
 // instead of a +/- stepper. Tapping the covers chip opens it.
 function openCoversPad() {
@@ -7358,6 +7392,7 @@ function render() {
     ${state.supplierModal ? renderSupplierModal() : ''}
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
     ${state.stockWarnModal ? renderStockWarnModal() : ''}
+    ${state.confirmDialog ? renderConfirmDialog() : ''}
     ${state.coversPad ? renderCoversPadModal() : ''}
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
@@ -9320,7 +9355,6 @@ async function saveInventoryItem() {
 }
 
 async function deleteInventoryItem(id) {
-  if (!confirm('Delete this inventory item?')) return;
   try {
     await api(`/api/inventory-items/${id}`, { method: 'DELETE' });
     await loadInventoryData();
@@ -9420,7 +9454,6 @@ async function saveSupplier() {
 }
 
 async function deleteSupplier(id) {
-  if (!confirm('Delete this supplier?')) return;
   try {
     await api(`/api/suppliers/${id}`, { method: 'DELETE' });
     await loadInventoryData();
@@ -9679,12 +9712,14 @@ async function backupNow() {
   setTimeout(() => { state.toast = null; render(); }, 2500);
 }
 async function restoreBackup(file) {
-  if (!confirm(`Replace ALL current data with the backup from this point in time?\n\nA safety copy of right now is taken first, so this can be undone.`)) return;
-  try {
-    await api('/api/backups/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }) });
-    alert('Backup restored. The app will reload.');
-    location.reload();
-  } catch (e) { state.toast = e.message; render(); }
+  openConfirm({ message: `Replace ALL current data with the backup from this point in time?\n\nA safety copy of right now is taken first, so this can be undone.`, confirmLabel: 'Restore', danger: true }, async () => {
+    try {
+      await api('/api/backups/restore', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }) });
+      state.toast = 'Backup restored. The app will reload.';
+      render();
+      setTimeout(() => location.reload(), 1200);
+    } catch (e) { state.toast = e.message; render(); }
+  });
 }
 
 // ---------- Doshii app orders ----------
@@ -11574,31 +11609,35 @@ async function applySimpleTables(countRaw) {
   const openLabels = new Set(state.orders.filter(o => o.status === 'open').map(o => String(o.table)));
   const removable = extras.filter(x => !openLabels.has(String(x.t.label)));
   const kept = extras.filter(x => openLabels.has(String(x.t.label)));
+  const proceed = async () => {
+    try {
+      for (const x of removable) {
+        await api(`/api/floorplans/${x.fpId}/tables/${x.t.id}`, { method: 'DELETE' });
+      }
+      for (let n = 1; n <= count; n++) {
+        if (have.has(n)) continue;
+        const col = (n - 1) % 6, row = Math.floor((n - 1) / 6);
+        await api(`/api/floorplans/${firstFp.id}/tables`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ label: String(n), x: 10 + col * 15, y: Math.min(88, 16 + row * 24), shape: 'square', width: 9, height: 16, seats: 4 }),
+        });
+      }
+      state.settings.simpleTableCount = count;
+      await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ simpleTableCount: count }) });
+      state.floorPlans = await api('/api/floorplans');
+      state.toast = kept.length
+        ? `Tables updated — kept ${kept.map(x => x.n).join(', ')} (open orders)`
+        : 'Tables updated';
+      setTimeout(() => { state.toast = null; render(); }, 3000);
+    } catch (e) { state.toast = e.message; }
+    render();
+  };
   if (removable.length) {
     const labels = removable.map(x => x.n).sort((a, b) => a - b).join(', ');
-    if (!confirm(`Remove table${removable.length > 1 ? 's' : ''} ${labels}? This can't be undone.`)) return;
+    openConfirm({ message: `Remove table${removable.length > 1 ? 's' : ''} ${labels}? This can't be undone.`, confirmLabel: 'Remove', danger: true }, proceed);
+  } else {
+    proceed();
   }
-  try {
-    for (const x of removable) {
-      await api(`/api/floorplans/${x.fpId}/tables/${x.t.id}`, { method: 'DELETE' });
-    }
-    for (let n = 1; n <= count; n++) {
-      if (have.has(n)) continue;
-      const col = (n - 1) % 6, row = Math.floor((n - 1) / 6);
-      await api(`/api/floorplans/${firstFp.id}/tables`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ label: String(n), x: 10 + col * 15, y: Math.min(88, 16 + row * 24), shape: 'square', width: 9, height: 16, seats: 4 }),
-      });
-    }
-    state.settings.simpleTableCount = count;
-    await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ simpleTableCount: count }) });
-    state.floorPlans = await api('/api/floorplans');
-    state.toast = kept.length
-      ? `Tables updated — kept ${kept.map(x => x.n).join(', ')} (open orders)`
-      : 'Tables updated';
-    setTimeout(() => { state.toast = null; render(); }, 3000);
-  } catch (e) { state.toast = e.message; }
-  render();
 }
 
 // Order tables numerically first (1,2,…,10), then named ones (Bar, Patio…) alphabetically.
@@ -12606,20 +12645,24 @@ function pickTable(id) {
     id = target.mergedInto;
     setTimeout(() => { state.toast = null; render(); }, 2500);
   }
+  const proceed = () => {
+    state.table = id;
+    const t = findTableById(id);
+    state.cart = [];
+    state.firedCourses = {};
+    state.covers = (t && t.covers) || 0;
+    state.allergies = (t && t.allergies) || [];
+    state.notes = (t && t.notes) || [];
+    state.vipType = (t && t.vipType) || '';
+    state.openOrderId = (t && state.orders.find(o => o.status === 'open' && o.table === t.label)?.id) || null;
+    state.showTablePicker = false;
+    render();
+  };
   if (id !== state.table && state.cart.length > 0) {
-    if (!confirm('Switch tables? Items not yet sent to the kitchen will be cleared.')) return;
+    openConfirm({ message: 'Switch tables? Items not yet sent to the kitchen will be cleared.', confirmLabel: 'Switch tables', danger: false }, proceed);
+  } else {
+    proceed();
   }
-  state.table = id;
-  const t = findTableById(id);
-  state.cart = [];
-  state.firedCourses = {};
-  state.covers = (t && t.covers) || 0;
-  state.allergies = (t && t.allergies) || [];
-  state.notes = (t && t.notes) || [];
-  state.vipType = (t && t.vipType) || '';
-  state.openOrderId = (t && state.orders.find(o => o.status === 'open' && o.table === t.label)?.id) || null;
-  state.showTablePicker = false;
-  render();
 }
 
 async function transferToTable(newTableId) {
@@ -13739,8 +13782,9 @@ function updateAllergyPreset(idx, patch) {
 function addAllergyPreset() { saveAllergyPresets([...state.allergyPresets, { name: 'New allergy', color: null, sequence: null, subTypes: [] }]); }
 const DEFAULT_ALLERGY_PRESET_NAMES = ['Nuts', 'Peanuts', 'Shellfish', 'Fish', 'Dairy', 'Eggs', 'Gluten', 'Soy', 'Vegetarian', 'Vegan'];
 function restoreDefaultAllergyPresets() {
-  if (!confirm('Restore the default allergy list? This replaces all current presets.')) return;
-  saveAllergyPresets(DEFAULT_ALLERGY_PRESET_NAMES.map(name => ({ name, color: null, sequence: null, subTypes: [] })));
+  openConfirm({ message: 'Restore the default allergy list? This replaces all current presets.', confirmLabel: 'Restore', danger: false }, () => {
+    saveAllergyPresets(DEFAULT_ALLERGY_PRESET_NAMES.map(name => ({ name, color: null, sequence: null, subTypes: [] })));
+  });
 }
 function removeAllergyPreset(idx) {
   if (state.allergyPresets.length <= 1) return;
@@ -13795,8 +13839,9 @@ async function saveVipPresets(presets) {
 function addVipPreset() { saveVipPresets([...state.vipPresets, 'New type']); }
 const DEFAULT_VIP_PRESET_NAMES = ['Regular', 'Celebrity', 'Food Critic', 'Investor', "Owner's Guest", 'Press/Media'];
 function restoreDefaultVipPresets() {
-  if (!confirm('Restore the default VIP type list? This replaces all current types.')) return;
-  saveVipPresets(DEFAULT_VIP_PRESET_NAMES);
+  openConfirm({ message: 'Restore the default VIP type list? This replaces all current types.', confirmLabel: 'Restore', danger: false }, () => {
+    saveVipPresets(DEFAULT_VIP_PRESET_NAMES);
+  });
 }
 function updateVipPreset(idx, value) {
   saveVipPresets(state.vipPresets.map((p, i) => i === idx ? value : p));
@@ -13902,16 +13947,17 @@ function deleteSelectedNoteTypes() {
   if (!sel.size) return;
   const nCustom = state.noteCategories.filter(c => sel.has(c.id)).length;
   const nBuiltin = ['vip', 'allergy'].filter(id => sel.has(id)).length;
-  if (!confirm(`Delete ${nCustom + nBuiltin} note type${nCustom + nBuiltin === 1 ? '' : 's'}?${nBuiltin ? ' (VIP/Allergies are hidden, restorable with ↺.)' : ''}`)) return;
-  // Hide built-ins, delete custom.
-  const hide = ['vip', 'allergy'].filter(id => sel.has(id));
-  const keepCats = state.noteCategories.filter(c => !sel.has(c.id));
-  state.selectedNoteTypeIds = [];
-  if (hide.length) {
-    const hidden = Array.from(new Set([...(state.settings.hiddenNoteTypes || []), ...hide]));
-    saveTicketSetting({ hiddenNoteTypes: hidden });
-  }
-  saveNoteCategories(keepCats);
+  openConfirm({ message: `Delete ${nCustom + nBuiltin} note type${nCustom + nBuiltin === 1 ? '' : 's'}?${nBuiltin ? ' (VIP/Allergies are hidden, restorable with ↺.)' : ''}`, confirmLabel: 'Delete', danger: true }, () => {
+    // Hide built-ins, delete custom.
+    const hide = ['vip', 'allergy'].filter(id => sel.has(id));
+    const keepCats = state.noteCategories.filter(c => !sel.has(c.id));
+    state.selectedNoteTypeIds = [];
+    if (hide.length) {
+      const hidden = Array.from(new Set([...(state.settings.hiddenNoteTypes || []), ...hide]));
+      saveTicketSetting({ hiddenNoteTypes: hidden });
+    }
+    saveNoteCategories(keepCats);
+  });
 }
 function quickUpdateNoteCategoryColor(id, color) {
   const cats = state.noteCategories.map(c => c.id === id ? { ...c, color: color || '#999' } : c);
@@ -13943,8 +13989,9 @@ async function saveVoidReasons(presets) {
 function addVoidReason() { saveVoidReasons([...state.voidReasons, 'New reason']); }
 const DEFAULT_VOID_REASON_NAMES = ['Order mistake', 'Customer complaint', 'Kitchen error', 'Duplicate order', 'Comp / goodwill', 'Other'];
 function restoreDefaultVoidReasons() {
-  if (!confirm('Restore the default void reason list? This replaces all current reasons.')) return;
-  saveVoidReasons(DEFAULT_VOID_REASON_NAMES);
+  openConfirm({ message: 'Restore the default void reason list? This replaces all current reasons.', confirmLabel: 'Restore', danger: false }, () => {
+    saveVoidReasons(DEFAULT_VOID_REASON_NAMES);
+  });
 }
 function updateVoidReason(idx, value) {
   saveVoidReasons(state.voidReasons.map((p, i) => i === idx ? value : p));
@@ -14173,16 +14220,18 @@ async function reorderSalesCategories(draggedId, targetId) {
 async function deleteSelectedSections() {
   const cats = [...state.selectedCategoryIds], subs = [...state.selectedSubcatIds];
   const n = cats.length + subs.length;
-  if (!n || !confirm(`Delete ${n} selected? Items keep existing but lose the grouping.`)) return;
-  try {
-    for (const id of subs) await api(`/api/subcategories/${id}`, { method: 'DELETE' });
-    for (const id of cats) await api(`/api/categories/${id}`, { method: 'DELETE' });
-    state.selectedCategoryIds = []; state.selectedSubcatIds = [];
-    state.categories = await api('/api/categories');
-    state.subcategories = await api('/api/subcategories');
-    state.menu = await api('/api/menu');
-    render();
-  } catch (e) { state.toast = 'Could not delete some of the selection.'; render(); }
+  if (!n) return;
+  openConfirm({ message: `Delete ${n} selected? Items keep existing but lose the grouping.`, confirmLabel: 'Delete', danger: true }, async () => {
+    try {
+      for (const id of subs) await api(`/api/subcategories/${id}`, { method: 'DELETE' });
+      for (const id of cats) await api(`/api/categories/${id}`, { method: 'DELETE' });
+      state.selectedCategoryIds = []; state.selectedSubcatIds = [];
+      state.categories = await api('/api/categories');
+      state.subcategories = await api('/api/subcategories');
+      state.menu = await api('/api/menu');
+      render();
+    } catch (e) { state.toast = 'Could not delete some of the selection.'; render(); }
+  });
 }
 async function deleteCategoryAction(id) {
   try {
@@ -14682,13 +14731,15 @@ async function deleteStaffMember(id) {
 }
 async function deleteSelectedStaff() {
   const ids = (state.selectedStaffIds || []).slice();
-  if (!ids.length || !confirm(`Delete ${ids.length} staff member${ids.length === 1 ? '' : 's'}?`)) return;
-  try {
-    for (const id of ids) await api(`/api/staff/${id}`, { method: 'DELETE' });
-    state.selectedStaffIds = [];
-    state.staffList = await api('/api/staff');
-    render();
-  } catch (e) { state.toast = 'Could not delete some staff.'; render(); }
+  if (!ids.length) return;
+  openConfirm({ message: `Delete ${ids.length} staff member${ids.length === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, async () => {
+    try {
+      for (const id of ids) await api(`/api/staff/${id}`, { method: 'DELETE' });
+      state.selectedStaffIds = [];
+      state.staffList = await api('/api/staff');
+      render();
+    } catch (e) { state.toast = 'Could not delete some staff.'; render(); }
+  });
 }
 async function saveBulkStaff() {
   const role = state.bulkStaffModal && state.bulkStaffModal.role;
@@ -14765,8 +14816,9 @@ function deleteSelectedSizes() {
 }
 const DEFAULT_SIZE_PRESET_NAMES = ['Small', 'Medium', 'Large', 'Glass', 'Half Glass', 'Bottle'];
 function restoreDefaultSizePresets() {
-  if (!confirm('Restore the default size list? This replaces all current size types.')) return;
-  saveSizePresets(DEFAULT_SIZE_PRESET_NAMES);
+  openConfirm({ message: 'Restore the default size list? This replaces all current size types.', confirmLabel: 'Restore', danger: false }, () => {
+    saveSizePresets(DEFAULT_SIZE_PRESET_NAMES);
+  });
 }
 function updateSizePreset(idx, value) {
   saveSizePresets(state.sizePresets.map((p, i) => i === idx ? value : p));
@@ -15692,7 +15744,7 @@ function bindEvents() {
       else if (MODAL_DELETE_ACTIONS[act]) {
         const [key, fn, msg] = MODAL_DELETE_ACTIONS[act];
         const cur = state[key];
-        if (cur && cur.id && confirm(msg)) { state[key] = null; state.adminError = ''; fn(cur.id); }
+        if (cur && cur.id) openConfirm({ message: msg, confirmLabel: 'Delete', danger: true }, () => { state[key] = null; state.adminError = ''; fn(cur.id); });
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return; state.view = 'order'; render(); }
       else if (act === 'toggle-mobile-cart') { state.mobileCartOpen = !state.mobileCartOpen; render(); }
@@ -15733,6 +15785,8 @@ function bindEvents() {
       else if (act === 'send-to-kitchen') { sendToKitchen(); }
       else if (act === 'close-stock-warn' || act === 'stock-warn-bg') { state.stockWarnModal = null; render(); }
       else if (act === 'stock-warn-send') { state.stockWarnModal = null; state._stockWarnAck = true; sendToKitchen(); }
+      else if (act === 'confirm-dialog-cancel') { state.confirmDialog = null; render(); }
+      else if (act === 'confirm-dialog-yes') { const cb = state.confirmDialog && state.confirmDialog.onConfirm; state.confirmDialog = null; render(); if (cb) cb(); }
       else if (act === 'cancel-checkout') { closeCheckout(); }
       else if (act === 'confirm-payment') { confirmPayment(); }
       else if (act === 'pay') { state.paymentMethod = el.dataset.val; render(); }
@@ -16215,14 +16269,14 @@ function bindEvents() {
       else if (act === 'apply-happy-hour') { applyHappyHour(el.dataset.id); }
       else if (act === 'add-reservation') { openAddReservation(); }
       else if (act === 'edit-reservation') { openEditReservation(el.dataset.id); }
-      else if (act === 'delete-reservation') { if (confirm('Delete this reservation?')) deleteReservationAction(el.dataset.id); }
+      else if (act === 'delete-reservation') { openConfirm({ message: 'Delete this reservation?', confirmLabel: 'Delete', danger: true }, () => deleteReservationAction(el.dataset.id)); }
       else if (act === 'seat-reservation') { markReservationSeated(el.dataset.id); }
       else if (act === 'close-reservation-modal') { closeReservationModal(); }
       else if (act === 'reservation-modal-bg') { if (e.target === el) closeReservationModal(); }
       else if (act === 'save-reservation-modal') { saveReservationModal(); }
       else if (act === 'add-customer') { openAddCustomer(); }
       else if (act === 'edit-customer') { openEditCustomer(el.dataset.id); }
-      else if (act === 'delete-customer') { if (confirm('Delete this customer?')) deleteCustomerAction(el.dataset.id); }
+      else if (act === 'delete-customer') { openConfirm({ message: 'Delete this customer?', confirmLabel: 'Delete', danger: true }, () => deleteCustomerAction(el.dataset.id)); }
       else if (act === 'close-customer-modal') { closeCustomerModal(); }
       else if (act === 'customer-modal-bg') { if (e.target === el) closeCustomerModal(); }
       else if (act === 'save-customer-modal') { saveCustomerModal(); }
@@ -16230,7 +16284,7 @@ function bindEvents() {
       else if (act === 'detach-customer') { detachCustomer(); }
       else if (act === 'redeem-loyalty-points') { redeemLoyaltyPoints(); }
       else if (act === 'submit-expense') { submitExpense(); }
-      else if (act === 'delete-expense') { if (confirm('Delete this expense?')) deleteExpenseAction(el.dataset.id); }
+      else if (act === 'delete-expense') { openConfirm({ message: 'Delete this expense?', confirmLabel: 'Delete', danger: true }, () => deleteExpenseAction(el.dataset.id)); }
       else if (act === 'open-adjust-stock') { openAdjustStock(el.dataset.id); }
       else if (act === 'close-adjust-stock-modal') { closeAdjustStockModal(); }
       else if (act === 'adjust-stock-modal-bg') { if (e.target === el) closeAdjustStockModal(); }
@@ -16256,7 +16310,7 @@ function bindEvents() {
       else if (act === 'gift-card-modal-bg') { if (e.target === el) closeGiftCardModal(); }
       else if (act === 'save-gift-card-modal') { saveGiftCardModal(); }
       else if (act === 'create-voucher') { openCreateVoucher(); }
-      else if (act === 'delete-voucher') { if (confirm('Delete this voucher?')) deleteVoucherAction(el.dataset.id); }
+      else if (act === 'delete-voucher') { openConfirm({ message: 'Delete this voucher?', confirmLabel: 'Delete', danger: true }, () => deleteVoucherAction(el.dataset.id)); }
       else if (act === 'close-voucher-modal') { closeVoucherModal(); }
       else if (act === 'voucher-modal-bg') { if (e.target === el) closeVoucherModal(); }
       else if (act === 'save-voucher-modal') { saveVoucherModal(); }
@@ -16270,7 +16324,7 @@ function bindEvents() {
       else if (act === 'close-inventory-item-modal') { closeInventoryItemModal(); }
       else if (act === 'inventory-item-modal-bg') { if (e.target === el) closeInventoryItemModal(); }
       else if (act === 'save-inventory-item') { saveInventoryItem(); }
-      else if (act === 'delete-inventory-item') { if (confirm('Delete this inventory item?')) deleteInventoryItem(el.dataset.id); }
+      else if (act === 'delete-inventory-item') { openConfirm({ message: 'Delete this inventory item?', confirmLabel: 'Delete', danger: true }, () => deleteInventoryItem(el.dataset.id)); }
       else if (act === 'open-adjust-inventory') { openAdjustInventory(el.dataset.id); }
       else if (act === 'close-adjust-inventory-modal') { closeAdjustInventoryModal(); }
       else if (act === 'adjust-inventory-modal-bg') { if (e.target === el) closeAdjustInventoryModal(); }
@@ -16280,7 +16334,7 @@ function bindEvents() {
       else if (act === 'close-supplier-modal') { closeSupplierModal(); }
       else if (act === 'supplier-modal-bg') { if (e.target === el) closeSupplierModal(); }
       else if (act === 'save-supplier') { saveSupplier(); }
-      else if (act === 'delete-supplier') { if (confirm('Delete this supplier?')) deleteSupplier(el.dataset.id); }
+      else if (act === 'delete-supplier') { openConfirm({ message: 'Delete this supplier?', confirmLabel: 'Delete', danger: true }, () => deleteSupplier(el.dataset.id)); }
       else if (act === 'open-recipe-editor') { openRecipeEditor(el.dataset.id); }
       else if (act === 'close-recipe-editor') { closeRecipeEditor(); }
       else if (act === 'recipe-modal-bg') { if (e.target === el) closeRecipeEditor(); }

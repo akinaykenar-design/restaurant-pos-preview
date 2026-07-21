@@ -1114,6 +1114,10 @@ input:focus, select:focus, textarea:focus{
 /* Colour dot before a course name (tabs + cart section heads + table map) */
 .course-dot{ display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:6px; vertical-align:middle; flex-shrink:0; box-shadow:inset 0 0 0 1px rgba(0,0,0,.18); }
 .tbl-course{ display:inline-flex; align-items:center; gap:3px; font-family:var(--font-mono); font-size:9px; font-weight:700; margin-top:2px; }
+/* Table-turn dwell chip: total time seated; escalates at 60/90 min. */
+.tbl-dwell{ display:inline-block; font-family:var(--font-mono); font-size:8.5px; font-weight:800; line-height:1; padding:2px 5px; border-radius:8px; background:rgba(255,255,255,.78); color:var(--text-primary); margin-top:2px; }
+.tbl-dwell.warn{ background:var(--gold); color:#fff; }
+.tbl-dwell.late{ background:var(--red); color:#fff; }
 .tbl-course .course-dot{ width:8px; height:8px; margin-right:0; }
 
 /* Larger + active variants of the square icon button (docket discount/clear) */
@@ -3093,6 +3097,7 @@ app.put('/api/menu/:id', (req, res) => {
   } else {
     logAudit(data, staffFromReq(req), `Updated menu item: ${item.name}`);
   }
+  if (Array.isArray(recipes)) recomputeAutoOut(data);
   writeData(data);
   res.json(item);
 });
@@ -4098,6 +4103,20 @@ app.post('/api/inventory-items', (req, res) => {
   res.json(item);
 });
 
+// Auto-86 tied to inventory: an item whose recipe ingredient is out of stock
+// goes sold-out automatically, and comes back on restock. A manual 86 (no
+// autoOut marker) is left alone, as is menu-level trackStock depletion.
+function recomputeAutoOut(data) {
+  const stock = {};
+  (data.inventoryItems || []).forEach(i => { stock[i.id] = i.currentStock || 0; });
+  (data.menu || []).forEach(m => {
+    const rec = (m.recipes || []).filter(r => (r.quantity || 0) > 0 && stock[r.inventoryItemId] !== undefined);
+    const missing = rec.some(r => stock[r.inventoryItemId] <= 0);
+    if (missing) { if (!m.out) { m.out = true; m.autoOut = true; } }
+    else if (m.autoOut) { m.autoOut = false; if (!(m.trackStock && m.stockCount <= 0)) m.out = false; }
+  });
+}
+
 app.put('/api/inventory-items/:id', (req, res) => {
   const data = readData();
   const item = (data.inventoryItems || []).find(i => i.id === req.params.id);
@@ -4112,6 +4131,7 @@ app.put('/api/inventory-items/:id', (req, res) => {
   if (maxStock !== undefined) item.maxStock = maxStock;
   if (costPerUnit !== undefined) item.costPerUnit = parseFloat(costPerUnit) || 0;
   if (supplierId !== undefined) item.supplierId = supplierId;
+  recomputeAutoOut(data);
   writeData(data);
   res.json(item);
 });
@@ -4147,6 +4167,7 @@ app.post('/api/inventory-items/:id/adjust', (req, res) => {
     timestamp: Date.now()
   }];
   logAudit(data, staffName || staffFromReq(req), `Adjusted stock for ${item.name}: ${parseInt(change) > 0 ? '+' : ''}${change} (${reason || 'adjustment'})`);
+  recomputeAutoOut(data);
   writeData(data);
   res.json({ item });
 });
@@ -8663,7 +8684,7 @@ function renderHoursAdmin() {
 
 // ---------- Roster (staff scheduling — the plan) ----------
 async function loadRoster() {
-  try { const [roster, timeOff] = await Promise.all([api('/api/roster'), api('/api/timeoff')]); state.roster = roster; state.timeOff = timeOff; } catch (e) {}
+  try { const [roster, timeOff, shifts] = await Promise.all([api('/api/roster'), api('/api/timeoff'), api('/api/shifts')]); state.roster = roster; state.timeOff = timeOff; state.shifts = shifts; } catch (e) {}
   render();
 }
 // Approved time-off covering a given staff member on a given date (YYYY-MM-DD).
@@ -8687,6 +8708,12 @@ function renderRosterAdmin() {
   const labourCost = staff.reduce((sum, s) => sum + staffWeekHours(s) * (s.payRate || 0), 0);
   const weekSales = (state.orders || []).filter(o => o.status !== 'void' && (o.createdAt || 0) >= weekStart && (o.createdAt || 0) < weekEnd)
     .reduce((a, o) => a + (o.grandTotal !== undefined ? o.grandTotal : (o.total || 0)), 0);
+  // Actuals from the time clock: shifts clocked in during this week.
+  const staffById = {}; staff.forEach(s => { staffById[s.id] = s; });
+  const clocked = (state.shifts || []).filter(sh => (sh.clockIn || 0) >= weekStart && (sh.clockIn || 0) < weekEnd);
+  const shiftHrs = sh => ((sh.clockOut || Date.now()) - sh.clockIn) / 3600000;
+  const actualHours = clocked.reduce((a, sh) => a + shiftHrs(sh), 0);
+  const actualCost = clocked.reduce((a, sh) => a + shiftHrs(sh) * ((staffById[sh.staffId] || {}).payRate || 0), 0);
   const today = rosterDateKey(new Date());
   const rangeLabel = `${days[0].date.toLocaleDateString([], { day: 'numeric', month: 'short' })} – ${days[6].date.toLocaleDateString([], { day: 'numeric', month: 'short' })}`;
 
@@ -8735,6 +8762,8 @@ function renderRosterAdmin() {
     <div class="rs-card"><div class="rs-label">Labour cost</div><div class="rs-value">${money(labourCost)}</div>${staff.some(s => !s.payRate) ? `<div class="rs-sub">set pay rates on Team for accuracy</div>` : ''}</div>
     <div class="rs-card"><div class="rs-label">Sales this week</div><div class="rs-value">${money(weekSales)}</div></div>
     <div class="rs-card"><div class="rs-label">Labour % of sales</div><div class="rs-value">${weekSales > 0 ? Math.round(labourCost / weekSales * 100) + '%' : '—'}</div></div>
+    <div class="rs-card"><div class="rs-label">Actual hours</div><div class="rs-value">${fmtHours(actualHours)}</div>${weekTotalHours > 0 && actualHours > 0 ? `<div class="rs-sub">${Math.round(actualHours / weekTotalHours * 100)}% of scheduled</div>` : ''}</div>
+    <div class="rs-card"><div class="rs-label">Actual labour %</div><div class="rs-value">${weekSales > 0 && actualCost > 0 ? Math.round(actualCost / weekSales * 100) + '%' : '—'}</div>${actualCost > 0 ? `<div class="rs-sub">${money(actualCost)} clocked</div>` : ''}</div>
   </div>
   ${renderTimeOffPanel()}
   `;
@@ -12725,7 +12754,19 @@ function tableCourseStatus(tableLabel) {
   // A call-away resets the timer; otherwise use the last round's sent time.
   const calledAway = (order.calledAwayAt || 0) > (last.sentAt || 0);
   const since = Math.max(last.sentAt || 0, order.calledAwayAt || 0);
-  return { sentAt: since, color, orderId: order.id, calledAway };
+  return { sentAt: since, color, orderId: order.id, calledAway, seatedAt: order.createdAt };
+}
+// Table-turn dwell: compact "42m" / "1h 25m" since the party was seated.
+function dwellLabel(seatedAt) {
+  const m = Math.floor((Date.now() - seatedAt) / 60000);
+  if (m < 1) return 'now';
+  if (m < 60) return m + 'm';
+  return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+}
+const DWELL_WARN_MIN = 60, DWELL_LATE_MIN = 90;
+function dwellClass(seatedAt) {
+  const m = (Date.now() - seatedAt) / 60000;
+  return m >= DWELL_LATE_MIN ? ' late' : m >= DWELL_WARN_MIN ? ' warn' : '';
 }
 function floorMarkerInner(t, canvasHeightPx, opts) {
   opts = opts || {};
@@ -12746,7 +12787,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // floor map during service).
   if (opts.hideStatus) return `${up0}<span>${esc(t.label)}${t.mergedInto ? ' 🔗' : ''}</span>${up1}`;
   const cs = tableCourseStatus(t.label);
-  return `${up0}<span>${esc(t.label)}${t.mergedInto ? ' 🔗' : ''}</span>${cs ? `<span class="tbl-course">${cs.color ? `<span class="course-dot" style="background:${cs.color};"></span>` : ''}<span class="tbl-elapsed" data-fired="${cs.sentAt}">${elapsedMinLabel(cs.sentAt)}</span></span>` : ''}${up1}`;
+  return `${up0}<span>${esc(t.label)}${t.mergedInto ? ' 🔗' : ''}</span>${cs ? `<span class="tbl-course">${cs.color ? `<span class="course-dot" style="background:${cs.color};"></span>` : ''}<span class="tbl-elapsed" data-fired="${cs.sentAt}">${elapsedMinLabel(cs.sentAt)}</span></span><span class="tbl-dwell${dwellClass(cs.seatedAt)}" data-seated="${cs.seatedAt}">⏱ ${dwellLabel(cs.seatedAt)}</span>` : ''}${up1}`;
 }
 
 // A dine-in table's live status, for the floor-map colour theme.
@@ -17276,6 +17317,11 @@ setInterval(() => {
   });
   document.querySelectorAll('.tbl-elapsed[data-fired]').forEach(el => {
     el.textContent = elapsedMinLabel(parseInt(el.dataset.fired));
+  });
+  document.querySelectorAll('.tbl-dwell[data-seated]').forEach(el => {
+    const seated = parseInt(el.dataset.seated);
+    el.textContent = '⏱ ' + dwellLabel(seated);
+    el.className = 'tbl-dwell' + dwellClass(seated);
   });
 }, 20000);
 

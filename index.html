@@ -7387,6 +7387,13 @@ async function voidOrder(id, reason, note) {
 }
 
 function render() {
+  // NEVER rebuild the DOM while a drag-to-reorder is live — doing so destroys the
+  // element under the pointer, which drops the drag "on its own". Background
+  // refreshes (the 15s poll), toast timers and async saves all funnel through
+  // render(), so guarding here covers every trigger. The pending render is
+  // replayed the moment the drag ends (see endSortDrag/up()).
+  if (state._sortDragging) { state._renderQueuedDuringDrag = true; return; }
+
   const app = document.getElementById('app');
 
   if (!state.currentStaff) {
@@ -15688,6 +15695,10 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
 
   const begin = () => {
     started = true;
+    // Freeze background re-renders (15s poll, toasts, async saves) for the
+    // duration of the drag so the row under the pointer can't be torn out.
+    state._sortDragging = true;
+    state._renderQueuedDuringDrag = false;
     itemsList = [...container.querySelectorAll(itemSel)];
     fromIdx = itemsList.indexOf(item);
     // Snapshot every item's resting geometry ONCE. All movement is computed against
@@ -15750,7 +15761,11 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
     document.removeEventListener('touchmove', blockScroll);
-    if (!started) return; // never crossed the threshold → it was a click/scroll, leave it alone
+    if (!started) { state._sortDragging = false; return; } // never crossed the threshold → it was a click/scroll, leave it alone
+    // Drag is ending — let renders through again. If anything tried to render
+    // mid-drag, replay it now so the list reflects any background updates.
+    state._sortDragging = false;
+    state._renderQueuedDuringDrag = false;
     item.classList.remove('sort-dragging');
     ['position', 'z-index', 'pointer-events', 'transform', 'will-change'].forEach(p => item.style.removeProperty(p));
     itemsList.forEach((el, i) => { if (i !== fromIdx) { el.style.transition = ''; el.style.transform = ''; el.style.willChange = ''; } });

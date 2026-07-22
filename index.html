@@ -624,6 +624,10 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .print-preview-cap{font-size:12px;font-weight:700;color:var(--charcoal-soft);margin-bottom:6px;}
 .print-preview-cap span{font-weight:500;opacity:0.7;}
 .paper-preview{background:#fff;color:#000;padding:12px 14px;border-radius:4px;box-shadow:0 2px 12px rgba(0,0,0,0.18);width:fit-content;}
+/* Elements flagged to print in red (2-colour impact/thermal printers). */
+.print-doc .dk-red, .print-doc .dk-red *{color:#C0392B !important;}
+/* Compact printer Font B: smaller, narrower glyphs — more per line. */
+.print-doc.dk.dk-font-b{font-size:0.82em;letter-spacing:-0.02em;}
 /* Editable print sample: the paper is the form. Tappable bits get a dashed
    underline; hidden lines stay visible but struck through and dimmed. */
 .pp-edit{cursor:pointer;border-bottom:1.5px dashed #999;padding-bottom:1px;}
@@ -2787,6 +2791,7 @@ app.put('/api/settings', (req, res) => {
     if (!isNaN(n)) data.settings.simpleTableCount = Math.max(1, Math.min(200, n));
   }
   if (quickRepeatEnabled !== undefined) data.settings.quickRepeatEnabled = !!quickRepeatEnabled;
+  if (req.body.coursePagedDocket !== undefined) data.settings.coursePagedDocket = !!req.body.coursePagedDocket;
   if (req.body.showItemIcons !== undefined) data.settings.showItemIcons = !!req.body.showItemIcons;
   if (req.body.catIconsOnly !== undefined) data.settings.catIconsOnly = !!req.body.catIconsOnly;
   if (req.body.iconStyle !== undefined) data.settings.iconStyle = req.body.iconStyle === 'bw' ? 'bw' : 'emoji';
@@ -2812,7 +2817,16 @@ app.put('/api/settings', (req, res) => {
       footerText: String(dk.footerText !== undefined ? dk.footerText : (cur.footerText || '')).slice(0, 60),
       newCourseStyle: pick(dk.newCourseStyle, ['invert', 'border', 'plain'], cur.newCourseStyle || 'invert'),
       fontScale: pick(dk.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'normal'),
+      font: pick(dk.font, ['A', 'B'], cur.font || 'A'),
       density: pick(dk.density, ['tight', 'normal', 'roomy'], cur.density || 'normal'),
+      // Red accents for 2-colour (impact/red-black thermal) printers.
+      red: (() => {
+        const r = dk.red !== undefined ? dk.red : (cur.red || {});
+        const out = {};
+        ['header', 'table', 'course', 'items', 'notes', 'allergies', 'callaway'].forEach(k => { out[k] = !!(r && r[k]); });
+        if (dk.red === undefined && cur.red === undefined) out.callaway = true; // sensible default
+        return out;
+      })(),
     };
   }
   if (qtyPadEnabled !== undefined) data.settings.qtyPadEnabled = !!qtyPadEnabled;
@@ -3785,10 +3799,34 @@ app.get('/api/printers/discover', async (req, res) => {
   }
 });
 
+// On-demand: print one course's items of an open order on its stations
+// (the 🖨️ button in the call-away pane, and auto-print on fire).
+app.post('/api/orders/:id/print-course', (req, res) => {
+  const data = readData();
+  const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const course = parseInt(req.body && req.body.course) || 1;
+  const items = (order.items || []).filter(i => (i.course || 1) === course);
+  if (!items.length) return res.status(400).json({ error: 'No items in that course yet' });
+  const courseName = (((data.settings || {}).courses || [])[course - 1] || {}).name || `Course ${course}`;
+  printing.printDocketsForRound(data, order, items, 0, { callAway: courseName });
+  res.json({ ok: true });
+});
+
+// On-demand: print the bill for an open order on the receipt station(s).
+app.post('/api/orders/:id/print-bill', (req, res) => {
+  const data = readData();
+  const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!(data.printerStations || []).some(s => s.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
+  printing.printReceiptForOrder(data, order);
+  res.json({ ok: true });
+});
+
 // Send a test page straight to an IP so setup can be verified in seconds.
 app.post('/api/printers/test', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address' });
+  if (!/^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
   try {
     await printing.sendToPrinter(ip, printing.testPage(readData().settings));
     res.json({ ok: true });
@@ -3799,11 +3837,15 @@ app.post('/api/printers/test', async (req, res) => {
 
 app.post('/api/printer-stations', (req, res) => {
   const data = readData();
-  const { name, categories, ip, receipts } = req.body;
+  const { name, categories, ip, ips, backupIp, receipts } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Station name is required' });
-  const cleanIp = String(ip || '').trim();
-  if (cleanIp && !/^\d{1,3}(\.\d{1,3}){3}$/.test(cleanIp)) return res.status(400).json({ error: 'That printer IP address does not look right' });
-  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ip: cleanIp || null, receipts: !!receipts, paused: false, fallbackId: null };
+  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
+  const cleanIps = (Array.isArray(ips) ? ips : [ip]).map(x => String(x || '').trim()).filter(Boolean);
+  if (cleanIps.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
+  const cleanBackup = String(backupIp || '').trim();
+  if (cleanBackup && !IP_RE.test(cleanBackup)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
+  const pw = req.body.paperWidth === '58' ? '58' : '80';
+  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, paused: false, fallbackId: null };
   data.printerStations = [...(data.printerStations || []), station];
   logAudit(data, staffFromReq(req), `Added printer station: ${station.name}`);
   writeData(data);
@@ -3814,14 +3856,27 @@ app.put('/api/printer-stations/:id', (req, res) => {
   const data = readData();
   const station = (data.printerStations || []).find(s => s.id === req.params.id);
   if (!station) return res.status(404).json({ error: 'Station not found' });
-  const { name, categories, ip, receipts, paused, fallbackId } = req.body;
+  const { name, categories, ip, ips, backupIp, receipts, paused, fallbackId } = req.body;
   if (name !== undefined && name.trim()) station.name = name.trim();
   if (Array.isArray(categories)) station.categories = categories;
-  if (ip !== undefined) {
+  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
+  if (Array.isArray(ips)) {
+    const clean = ips.map(x => String(x || '').trim()).filter(Boolean);
+    if (clean.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
+    station.ips = clean;
+    station.ip = clean[0] || null; // legacy mirror
+  } else if (ip !== undefined) {
     const clean = String(ip || '').trim();
-    if (clean && !/^\d{1,3}(\.\d{1,3}){3}$/.test(clean)) return res.status(400).json({ error: 'That printer IP address does not look right' });
+    if (clean && !IP_RE.test(clean)) return res.status(400).json({ error: 'That printer IP address does not look right' });
     station.ip = clean || null;
+    station.ips = clean ? [clean] : [];
   }
+  if (backupIp !== undefined) {
+    const clean = String(backupIp || '').trim();
+    if (clean && !IP_RE.test(clean)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
+    station.backupIp = clean || null;
+  }
+  if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : '80';
   if (receipts !== undefined) station.receipts = !!receipts;
   if (paused !== undefined) {
     station.paused = !!paused;
@@ -5356,9 +5411,11 @@ function elapsedMinLabel(ts) {
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 function fmtDate(ts) { return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' }); }
 
-// Printing uses the browser's own print dialog against whatever printer the
-// OS has installed - there's no direct ESC/POS or USB driver access from here.
+// The browser's print dialog exists ONLY for the "Plain paper · colour" print
+// type (a normal office printer). In thermal mode every print goes straight to
+// the network printers via the server — the OS print popup never appears.
 function openPrintArea(html) {
+  if ((state.settings.printColorMode || 'thermal') !== 'color') return;
   const area = document.getElementById('print-area');
   area.innerHTML = html;
   // Match the paper roll: 80mm or 58mm wide, auto length.
@@ -5386,6 +5443,7 @@ const DOCKET_DEFAULTS = {
   showSeats: true, showNotes: true, showBuild: true, showStationTag: true,
   showOrderNo: false, showTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
+  font: 'A', red: { callaway: true },
 };
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 function docketDocClasses() {
@@ -5393,7 +5451,7 @@ function docketDocClasses() {
   return 'print-doc dk'
     + (s.paperWidth === '58' ? ' pw58' : ' pw80')
     + (s.printColorMode === 'color' ? ' mode-color' : ' mode-thermal')
-    + ' dk-fs-' + d.fontScale + ' dk-den-' + d.density + ' dk-nc-' + d.newCourseStyle;
+    + ' dk-fs-' + d.fontScale + ' dk-den-' + d.density + ' dk-nc-' + d.newCourseStyle + (d.font === 'B' ? ' dk-font-b' : '');
 }
 // Persist one docket-layout option (merges into settings.docket).
 function setDocketOpt(key, value) {
@@ -5465,6 +5523,7 @@ function stationTag(line) {
 // on the docket, though colours are kept everywhere else in the app.
 function buildDocketDoc(ctx, edit) {
   const d = docketCfg();
+  const rc = k => (d.red && d.red[k]) ? ' dk-red' : '';
   // Tap-to-toggle wrappers: in edit mode every element is tappable (off = dimmed
   // but still there so you can switch it back on); in print mode off = gone.
   const tog = (on, key, inner, label) => edit
@@ -5481,28 +5540,28 @@ function buildDocketDoc(ctx, edit) {
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
   const vipHtml = ctx.vip ? btog(d.showVip, 'showVip', `<div class="print-flag">🌟 VIP — ${esc(ctx.vip)}</div>`, 'the VIP flag') : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
-    ? btog(d.showAllergies, 'showAllergies', `<div class="print-flag-block">${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, 'allergy flags')
+    ? btog(d.showAllergies, 'showAllergies', `<div class="print-flag-block${rc('allergies')}">${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, 'allergy flags')
     : '';
 
   return `
     <div class="${docketDocClasses()}">
-      ${edit || d.headerText ? `<div class="print-dockmini">${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
-      <h3 class="print-dockhead">${esc(ctx.subLabel)}${coversSeg}</h3>
+      ${edit || d.headerText ? `<div class="print-dockmini${rc('header')}">${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
+      <h3 class="print-dockhead${rc('table')}">${esc(ctx.subLabel)}${coversSeg}</h3>
       ${metaHtml}
       ${vipHtml}
       ${allergyHtml}
       <hr>
       ${ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
-          ${btog(d.showCourseName, 'showCourseName', `<div class="print-sub print-coursename">${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, 'course names')}
+          ${btog(d.showCourseName, 'showCourseName', `<div class="print-sub print-coursename${rc('course')}">${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, 'course names')}
           ${c.lines.map(l => {
             const seat = l.seat ? tog(d.showSeats, 'showSeats', ` (${esc(seatText(l.seat))})`, 'seat numbers') : '';
             const tag = l.tag ? tog(d.showStationTag, 'showStationTag', l.tag, 'station tags') : '';
-            const note = l.note ? tog(d.showNotes, 'showNotes', ` — <b>${esc(l.note)}</b>`, 'item notes') : '';
+            const note = l.note ? tog(d.showNotes, 'showNotes', ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`, 'item notes') : '';
             const build = (l.build && (l.build.kept.length || l.build.removed.length))
               ? btog(d.showBuild, 'showBuild', `<div class="print-build">${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, 'the build lines')
               : '';
-            return `<div class="print-line"><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+            return `<div class="print-line${rc('items')}"><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
           }).join('')}
         </div>`).join('')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
@@ -5510,6 +5569,14 @@ function buildDocketDoc(ctx, edit) {
 }
 
 function printKitchenDocket(courseNumber) {
+  // Thermal mode: the server prints the course's items on the right stations.
+  if ((state.settings.printColorMode || 'thermal') !== 'color') {
+    const o = activeOpenOrder();
+    if (!o) { state.toast = 'Nothing sent yet — dockets print when you Send.'; render(); setTimeout(() => { state.toast = null; render(); }, 2600); return; }
+    api(`/api/orders/${o.id}/print-course`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course: courseNumber }) })
+      .catch(e => { state.toast = e.message || 'Could not print the docket.'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); });
+    return;
+  }
   // Cumulative: shows every course fired so far for this table, with the
   // just-fired one highlighted so the kitchen can tell what's new without
   // losing the context of what's already been sent.
@@ -5569,7 +5636,17 @@ function sampleDocketCtx() {
     ],
   };
 }
-function sendTestPrint() {
+async function sendTestPrint() {
+  if ((state.settings.printColorMode || 'thermal') !== 'color') {
+    const ips = [...new Set((state.printerStations || []).flatMap(s => (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : []))))];
+    if (!ips.length) { state.toast = 'Add a printer station first (with an IP).'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); return; }
+    state.toast = `Sending test page to ${ips.length} printer${ips.length === 1 ? '' : 's'}…`; render();
+    const results = await Promise.allSettled(ips.map(ip => api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) })));
+    const failed = ips.filter((ip, i) => results[i].status === 'rejected');
+    state.toast = failed.length ? `Test failed on ${failed.join(', ')}` : `Test page sent to ${ips.length} printer${ips.length === 1 ? '' : 's'} ✓`;
+    render(); setTimeout(() => { state.toast = null; render(); }, 3500);
+    return;
+  }
   const html = `
     <div class="print-doc">
       <h3>${state.settings.ticketHeader || 'LINE POS'}</h3>
@@ -6854,7 +6931,7 @@ function fireCourse(n) {
   state.firedCourses[n] = Date.now();
   state.toast = `📣 ${esc(courseInfo(n).name)} called away`;
   render();
-  if (state.settings.printEnabled && state.settings.autoPrintKitchenDocket) printKitchenDocket(n);
+  if (state.settings.printEnabled) printKitchenDocket(n);
 }
 // One dedicated place to call away courses: a middle pane over the menu. Opening
 // it closes any other middle pane so only one thing covers the menu at a time.
@@ -6892,7 +6969,13 @@ async function callAwayTable(orderId) {
 async function markBillPrinted(orderId) {
   const order = (state.orders || []).find(o => String(o.id) === String(orderId));
   if (!order) return;
-  try { printReceipt(order); } catch (e) {}
+  if ((state.settings.printColorMode || 'thermal') !== 'color') {
+    // Thermal: the server prints the bill on the receipt station(s).
+    api(`/api/orders/${orderId}/print-bill`, { method: 'POST' })
+      .catch(e => { state.toast = e.message || 'Could not print the bill.'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); });
+  } else {
+    try { printReceipt(order); } catch (e) {}
+  }
   order.billPrinted = true;
   render();
   try {
@@ -8013,7 +8096,7 @@ function renderTicketPanel() {
         const info = courseInfo(n);
         return `
           <button class="course-tab ${state.activeCourse === n ? 'active' : ''}" data-act="set-course" data-val="${n}">
-            ${esc(info.name)}${state.firedCourses[n] ? ' ✓' : ''}
+            ${esc(info.name)}${(() => { if (state.settings.coursePagedDocket !== true) return ''; const cnt = state.cart.filter(c => c.course === n).reduce((s2, c) => s2 + c.qty, 0) + Object.values(sentByCourse[n] || {}).reduce((s2, e) => s2 + (e.qty || e.sentQty || 0), 0); return cnt ? ` ${cnt}` : ''; })()}${state.firedCourses[n] ? ' ✓' : ''}
           </button>`;
       }).join('')}
     </div>
@@ -8025,9 +8108,18 @@ function renderTicketPanel() {
         // item's qty re-highlights that line instead of adding a second one.
         const cartByCourse = {};
         state.cart.forEach((c, idx) => { (cartByCourse[c.course] = cartByCourse[c.course] || []).push({ ...c, idx }); });
-        const coursesToShow = courseNumbers.filter(n => (sentByCourse[n] && Object.keys(sentByCourse[n]).length) || (cartByCourse[n] && cartByCourse[n].length));
+        let coursesToShow = courseNumbers.filter(n => (sentByCourse[n] && Object.keys(sentByCourse[n]).length) || (cartByCourse[n] && cartByCourse[n].length));
         if (coursesToShow.length === 0) {
           return `<div class="empty-ticket"><div class="empty-ticket-icon">${uiIcon('receipt','🧾')}</div><div class="empty-ticket-msg">No items yet</div><div class="empty-ticket-sub">Tap a menu item to start the order</div></div>`;
+        }
+        // Course pages (Settings → Courses): the docket shows only the active
+        // course; the course tabs are the pages.
+        if (state.settings.coursePagedDocket === true) {
+          const hasItems = coursesToShow.includes(state.activeCourse);
+          coursesToShow = coursesToShow.filter(n => n === state.activeCourse);
+          if (!hasItems) {
+            return `<div class="empty-ticket"><div class="empty-ticket-msg" style="font-size:13px;">Nothing in ${esc(courseInfo(state.activeCourse).name)} yet</div><div class="empty-ticket-sub">Other courses have items — tap their tabs</div></div>`;
+          }
         }
         const keyOf = x => `${x.name}${x.seat != null ? x.seat : ''}${x.note || ''}${x.price}${removedSig(x)}`;
         const lineHtml = (e) => {
@@ -9775,13 +9867,14 @@ async function loadPrinterStations() {
   render();
 }
 function openAddPrinterStation() {
-  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ip: '', receipts: false, fallbackId: null });
+  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, fallbackId: null });
   state.adminError = '';
   render();
 }
 function openEditPrinterStation(id) {
   const s = state.printerStations.find(x => x.id === id);
-  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ip: s.ip || '', receipts: !!s.receipts, fallbackId: s.fallbackId || null });
+  const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
+  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, fallbackId: s.fallbackId || null });
   state.adminError = '';
   render();
 }
@@ -9795,9 +9888,16 @@ function togglePrinterStationCategory(catName) {
 async function savePrinterStationModal() {
   const m = state.printerStationModal;
   if (!m.name.trim()) { state.adminError = 'Station name is required.'; render(); return; }
-  const ipInput = document.getElementById('printer-station-ip-input');
+  const ipInputs = [...document.querySelectorAll('.ps-ip-input')];
+  const backupInput = document.getElementById('printer-station-backup-input');
   const fbSelect = document.getElementById('printer-station-fallback');
-  const payload = { name: m.name, categories: m.categories, ip: ipInput ? ipInput.value.trim() : (m.ip || ''), receipts: !!m.receipts, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || '') };
+  const payload = {
+    name: m.name, categories: m.categories,
+    ips: ipInputs.length ? ipInputs.map(el => el.value.trim()).filter(Boolean) : m.ips.filter(Boolean),
+    backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
+    paperWidth: m.paperWidth === '58' ? '58' : '80',
+    receipts: !!m.receipts, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
+  };
   try {
     if (m.mode === 'add') await api('/api/printer-stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     else await api(`/api/printer-stations/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -10109,25 +10209,8 @@ function renderPrintersSetupTab() {
       </div>
       ${s.printEnabled ? `<button class="btn-secondary" style="width:auto;padding:9px 16px;" data-act="test-print">🖨️ Send test print</button>` : ''}
     </div>
-    ${s.printEnabled ? `
-    <div class="settings-card wide" style="max-width:640px;">
-      <div class="th" style="margin-bottom:6px;">Paper & print type</div>
-      <label class="print-opt-label">Paper width</label>
-      <div class="pay-options" style="margin-bottom:12px;">
-        <div class="pay-opt ${w === '80' ? 'active' : ''}" data-act="set-paper-width" data-val="80">80mm</div>
-        <div class="pay-opt ${w === '58' ? 'active' : ''}" data-act="set-paper-width" data-val="58">58mm</div>
-      </div>
-      <label class="print-opt-label">Print type</label>
-      <div class="pay-options" style="margin-bottom:6px;">
-        <div class="pay-opt ${mode === 'thermal' ? 'active' : ''}" data-act="set-print-color-mode" data-val="thermal">Thermal · mono</div>
-        <div class="pay-opt ${mode === 'color' ? 'active' : ''}" data-act="set-print-color-mode" data-val="color">Plain paper · colour</div>
-      </div>
-      <label class="print-opt-label">Font size</label>
-      <div class="pay-options">
-        <div class="pay-opt ${scale === 'normal' ? 'active' : ''}" data-act="set-print-font-scale" data-val="normal">Normal</div>
-        <div class="pay-opt ${scale === 'large' ? 'active' : ''}" data-act="set-print-font-scale" data-val="large">Large</div>
-      </div>
-    </div>` : ''}
+
+    <div class="th" style="margin:6px 0 8px;">Printer stations</div>
     <div class="admin-toolbar">
       <button class="btn-add inline tb-add" data-act="add-printer-station" title="Add station">+</button>
       <button class="btn-secondary" data-act="find-printers" ${state.findingPrinters ? 'disabled' : ''}>${state.findingPrinters ? 'Scanning the wifi…' : '🔍 Find printers'}</button>
@@ -10150,12 +10233,31 @@ function renderPrintersSetupTab() {
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
         <div class="order-info">
           <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
-          <div class="t2">${s.ip ? `🖨 ${esc(s.ip)} · ` : 'No printer assigned · '}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `🖨 ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
         ${s.ip ? `<button class="btn-secondary sm" data-act="test-printer-ip" data-ip="${esc(s.ip)}">Test print</button>` : ''}
       </div>
     `).join('')}
+    ${s.printEnabled ? `
+    <div class="settings-card wide" style="max-width:640px;">
+      <div class="th" style="margin-bottom:6px;">Paper & print type</div>
+      <label class="print-opt-label">Paper width</label>
+      <div class="pay-options" style="margin-bottom:12px;">
+        <div class="pay-opt ${w === '80' ? 'active' : ''}" data-act="set-paper-width" data-val="80">80mm</div>
+        <div class="pay-opt ${w === '58' ? 'active' : ''}" data-act="set-paper-width" data-val="58">58mm</div>
+      </div>
+      <label class="print-opt-label">Print type</label>
+      <div class="pay-options" style="margin-bottom:6px;">
+        <div class="pay-opt ${mode === 'thermal' ? 'active' : ''}" data-act="set-print-color-mode" data-val="thermal">Thermal · mono</div>
+        <div class="pay-opt ${mode === 'color' ? 'active' : ''}" data-act="set-print-color-mode" data-val="color">Plain paper · colour</div>
+      </div>
+      <label class="print-opt-label">Font size</label>
+      <div class="pay-options">
+        <div class="pay-opt ${scale === 'normal' ? 'active' : ''}" data-act="set-print-font-scale" data-val="normal">Normal</div>
+        <div class="pay-opt ${scale === 'large' ? 'active' : ''}" data-act="set-print-font-scale" data-val="large">Large</div>
+      </div>
+    </div>` : ''}
   `;
 }
 
@@ -10179,8 +10281,13 @@ function renderPrintersDocketTab() {
       <div class="dk-format">
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">Paper</span><div class="seg" style="width:fit-content;"><button class="${w === '80' ? 'active' : ''}" data-act="set-paper-width" data-val="80">80mm</button><button class="${w === '58' ? 'active' : ''}" data-act="set-paper-width" data-val="58">58mm</button></div></div>
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">Text size</span>${seg(d.fontScale, 'fontScale', [{ v: 'normal', l: 'Normal' }, { v: 'large', l: 'Large' }, { v: 'xlarge', l: 'Huge' }])}</div>
+        <div class="dk-fmt-row"><span class="dk-fmt-lbl">Font</span>${seg(d.font || 'A', 'font', [{ v: 'A', l: 'A · Standard' }, { v: 'B', l: 'B · Compact' }])}</div>
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">Spacing</span>${seg(d.density, 'density', [{ v: 'tight', l: 'Tight' }, { v: 'normal', l: 'Normal' }, { v: 'roomy', l: 'Roomy' }])}</div>
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">New course</span>${seg(d.newCourseStyle, 'newCourseStyle', [{ v: 'invert', l: 'Inverse' }, { v: 'border', l: 'Border' }, { v: 'plain', l: 'Plain' }])}</div>
+        <div class="dk-fmt-row"><span class="dk-fmt-lbl">Print in red</span><div style="display:flex;flex-wrap:wrap;gap:6px;">
+          ${[['table', 'Table'], ['course', 'Courses'], ['items', 'Items'], ['notes', 'Notes'], ['allergies', 'Allergies'], ['callaway', 'Call away'], ['header', 'Header']].map(([k, l]) =>
+            `<button type="button" class="pay-opt dk-red-pill ${(d.red || {})[k] ? 'active' : ''}" style="flex:none;padding:7px 12px;" data-act="toggle-docket-red" data-key="${k}">${l}</button>`).join('')}
+        </div></div>
       </div>
       <div class="print-preview-grid" style="margin-top:16px;">
         <div>
@@ -10228,15 +10335,28 @@ function renderPrinterStationModal() {
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
         ${state.categories.map(c => `<button type="button" class="pay-opt ${m.categories.includes(c.name) ? 'active' : ''}" style="flex:none;padding:8px 14px;" data-act="toggle-printer-station-category" data-val="${esc(c.name)}">${esc(c.name)}</button>`).join('')}
       </div>
-      <label>Printer IP address</label>
-      <div style="display:flex;gap:8px;">
-        <input id="printer-station-ip-input" type="text" list="discovered-printer-ips" value="${esc(m.ip || '')}" placeholder="e.g. 192.168.1.87 — use Find printers" style="flex:1;">
-        <button type="button" class="btn-secondary" style="flex:none;" data-act="test-printer-ip-input">Test</button>
-      </div>
+      <label>Printers (all print every docket)</label>
+      ${m.ips.map((ip, idx) => `
+      <div style="display:flex;gap:8px;margin-bottom:6px;">
+        <input class="ps-ip-input" data-idx="${idx}" type="text" list="discovered-printer-ips" value="${esc(ip)}" placeholder="IP (192.168.1.87) or COM3" style="flex:1;">
+        <button type="button" class="btn-secondary" style="flex:none;" data-act="test-station-ip-row" data-idx="${idx}">Test</button>
+        ${m.ips.length > 1 ? `<button type="button" class="btn-secondary" style="flex:none;padding:9px 12px;" data-act="remove-station-ip" data-idx="${idx}">✕</button>` : ''}
+      </div>`).join('')}
+      <button type="button" class="btn-secondary" style="width:auto;padding:8px 14px;margin-bottom:4px;" data-act="add-station-ip">+ Add printer</button>
       <datalist id="discovered-printer-ips">
         ${(state.discoveredPrinters || []).map(ip => `<option value="${esc(ip)}"></option>`).join('')}
       </datalist>
-      <label>If this printer can't print, use</label>
+      <label>Backup printer (used if one above fails)</label>
+      <div style="display:flex;gap:8px;">
+        <input id="printer-station-backup-input" type="text" list="discovered-printer-ips" value="${esc(m.backupIp || '')}" placeholder="optional" style="flex:1;">
+        <button type="button" class="btn-secondary" style="flex:none;" data-act="test-station-backup">Test</button>
+      </div>
+      <label>Paper</label>
+      <div class="pay-options" style="margin-bottom:6px;">
+        <div class="pay-opt ${m.paperWidth !== '58' ? 'active' : ''}" data-act="set-station-paper" data-val="80">80mm</div>
+        <div class="pay-opt ${m.paperWidth === '58' ? 'active' : ''}" data-act="set-station-paper" data-val="58">58mm</div>
+      </div>
+      <label>If nothing here prints, send to station</label>
       <select id="printer-station-fallback">
         <option value="">— nowhere (alert only) —</option>
         ${state.printerStations.filter(s => s.id !== m.id).map(s => `<option value="${s.id}" ${m.fallbackId === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
@@ -10896,6 +11016,12 @@ function renderAllergySettingsAdmin() {
 
 function renderCoursesSettingsAdmin() {
   return `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Course pages in the docket</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.coursePagedDocket === true, 'set-course-paged')}
+    </div>
+  </div>
   <div class="settings-card">
     <div class="th" style="margin-bottom:14px;">Covers</div>
     <div class="pay-options">
@@ -16283,7 +16409,19 @@ function bindEvents() {
       else if (act === 'pair-linkly') { pairLinklyTerminal(); }
       else if (act === 'terminal-test-charge') { terminalTestCharge(); }
       else if (act === 'test-printer-ip') { testPrinterIp(el.dataset.ip); }
-      else if (act === 'test-printer-ip-input') { const inp = document.getElementById('printer-station-ip-input'); testPrinterIp(inp ? inp.value.trim() : ''); }
+      else if (act === 'test-station-ip-row') { const inp = document.querySelector(`.ps-ip-input[data-idx="${el.dataset.idx}"]`); testPrinterIp(inp ? inp.value.trim() : ''); }
+      else if (act === 'test-station-backup') { const inp = document.getElementById('printer-station-backup-input'); testPrinterIp(inp ? inp.value.trim() : ''); }
+      else if (act === 'add-station-ip' || act === 'remove-station-ip') {
+        const m = state.printerStationModal;
+        if (m) {
+          // Capture what's typed before the re-render rebuilds the rows.
+          [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; });
+          const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value;
+          if (act === 'add-station-ip') m.ips.push('');
+          else { m.ips.splice(parseInt(el.dataset.idx), 1); if (!m.ips.length) m.ips.push(''); }
+          render();
+        }
+      }
       else if (act === 'assign-printer-ip') { assignPrinterIp(el.dataset.id, el.dataset.ip); }
       else if (act === 'toggle-station-paused') { toggleStationPaused(el.dataset.id); }
       else if (act === 'bulk-price-mode') { state.bulkEditModal.priceMode = el.dataset.val; render(); }
@@ -16317,6 +16455,7 @@ function bindEvents() {
       else if (act === 'set-qtypad-enabled') { setQtyPadEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-item-icons') { saveTicketSetting({ showItemIcons: el.dataset.val === 'true' }); }
       else if (act === 'set-cat-icons-only') { saveTicketSetting({ catIconsOnly: el.dataset.val === 'true' }); }
+      else if (act === 'set-course-paged') { saveTicketSetting({ coursePagedDocket: el.dataset.val === 'true' }); }
       else if (act === 'set-icon-style') { saveTicketSetting({ iconStyle: el.dataset.val }); }
       else if (act === 'toggle-sort') { state.sortMenuOpen = state.sortMenuOpen === el.dataset.list ? null : el.dataset.list; render(); }
       else if (act === 'set-sort') { setListSort(el.dataset.list, el.dataset.key); }
@@ -16406,6 +16545,8 @@ function bindEvents() {
       else if (act === 'set-print-color-mode') { saveTicketSetting({ printColorMode: el.dataset.val }); }
       else if (act === 'set-print-font-scale') { saveTicketSetting({ printFontScale: el.dataset.val }); }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
+      else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); } }
+      else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }
       else if (act === 'test-print') { sendTestPrint(); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }
       else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) printReceipt(o); }
@@ -17245,6 +17386,13 @@ function bindEvents() {
 
   const printerStationNameInput = document.getElementById('printer-station-name-input');
   if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
+  // Keep typed printer addresses in state so a background re-render can never
+  // wipe them mid-keystroke.
+  document.querySelectorAll('.ps-ip-input').forEach(el => {
+    el.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.ips[parseInt(e.target.dataset.idx)] = e.target.value; });
+  });
+  const printerStationBackupInput = document.getElementById('printer-station-backup-input');
+  if (printerStationBackupInput) printerStationBackupInput.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.backupIp = e.target.value; });
 
   const happyHourNameInput = document.getElementById('happy-hour-name-input');
   if (happyHourNameInput) happyHourNameInput.addEventListener('input', (e) => { state.happyHourModal.name = e.target.value; });
@@ -17288,7 +17436,7 @@ function bindEvents() {
 
 // Refresh orders/summary quietly every 15s so other terminals' activity shows up
 setInterval(() => {
-  if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal) {
+  if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal && !state.printerStationModal) {
     refreshOrders().then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary(); return api('/api/menu'); })
       .then(menu => { state.menu = menu; render(); })
       .catch(() => { render(); });

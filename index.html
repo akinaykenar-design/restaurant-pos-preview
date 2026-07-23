@@ -2276,7 +2276,7 @@ const PORT = 3000;
 // Cap request bodies so one device can't post a huge payload that bloats
 // store.json or spikes memory. Menu/order payloads are tiny; 1mb is generous.
 // (Uploaded photos are resized client-side to well under this before posting.)
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '8mb' }));
 // Serve the app files with `Cache-Control: no-cache` so the browser always
 // revalidates (cheap 304 via ETag) and can never show a stale app.js/style.css
 // after an update — the cause of "the fix isn't there" on already-open devices.
@@ -4446,6 +4446,19 @@ app.get('/api/backup', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="pos-backup-${stamp}.json"`);
   res.send(JSON.stringify(data, null, 2));
+});
+
+// Replace the whole store with an uploaded data file (a downloaded copy from
+// another install — e.g. the browser preview). A safety snapshot is taken
+// first, so a bad import can be undone from Backups.
+app.post('/api/import', (req, res) => {
+  const incoming = req.body;
+  if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.menu) || !incoming.settings || !Array.isArray(incoming.orders)) {
+    return res.status(400).json({ error: 'That file does not look like POS data.' });
+  }
+  try { backups.snapshot('pre-import'); } catch (e) {}
+  writeData(incoming);
+  res.json({ ok: true });
 });
 
 // Revert admin config collections to a client-supplied snapshot (used by the
@@ -10015,13 +10028,15 @@ async function loadBackups() {
 function renderBackupsSettingsAdmin() {
   const list = state.backupsList;
   if (list === undefined) { state.backupsList = null; loadBackups(); }
-  const label = (f) => f.startsWith('close') ? 'register close' : f.startsWith('manual') ? 'manual' : f.startsWith('pre-restore') ? 'before a restore' : 'automatic';
+  const label = (f) => f.startsWith('close') ? 'register close' : f.startsWith('manual') ? 'manual' : f.startsWith('pre-restore') ? 'before a restore' : f.startsWith('pre-import') ? 'before an import' : 'automatic';
   return `
   <div class="settings-card wide">
     <div class="th">Backups</div>
     <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;">
       <button class="btn-add inline" data-act="backup-now">+ Back up now</button>
-      <button class="btn-secondary" data-act="download-backup">⬇ Download a copy</button>
+      <button class="btn-secondary" data-act="download-backup">⬇ Download data file</button>
+      <button class="btn-secondary" data-act="import-data">⬆ Import data file</button>
+      <input type="file" id="import-data-input" accept=".json,application/json" style="display:none;">
     </div>
     ${list === null || list === undefined ? '<div class="ts">Loading…</div>' : list.length === 0 ? '<div class="ts">No backups yet.</div>' : list.map(b => `
       <div class="order-row" style="cursor:default;">
@@ -10032,6 +10047,41 @@ function renderBackupsSettingsAdmin() {
         <button class="btn-secondary sm" data-act="restore-backup" data-file="${esc(b.file)}">Restore</button>
       </div>`).join('')}
   </div>`;
+}
+// Fetch-and-blob (not a navigation) so it also works inside the browser
+// preview, where there is no real server to navigate to.
+async function downloadDataFile() {
+  try {
+    const r = await fetch('/api/backup');
+    if (!r.ok) throw new Error('Could not read data.');
+    const text = await r.text();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+    a.download = 'pos-data-' + new Date().toISOString().slice(0, 10) + '.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  } catch (e) { state.toast = 'Could not download the data file.'; render(); setTimeout(() => { state.toast = null; render(); }, 2500); }
+}
+function importDataFile(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let data;
+    try { data = JSON.parse(reader.result); } catch (e) { data = null; }
+    if (!data || !Array.isArray(data.menu) || !data.settings) {
+      state.toast = 'That file does not look like POS data.'; render();
+      setTimeout(() => { state.toast = null; render(); }, 3000);
+      return;
+    }
+    openConfirm({ message: 'Replace ALL current data with this file?\n\nA safety copy of right now is taken first, so this can be undone from Backups.', confirmLabel: 'Import', danger: true }, async () => {
+      try {
+        await api('/api/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+        state.toast = 'Data imported. The app will reload.';
+        render();
+        setTimeout(() => location.reload(), 1200);
+      } catch (e) { state.toast = e.message; render(); }
+    });
+  };
+  reader.readAsText(file);
 }
 async function backupNow() {
   try {
@@ -15998,6 +16048,15 @@ async function deleteComboAction(id) {
   }
 }
 
+// Backups: hidden file input for "Import data file" (delegated once — the
+// input is re-created by every render).
+document.addEventListener('change', (e) => {
+  if (e.target && e.target.id === 'import-data-input' && e.target.files && e.target.files[0]) {
+    importDataFile(e.target.files[0]);
+    e.target.value = '';
+  }
+});
+
 // Design › Screen mockup: dragging the grip on the docket edge resizes the real
 // docket width live (CSS var only — no re-render until release, so the drag
 // can't be torn out from under the pointer).
@@ -16690,7 +16749,8 @@ function bindEvents() {
         if (to) params.set('to', to);
         window.location.href = '/api/orders/export.csv' + (params.toString() ? '?' + params.toString() : '');
       }
-      else if (act === 'download-backup') { window.location.href = '/api/backup'; }
+      else if (act === 'download-backup') { downloadDataFile(); }
+      else if (act === 'import-data') { const inp = document.getElementById('import-data-input'); if (inp) inp.click(); }
       else if (act === 'close-register') { closeRegister(); }
       else if (act === 'covers-inc') { incCovers(); }
       else if (act === 'covers-dec') { decCovers(); }

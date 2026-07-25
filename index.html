@@ -1056,6 +1056,10 @@ input:focus, select:focus, textarea:focus{
 .glyph-btn svg{width:29px;height:29px;fill:currentColor;display:block;}
 .glyph-btn .gnum{position:absolute;left:50%;transform:translateX(-50%);font-family:var(--font-mono);font-weight:800;line-height:1;font-size:13.5px;top:49%;}
 .glyph-btn .gnum.cov{color:var(--surface);top:52%;font-size:12.5px;}
+/* Expandable bodies (nav groups etc.): plain block that fills the sidebar
+   column; the open animation is a one-off height tween from render(). */
+.exp-body{width:100%;}
+.exp-body .admin-nav-btn{width:100%;text-align:left;}
 /* Floor editor: Tables / Objects placement dropdowns. */
 .pp-select{padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;font-size:13px;font-weight:600;min-width:170px;cursor:pointer;}
 /* Table finish (texture) swatches in the floor editor. */
@@ -7617,6 +7621,52 @@ async function voidOrder(id, reason, note) {
   render();
 }
 
+// ---- Expand motion. The whole DOM is rebuilt on every state change, so CSS
+// transitions never get to play on their own. Instead: snapshot which
+// expandables were open BEFORE the rebuild, and after it, run a one-off
+// height animation on anything that is newly open — nav groups, expandable
+// admin rows, the ticket totals breakdown, the mobile docket sheet.
+// A row counts as expanded when it has a body under its header (some lists
+// use an .open class, some don't — child count is the one universal signal).
+function expRowKey(el) {
+  const sk = el.querySelector('[data-selkey]');
+  return 'row:' + (el.dataset.id || el.dataset.typeid || (sk && sk.dataset.selkey) || (el.firstElementChild && el.firstElementChild.textContent.slice(0, 40)) || '');
+}
+function snapshotExpKeys() {
+  const keys = new Set();
+  document.querySelectorAll('[data-expkey]').forEach(el => keys.add(el.dataset.expkey));
+  document.querySelectorAll('.menu-item-expandable').forEach(el => { if (el.children.length > 1) keys.add(expRowKey(el)); });
+  return keys;
+}
+// Rapid follow-up renders (async loads right after a toggle) replace the
+// animating element and would cut the tween dead — remember what's mid-flight
+// and replay it on the fresh element.
+const _expUntil = {};
+function expandIn(el, key) {
+  const h = el.offsetHeight;
+  if (!h || !el.animate) return;
+  _expUntil[key] = Date.now() + 200;
+  el.style.overflow = 'hidden';
+  const anim = el.animate(
+    [{ height: '0px', opacity: 0.25 }, { height: h + 'px', opacity: 1 }],
+    { duration: 190, easing: 'cubic-bezier(.2,.7,.3,1)' });
+  anim.onfinish = () => { el.style.overflow = ''; };
+}
+function shouldExpand(prev, key) {
+  return !prev.has(key) || (_expUntil[key] || 0) > Date.now();
+}
+function animateExpansions(prev) {
+  if (!prev) return;
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  document.querySelectorAll('[data-expkey]').forEach(el => {
+    if (shouldExpand(prev, el.dataset.expkey)) expandIn(el, el.dataset.expkey);
+  });
+  document.querySelectorAll('.menu-item-expandable').forEach(row => {
+    const key = expRowKey(row);
+    if (row.children.length > 1 && shouldExpand(prev, key)) expandIn(row.children[1], key);
+  });
+}
+
 function render() {
   // NEVER rebuild the DOM while a drag-to-reorder is live — doing so destroys the
   // element under the pointer, which drops the drag "on its own". Background
@@ -7625,6 +7675,7 @@ function render() {
   // replayed the moment the drag ends (see endSortDrag/up()).
   if (state._sortDragging || state._mockDragging) { state._renderQueuedDuringDrag = true; return; }
 
+  const _prevExp = snapshotExpKeys();
   const app = document.getElementById('app');
 
   if (!state.currentStaff) {
@@ -7687,6 +7738,7 @@ function render() {
     if (el) { el.scrollTop = top; el.scrollLeft = left; }
   });
   setToolbarHeightVar();
+  animateExpansions(_prevExp);
 }
 
 // The sticky selection bar pins just below the sticky toolbar (phone
@@ -8166,7 +8218,7 @@ function renderTicketPanel() {
   const courseNumbers = [...new Set([...state.cart.map(c => c.course), ...Object.keys(sentByCourse).map(Number), ...Array.from({ length: state.courseCount }, (_, i) => i + 1)])].sort((a, b) => a - b);
 
   return `
-  <div class="ticket-panel ${state.mobileCartOpen ? 'open' : ''}">
+  <div class="ticket-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}">
     <div class="ticket-head">
       <button class="ticket-close-mobile" data-act="toggle-mobile-cart" title="Back to menu">✕</button>
       ${state.settings.ticketHeader ? `<div class="ticket-custom-header">${esc(state.settings.ticketHeader)}</div>` : ''}
@@ -8319,11 +8371,11 @@ function renderTicketPanel() {
       const totalAll = taxCfg().mode === 'exclusive' ? subAll - discountAmount + taxAll : subAll - discountAmount;
       return `
       <div class="ticket-running" data-act="toggle-ticket-totals" title="${state.totalsExpanded ? 'Hide the breakdown' : 'Show the breakdown'}">
-        ${state.totalsExpanded ? `
+        ${state.totalsExpanded ? `<div data-expkey="totals">
           ${sentSub > 0 ? `<div class="tot-row"><span>Sent to kitchen</span><span>${money(sentSub)}</span></div>` : ''}
           ${newSub > 0 && sentSub > 0 ? `<div class="tot-row"><span>New items</span><span>${money(newSub)}</span></div>` : newSub > 0 ? `<div class="tot-row"><span>Items</span><span>${money(newSub)}</span></div>` : ''}
           ${discountAmount ? `<div class="tot-row"><span>${state.discount && state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${money(-discountAmount)}</span></div>` : ''}
-          ${taxAll ? `<div class="tot-row"><span>${esc(taxLabel())}</span><span>${money(taxAll)}</span></div>` : ''}` : ''}
+          ${taxAll ? `<div class="tot-row"><span>${esc(taxLabel())}</span><span>${money(taxAll)}</span></div>` : ''}</div>` : ''}
         <div class="tot-row grand"><span>Total ${state.totalsExpanded ? '' : '▸'}</span><span>${money(totalAll)}</span></div>
       </div>`;
     })()}
@@ -11056,7 +11108,7 @@ function renderAdminNavBody() {
     const open = state.adminOpenGroups.includes(groupKey);
     return `
       <button class="admin-nav-btn${open ? ' current' : ''}" data-act="toggle-menu-group" data-val="${groupKey}" style="font-weight:600;padding:11px 10px;">${s.group}</button>
-      ${open ? s.children.map(c => `<button class="admin-nav-btn admin-nav-sub ${state.adminTab === c.key ? 'active' : ''}" data-act="admin-tab" data-val="${c.key}" style="padding-left:22px;">${esc(c.label)}${c.key === 'stock-ledger' && lowStockItems().length > 0 ? ` <span class="status-chip void" style="margin-left:4px;">${lowStockItems().length}</span>` : ''}</button>`).join('') : ''}`;
+      ${open ? `<div class="exp-body" data-expkey="nav:${groupKey}">${s.children.map(c => `<button class="admin-nav-btn admin-nav-sub ${state.adminTab === c.key ? 'active' : ''}" data-act="admin-tab" data-val="${c.key}" style="padding-left:22px;">${esc(c.label)}${c.key === 'stock-ledger' && lowStockItems().length > 0 ? ` <span class="status-chip void" style="margin-left:4px;">${lowStockItems().length}</span>` : ''}</button>`).join('')}</div>` : ''}`;
   }).join('');
 }
 
@@ -12273,7 +12325,7 @@ function renderFloorPlanAdmin() {
   </div>`;
   })()}
   ${state.floorAdvancedOpen ? `
-  <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
+  <div data-expkey="floor-adv" style="display:flex;align-items:center;gap:16px;margin-bottom:14px;flex-wrap:wrap;">
     <div style="display:flex;align-items:center;gap:8px;">
       <label class="ts" style="margin:0;">Height (px)</label>
       <input id="floorplan-height-input" type="number" min="200" max="1000" step="10" value="${fp.height}" data-fp="${fp.id}" style="width:80px;padding:7px 10px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
@@ -16510,7 +16562,29 @@ function bindEvents() {
         if (cur && cur.id) openConfirm({ message: msg, confirmLabel: 'Delete', danger: true }, () => { state[key] = null; state.adminError = ''; fn(cur.id); });
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return; state.view = 'order'; render(); }
-      else if (act === 'toggle-mobile-cart') { state.mobileCartOpen = !state.mobileCartOpen; render(); }
+      else if (act === 'toggle-mobile-cart') {
+        const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const sheet = document.querySelector('.ticket-panel.open');
+        if (state.mobileCartOpen && sheet && window.innerWidth <= 768 && !reduce) {
+          // Slide the sheet down first, THEN re-render — closing has motion too.
+          sheet.classList.remove('open');
+          setTimeout(() => { state.mobileCartOpen = false; render(); }, 290);
+        } else if (!state.mobileCartOpen && window.innerWidth <= 768 && !reduce) {
+          // Open with the slide-up: mount one frame closed (a fresh, unpainted
+          // element skips CSS transitions), then flip the class on the live node.
+          state.mobileCartOpen = true;
+          state._sheetEntering = true;
+          render();
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            state._sheetEntering = false;
+            const live = document.querySelector('.ticket-panel');
+            if (live && state.mobileCartOpen) live.classList.add('open');
+          }));
+        } else {
+          state.mobileCartOpen = !state.mobileCartOpen;
+          render();
+        }
+      }
       else if (act === 'cat') {
         state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
         state.showTablePicker = false; state.transferMode = false; state.mergeMode = false;

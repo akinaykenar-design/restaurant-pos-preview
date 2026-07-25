@@ -4687,7 +4687,7 @@ app.post('/api/orders', (req, res) => {
       customerName: orderType !== 'dine-in' ? (customerName || 'Guest') : null,
       covers: orderType === 'dine-in' && covers ? parseInt(covers) : null,
       items,
-      rounds: [{ id: 1, sentAt: Date.now(), color: null, items }],
+      rounds: [{ id: 1, sentAt: Date.now(), color: null, items, quickNote: String(req.body.quickNote || '').trim().slice(0, 120) || null }],
       subtotal,
       discount: null,
       tax: 0,
@@ -4704,7 +4704,7 @@ app.post('/api/orders', (req, res) => {
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
-    printing.printDocketsForRound(data, order, items, 1);
+    printing.printDocketsForRound(data, order, items, 1, order.rounds[0].quickNote ? { quickNote: order.rounds[0].quickNote } : undefined);
     return res.json(order);
   }
 
@@ -4774,7 +4774,8 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   }
   const items = rawItems.map(i => ({ ...i, status: i.status || 'ordered' }));
   const roundNumber = (order.rounds || []).length + 1;
-  const round = { id: roundNumber, sentAt: Date.now(), color: roundColorFor(data, roundNumber), items };
+  const quickNote = String(req.body.quickNote || '').trim().slice(0, 120) || null;
+  const round = { id: roundNumber, sentAt: Date.now(), color: roundColorFor(data, roundNumber), items, quickNote };
   order.rounds = [...(order.rounds || []), round];
   order.items = order.items.concat(items);
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
@@ -4786,7 +4787,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   // Later rounds can reprint the whole docket (settings.docket.roundPrint =
   // 'full') so the kitchen sees the complete table, or just the added items.
   const fullRound = ((data.settings.docket || {}).roundPrint === 'full');
-  printing.printDocketsForRound(data, order, fullRound ? order.items : items, roundNumber);
+  printing.printDocketsForRound(data, order, fullRound ? order.items : items, roundNumber, quickNote ? { quickNote } : undefined);
   res.json(order);
 });
 
@@ -5417,6 +5418,7 @@ let state = {
   vipPresets: [],
   sizePresets: [],
   notes: [], // [{ seat, categoryId, text }]
+  quickNote: '', // one-shot note — prints on the NEXT docket only, then clears
   notesPanel: null, // { tab: 'vip'|'allergy'|<categoryId> }
   customNoteDraft: null, // { categoryId, text, seats, wholeTable }
   noteCategories: [], // [{ id, name, color }]
@@ -7402,7 +7404,7 @@ async function sendToKitchen() {
       order = await api(`/api/orders/${state.openOrderId}/rounds`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: state.cart, staffName }),
+        body: JSON.stringify({ items: state.cart, staffName, quickNote: state.quickNote || null }),
       });
     } else {
       const payload = {
@@ -7414,6 +7416,7 @@ async function sendToKitchen() {
         staffId: state.currentStaff ? state.currentStaff.id : null,
         staffName,
         open: true,
+        quickNote: state.quickNote || null,
       };
       order = await api('/api/orders', {
         method: 'POST',
@@ -7423,6 +7426,7 @@ async function sendToKitchen() {
       state.openOrderId = order.id;
     }
     state.cart = [];
+    state.quickNote = ''; // one-shot: it went out on this docket, never again
     state.activeCourse = firstEnabledCourseNumber();
     state.courseCount = state.settings.courses.length || 1;
     // Keep any called-away courses (and their timers) — sending a round must not
@@ -8167,8 +8171,9 @@ function renderTicketPanel() {
           <button class="tkt-icon-btn lg ${state.notesPanel ? 'active' : ''}" title="Notes" data-act="toggle-notes-panel">${uiIcon('note','📝')}</button>
           <button class="tkt-icon-btn lg ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${uiIcon('flame','🔥')}</button>
         </div>
-        ${(state.vipType || state.allergies.length || state.notes.length) ? `
+        ${(state.vipType || state.allergies.length || state.notes.length || state.quickNote) ? `
         <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+          ${state.quickNote ? `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border-color:var(--orange);">⚡ ${esc(state.quickNote)} <button data-act="clear-quick-note" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>` : ''}
           ${state.vipType ? `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border-color:var(--orange);">VIP — ${state.vipType} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>` : ''}
           ${state.allergies.map((a, idx) => {
             const preset = findAllergyPreset(a.allergy);
@@ -8323,6 +8328,10 @@ function renderNotesMiddle() {
     <div class="middle-view-head" style="justify-content:space-between;">
       <div class="th">${uiIcon('note','📝')} Notes</div>
       <button class="tkt-icon-btn lg" title="Close" data-act="close-notes-panel">✕</button>
+    </div>
+    <div style="padding:12px 20px 0;display:flex;gap:8px;align-items:center;">
+      <input id="quick-note-input" type="text" maxlength="120" placeholder="⚡ Quick note — next docket only" value="${esc(state.quickNote || '')}" style="flex:1;max-width:420px;padding:10px 12px;border-radius:8px;border:1px solid var(--steel-300);font-size:13.5px;background:var(--surface);color:var(--text-primary);font-family:inherit;">
+      ${state.quickNote ? `<button class="icon-sq" title="Clear" data-act="clear-quick-note">✕</button>` : ''}
     </div>
     <div style="padding:8px 20px 0;">
       <div class="seg" style="width:fit-content;flex-wrap:wrap;">
@@ -16972,6 +16981,7 @@ function bindEvents() {
         render();
       }
       else if (act === 'clear-vip') { clearVip(); }
+      else if (act === 'clear-quick-note') { state.quickNote = ''; render(); }
       else if (act === 'open-bulk-edit') { openBulkEditModal(); }
       else if (act === 'duplicate-selected-menu-items') { duplicateSelectedMenuItems(); }
       else if (act === 'delete-selected-menu-items') { deleteSelectedMenuItems(); }
@@ -17760,6 +17770,9 @@ function bindEvents() {
   if (checkoutGiftcardInput) checkoutGiftcardInput.addEventListener('input', (e) => { state.checkoutGiftCardCode = e.target.value; });
   const checkoutVoucherInput = document.getElementById('checkout-voucher-input');
   if (checkoutVoucherInput) checkoutVoucherInput.addEventListener('input', (e) => { state.checkoutVoucherCode = e.target.value; });
+
+  const quickNoteInput = document.getElementById('quick-note-input');
+  if (quickNoteInput) quickNoteInput.addEventListener('input', (e) => { state.quickNote = e.target.value; });
 
   document.querySelectorAll('.admin-floor-marker').forEach(el => {
     el.addEventListener('mousedown', (e) => startFloorDrag(e, el.dataset.id));

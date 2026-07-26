@@ -146,6 +146,31 @@ body[data-subcat-size="lg"] .subcat-seg button{padding:12px 20px;font-size:14.5p
 .cat-btn.active{border-left-color:var(--orange);background:var(--orange-dim);color:var(--orange);}
 /* Desktop keeps the floating menu-float; the in-rail toggles are phone-only. */
 .catrail-toggles{display:none;}
+/* Menu bar on top (PC/tablet, Design → Panel layout): the .main row becomes a
+   grid — full-width horizontal rail above, menu + docket splitting the space
+   below on the docket's saved side. Phones keep their own media-query layout. */
+@media (min-width: 769px){
+  body[data-rail-pos="top"] .main{ display:grid; grid-template-rows:auto minmax(0,1fr); }
+  body[data-rail-pos="top"][data-ticket-side="right"] .main{ grid-template-columns:minmax(0,1fr) var(--ticket-w,360px); }
+  body[data-rail-pos="top"][data-ticket-side="left"] .main{ grid-template-columns:var(--ticket-w,360px) minmax(0,1fr); }
+  body[data-rail-pos="top"] .catrail{
+    grid-row:1; grid-column:1 / -1; width:100%; height:auto;
+    display:flex; flex-direction:row; gap:6px; overflow-x:auto; overflow-y:hidden;
+    padding:5px 8px; border-right:none; border-bottom:1px solid var(--steel-200);
+  }
+  body[data-rail-pos="top"] .cat-btn{
+    width:auto; aspect-ratio:auto; flex:0 0 auto; flex-direction:row; gap:6px; white-space:nowrap;
+    padding:7px 13px; border-radius:var(--btn-radius); border-left:none;
+    background:var(--steel-100); color:var(--charcoal-soft);
+  }
+  body[data-rail-pos="top"] .cat-btn.active{ background:var(--orange); color:#fff; border-left-color:transparent; }
+  body[data-rail-pos="top"][data-ticket-side="right"] .menu-panel,
+  body[data-rail-pos="top"][data-ticket-side="right"] .middle-view{ grid-row:2; grid-column:1; }
+  body[data-rail-pos="top"][data-ticket-side="left"] .menu-panel,
+  body[data-rail-pos="top"][data-ticket-side="left"] .middle-view{ grid-row:2; grid-column:2; }
+  body[data-rail-pos="top"][data-ticket-side="right"] .ticket-panel{ grid-row:2; grid-column:2; width:auto; }
+  body[data-rail-pos="top"][data-ticket-side="left"] .ticket-panel{ grid-row:2; grid-column:1; width:auto; }
+}
 
 .menu-panel{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--steel-100);order:var(--panel-order-menu,1);position:relative;}
 /* Collapsed search: a floating magnifier (+ pad toggle) in the menu's top-right
@@ -1334,6 +1359,10 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
 .mk-mob-bar{position:absolute;left:0;right:0;bottom:0;height:52px;display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--green);color:#fff;border-radius:16px 16px 0 0;padding:0 18px;font-family:var(--font-display);font-size:14px;box-shadow:0 -4px 16px rgba(20,24,25,.18);}
 .mk-mob-bar .mcb-grip{position:absolute;left:50%;top:5px;transform:translateX(-50%);width:34px;height:4px;border-radius:2px;background:rgba(255,255,255,.55);}
 .mk-mob-bar .mcb-total{font-family:var(--font-mono);}
+/* Rail-on-top mockup frame (PC/tablet) */
+.mk-topwrap{display:flex;flex-direction:column;width:100%;height:100%;min-height:0;}
+.mk-topwrap .mk-mob-rail{flex-shrink:0;}
+.mk-toprow{display:flex;flex:1;min-height:0;}
 .mk-line{display:flex;gap:10px;align-items:flex-start;}
 .mk-line-qty{flex:none;min-width:28px;height:28px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--chit-line);border-radius:6px;font-family:var(--font-mono);font-size:calc(12px*var(--tkt-fs,1));font-weight:700;}
 
@@ -2948,6 +2977,14 @@ app.put('/api/settings', (req, res) => {
       }
     }
     data.settings.panelOrders = next;
+  }
+  if (req.body.railPositions && typeof req.body.railPositions === 'object') {
+    const next = Object.assign({}, data.settings.railPositions);
+    for (const dev of ['pc', 'tablet']) {
+      const v = req.body.railPositions[dev];
+      if (v === 'side' || v === 'top') next[dev] = v;
+    }
+    data.settings.railPositions = next;
   }
   if (Array.isArray(panelOrder)) {
     const valid = ['catrail', 'menu', 'ticket'];
@@ -6342,12 +6379,33 @@ function panelOrderFor(device) {
   return ((po[device] && po[device].length === 3 ? po[device] : null) || s.panelOrder || ['catrail', 'menu', 'ticket']).slice();
 }
 function applyPanelLayout() {
-  const order = panelOrderFor(activeLayoutDevice());
+  const dev = activeLayoutDevice();
+  const order = panelOrderFor(dev);
   const fallback = { catrail: 0, menu: 1, ticket: 2 };
   ['catrail', 'menu', 'ticket'].forEach(id => {
     const i = order.indexOf(id);
     document.body.style.setProperty(`--panel-order-${id}`, i >= 0 ? i : fallback[id]);
   });
+  // Menu bar position (PC/tablet): 'top' turns the side rail into a horizontal
+  // strip via a grid layout; the docket keeps its saved side underneath.
+  const railTop = dev !== 'mobile' && (state.settings.railPositions || {})[dev] === 'top';
+  document.body.setAttribute('data-rail-pos', railTop ? 'top' : 'side');
+  document.body.setAttribute('data-ticket-side', order.indexOf('ticket') < order.indexOf('menu') ? 'left' : 'right');
+}
+async function saveRailPosition(val) {
+  const dev = state.mockDevice || 'pc';
+  if (dev === 'mobile') return;
+  const rp = { ...(state.settings.railPositions || {}), [dev]: val };
+  state.settings.railPositions = rp; // optimistic
+  applyPanelLayout();
+  render();
+  try {
+    const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ railPositions: rp }) });
+    state.settings = s;
+  } catch (e) {
+    state.toast = 'Could not save layout.';
+    render();
+  }
 }
 window.addEventListener('resize', applyPanelLayout);
 async function reorderPanels(fromIdx, toIdx) {
@@ -11034,7 +11092,6 @@ const ADMIN_SECTIONS = [
     { key: 'settings-printers', label: 'Printers' },
   ] },
   { group: 'Settings', children: [
-    { key: 'settings', label: 'General' },
     { key: 'screen', label: 'Design' },
     { key: 'floorplan', label: 'Table Layout' },
     { key: 'settings-courses', label: 'Courses' },
@@ -11047,11 +11104,11 @@ const ADMIN_SECTIONS = [
 // Deep search: individual settings and controls, so "gst", "58mm" or "footer"
 // lands on the right page (and sub-tab) without knowing where anything lives.
 const SETTINGS_INDEX = [
-  { page: 'settings', label: 'Takeaway on/off', terms: 'takeaway order types' },
-  { page: 'settings', label: 'Delivery on/off', terms: 'delivery order types' },
-  { page: 'settings', label: 'Show or hide prices', terms: 'prices show hide menu' },
+  { page: 'screen', label: 'Takeaway on/off', terms: 'takeaway order types' },
+  { page: 'screen', label: 'Delivery on/off', terms: 'delivery order types' },
+  { page: 'screen', label: 'Show or hide prices', terms: 'prices show hide menu' },
   { page: 'settings-tax', label: 'Tax — name, rate & mode', terms: 'tax gst vat rate percent inclusive exclusive included finance' },
-  { page: 'settings', label: 'Download full backup', terms: 'backup download export data file' },
+  { page: 'settings-backups', label: 'Download full backup', terms: 'backup download export data file' },
   { page: 'screen', label: 'Colours & theme', terms: 'theme colour color accent dark light palette' },
   { page: 'screen', label: 'Menu tile size', terms: 'tile size item button small medium large' },
   { page: 'screen', label: 'Order screen mockup', terms: 'screen mockup preview order font text size docket width panel resize' },
@@ -11225,7 +11282,6 @@ function renderAdminView() {
         : state.adminTab === 'screen' ? renderScreenAdmin()
         : state.adminTab === 'floorplan' ? renderFloorPlanAdmin()
         : state.adminTab === 'audit' ? renderAuditLogAdmin()
-        : state.adminTab === 'settings' ? renderGeneralSettingsAdmin()
         : state.adminTab === 'settings-courses' ? renderCoursesSettingsAdmin()
         : state.adminTab === 'settings-allergies' ? renderAllergySettingsAdmin()
         : state.adminTab === 'settings-vip' ? renderVipSettingsAdmin()
@@ -11609,29 +11665,6 @@ function renderTaxSettingsAdmin() {
       </div>
     </div>` : ''}
   </div>`;
-}
-
-function renderGeneralSettingsAdmin() {
-  return `
-  <div class="settings-card">
-    <div class="th" style="margin-bottom:10px;">Order types</div>
-    <div class="th" style="margin-bottom:8px;font-size:12.5px;">Takeaway</div>
-    <div class="pay-options" style="margin-bottom:14px;">
-      ${togglePill(state.settings.takeawayEnabled !== false, 'set-takeaway-enabled')}
-    </div>
-    <div class="th" style="margin-bottom:8px;font-size:12.5px;">Delivery</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.deliveryEnabled !== false, 'set-delivery-enabled')}
-    </div>
-  </div>
-  <div class="settings-card">
-    <div class="th" style="margin-bottom:10px;">Prices</div>
-    <div class="seg" style="width:fit-content;">
-      <button class="${state.settings.showPrices ? 'active' : ''}" data-act="set-show-prices" data-val="true">Show prices</button>
-      <button class="${!state.settings.showPrices ? 'active' : ''}" data-act="set-show-prices" data-val="false">Hide prices</button>
-    </div>
-  </div>
-  `;
 }
 
 function renderStaffAdmin() {
@@ -12671,12 +12704,20 @@ function renderScreenMockup() {
       <div class="mk-mob-bar" data-act="mock-jump" data-target="ctl-docket" title="Docket settings"><span class="mcb-grip"></span><span>🧾 View order · ${totalUnits} items</span><span class="mcb-total">${money(total)}</span></div>
     </div>`;
   const devTab = (v, label) => `<div class="pay-opt ${dev === v ? 'active' : ''}" data-act="set-mock-device" data-val="${v}">${label}</div>`;
+  // Rail-on-top (PC/tablet): horizontal chip strip above, menu + docket below.
+  const railTop = dev !== 'mobile' && (state.settings.railPositions || {})[dev] === 'top';
+  const desktop = railTop
+    ? `<div class="mk-topwrap">
+        <div class="mk-mob-rail" data-act="mock-jump" data-target="ctl-rail" title="Menu bar settings">${cats.map(mkChip).join('')}</div>
+        <div class="mk-toprow">${order.filter(id => id !== 'catrail').map(id => panels[id]).join('')}</div>
+      </div>`
+    : order.map(id => panels[id]).join('');
   requestAnimationFrame(fitScreenMockup);
   return `
   <div class="settings-card">
     <div class="pay-options" style="margin-bottom:12px;">${devTab('pc', 'PC')}${devTab('tablet', 'Tablet')}${devTab('mobile', 'Phone')}</div>
     <div class="mk-wrap" data-fw="${frame.w}" data-cap="${frame.cap}" style="--mks:${MK_SCALE};--mkw:${frame.w}px;--mkh:${frame.h}px;">
-      <div class="scrmock">${dev === 'mobile' ? phone : order.map(id => panels[id]).join('')}</div>
+      <div class="scrmock">${dev === 'mobile' ? phone : desktop}</div>
     </div>
   </div>`;
 }
@@ -12716,6 +12757,12 @@ function renderScreenAdmin() {
           <span class="ptile-label" title="${meta[id].label}">${meta[id].label}</span>
         </div>`).join('')}
     </div>
+    ${dev !== 'mobile' ? `
+    <div class="th" style="margin:16px 0 10px;">Menu bar position</div>
+    <div class="pay-options">
+      <div class="pay-opt ${(state.settings.railPositions || {})[dev] !== 'top' ? 'active' : ''}" data-act="set-rail-pos" data-val="side">Side</div>
+      <div class="pay-opt ${(state.settings.railPositions || {})[dev] === 'top' ? 'active' : ''}" data-act="set-rail-pos" data-val="top">Top</div>
+    </div>` : ''}
   </div>
   <div class="settings-card" id="ctl-menu">
     <div class="th" style="margin-bottom:14px;">Menu tile size</div>
@@ -12724,6 +12771,11 @@ function renderScreenAdmin() {
     <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-tilegap', state.theme.tileGap || 'md')}</div>
     <div class="th" style="margin-bottom:14px;">Menu text</div>
     <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-fontsize', state.theme.fontSize || 'md')}</div>
+    <div class="th" style="margin-bottom:14px;">Prices</div>
+    <div class="seg" style="width:fit-content;margin-bottom:18px;">
+      <button class="${state.settings.showPrices ? 'active' : ''}" data-act="set-show-prices" data-val="true">Show prices</button>
+      <button class="${!state.settings.showPrices ? 'active' : ''}" data-act="set-show-prices" data-val="false">Hide prices</button>
+    </div>
     <div class="th" style="margin-bottom:14px;">Item prices</div>
     <div class="pay-options">
       ${togglePill(state.settings.showTilePrices !== false, 'set-tile-prices')}
@@ -12779,6 +12831,17 @@ function renderScreenAdmin() {
     <div class="th" style="margin-bottom:14px;">Quantity number pad</div>
     <div class="pay-options">
       ${togglePill(state.settings.qtyPadEnabled, 'set-qtypad-enabled')}
+    </div>
+  </div>
+  <div class="settings-card" id="ctl-ordertypes">
+    <div class="th" style="margin-bottom:10px;">Order types</div>
+    <div class="th" style="margin-bottom:8px;font-size:12.5px;">Takeaway</div>
+    <div class="pay-options" style="margin-bottom:14px;">
+      ${togglePill(state.settings.takeawayEnabled !== false, 'set-takeaway-enabled')}
+    </div>
+    <div class="th" style="margin-bottom:8px;font-size:12.5px;">Delivery</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.deliveryEnabled !== false, 'set-delivery-enabled')}
     </div>
   </div>`;
 }
@@ -16964,6 +17027,7 @@ function bindEvents() {
       else if (act === 'set-theme-tilegap') { setThemeDraft({ tileGap: el.dataset.val }); }
       else if (act === 'set-theme-tktgap') { setThemeDraft({ tktGap: el.dataset.val }); }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
+      else if (act === 'set-rail-pos') { saveRailPosition(el.dataset.val); }
       else if (act === 'set-theme-tktsize') { setThemeDraft({ tktFontSize: el.dataset.val }); }
       else if (act === 'tkt-width-minus') { setThemeDraft({ tktWidth: Math.max(260, (state.theme.tktWidth || 360) - 20) }); }
       else if (act === 'tkt-width-plus') { setThemeDraft({ tktWidth: Math.min(560, (state.theme.tktWidth || 360) + 20) }); }

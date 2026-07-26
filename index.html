@@ -117,6 +117,10 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
 .sn-short{display:none;}
 .seg button{border:none;background:none;padding:7px 16px;font-size:13px;font-weight:500;color:var(--charcoal-soft);border-radius:8px;cursor:pointer;}
 .seg button.active{background:var(--orange-dim);color:var(--orange);font-weight:700;}
+/* Subsection bar size (Design → Screen). md = the defaults above; these win
+   over the phone-portrait padding override via attribute specificity. */
+body[data-subcat-size="sm"] .subcat-seg button{padding:5px 12px;font-size:12px;}
+body[data-subcat-size="lg"] .subcat-seg button{padding:12px 20px;font-size:14.5px;}
 /* Order type lives in the top bar; same quiet segmented control, on a slightly
    deeper track so it reads against the bar surface. */
 .topbar-seg{background:var(--steel-100);}
@@ -2756,12 +2760,13 @@ app.get('/api/theme', (req, res) => {
 
 app.put('/api/theme', (req, res) => {
   const data = readData();
-  const { accent, mode, itemSize, fontSize, tktFontSize, tktWidth } = req.body;
+  const { accent, mode, itemSize, fontSize, tktFontSize, tktWidth, subcatSize } = req.body;
   if (accent && /^#[0-9A-Fa-f]{6}$/.test(accent)) data.theme.accent = accent;
   if (mode === 'light' || mode === 'dark') data.theme.mode = mode;
   if (itemSize === 'sm' || itemSize === 'md' || itemSize === 'lg') data.theme.itemSize = itemSize;
   if (fontSize === 'sm' || fontSize === 'md' || fontSize === 'lg') data.theme.fontSize = fontSize;
   if (tktFontSize === 'sm' || tktFontSize === 'md' || tktFontSize === 'lg') data.theme.tktFontSize = tktFontSize;
+  if (subcatSize === 'sm' || subcatSize === 'md' || subcatSize === 'lg') data.theme.subcatSize = subcatSize;
   if (Number.isFinite(Number(tktWidth))) data.theme.tktWidth = Math.max(260, Math.min(560, Math.round(Number(tktWidth))));
   writeData(data);
   res.json(data.theme);
@@ -5424,7 +5429,7 @@ let state = {
   recipeCosts: null, // { costOfGoods, grossProfit, profitMargin, ingredients }
 
   // Theme
-  theme: { accent: '#3692E7', mode: 'light', itemSize: 'md', fontSize: 'md', tktFontSize: 'md', tktWidth: 360 },
+  theme: { accent: '#3692E7', mode: 'light', itemSize: 'md', fontSize: 'md', tktFontSize: 'md', tktWidth: 360, subcatSize: 'md' },
 
   // Settings
   settings: {
@@ -6290,6 +6295,7 @@ function applyTheme() {
   document.body.setAttribute('data-item-size', state.theme.itemSize || 'md');
   document.body.setAttribute('data-font-size', state.theme.fontSize || 'md');
   document.body.setAttribute('data-tkt-size', state.theme.tktFontSize || 'md');
+  document.body.setAttribute('data-subcat-size', state.theme.subcatSize || 'md');
   root.style.setProperty('--ticket-w', (state.theme.tktWidth || 360) + 'px');
 }
 // Order-screen panel arrangement, per device size. The Layout admin page
@@ -12633,6 +12639,8 @@ function renderScreenAdmin() {
     <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-itemsize', state.theme.itemSize || 'md')}</div>
     <div class="th" style="margin-bottom:14px;">Menu text</div>
     <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-fontsize', state.theme.fontSize || 'md')}</div>
+    <div class="th" style="margin-bottom:14px;">Subsection bar</div>
+    <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-subcatsize', state.theme.subcatSize || 'md')}</div>
     <div class="th" style="margin-bottom:14px;">Docket text</div>
     <div class="pay-options" style="margin-bottom:18px;">${seg('set-theme-tktsize', state.theme.tktFontSize || 'md')}</div>
     <div class="th" style="margin-bottom:14px;">Item prices</div>
@@ -14841,7 +14849,7 @@ async function saveTicketSetting(patch) {
 
 async function saveAppearance() {
   try {
-    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth }) });
+    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth, subcatSize: state.theme.subcatSize }) });
     state.theme = theme;
     applyTheme();
   } catch (e) {
@@ -16283,6 +16291,9 @@ document.addEventListener('change', (e) => {
 // selected, plain taps toggle more rows without holding. The checkboxes keep
 // working; this is a faster path to the same selection.
 let _selHoldFired = false;
+// Revert hook: while a press is still down, holds the undo for a selection its
+// hold-timer made — a drag beginning mid-press calls it so dragging never selects.
+let _selHoldUndo = null;
 // Toggle a row's selection WITHOUT a synthetic checkbox click — a real click
 // on the (hidden) box would bubble to the row header and also open it.
 function toggleRowSelection(head, cb) {
@@ -16300,9 +16311,15 @@ document.addEventListener('pointerdown', (e) => {
   const sx = e.clientX, sy = e.clientY;
   // Selection fires ON THE TIMER (~450ms in), never on release — however long
   // the finger stays down after that, the release must be a no-op.
-  const timer = setTimeout(() => { _selHoldFired = true; toggleRowSelection(head, cb); }, 450);
+  const timer = setTimeout(() => {
+    if (state._sortDragging) return; // the row was lifted for a drag — a drag never selects
+    _selHoldFired = true;
+    toggleRowSelection(head, cb);
+    _selHoldUndo = () => toggleRowSelection(head, cb);
+  }, 450);
   const off = () => {
     clearTimeout(timer);
+    _selHoldUndo = null; // released: the selection (if any) is committed
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('pointerup', off, true);
     document.removeEventListener('pointercancel', off, true);
@@ -16387,12 +16404,28 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
   let started = false, raf = 0, lastX = startX, lastY = startY, holdTimer = 0, dead = false;
   let slots = [], itemsList = [], fromIdx = -1, pitch = 0, lift = 0, horizontal = false, target = -1;
 
+  const rowKey = (el) => el.dataset.id || el.dataset.typeid || el.dataset.selkey || el.dataset.idx || el.dataset.panel;
   const begin = () => {
+    // A render may have replaced the DOM between the press and the lift (the
+    // hold-select highlight at 450ms, a background poll) — the pressed element
+    // is then detached and its geometry reads as zeros. Re-find the live row
+    // by its identity key, or stand down if it's gone.
+    if (!item.isConnected) {
+      const key = rowKey(item);
+      const fresh = key != null ? [...document.querySelectorAll(itemSel)].find(el => rowKey(el) === key) : null;
+      if (!fresh) { dead = true; return; }
+      item = fresh;
+      container = fresh.parentElement;
+    }
     started = true;
     // Freeze background re-renders (15s poll, toasts, async saves) for the
     // duration of the drag so the row under the pointer can't be torn out.
     state._sortDragging = true;
     state._renderQueuedDuringDrag = false;
+    // Dragging must never select the row. If this press's hold-to-select
+    // already fired (450ms hold, then pulled), take the selection back — the
+    // render it triggers is queued behind _sortDragging, not run mid-lift.
+    if (_selHoldUndo) { _selHoldUndo(); _selHoldUndo = null; _selHoldFired = false; }
     // A text selection may have started on the press; if it survives, the
     // browser auto-scrolls the page to extend it while we drag. Kill it —
     // body.sorting's user-select:none stops a new one forming.
@@ -16418,6 +16451,7 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     target = fromIdx;
   };
   const update = () => {
+    if (!started) return;
     const dx = lastX - startX, dy = lastY - startY;
     // dragged card follows the pointer (no transition → instant), keeps the lift scale
     item.style.transform = `translate(${dx}px, ${dy}px) scale(1.03)`;
@@ -16449,6 +16483,7 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     }
   };
   const move = (e) => {
+    if (dead) return;
     lastX = e.clientX; lastY = e.clientY;
     if (!started) {
       const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
@@ -16846,6 +16881,7 @@ function bindEvents() {
       else if (act === 'set-theme-mode') { setThemeModeDraft(el.dataset.val); }
       else if (act === 'set-theme-itemsize') { setThemeItemSizeDraft(el.dataset.val); }
       else if (act === 'set-theme-fontsize') { setThemeDraft({ fontSize: el.dataset.val }); }
+      else if (act === 'set-theme-subcatsize') { setThemeDraft({ subcatSize: el.dataset.val }); }
       else if (act === 'set-theme-tktsize') { setThemeDraft({ tktFontSize: el.dataset.val }); }
       else if (act === 'tkt-width-minus') { setThemeDraft({ tktWidth: Math.max(260, (state.theme.tktWidth || 360) - 20) }); }
       else if (act === 'tkt-width-plus') { setThemeDraft({ tktWidth: Math.min(560, (state.theme.tktWidth || 360) + 20) }); }

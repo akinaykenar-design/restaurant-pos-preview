@@ -16385,7 +16385,7 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
   const startX = downEvt.clientX, startY = downEvt.clientY;
   const isTouch = downEvt.pointerType === 'touch';
   let started = false, raf = 0, lastX = startX, lastY = startY, holdTimer = 0, dead = false;
-  let slots = [], itemsList = [], fromIdx = -1, pitch = 0, horizontal = false, target = -1;
+  let slots = [], itemsList = [], fromIdx = -1, pitch = 0, lift = 0, horizontal = false, target = -1;
 
   const begin = () => {
     started = true;
@@ -16393,6 +16393,10 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     // duration of the drag so the row under the pointer can't be torn out.
     state._sortDragging = true;
     state._renderQueuedDuringDrag = false;
+    // A text selection may have started on the press; if it survives, the
+    // browser auto-scrolls the page to extend it while we drag. Kill it —
+    // body.sorting's user-select:none stops a new one forming.
+    try { getSelection().removeAllRanges(); } catch (err) {}
     itemsList = [...container.querySelectorAll(itemSel)];
     fromIdx = itemsList.indexOf(item);
     // Snapshot every item's resting geometry ONCE. All movement is computed against
@@ -16401,6 +16405,11 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     slots = itemsList.map(el => { const r = el.getBoundingClientRect(); return { el, left: r.left, top: r.top, w: r.width, h: r.height, cx: r.left + r.width / 2, cy: r.top + r.height / 2 }; });
     horizontal = slots.length > 1 && Math.abs(slots[1].left - slots[0].left) > Math.abs(slots[1].top - slots[0].top);
     pitch = slots.length > 1 ? (horizontal ? Math.abs(slots[1].left - slots[0].left) : Math.abs(slots[1].top - slots[0].top)) : (horizontal ? slots[0].w : slots[0].h);
+    // Neighbours slide by the DRAGGED row's extent (its size + list gap), not
+    // the generic pitch — with mixed row heights the gap that opens must match
+    // the row that will land in it, or cards visually snap over each other.
+    const gap = slots.length > 1 ? Math.max(0, horizontal ? slots[1].left - (slots[0].left + slots[0].w) : slots[1].top - (slots[0].top + slots[0].h)) : 0;
+    lift = (horizontal ? slots[fromIdx].w : slots[fromIdx].h) + gap;
     item.classList.add('sort-dragging');
     // Stay in flow (position:relative) so the list doesn't collapse; lift via z-index.
     item.style.position = 'relative'; item.style.zIndex = '9999'; item.style.pointerEvents = 'none'; item.style.willChange = 'transform';
@@ -16418,13 +16427,24 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     let t = 0;
     for (let i = 0; i < slots.length; i++) { if (i === fromIdx) continue; const c = horizontal ? slots[i].cx : slots[i].cy; if (c < centre) t++; }
     if (t === target) return;
+    // Dead band: a swap only commits once the dragged centre clears the
+    // neighbour's centre by a margin. Grazing the boundary — a slight
+    // overlap, a wobbling pointer — keeps the current order (no jitter,
+    // no snapping back and forth on the edge).
+    const hys = Math.max(8, pitch * 0.2);
+    const cs = [];
+    for (let i = 0; i < slots.length; i++) { if (i !== fromIdx) cs.push(horizontal ? slots[i].cx : slots[i].cy); }
+    cs.sort((a, b) => a - b);
+    for (let i = Math.min(t, target); i < Math.max(t, target); i++) {
+      if (Math.abs(centre - cs[i]) <= hys) return;
+    }
     target = t;
-    // Slide the intervening neighbours by one pitch to open the gap at `target`.
+    // Slide the intervening neighbours to open the gap at `target`.
     for (let i = 0; i < slots.length; i++) {
       if (i === fromIdx) continue;
       let d = 0;
-      if (target > fromIdx && i > fromIdx && i <= target) d = -pitch;
-      else if (target < fromIdx && i >= target && i < fromIdx) d = pitch;
+      if (target > fromIdx && i > fromIdx && i <= target) d = -lift;
+      else if (target < fromIdx && i >= target && i < fromIdx) d = lift;
       slots[i].el.style.transform = d ? (horizontal ? `translateX(${d}px)` : `translateY(${d}px)`) : '';
     }
   };
@@ -17643,8 +17663,11 @@ function bindEvents() {
   makeSortable('allergy-preset-row', reorderAllergyPresets);
   makeSortable('course-template-row', reorderCourseTemplates);
   makeSortable('panel-tile', (from, to) => reorderPanels(from, to));
-  makeSortable('menu-item-expandable', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderMenuItems(els[from].dataset.id, t.dataset.id); }, { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
-  makeSortable('sales-cat-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderSalesCategories(els[from].dataset.id, t.dataset.id); });
+  // `to` is the dragged row's FINAL index; the reorder fns remove the dragged
+  // entry then insert at the target's pre-removal index, so els[to] is the
+  // right target row whichever direction the drag went.
+  makeSortable('menu-item-expandable', (from, to, els) => reorderMenuItems(els[from].dataset.id, els[to].dataset.id), { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+  makeSortable('sales-cat-row', (from, to, els) => reorderSalesCategories(els[from].dataset.id, els[to].dataset.id));
   // Order Notes: custom note TYPES reorder among themselves (built-ins pinned);
   // a type only drags while collapsed so it never fights its content.
   makeSortable('note-type-row', (from, to) => {
@@ -17688,8 +17711,8 @@ function bindEvents() {
       autosaveCombo();
     }));
   }
-  makeSortable('category-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderCategories(els[from].dataset.id, t.dataset.id); });
-  makeSortable('subcategory-row', (from, to, els) => { const rest = els.filter((_, i) => i !== from); const t = rest[Math.min(to, rest.length - 1)]; if (t) reorderSubcategories(els[from].dataset.id, t.dataset.id); });
+  makeSortable('category-row', (from, to, els) => reorderCategories(els[from].dataset.id, els[to].dataset.id));
+  makeSortable('subcategory-row', (from, to, els) => reorderSubcategories(els[from].dataset.id, els[to].dataset.id));
   document.querySelectorAll('.category-name-quick-input').forEach(el => {
     el.addEventListener('change', (e) => { renameCategoryInline(el.dataset.id, e.target.value); });
   });

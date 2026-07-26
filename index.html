@@ -4436,6 +4436,25 @@ app.get('/api/shifts', (req, res) => {
   res.json(data.shifts || []);
 });
 
+// Manual shift entry (Staff → Shifts → + Add shift): a completed shift with
+// explicit clock-in/out, for the one someone forgot to clock.
+app.post('/api/shifts', (req, res) => {
+  const data = readData();
+  const { staffId, clockIn, clockOut } = req.body;
+  const staff = (data.staff || []).find(s => s.id === staffId);
+  if (!staff) return res.status(400).json({ error: 'Unknown staff member' });
+  const inTs = Number(clockIn), outTs = Number(clockOut);
+  if (!Number.isFinite(inTs) || !Number.isFinite(outTs) || outTs <= inTs) {
+    return res.status(400).json({ error: 'Invalid times' });
+  }
+  if (outTs - inTs > 24 * 3600000) return res.status(400).json({ error: 'Shift longer than 24h' });
+  const shift = { id: 'sh' + Date.now(), staffId, staffName: staff.name, clockIn: inTs, clockOut: outTs };
+  data.shifts = [...(data.shifts || []), shift];
+  logAudit(data, staff.name, `Shift added manually (${((outTs - inTs) / 3600000).toFixed(2)}h)`);
+  writeData(data);
+  res.json(shift);
+});
+
 app.post('/api/shifts/clock-in', (req, res) => {
   const data = readData();
   const { staffId, staffName } = req.body;
@@ -7834,6 +7853,7 @@ function render() {
     ${state.staffModal ? renderStaffModal() : ''}
     ${state.rosterShiftModal ? renderRosterShiftModal() : ''}
     ${state.timeOffModal ? renderTimeOffModal() : ''}
+    ${state.shiftModal ? renderShiftModal() : ''}
     ${state.menuModal ? renderMenuModal() : ''}
     ${state.modifierGroupModal ? renderModifierGroupModal() : ''}
     ${state.categoryModal ? renderCategoryModal() : ''}
@@ -9095,7 +9115,11 @@ function renderHoursAdmin() {
       <div class="detail-line"><span>${name}</span><span>${fmtHours(hrs)}</span></div>
     `).join('')}
   </div>
-  <div class="th" style="margin-bottom:10px;">Shift log</div>
+  <div style="display:flex;align-items:center;margin-bottom:10px;max-width:600px;">
+    <div class="th" style="margin:0;">Shift log</div>
+    <span style="flex:1;"></span>
+    <button class="btn-add inline" data-act="open-shift-modal" title="Add shift">+ Add shift</button>
+  </div>
   <div style="max-width:600px;">
     ${shifts.length === 0 ? `<div class="empty-hist">No shifts yet.</div>` : shifts.map(s => {
       const hours = ((s.clockOut || Date.now()) - s.clockIn) / 3600000;
@@ -9247,6 +9271,55 @@ function renderTimeOffModal() {
       </div>
     </div>
   </div>`;
+}
+// Manual shift entry — for the shift someone forgot to clock.
+function renderShiftModal() {
+  const m = state.shiftModal;
+  const staff = (state.staffList || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  return `
+  <div class="modal-bg" data-act="shift-modal-bg">
+    <div class="modal" data-stop="1" style="max-width:420px;">
+      <h2>Add shift</h2>
+      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      <label>Staff</label>
+      <select id="shift-staff">${staff.map(st => `<option value="${st.id}" ${m.staffId === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select>
+      <label>Date</label>
+      <input id="shift-date" type="date" value="${m.date}">
+      <div style="display:flex;gap:12px;">
+        <div style="flex:1;"><label>Start</label><input id="shift-start" type="time" value="${m.start}"></div>
+        <div style="flex:1;"><label>End</label><input id="shift-end" type="time" value="${m.end}"></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" data-act="close-shift-modal">Cancel</button>
+        <button class="btn-confirm" data-act="save-shift-modal">Save</button>
+      </div>
+    </div>
+  </div>`;
+}
+function openShiftModal() {
+  const staff = (state.staffList || []).slice().sort((a, b) => a.name.localeCompare(b.name));
+  state.shiftModal = { staffId: staff[0] ? staff[0].id : '', date: rosterDateKey(new Date()), start: '09:00', end: '17:00' };
+  state.adminError = '';
+  render();
+}
+async function saveShiftModal() {
+  const staffId = (document.getElementById('shift-staff') || {}).value;
+  const date = (document.getElementById('shift-date') || {}).value;
+  const start = (document.getElementById('shift-start') || {}).value;
+  const end = (document.getElementById('shift-end') || {}).value;
+  if (!staffId || !date || !start || !end) { state.adminError = 'Fill in every field.'; render(); return; }
+  const clockIn = new Date(date + 'T' + start).getTime();
+  let clockOut = new Date(date + 'T' + end).getTime();
+  if (clockOut <= clockIn) clockOut += 86400000; // overnight shift rolls into the next day
+  try {
+    await api('/api/shifts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffId, clockIn, clockOut }) });
+    state.shiftModal = null;
+    state.adminError = '';
+    await loadShifts();
+  } catch (e) {
+    state.adminError = 'Could not save the shift.';
+    render();
+  }
 }
 function openTimeOff() {
   const staff = (state.staffList || []).slice().sort((a, b) => a.name.localeCompare(b.name));
@@ -17318,6 +17391,9 @@ function bindEvents() {
       else if (act === 'roster-delete') { deleteRosterShift(el.dataset.id); }
       else if (act === 'roster-copy-week') { rosterCopyLastWeek(); }
       else if (act === 'open-timeoff') { openTimeOff(); }
+      else if (act === 'open-shift-modal') { openShiftModal(); }
+      else if (act === 'close-shift-modal' || act === 'shift-modal-bg') { state.shiftModal = null; state.adminError = ''; render(); }
+      else if (act === 'save-shift-modal') { saveShiftModal(); }
       else if (act === 'close-timeoff' || act === 'timeoff-modal-bg') { closeTimeOff(); }
       else if (act === 'save-timeoff') { saveTimeOff(); }
       else if (act === 'timeoff-status') { setTimeOffStatus(el.dataset.id, el.dataset.val); }

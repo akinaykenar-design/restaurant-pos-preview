@@ -1283,10 +1283,13 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
   /* Constant height whether or not the bulk buttons are showing, so ticking
      select-all never pushes the list down. */
   .select-all-row{ position:sticky; top:calc(var(--admin-toolbar-h, 57px) - 16px); z-index:5; background:var(--steel-100); margin:0 -14px 4px; padding:6px 14px 6px 31px; min-height:46px; box-sizing:border-box; }
-  /* While a selection is active the action icons need the width — the sort
-     and add controls step aside so the bar never grows a second line. */
-  .select-all-row:has(.icon-sq) .sort-ctl,
-  .select-all-row:has(.icon-sq) .btn-add{ display:none; }
+  /* While a selection is active the action icons need the width — the sort,
+     restore and add controls step aside so the bar never grows a second line.
+     Keyed off the selection-only buttons (delete/clear), NOT any .icon-sq:
+     always-present icons like ↺ restore must not hide the add button. */
+  .select-all-row:has([data-act^="delete-selected"], [data-act^="clear-"]) .sort-ctl,
+  .select-all-row:has([data-act^="delete-selected"], [data-act^="clear-"]) [data-act^="restore-"],
+  .select-all-row:has([data-act^="delete-selected"], [data-act^="clear-"]) .btn-add{ display:none; }
   /* Match the add button to the 34px icon squares so the bar height is
      identical with and without a selection — the list below never shifts. */
   .select-all-row .btn-add{ height:34px; }
@@ -16591,6 +16594,9 @@ document.addEventListener('change', (e) => {
 // selected, plain taps toggle more rows without holding. The checkboxes keep
 // working; this is a faster path to the same selection.
 let _selHoldFired = false;
+// Set while a sort-drag is lifted but the pointer hasn't moved yet — calling
+// it abandons the drag (no reorder). Cleared the moment the drag really moves.
+let _sortCancelHook = null;
 // Revert hook: while a press is still down, holds the undo for a selection its
 // hold-timer made — a drag beginning mid-press calls it so dragging never selects.
 let _selHoldUndo = null;
@@ -16616,7 +16622,15 @@ document.addEventListener('pointerdown', (e) => {
   // Selection fires ON THE TIMER (~450ms in), never on release — however long
   // the finger stays down after that, the release must be a no-op.
   const timer = setTimeout(() => {
-    if (state._sortDragging) return; // the row was lifted for a drag — a drag never selects
+    if (state._sortDragging) {
+      // Touch lifts the row for a drag at 300ms — before this 450ms hold. If
+      // the finger has actually MOVED it's a real drag and never selects; a
+      // stationary lift cancels itself and the hold selects, or phones could
+      // never hold-select sortable rows at all.
+      if (!_sortCancelHook) return;
+      _sortCancelHook();
+      _sortCancelHook = null;
+    }
     _selHoldFired = true;
     if (inp) inp.blur(); // holding an input selects the row, not the text
     toggleRowSelection(head, cb);
@@ -16759,6 +16773,9 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     itemsList.forEach((el, i) => { if (i !== fromIdx) { el.style.transition = 'transform .16s cubic-bezier(.2,.7,.3,1)'; el.style.willChange = 'transform'; } });
     document.body.classList.add('sorting');
     target = fromIdx;
+    // Until the pointer really moves, the lift is cancellable — the 450ms
+    // hold-to-select uses this to win over a stationary touch lift.
+    _sortCancelHook = () => up();
   };
   // Final index for a given dragged-centre position. Swaps trigger at HALF
   // overlap — the dragged card's centre crossing the near edge of the slot
@@ -16812,6 +16829,7 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
       begin();
     }
     e.preventDefault();
+    if (started && _sortCancelHook && Math.hypot(lastX - startX, lastY - startY) > 8) _sortCancelHook = null; // it's a real drag now
     if (raf) return;
     raf = requestAnimationFrame(() => { raf = 0; update(); });
   };
@@ -16822,6 +16840,7 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     if (raf) cancelAnimationFrame(raf);
     if (holdTimer) clearTimeout(holdTimer);
     dead = true;
+    _sortCancelHook = null;
     document.removeEventListener('pointermove', move);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);

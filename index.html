@@ -492,6 +492,12 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 
 /* Order-screen panel layout: drag-to-arrange tiles (mini preview of the 3 columns) */
 .panel-layout-strip{display:flex;gap:8px;max-width:480px;padding:10px;background:var(--steel-100);border:1px solid var(--steel-200);border-radius:12px;}
+/* Categories docked on top: a wide bar above the strip; drag it down to undock. */
+.panel-tile-top{display:flex;align-items:center;justify-content:center;gap:6px;max-width:480px;margin-bottom:8px;padding:10px 8px;background:var(--surface);border:1px solid var(--steel-200);border-radius:10px;cursor:grab;user-select:none;touch-action:none;transition:border-color .12s,box-shadow .12s;}
+.panel-tile-top:hover{border-color:var(--steel-300);box-shadow:var(--shadow);}
+.panel-tile-top:active{cursor:grabbing;}
+.ptile-hbar{width:26px;height:8px;border-radius:4px;background:var(--steel-300);}
+.panel-tile-top .ptile-label{margin-left:6px;}
 .panel-tile{display:flex;flex-direction:column;align-items:center;justify-content:space-between;gap:9px;min-width:0;min-height:104px;padding:12px 8px;background:var(--surface);border:1px solid var(--steel-200);border-radius:10px;cursor:grab;user-select:none;transition:border-color .12s,box-shadow .12s,transform .12s,opacity .12s;}
 .panel-tile:hover{border-color:var(--steel-300);box-shadow:var(--shadow);}
 .panel-tile:active{cursor:grabbing;}
@@ -6408,12 +6414,7 @@ async function saveRailPosition(val) {
   }
 }
 window.addEventListener('resize', applyPanelLayout);
-async function reorderPanels(fromIdx, toIdx) {
-  const dev = state.mockDevice || 'pc'; // the layout strip edits the device shown in the mockup
-  const order = panelOrderFor(dev);
-  if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= order.length || toIdx >= order.length) return;
-  const [dragged] = order.splice(fromIdx, 1);
-  order.splice(toIdx, 0, dragged);
+async function savePanelOrders(dev, order) {
   const orders = {};
   ['pc', 'tablet', 'mobile'].forEach(d => { orders[d] = d === dev ? order : panelOrderFor(d); });
   state.settings.panelOrders = orders; // optimistic
@@ -6424,6 +6425,14 @@ async function reorderPanels(fromIdx, toIdx) {
     state.settings = s;
     applyPanelLayout();
   } catch (e) { state.toast = 'Could not save layout.'; render(); }
+}
+async function reorderPanels(fromIdx, toIdx) {
+  const dev = state.mockDevice || 'pc'; // the layout strip edits the device shown in the mockup
+  const order = panelOrderFor(dev);
+  if (fromIdx === toIdx || fromIdx < 0 || toIdx < 0 || fromIdx >= order.length || toIdx >= order.length) return;
+  const [dragged] = order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, dragged);
+  savePanelOrders(dev, order);
 }
 
 async function loadInitial() {
@@ -12729,6 +12738,7 @@ function renderScreenAdmin() {
     `<div class="pay-opt ${cur === v ? 'active' : ''}" data-act="${act}" data-val="${v}">${v === 'sm' ? 'S' : v === 'md' ? 'M' : 'L'}</div>`).join('');
   const dev = state.mockDevice || 'pc';
   const order = panelOrderFor(dev);
+  const railTopDev = dev !== 'mobile' && (state.settings.railPositions || {})[dev] === 'top';
   const meta = {
     catrail: { label: 'Categories', flex: '0 0 54px' },
     menu: { label: 'Menu', flex: '1 1 auto' },
@@ -12750,19 +12760,17 @@ function renderScreenAdmin() {
   </div>
   <div class="settings-card" id="ctl-layout">
     <div class="th" style="margin-bottom:10px;">Panel layout — ${dev === 'pc' ? 'PC' : dev === 'tablet' ? 'Tablet' : 'Phone'}</div>
+    ${railTopDev ? `
+    <div class="panel-tile-top" data-panel="catrail" title="Drag down to dock at the side">
+      ${'<span class="ptile-hbar"></span>'.repeat(4)}<span class="ptile-label" style="align-self:auto;width:auto;flex:none;">Categories</span>
+    </div>` : ''}
     <div class="panel-layout-strip">
-      ${order.map((id, i) => `
-        <div class="panel-tile" draggable="true" data-idx="${i}" data-panel="${id}" style="flex:${meta[id].flex};">
+      ${(railTopDev ? order.filter(id => id !== 'catrail') : order).map((id, i) => `
+        <div class="panel-tile" draggable="true" data-idx="${i}" data-panel="${id}" style="flex:${meta[id].flex};" ${id === 'catrail' && dev !== 'mobile' ? 'title="Drag up to dock on top"' : ''}>
           ${glyph(id)}
           <span class="ptile-label" title="${meta[id].label}">${meta[id].label}</span>
         </div>`).join('')}
     </div>
-    ${dev !== 'mobile' ? `
-    <div class="th" style="margin:16px 0 10px;">Menu bar position</div>
-    <div class="pay-options">
-      <div class="pay-opt ${(state.settings.railPositions || {})[dev] !== 'top' ? 'active' : ''}" data-act="set-rail-pos" data-val="side">Side</div>
-      <div class="pay-opt ${(state.settings.railPositions || {})[dev] === 'top' ? 'active' : ''}" data-act="set-rail-pos" data-val="top">Top</div>
-    </div>` : ''}
   </div>
   <div class="settings-card" id="ctl-menu">
     <div class="th" style="margin-bottom:14px;">Menu tile size</div>
@@ -16527,11 +16535,12 @@ function makeSortable(rowClass, onReorder, opts) {
       if (e.button !== 0) return;
       if (e.target.closest('button,input,select,textarea,a,[contenteditable]')) return;
       if (opts.canStart && !opts.canStart(item)) return;
-      beginSortDrag(container, '.' + rowClass, item, onReorder, e);
+      beginSortDrag(container, '.' + rowClass, item, onReorder, e, opts);
     });
   });
 }
-function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
+function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
+  opts = opts || {};
   const startX = downEvt.clientX, startY = downEvt.clientY;
   const isTouch = downEvt.pointerType === 'touch';
   let started = false, raf = 0, lastX = startX, lastY = startY, holdTimer = 0, dead = false;
@@ -16651,6 +16660,15 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt) {
     item.classList.remove('sort-dragging');
     ['position', 'z-index', 'pointer-events', 'transform', 'will-change'].forEach(p => item.style.removeProperty(p));
     itemsList.forEach((el, i) => { if (i !== fromIdx) { el.style.transition = ''; el.style.transform = ''; el.style.willChange = ''; } });
+    // Cross-axis drop (e.g. dragging the Categories tile OUT of the layout
+    // row to dock the menu bar on top): when the drag went clearly across the
+    // list's axis, hand off instead of reordering.
+    const mainD = horizontal ? lastX - startX : lastY - startY;
+    const crossD = horizontal ? lastY - startY : lastX - startX;
+    if (opts.crossAxis && Math.abs(crossD) > 40 && Math.abs(crossD) > Math.abs(mainD)) {
+      opts.crossAxis(fromIdx, crossD, itemsList);
+      return;
+    }
     // The dead band exists to stop mid-drag flip-flop; the DROP honours where
     // the card actually sits, so releasing right on a boundary still lands.
     if (slots.length > 1) {
@@ -17027,7 +17045,6 @@ function bindEvents() {
       else if (act === 'set-theme-tilegap') { setThemeDraft({ tileGap: el.dataset.val }); }
       else if (act === 'set-theme-tktgap') { setThemeDraft({ tktGap: el.dataset.val }); }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
-      else if (act === 'set-rail-pos') { saveRailPosition(el.dataset.val); }
       else if (act === 'set-theme-tktsize') { setThemeDraft({ tktFontSize: el.dataset.val }); }
       else if (act === 'tkt-width-minus') { setThemeDraft({ tktWidth: Math.max(260, (state.theme.tktWidth || 360) - 20) }); }
       else if (act === 'tkt-width-plus') { setThemeDraft({ tktWidth: Math.min(560, (state.theme.tktWidth || 360) + 20) }); }
@@ -17853,7 +17870,41 @@ function bindEvents() {
   makeSortable('void-reason-row', reorderVoidReasons);
   makeSortable('allergy-preset-row', reorderAllergyPresets);
   makeSortable('course-template-row', reorderCourseTemplates);
-  makeSortable('panel-tile', (from, to) => reorderPanels(from, to));
+  // Layout strip: horizontal drag reorders; dragging the Categories tile UP
+  // and out of the row docks the menu bar on top (PC/tablet). The wide bar
+  // above the strip drags back down to return it to the side.
+  makeSortable('panel-tile', (from, to, els) => {
+    const dev = state.mockDevice || 'pc';
+    if (dev !== 'mobile' && (state.settings.railPositions || {})[dev] === 'top') {
+      const cur = panelOrderFor(dev);
+      const row = cur.filter(id => id !== 'catrail');
+      const [m] = row.splice(from, 1);
+      row.splice(to, 0, m);
+      row.splice(cur.indexOf('catrail'), 0, 'catrail');
+      savePanelOrders(dev, row);
+    } else reorderPanels(from, to);
+  }, { crossAxis: (from, cross, els) => {
+    const dev = state.mockDevice || 'pc';
+    if (els[from] && els[from].dataset.panel === 'catrail' && dev !== 'mobile' && cross < 0) saveRailPosition('top');
+    else render();
+  } });
+  const railTopTile = document.querySelector('.panel-tile-top');
+  if (railTopTile) railTopTile.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const sy = e.clientY;
+    const mv = (ev) => { const dy = Math.max(0, ev.clientY - sy); railTopTile.style.transform = dy ? `translateY(${dy}px)` : ''; };
+    const done = (ev) => {
+      document.removeEventListener('pointermove', mv);
+      document.removeEventListener('pointerup', done);
+      document.removeEventListener('pointercancel', done);
+      railTopTile.style.transform = '';
+      if (ev.clientY - sy > 34) saveRailPosition('side');
+    };
+    document.addEventListener('pointermove', mv);
+    document.addEventListener('pointerup', done);
+    document.addEventListener('pointercancel', done);
+  });
   // `to` is the dragged row's FINAL index; the reorder fns remove the dragged
   // entry then insert at the target's pre-removal index, so els[to] is the
   // right target row whichever direction the drag went.

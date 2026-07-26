@@ -16687,28 +16687,34 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     document.body.classList.add('sorting');
     target = fromIdx;
   };
+  // Final index for a given dragged-centre position. Swaps trigger at HALF
+  // overlap — the dragged card's centre crossing the near edge of the slot
+  // (c ∓ lift/2), not the far-away neighbour centre — so a drop is accepted
+  // as soon as the card sits mostly over its new spot. `h` widens (h>0) or
+  // narrows (h<0) the trigger for the Schmitt band below.
+  const targetAt = (centre, h) => {
+    const O = horizontal ? slots[fromIdx].cx : slots[fromIdx].cy;
+    let t = fromIdx;
+    for (let i = 0; i < slots.length; i++) {
+      if (i === fromIdx) continue;
+      const c = horizontal ? slots[i].cx : slots[i].cy;
+      if (c > O && centre > (c - lift / 2) + h) t++;
+      else if (c < O && centre < (c + lift / 2) - h) t--;
+    }
+    return t;
+  };
   const update = () => {
     if (!started) return;
     const dx = lastX - startX, dy = lastY - startY;
     // dragged card follows the pointer (no transition → instant), keeps the lift scale
     item.style.transform = `translate(${dx}px, ${dy}px) scale(1.03)`;
     const centre = horizontal ? (slots[fromIdx].cx + dx) : (slots[fromIdx].cy + dy);
-    // target = how many OTHER cards' resting centres sit before the dragged centre
-    // (= its final index). One full pitch of travel per swap, so a slight touch never flips.
-    let t = 0;
-    for (let i = 0; i < slots.length; i++) { if (i === fromIdx) continue; const c = horizontal ? slots[i].cx : slots[i].cy; if (c < centre) t++; }
+    // Schmitt band: advancing needs the trigger + hys, retreating needs the
+    // trigger - hys — hovering right on a boundary never flips back and forth.
+    const hys = Math.max(6, pitch * 0.12);
+    const tOut = targetAt(centre, hys), tRet = targetAt(centre, -hys);
+    const t = Math.max(Math.min(tOut, tRet), Math.min(Math.max(tOut, tRet), target));
     if (t === target) return;
-    // Dead band: a swap only commits once the dragged centre clears the
-    // neighbour's centre by a margin. Grazing the boundary — a slight
-    // overlap, a wobbling pointer — keeps the current order (no jitter,
-    // no snapping back and forth on the edge).
-    const hys = Math.max(8, pitch * 0.2);
-    const cs = [];
-    for (let i = 0; i < slots.length; i++) { if (i !== fromIdx) cs.push(horizontal ? slots[i].cx : slots[i].cy); }
-    cs.sort((a, b) => a - b);
-    for (let i = Math.min(t, target); i < Math.max(t, target); i++) {
-      if (Math.abs(centre - cs[i]) <= hys) return;
-    }
     target = t;
     // Slide the intervening neighbours to open the gap at `target`.
     for (let i = 0; i < slots.length; i++) {
@@ -16752,6 +16758,11 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     // mid-drag, replay it now so the list reflects any background updates.
     state._sortDragging = false;
     state._renderQueuedDuringDrag = false;
+    // FLIP snapshot of where every card sits RIGHT NOW (dragged one under the
+    // pointer, neighbours slid open), so the post-drop render can animate each
+    // card gliding into its final slot instead of teleporting.
+    const flipSnap = new Map();
+    itemsList.forEach(el => { const k = rowKey(el); if (k != null) flipSnap.set(k, el.getBoundingClientRect()); });
     item.classList.remove('sort-dragging');
     ['position', 'z-index', 'pointer-events', 'transform', 'will-change'].forEach(p => item.style.removeProperty(p));
     itemsList.forEach((el, i) => { if (i !== fromIdx) { el.style.transition = ''; el.style.transform = ''; el.style.willChange = ''; } });
@@ -16764,13 +16775,11 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
       opts.crossAxis(fromIdx, crossD, itemsList);
       return;
     }
-    // The dead band exists to stop mid-drag flip-flop; the DROP honours where
-    // the card actually sits, so releasing right on a boundary still lands.
+    // The DROP honours where the card actually sits (no band): released at
+    // half overlap = accepted.
     if (slots.length > 1) {
       const centre = horizontal ? (slots[fromIdx].cx + (lastX - startX)) : (slots[fromIdx].cy + (lastY - startY));
-      let t = 0;
-      for (let i = 0; i < slots.length; i++) { if (i === fromIdx) continue; const c = horizontal ? slots[i].cx : slots[i].cy; if (c < centre) t++; }
-      target = t;
+      target = targetAt(centre, 0);
     }
     document.body.classList.remove('sorting');
     // swallow the click that follows a real drag so it can't also toggle row selection
@@ -16780,6 +16789,20 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     // `target` == the old placeholder index, so onReorder gets the same value as before.
     if (target !== -1 && target !== fromIdx) onReorder(fromIdx, target, itemsList);
     else render();
+    // Settle: after the reorder render, glide each card from where it was
+    // held/slid to its new resting place (~200ms), instead of snapping.
+    requestAnimationFrame(() => {
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+      document.querySelectorAll(itemSel).forEach(el => {
+        const k = rowKey(el);
+        const old = k != null ? flipSnap.get(k) : null;
+        if (!old) return;
+        const r = el.getBoundingClientRect();
+        const fx = old.left - r.left, fy = old.top - r.top;
+        if (Math.abs(fx) < 1 && Math.abs(fy) < 1) return;
+        el.animate([{ transform: `translate(${fx}px, ${fy}px)` }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(.2,.7,.3,1)' });
+      });
+    });
   };
   document.addEventListener('pointermove', move);
   document.addEventListener('pointerup', up);

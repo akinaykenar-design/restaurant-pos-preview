@@ -3384,7 +3384,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
-  const { label, x, y, shape, width, height, seats, rotation, covers, allergies, notes, vipType, mergedInto, finish, color } = req.body;
+  const { label, x, y, shape, width, height, seats, rotation, covers, allergies, notes, vipType, mergedInto, finish, color, decorType, icon } = req.body;
   if (label !== undefined) {
     if (table.type === 'table' && tableLabelTaken(data, label, table.id)) {
       return res.status(400).json({ error: 'That table number is already used in another layout' });
@@ -3400,6 +3400,8 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (rotation !== undefined) table.rotation = ((rotation % 360) + 360) % 360;
   if (finish !== undefined) table.finish = finish;
   if (color !== undefined) table.color = color || null;
+  if (decorType !== undefined && table.type === 'decor') table.decorType = decorType;
+  if (icon !== undefined && table.type === 'decor') table.icon = icon || null;
   if (covers !== undefined) table.covers = Math.max(0, parseInt(covers) || 0);
   if (Array.isArray(allergies)) {
     table.allergies = allergies.slice(0, 50)
@@ -12603,48 +12605,90 @@ function renderFloorPlanAdmin() {
   </div>`;
   if (tableMode === 'simple') return modeCard + renderSimpleTablesAdmin();
   return modeCard + `
-  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center;">
-    ${state.floorPlans.map(f => `
-      <span style="display:inline-flex;gap:2px;align-items:center;">
-        ${f.id === state.adminFloorPlanId
-          ? `<span class="pay-opt active" style="flex:none;padding:9px 16px;font-size:13.5px;"><input type="text" class="floorplan-name-quick-edit" data-id="${f.id}" value="${esc(f.name)}" style="background:none;border:none;color:inherit;font:inherit;font-weight:700;padding:0;width:${Math.max(f.name.length, 4)}ch;" onclick="event.stopPropagation();" onblur="saveFloorPlanNameInline('${f.id}', this.value)"></span>`
-          : `<button type="button" class="pay-opt" style="flex:none;padding:9px 16px;font-size:13.5px;" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`}
-        ${state.floorPlans.length > 1 ? `<button type="button" class="pay-opt" title="Delete layout" style="flex:none;padding:9px 11px;font-size:12.5px;color:var(--red);" data-act="delete-floorplan" data-id="${f.id}">✕</button>` : ''}
-      </span>`).join('')}
-    <button type="button" class="btn-add inline" title="Add layout" style="height:34px;" data-act="add-floorplan">+ Add layout</button>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;align-items:center;max-width:900px;">
+    <div class="pay-options" style="margin:0;">
+      ${state.floorPlans.map(f => f.id === state.adminFloorPlanId
+        ? `<button type="button" class="pay-opt active" style="flex:none;padding:9px 16px;font-size:13.5px;" data-act="edit-floorplan" data-id="${f.id}" title="Tap to rename">${esc(f.name)}</button>`
+        : `<button type="button" class="pay-opt" style="flex:none;padding:9px 16px;font-size:13.5px;" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('')}
+    </div>
+    <button type="button" class="btn-add inline" title="Add layout" style="height:34px;margin-left:auto;" data-act="add-floorplan">+ Add layout</button>
   </div>
   ${fp ? `
   ${(() => {
+    // ONE control strip: with nothing selected it sets up what you'll place;
+    // select an object on the floor and the SAME dropdowns/tiles edit it —
+    // no second editor row below the canvas.
+    const selTable = selected && selected.type !== 'decor' ? selected : null;
+    const selDecor = selected && selected.type === 'decor' ? selected : null;
+    const multi = state.selectedAdminTableIds.length;
+    const tableTpl = selTable ? TABLE_TEMPLATES.find(t => t.shape === selTable.shape && t.seats === selTable.seats) : null;
+    const decorTpl = selDecor ? DECOR_TEMPLATES.find(t => t.key === selDecor.decorType) : null;
     return `
   <div class="place-palette">
     <div class="pp-group">
-      <div class="pp-label">Tables</div>
+      <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · type` : 'Tables'}</div>
+      ${selTable ? `
+      <select class="pp-select pp-retype-select" data-id="${selTable.id}" data-fp="${fp.id}" title="Change this table's type">
+        <option value="">${tableTpl ? 'Keep as is' : 'Custom size'}</option>
+        ${TABLE_TEMPLATES.map(t => `<option value="table:${t.key}" ${tableTpl && tableTpl.key === t.key ? 'selected' : ''}>${esc(t.label)} · ${t.seats} seats</option>`).join('')}
+      </select>` : `
       <select class="pp-select pp-place-select" title="Pick, then tap the floor to place">
         <option value="">＋ Place a table…</option>
         ${TABLE_TEMPLATES.map(t => `<option value="table:${t.key}" ${state.floorPlacing === `table:${t.key}` ? 'selected' : ''}>${esc(t.label)} · ${t.seats} seats</option>`).join('')}
-      </select>
+      </select>`}
     </div>
     <div class="pp-group">
-      <div class="pp-label">Table style</div>
+      <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · style` : 'Table style'}</div>
       <div class="pp-row">
         ${TABLE_FINISHES.map(f => `
-          <button type="button" class="pp-tile${(state.floorTableFinish || 'plain') === f.key && !state.floorTableColor ? ' on' : ''}" data-act="set-place-finish" data-val="${f.key}" title="${esc(f.label)}">
+          <button type="button" class="pp-tile${(selTable ? (selTable.finish || 'plain') === f.key && !selTable.color : (state.floorTableFinish || 'plain') === f.key && !state.floorTableColor) ? ' on' : ''}" data-act="${selTable ? 'set-table-finish' : 'set-place-finish'}" data-val="${f.key}" ${selTable ? `data-id="${selTable.id}" data-fp="${fp.id}"` : ''} title="${esc(f.label)}">
             <span class="pp-shape" style="width:30px;height:24px;border-radius:6px;background:${f.bg || 'var(--surface)'};"></span>
             <span class="pp-name">${esc(f.label)}</span>
           </button>`).join('')}
         <div class="pp-tile pp-color" title="Solid colour instead of a texture">
-          ${colorDotButton('floor-table-new', 'new', state.floorTableColor, { size: 26, title: 'Solid colour applied to tables you place' })}
+          ${selTable
+            ? colorDotButton('table-color', selTable.id, selTable.color, { size: 26, title: 'Table colour' })
+            : colorDotButton('floor-table-new', 'new', state.floorTableColor, { size: 26, title: 'Solid colour applied to tables you place' })}
           <span class="pp-name">Colour</span>
         </div>
       </div>
     </div>
     <div class="pp-group">
-      <div class="pp-label">Objects</div>
+      <div class="pp-label">${selDecor ? `${esc(selDecor.label)} · type` : 'Objects'}</div>
+      ${selDecor ? `
+      <select class="pp-select pp-retype-select" data-id="${selDecor.id}" data-fp="${fp.id}" title="Change this object's type">
+        <option value="">${decorTpl ? 'Keep as is' : 'Custom object'}</option>
+        ${DECOR_TEMPLATES.map(t => `<option value="decor:${t.key}" ${decorTpl && decorTpl.key === t.key ? 'selected' : ''}>${t.icon} ${esc(t.label)}</option>`).join('')}
+      </select>` : `
       <select class="pp-select pp-place-select" title="Pick, then tap the floor to place">
         <option value="">＋ Place an object…</option>
         ${DECOR_TEMPLATES.map(t => `<option value="decor:${t.key}" ${state.floorPlacing === `decor:${t.key}` ? 'selected' : ''}>${t.icon} ${esc(t.label)}</option>`).join('')}
-      </select>
+      </select>`}
     </div>
+    ${selected || multi ? `
+    <div class="pp-group">
+      <div class="pp-label">${multi ? `${multi} selected` : 'Selected'}</div>
+      <div class="pp-row" style="align-items:center;">
+        ${selected ? `
+        <input id="table-label-input" type="text" value="${esc(selected.label)}" placeholder="Label" data-id="${selected.id}" data-fp="${fp.id}" style="width:110px;padding:8px 12px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
+        ${selTable ? `
+        <label class="ts" style="margin:0;">Seats</label>
+        <input id="table-seats-input" type="number" min="1" max="20" step="1" value="${selTable.seats}" data-id="${selTable.id}" data-fp="${fp.id}" style="width:56px;padding:8px;border-radius:8px;border:1px solid var(--steel-300);">` : `
+        <label class="ts" style="margin:0;">Width</label>
+        <input id="decor-width-input" type="number" min="2" max="60" step="1" value="${selected.width}" data-id="${selected.id}" data-fp="${fp.id}" style="width:56px;padding:8px;border-radius:8px;border:1px solid var(--steel-300);">
+        <label class="ts" style="margin:0;">Height</label>
+        <input id="decor-height-input" type="number" min="2" max="60" step="1" value="${selected.height}" data-id="${selected.id}" data-fp="${fp.id}" style="width:56px;padding:8px;border-radius:8px;border:1px solid var(--steel-300);">`}
+        ${selected.shape !== 'round' ? `
+        <div style="display:flex;align-items:center;gap:4px;">
+          <button class="icon-sq" data-act="rotate-object" data-dir="-15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate left">${ACT_RESET_SVG}</button>
+          <span class="ts" style="min-width:34px;text-align:center;">${selected.rotation || 0}°</span>
+          <button class="icon-sq" data-act="rotate-object" data-dir="15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate right">${ACT_ROTR_SVG}</button>
+        </div>` : ''}` : ''}
+        <span style="flex:1;"></span>
+        <button class="icon-sq" data-act="${multi ? 'delete-selected-tables' : 'delete-table'}" ${selected ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''} title="Delete">${ACT_TRASH_SVG}</button>
+        <button class="icon-sq" data-act="clear-table-selection" title="Done">${ACT_X_SVG}</button>
+      </div>
+    </div>` : ''}
     <div class="pp-foot">
       ${state.floorPlacing ? `<span class="pp-hint">Tap the floor to place — <b>Esc</b> or tap again to cancel <button type="button" class="pp-cancel" data-act="stop-placing">✕</button></span>` : ``}
       <button class="btn-secondary" style="width:auto;padding:7px 12px;margin-left:auto;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Layout size & grid options">⚙ Options</button>
@@ -12690,50 +12734,6 @@ function renderFloorPlanAdmin() {
       </button>
     `).join('')}
   </div>
-  ${state.selectedAdminTableIds.length > 0 ? `
-  <div style="display:flex;gap:10px;margin-top:14px;align-items:center;flex-wrap:wrap;">
-    
-    <button class="btn-secondary sm" style="width:auto;border-color:var(--red);color:var(--red);display:inline-flex;align-items:center;gap:6px;" data-act="delete-selected-tables" title="Delete selected objects">${ACT_TRASH_SVG} Delete</button>
-    <button class="btn-secondary sm" style="width:auto;" data-act="clear-table-selection">Clear</button>
-  </div>` : ''}
-  ${selected ? `
-  <div style="display:flex;gap:10px;margin-top:14px;align-items:center;flex-wrap:wrap;">
-    <input id="table-label-input" type="text" value="${esc(selected.label)}" placeholder="Label" data-id="${selected.id}" data-fp="${fp.id}" style="width:110px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
-    ${selected.type !== 'decor' ? `
-      <div class="pay-options" style="margin:0;">
-        <div class="pay-opt ${selected.shape === 'round' ? 'active' : ''}" style="flex:none;padding:8px 12px;" data-act="set-table-shape" data-val="round" data-id="${selected.id}" data-fp="${fp.id}" title="Round"><span style="display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid currentColor;vertical-align:-2px;"></span></div>
-        <div class="pay-opt ${selected.shape === 'square' ? 'active' : ''}" style="flex:none;padding:8px 12px;" data-act="set-table-shape" data-val="square" data-id="${selected.id}" data-fp="${fp.id}" title="Square"><span style="display:inline-block;width:14px;height:14px;border-radius:3px;border:2px solid currentColor;vertical-align:-2px;"></span></div>
-        <div class="pay-opt ${selected.shape === 'rect' ? 'active' : ''}" style="flex:none;padding:8px 12px;" data-act="set-table-shape" data-val="rect" data-id="${selected.id}" data-fp="${fp.id}" title="Rectangle"><span style="display:inline-block;width:20px;height:12px;border-radius:3px;border:2px solid currentColor;vertical-align:-1px;"></span></div>
-      </div>
-      <label class="ts" style="margin:0;">Size</label>
-      <div class="pay-options" style="margin:0;" id="table-size-input" data-current="${sizeFromDims(selected.shape, selected.width, selected.height)}">
-        ${['S', 'M', 'L', 'XL'].map(sz => `<div class="pay-opt ${sizeFromDims(selected.shape, selected.width, selected.height) === sz ? 'active' : ''}" style="flex:none;padding:8px 11px;font-size:12px;" data-act="set-table-size" data-val="${sz}" data-id="${selected.id}" data-fp="${fp.id}">${sz}</div>`).join('')}
-      </div>
-      <label class="ts" style="margin:0;">Seats</label>
-      <input id="table-seats-input" type="number" min="1" max="20" step="1" value="${selected.seats}" data-id="${selected.id}" data-fp="${fp.id}" style="width:56px;padding:9px 8px;border-radius:8px;border:1px solid var(--steel-300);">
-    ` : `
-      <label class="ts" style="margin:0;">Width</label>
-      <input id="decor-width-input" type="number" min="2" max="60" step="1" value="${selected.width}" data-id="${selected.id}" data-fp="${fp.id}" style="width:56px;padding:9px 8px;border-radius:8px;border:1px solid var(--steel-300);">
-      <label class="ts" style="margin:0;">Height</label>
-      <input id="decor-height-input" type="number" min="2" max="60" step="1" value="${selected.height}" data-id="${selected.id}" data-fp="${fp.id}" style="width:56px;padding:9px 8px;border-radius:8px;border:1px solid var(--steel-300);">
-    `}
-    ${selected.shape !== 'round' ? `
-    <div style="display:flex;align-items:center;gap:4px;">
-      <button class="icon-sq" data-act="rotate-object" data-dir="-15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate left">${ACT_RESET_SVG}</button>
-      <span class="ts" style="min-width:34px;text-align:center;">${selected.rotation || 0}°</span>
-      <button class="icon-sq" data-act="rotate-object" data-dir="15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate right">${ACT_ROTR_SVG}</button>
-    </div>` : ''}
-    <button class="delete-icon-btn" data-act="delete-table" data-id="${selected.id}" data-fp="${fp.id}" title="Remove">${ACT_TRASH_SVG}</button>
-  </div>
-  ${selected.type !== 'decor' ? `
-  <div style="display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap;">
-    <label class="ts" style="margin:0;">Colour</label>
-    ${colorDotButton('table-color', selected.id, selected.color, { size: 24, title: 'Table colour' })}
-    <label class="ts" style="margin:0 0 0 8px;">Finish</label>
-    ${TABLE_FINISHES.map(f => `<button type="button" class="pp-swatch${(selected.finish || 'plain') === f.key && !selected.color ? ' on' : ''}" data-act="set-table-finish" data-val="${f.key}" data-id="${selected.id}" data-fp="${fp.id}" title="${esc(f.label)}" style="background:${f.bg || 'var(--surface)'};"></button>`).join('')}
-  </div>
-  ` : ''}
-  ` : ''}
   ` : `<div class="ts">No floor plan layouts yet.</div>`}
   ${renderTableStatusColorsCard()}
   `;
@@ -12749,6 +12749,7 @@ function renderFloorPlanModal() {
       <label>Name</label>
       <input id="floorplan-name-input" type="text" value="${esc(m.name)}">
       <div class="modal-actions">
+        ${m.mode === 'edit' && state.floorPlans.length > 1 ? `<button type="button" class="btn-modal-delete" data-act="delete-floorplan" data-id="${m.id}">Delete</button>` : ''}
         <button class="btn-cancel" data-act="close-floorplan-modal">Cancel</button>
         <button class="btn-confirm" data-act="save-floorplan-modal">Save</button>
       </div>
@@ -14381,15 +14382,28 @@ async function saveTablePosition(id, x, y) {
 }
 
 function openAddFloorPlan() { state.floorPlanModal = withDirtyCheck({ mode: 'add', id: null, name: '' }); state.adminError = ''; render(); }
+function openEditFloorPlan(id) {
+  const fp = state.floorPlans.find(f => f.id === id);
+  if (!fp) return;
+  state.floorPlanModal = withDirtyCheck({ mode: 'edit', id, name: fp.name });
+  state.adminError = '';
+  render();
+}
 function closeFloorPlanModal() { if (!confirmDiscard(state.floorPlanModal)) return; state.floorPlanModal = null; state.adminError = ''; render(); }
 
 async function saveFloorPlanModal() {
   const m = state.floorPlanModal;
   if (!m.name || !m.name.trim()) { state.adminError = 'A layout name is required.'; render(); return; }
   try {
-    const fp = await api('/api/floorplans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: m.name }) });
-    state.floorPlans.push(fp);
-    state.adminFloorPlanId = fp.id;
+    if (m.mode === 'edit') {
+      await api(`/api/floorplans/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: m.name.trim() }) });
+      const fp = state.floorPlans.find(f => f.id === m.id);
+      if (fp) fp.name = m.name.trim();
+    } else {
+      const fp = await api('/api/floorplans', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: m.name }) });
+      state.floorPlans.push(fp);
+      state.adminFloorPlanId = fp.id;
+    }
     state.floorPlanModal = null;
     state.adminError = '';
     render();
@@ -14399,24 +14413,13 @@ async function saveFloorPlanModal() {
   }
 }
 
-async function saveFloorPlanNameInline(id, name) {
-  if (!name || !name.trim()) { render(); return; }
-  const fp = state.floorPlans.find(f => f.id === id);
-  if (fp) fp.name = name.trim();
-  try {
-    await api(`/api/floorplans/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.trim() }) });
-  } catch (e) {
-    state.toast = 'Could not rename layout.';
-  }
-  render();
-}
-
 async function deleteFloorPlanAction(id) {
   try {
     await api(`/api/floorplans/${id}`, { method: 'DELETE' });
     state.floorPlans = state.floorPlans.filter(f => f.id !== id);
     if (state.adminFloorPlanId === id) state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
     state.selectedAdminTableId = null;
+    state.floorPlanModal = null;
     render();
   } catch (e) {
     state.toast = 'Could not delete that layout.';
@@ -14448,7 +14451,7 @@ function toggleTableMultiSelect(tableId) {
   else state.selectedAdminTableIds.splice(i, 1);
   render();
 }
-function clearTableSelection() { state.selectedAdminTableIds = []; render(); }
+function clearTableSelection() { state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
 async function deleteSelectedTables() {
   const ids = [...state.selectedAdminTableIds];
   const fpId = state.adminFloorPlanId;
@@ -16883,6 +16886,19 @@ document.addEventListener('change', (e) => {
     state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
     render();
   }
+  // With an object selected, the same dropdown re-types it instead of placing.
+  if (e.target && e.target.classList && e.target.classList.contains('pp-retype-select')) {
+    const val = e.target.value;
+    if (!val) return;
+    const [kind, key] = val.split(':');
+    if (kind === 'decor') {
+      const tpl = DECOR_TEMPLATES.find(t => t.key === key);
+      if (tpl) patchFloorObject(e.target.dataset.fp, e.target.dataset.id, { decorType: tpl.key, icon: tpl.icon, label: tpl.label, width: tpl.width, height: tpl.height });
+    } else {
+      const tpl = TABLE_TEMPLATES.find(t => t.key === key);
+      if (tpl) patchFloorObject(e.target.dataset.fp, e.target.dataset.id, { shape: tpl.shape, width: tpl.width, height: tpl.height, seats: tpl.seats });
+    }
+  }
 });
 
 // Admin lists: HOLD a row (mouse press-and-hold or touch long-press) to select
@@ -17664,18 +17680,6 @@ function bindEvents() {
       else if (act === 'assign-printer-ip') { assignPrinterIp(el.dataset.id, el.dataset.ip); }
       else if (act === 'toggle-station-paused') { toggleStationPaused(el.dataset.id); }
       else if (act === 'bulk-price-mode') { state.bulkEditModal.priceMode = el.dataset.val; render(); }
-      else if (act === 'set-table-shape') {
-        const sizeEl = document.getElementById('table-size-input');
-        const size = (sizeEl && sizeEl.dataset.current) || 'M';
-        const dims = (TABLE_SIZE_PRESETS[el.dataset.val] || TABLE_SIZE_PRESETS.square)[size] || {};
-        patchFloorObject(el.dataset.fp, el.dataset.id, Object.assign({ shape: el.dataset.val }, dims));
-      }
-      else if (act === 'set-table-size') {
-        const fp = state.floorPlans.find(f => f.id === el.dataset.fp);
-        const t = fp && fp.tables.find(x => x.id === el.dataset.id);
-        const dims = (TABLE_SIZE_PRESETS[(t && t.shape) || 'square'] || TABLE_SIZE_PRESETS.square)[el.dataset.val];
-        if (dims) patchFloorObject(el.dataset.fp, el.dataset.id, { width: dims.width, height: dims.height });
-      }
       else if (act === 'toggle-printer-station-receipts') { const m = state.printerStationModal; if (m) { const inp = document.getElementById('printer-station-ip-input'); if (inp) m.ip = inp.value.trim(); m.receipts = !m.receipts; render(); } }
       else if (act === 'apply-simple-tables') { applySimpleTables(document.getElementById('simple-table-count').value); }
       else if (act === 'rotate-object') {
@@ -17840,6 +17844,7 @@ function bindEvents() {
       else if (act === 'covers-dec') { decCovers(); }
       else if (act === 'cycle-seat') { cycleSeat(parseInt(el.dataset.idx)); }
       else if (act === 'add-floorplan') { openAddFloorPlan(); }
+      else if (act === 'edit-floorplan') { openEditFloorPlan(el.dataset.id); }
       else if (act === 'delete-floorplan') { deleteFloorPlanAction(el.dataset.id); }
       else if (act === 'close-floorplan-modal') { closeFloorPlanModal(); }
       else if (act === 'floorplan-modal-bg') { if (e.target === el) closeFloorPlanModal(); }

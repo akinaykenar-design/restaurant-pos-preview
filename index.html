@@ -2563,16 +2563,24 @@ app.put('/api/allergy-presets', (req, res) => {
 });
 
 // ---------- VIP presets ----------
+// Presets are { name, color } so each waiter-facing button can carry a
+// colour; legacy stores hold plain strings, normalized on the way out.
+function normPresetObj(p, maxLen) {
+  const name = String((p && p.name !== undefined ? p.name : p) || '').trim().slice(0, maxLen);
+  const color = (p && typeof p === 'object' && p.color) || null;
+  return name ? { name, color } : null;
+}
+
 app.get('/api/vip-presets', (req, res) => {
   const data = readData();
-  res.json(data.vipPresets || []);
+  res.json((data.vipPresets || []).map(p => normPresetObj(p, 40)).filter(Boolean));
 });
 
 app.put('/api/vip-presets', (req, res) => {
   const data = readData();
   const { presets } = req.body;
   if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
-  const cleaned = presets.map(p => String(p || '').trim().slice(0, 40)).filter(Boolean).slice(0, 20);
+  const cleaned = presets.map(p => normPresetObj(p, 40)).filter(Boolean).slice(0, 20);
   data.vipPresets = cleaned;
   logAudit(data, staffFromReq(req), 'Updated VIP presets');
   writeData(data);
@@ -2599,7 +2607,10 @@ app.put('/api/size-presets', (req, res) => {
 // ---------- Note categories ----------
 app.get('/api/note-categories', (req, res) => {
   const data = readData();
-  res.json(data.noteCategories || []);
+  res.json((data.noteCategories || []).map(c => ({
+    ...c,
+    presets: (c.presets || []).map(p => normPresetObj(p, 80)).filter(Boolean),
+  })));
 });
 
 app.put('/api/note-categories', (req, res) => {
@@ -2612,7 +2623,7 @@ app.put('/api/note-categories', (req, res) => {
       name: String((c && c.name) || '').trim().slice(0, 40),
       color: (c && c.color) || '#999',
       presets: Array.isArray(c && c.presets)
-        ? c.presets.map(p => String(p || '').trim().slice(0, 80)).filter(Boolean).slice(0, 50)
+        ? c.presets.map(p => normPresetObj(p, 80)).filter(Boolean).slice(0, 50)
         : [],
     }))
     .filter(c => c.name)
@@ -5601,7 +5612,6 @@ let state = {
   notesPanel: null, // { tab: 'vip'|'allergy'|<categoryId> }
   customNoteDraft: null, // { categoryId, text, seats, wholeTable }
   noteCategories: [], // [{ id, name, color }]
-  noteCategoryModal: null, // { mode: 'add'|'edit', id, name, color }
   discountPresets: [],
   discountPresetModal: null, // { mode: 'add'|'edit', id, name, kind, type, value }
   voidReasons: [],
@@ -6207,6 +6217,15 @@ async function uploadImageFile(file) {
   const res = await api('/api/upload-image', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl }) });
   return res.url;
 }
+// VIP and note presets are { name, color } objects; legacy stores (and the
+// browser-only preview's seed data) may hold plain strings — normalize once
+// on load so every consumer can rely on the object shape.
+function normPresetList(list) {
+  return (list || []).map(p => typeof p === 'string' ? { name: p, color: null } : p).filter(p => p && p.name);
+}
+function normNoteCategories(cats) {
+  return (cats || []).map(c => ({ ...c, presets: normPresetList(c.presets) }));
+}
 function applyColorForKind(kind, id, color) {
   if (kind === 'category') quickUpdateCategoryColor(id, color);
   else if (kind === 'subcategory') quickUpdateSubcategoryColor(id, color);
@@ -6218,8 +6237,10 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-category-modal') { state.bulkCategoryModal.color = color; render(); }
   else if (kind === 'bulk-color-modal') { state.bulkColorModal.color = color; render(); }
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
-  else if (kind === 'note-category') quickUpdateNoteCategoryColor(id, color);
-  else if (kind === 'bulk-note-type') bulkSetNoteTypeColor(color);
+  else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
+  else if (kind === 'bulk-vip') bulkSetVipColor(color);
+  else if (kind === 'note-preset') setNotePresetColor(id, color);
+  else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
   else if (kind === 'bulk-allergy') bulkSetAllergyColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
@@ -6227,12 +6248,29 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'table-color') updateTableColor(id, color);
   else if (kind === 'modifier-group') quickUpdateModifierGroupColor(id, color);
   else if (kind === 'combo') quickUpdateComboColor(id, color);
-  else if (kind === 'note-type') setNoteTypeColor(id, color);
 }
-// Row colour for the built-in VIP / Allergies note types (custom types keep
-// their colour on the category itself).
-function setNoteTypeColor(id, color) {
-  saveTicketSetting({ noteTypeColors: { ...(state.settings.noteTypeColors || {}), [id]: color || null } });
+// Preset-button colours (the waiter-facing buttons; the note TYPE rows
+// themselves carry no colour — only their presets do).
+function setNotePresetColor(ref, color) {
+  const [catId, idx] = String(ref).split(':');
+  const cats = state.noteCategories.map(c => c.id !== catId ? c : {
+    ...c, presets: (c.presets || []).map((p, i) => i === parseInt(idx) ? { ...p, color: color || null } : p),
+  });
+  saveNoteCategories(cats);
+}
+function bulkSetVipColor(color) {
+  const sel = new Set(state.selectedVipIdxs || []);
+  if (!sel.size) return;
+  saveVipPresets(state.vipPresets.map((p, i) => sel.has(i) ? { ...p, color: color || null } : p));
+}
+function bulkSetNotePresetColor(color) {
+  const sel = new Set(state.selectedNotePresetIdxs || []);
+  const catId = state.notesOpenId;
+  if (!sel.size || !catId) return;
+  const cats = state.noteCategories.map(c => c.id !== catId ? c : {
+    ...c, presets: (c.presets || []).map((p, i) => sel.has(i) ? { ...p, color: color || null } : p),
+  });
+  saveNoteCategories(cats);
 }
 async function quickUpdateComboColor(id, color) {
   try {
@@ -6550,9 +6588,9 @@ async function loadInitial() {
     applyPanelLayout();
     state.savedColors = await api('/api/saved-colors');
     state.allergyPresets = await api('/api/allergy-presets');
-    state.vipPresets = await api('/api/vip-presets');
+    state.vipPresets = normPresetList(await api('/api/vip-presets'));
     state.sizePresets = await api('/api/size-presets');
-    state.noteCategories = await api('/api/note-categories');
+    state.noteCategories = normNoteCategories(await api('/api/note-categories'));
     state.discountPresets = await api('/api/discount-presets');
     state.voidReasons = await api('/api/void-reasons');
     state.happyHours = await api('/api/happy-hours');
@@ -8481,7 +8519,12 @@ function renderTicketPanel() {
             const qs = (state.printerStations || []).find(s => s.id === state.quickNoteStation);
             return `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border:1.5px dashed var(--orange);">⚡ ${qs ? esc(qs.name) + ' — ' : ''}${esc(state.quickNote)} <button data-act="clear-quick-note" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
           })() : ''}
-          ${state.vipType ? `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border-color:var(--orange);">VIP — ${state.vipType} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>` : ''}
+          ${state.vipType ? (() => {
+            const picks = state.vipType.split(',').map(s => s.trim());
+            const vp = state.vipPresets.find(p => p.color && picks.includes(p.name));
+            const style = vp ? `background:${vp.color};color:${contrastTextColor(vp.color)};border-color:${vp.color};` : 'background:var(--orange-dim);color:var(--orange);border-color:var(--orange);';
+            return `<span class="seat-chip" style="${style}">VIP — ${esc(state.vipType)} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
+          })() : ''}
           ${state.allergies.map((a, idx) => {
             const preset = findAllergyPreset(a.allergy);
             const style = preset && preset.color ? `background:${preset.color};color:${contrastTextColor(preset.color)};border-color:${preset.color};` : '';
@@ -8489,7 +8532,9 @@ function renderTicketPanel() {
           }).join('')}
           ${state.notes.map((n, idx) => {
             const cat = state.noteCategories.find(c => c.id === n.categoryId);
-            return `<span class="seat-chip">${n.seat ? esc(seatText(n.seat)) : 'Whole table'} — ${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)} <button data-act="remove-note" data-idx="${idx}" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
+            const preset = cat && (cat.presets || []).find(p => p.name === n.text && p.color);
+            const style = preset ? `background:${preset.color};color:${contrastTextColor(preset.color)};border-color:${preset.color};` : '';
+            return `<span class="seat-chip" style="${style}">${n.seat ? esc(seatText(n.seat)) : 'Whole table'} — ${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)} <button data-act="remove-note" data-idx="${idx}" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
           }).join('')}
         </div>` : ''}
       ` : ''}
@@ -8654,7 +8699,7 @@ function renderNotesMiddle() {
   const tabs = [
     { key: 'vip', label: 'VIP' },
     { key: 'allergy', label: 'Allergies' },
-    ...state.noteCategories.map(c => ({ key: c.id, label: c.name, color: c.color })),
+    ...state.noteCategories.map(c => ({ key: c.id, label: c.name })),
   ];
   return `
   <div class="middle-view">
@@ -8680,7 +8725,7 @@ function renderVipTabContent() {
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   ${state.vipPresets.length > 0 ? `
     <div class="grid" style="margin-bottom:8px;">
-      ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p)}"><div class="item-name">${esc(p)}</div></button>`).join(''); })()}
+      ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${p.color ? `style="background:${p.color};color:${contrastTextColor(p.color)};"` : ''}><div class="item-name">${esc(p.name)}</div></button>`).join(''); })()}
     </div>` : ''}
   <input id="vip-type-input" type="text" value="${m.type}" placeholder="Or type a custom VIP type…" style="max-width:420px;width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;font-size:13.5px;">
   <div class="modal-actions" style="max-width:420px;">
@@ -8761,7 +8806,7 @@ function renderCustomNoteTabContent(categoryId) {
   ${cat && (cat.presets || []).length ? `
     <label>Quick notes</label>
     <div class="grid" style="margin-bottom:12px;">
-      ${cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${m.text === p ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p)}"><div class="item-name">${esc(p)}</div></button>`).join('')}
+      ${cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${m.text === p.name ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${p.color ? `style="background:${p.color};color:${contrastTextColor(p.color)};"` : ''}><div class="item-name">${esc(p.name)}</div></button>`).join('')}
     </div>` : ''}
   <label>${cat ? esc(cat.name) : 'Note'}</label>
   <input id="custom-note-text-input" type="text" value="${esc(m.text)}">
@@ -11591,7 +11636,7 @@ function renderVipSettingsAdmin() {
   const sel = state.selectedVipIdxs || [];
   return `
   <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-vips" ${vips.length > 0 && vips.every((_, i) => sel.includes(i)) ? 'checked' : ''}></label>${sel.length > 0 ? `
-      
+      <span style="display:inline-flex;align-items:center;gap:6px;">${colorDotButton('bulk-vip', 'x', null, { size: 22, allowClear: true, title: 'Set colour for selected' })}</span>
       <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-vips">${ACT_COPY_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-vips">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" title="Clear selection" data-act="clear-vip-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-vip-preset" title="Add note">+ Add note</button></div>
@@ -11603,14 +11648,15 @@ function renderVipSettingsAdmin() {
       <div class="menu-item-expandable vip-preset-drag${selected ? ' selected' : ''}${(state.expandedVipIdxs || []).includes(idx) ? ' open' : ''}" draggable="true" data-idx="${idx}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
         <div class="menu-item-header sel-head" data-act="vip-toggle-open" data-idx="${idx}" data-sellist="vip" data-selkey="${idx}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="vip" data-key="${idx}" ${selected ? 'checked' : ''}>
-          <span class="t1" style="font-weight:700;font-size:13.5px;">${esc(p)}</span>
+          ${colorDotButton('vip-preset', idx, p.color, { size: 20 })}
+          <span class="t1" style="font-weight:700;font-size:13.5px;">${esc(p.name)}</span>
           <span style="flex:1;"></span>
         </div>
         ${(state.expandedVipIdxs || []).includes(idx) ? `
         <div style="padding:0 12px 12px 44px;">
           <div style="display:flex;flex-direction:column;gap:6px;max-width:280px;">
             <label class="field-label">Name</label>
-            <input class="vip-preset-name-input" data-idx="${idx}" type="text" value="${esc(p)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:13.5px;">
+            <input class="vip-preset-name-input" data-idx="${idx}" type="text" value="${esc(p.name)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:13.5px;">
           </div>
         </div>` : ''}
       </div>`;
@@ -11637,19 +11683,16 @@ function renderOrderNotesAdmin() {
     ...cats.map(c => c.id),
   ];
 
-  const typeRow = (id, name, color, count, builtin, catId) => {
+  // Type rows carry NO colour — colour lives on the preset buttons inside,
+  // where the waiter actually sees it.
+  const typeRow = (id, name, count, builtin, catId) => {
     const open = openId === id;
     const selected = selT.includes(id);
     return `
     <div class="menu-item-expandable${builtin ? '' : ' note-type-row'}${selected ? ' selected' : ''}" data-typeid="${id}" draggable="${builtin ? 'false' : 'true'}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;">
       <div class="menu-item-header sel-head" data-act="notes-toggle-open" data-id="${id}" data-sellist="note-type" data-selkey="${id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
-        ${builtin
-          ? colorDotButton('note-type', id, color, { allowClear: false })
-          : colorDotButton('note-category', catId, color, { size: 20 })}
-        ${builtin
-          ? `<span style="font-weight:700;font-size:13.5px;">${esc(name)}</span>`
-          : `<span style="font-weight:700;font-size:13.5px;">${esc(name)}</span>`}
+        <span style="font-weight:700;font-size:13.5px;">${esc(name)}</span>
         <span style="flex:1;"></span>
         <span class="ts" style="flex-shrink:0;">${count} note${count === 1 ? '' : 's'}</span>
       </div>
@@ -11662,16 +11705,14 @@ function renderOrderNotesAdmin() {
   };
 
   const rows = [
-    ...(!hidden.includes('vip') ? [typeRow('vip', 'VIP', (state.settings.noteTypeColors || {}).vip || '#C08A00', state.vipPresets.length, true)] : []),
-    ...(!hidden.includes('allergy') ? [typeRow('allergy', 'Allergies', (state.settings.noteTypeColors || {}).allergy || '#A8483A', state.allergyPresets.length, true)] : []),
-    ...cats.map(c => typeRow(c.id, c.name, c.color, (c.presets || []).length, false, c.id)),
+    ...(!hidden.includes('vip') ? [typeRow('vip', 'VIP', state.vipPresets.length, true)] : []),
+    ...(!hidden.includes('allergy') ? [typeRow('allergy', 'Allergies', state.allergyPresets.length, true)] : []),
+    ...cats.map(c => typeRow(c.id, c.name, (c.presets || []).length, false, c.id)),
   ];
 
   return `
   ${rows.length === 0 ? `<div class="empty-hist">No note types yet.</div>` : ''}
   <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-types" ${allTypeIds.length > 0 && allTypeIds.every(id => selT.includes(id)) ? 'checked' : ''}></label>${selT.length > 0 ? `
-      
-      <span style="display:inline-flex;align-items:center;gap:6px;">${colorDotButton('bulk-note-type', 'x', null, { size: 22, allowClear: true, title: 'Set colour for selected' })}</span>
       <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-note-types">${ACT_COPY_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-types">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" title="Clear selection" data-act="clear-note-type-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span>${hidden.length ? `<button class="icon-sq" title="Restore VIP / Allergies" data-act="restore-note-types">${ACT_RESET_SVG}</button>` : ''}<button class="btn-add inline" data-act="add-note-section" title="Add note type">+ Add note type</button></div>
@@ -11686,7 +11727,7 @@ function renderNotePresetList(cat, selP) {
   const presets = cat.presets || [];
   return `
   <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${selP.length > 0 ? `
-      
+      <span style="display:inline-flex;align-items:center;gap:6px;">${colorDotButton('bulk-note-preset', 'x', null, { size: 22, allowClear: true, title: 'Set colour for selected' })}</span>
       <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-note-presets">${ACT_COPY_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-presets">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+ Add note</button></div>
@@ -11698,14 +11739,15 @@ function renderNotePresetList(cat, selP) {
       <div class="menu-item-expandable note-preset-drag${selected ? ' selected' : ''}${(state.expandedNotePresetIdxs || []).includes(pIdx) ? ' open' : ''}" data-idx="${pIdx}" draggable="true" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
         <div class="menu-item-header sel-head" data-act="notepreset-toggle-open" data-idx="${pIdx}" data-sellist="note-preset" data-selkey="${pIdx}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
-          <span class="t1" style="font-weight:700;font-size:13.5px;">${esc(p)}</span>
+          ${colorDotButton('note-preset', `${cat.id}:${pIdx}`, p.color, { size: 20 })}
+          <span class="t1" style="font-weight:700;font-size:13.5px;">${esc(p.name)}</span>
           <span style="flex:1;"></span>
         </div>
         ${(state.expandedNotePresetIdxs || []).includes(pIdx) ? `
         <div style="padding:0 12px 12px 44px;">
           <div style="display:flex;flex-direction:column;gap:6px;max-width:280px;">
             <label class="field-label">Name</label>
-            <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:13.5px;">
+            <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p.name)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:13.5px;">
           </div>
         </div>` : ''}
       </div>`;
@@ -14980,7 +15022,6 @@ function updateAllergyPreset(idx, patch) {
   saveAllergyPresets(presets);
 }
 function addAllergyPreset() { saveAllergyPresets([...state.allergyPresets, { name: 'New allergy', color: null, sequence: null, subTypes: [] }]); }
-const DEFAULT_ALLERGY_PRESET_NAMES = ['Nuts', 'Peanuts', 'Shellfish', 'Fish', 'Dairy', 'Eggs', 'Gluten', 'Soy', 'Vegetarian', 'Vegan'];
 function removeAllergyPreset(idx) {
   if (state.allergyPresets.length <= 1) return;
   saveAllergyPresets(state.allergyPresets.filter((_, i) => i !== idx));
@@ -15027,14 +15068,13 @@ async function saveVipPresets(presets) {
   state.vipPresets = presets;
   render();
   try {
-    state.vipPresets = await api('/api/vip-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
+    state.vipPresets = normPresetList(await api('/api/vip-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) }));
     render();
   } catch (e) {}
 }
-function addVipPreset() { saveVipPresets([...state.vipPresets, 'New type']); }
-const DEFAULT_VIP_PRESET_NAMES = ['Regular', 'Celebrity', 'Food Critic', 'Investor', "Owner's Guest", 'Press/Media'];
+function addVipPreset() { saveVipPresets([...state.vipPresets, { name: 'New type', color: null }]); }
 function updateVipPreset(idx, value) {
-  saveVipPresets(state.vipPresets.map((p, i) => i === idx ? value : p));
+  saveVipPresets(state.vipPresets.map((p, i) => i === idx ? { ...p, name: value } : p));
 }
 function removeVipPreset(idx) {
   saveVipPresets(state.vipPresets.filter((_, i) => i !== idx));
@@ -15050,7 +15090,7 @@ function duplicateSelectedSizes() {
 function duplicateSelectedVips() {
   const sel = (state.selectedVipIdxs || []).slice().sort((a, b) => a - b);
   if (!sel.length) return;
-  saveVipPresets([...state.vipPresets, ...sel.map(i => dupName(state.vipPresets[i]))]);
+  saveVipPresets([...state.vipPresets, ...sel.map(i => ({ ...state.vipPresets[i], name: dupName(state.vipPresets[i].name) }))]);
 }
 function duplicateSelectedVoidReasons() {
   const sel = (state.selectedVoidReasonIdxs || []).slice().sort((a, b) => a - b);
@@ -15073,7 +15113,7 @@ function duplicateSelectedNotePresets() {
   const sel = (state.selectedNotePresetIdxs || []).slice().sort((a, b) => a - b);
   const catId = state.notesOpenId;
   if (!sel.length || !catId) return;
-  const cats = state.noteCategories.map(c => c.id !== catId ? c : { ...c, presets: [...(c.presets || []), ...sel.map(i => dupName((c.presets || [])[i])).filter(Boolean)] });
+  const cats = state.noteCategories.map(c => c.id !== catId ? c : { ...c, presets: [...(c.presets || []), ...sel.map(i => (c.presets || [])[i]).filter(Boolean).map(p => ({ ...p, name: dupName(p.name) }))] });
   saveNoteCategories(cats);
 }
 async function duplicateSelectedSections() {
@@ -15189,7 +15229,7 @@ async function saveNoteCategories(categories) {
   state.noteCategories = categories;
   render();
   try {
-    state.noteCategories = await api('/api/note-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ categories }) });
+    state.noteCategories = normNoteCategories(await api('/api/note-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ categories }) }));
     render();
   } catch (e) {}
 }
@@ -15199,12 +15239,6 @@ function addNoteCategory() {
 }
 function removeNoteCategory(idx) {
   saveNoteCategories(state.noteCategories.filter((_, i) => i !== idx));
-}
-function openEditNoteCategory(idx) {
-  const cat = state.noteCategories[idx];
-  if (!cat) return;
-  state.noteCategoryModal = { id: cat.id, name: cat.name, color: cat.color, idx };
-  render();
 }
 function updateNoteCategory(idx, field, value) {
   state.noteCategories[idx][field] = value;
@@ -15224,14 +15258,14 @@ function removeNoteSection(idx) {
 function addNotePreset(catId) {
   // Server drops empty presets, so seed a placeholder the user then edits
   // (same pattern as "New section" / "New category").
-  const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: [...(c.presets || []), 'New note'] } : c);
+  const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: [...(c.presets || []), { name: 'New note', color: null }] } : c);
   saveNoteCategories(cats);
 }
 function updateNotePreset(catId, idx, text) {
   const cats = state.noteCategories.map(c => {
     if (c.id !== catId) return c;
     const presets = [...(c.presets || [])];
-    presets[idx] = text;
+    presets[idx] = { ...presets[idx], name: text };
     return { ...c, presets };
   });
   saveNoteCategories(cats);
@@ -15243,23 +15277,17 @@ function removeNotePreset(catId, idx) {
 function deleteSelectedNotePresets() {
   const sel = new Set(state.selectedNotePresetIdxs || []);
   if (!sel.size) return;
-  const catId = state.notesAdminSection;
+  // The visible preset list is keyed off notesOpenId (same as duplicate).
+  const catId = state.notesOpenId;
   const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: (c.presets || []).filter((_, i) => !sel.has(i)) } : c);
   state.selectedNotePresetIdxs = [];
-  saveNoteCategories(cats);
-}
-// Bulk colour on selected note types — applies to the custom ones (built-in
-// VIP/Allergies keep their fixed colour).
-function bulkSetNoteTypeColor(color) {
-  const sel = new Set(state.selectedNoteTypeIds || []);
-  const cats = state.noteCategories.map(c => sel.has(c.id) ? { ...c, color: color || '#999' } : c);
   saveNoteCategories(cats);
 }
 function duplicateSelectedNoteTypes() {
   const sel = new Set(state.selectedNoteTypeIds || []);
   const dupes = state.noteCategories.filter(c => sel.has(c.id)).map(c => ({
     id: 'note-' + Date.now() + '-' + Math.floor(state.noteCategories.length + Math.random() * 1000),
-    name: c.name + ' copy', color: c.color, presets: [...(c.presets || [])],
+    name: c.name + ' copy', color: c.color, presets: (c.presets || []).map(p => ({ ...p })),
   }));
   if (!dupes.length) return;
   saveNoteCategories([...state.noteCategories, ...dupes]); // originals stay selected
@@ -15280,10 +15308,6 @@ function deleteSelectedNoteTypes() {
     }
     saveNoteCategories(keepCats);
   });
-}
-function quickUpdateNoteCategoryColor(id, color) {
-  const cats = state.noteCategories.map(c => c.id === id ? { ...c, color: color || '#999' } : c);
-  saveNoteCategories(cats);
 }
 function hideNoteType(type) {
   const hidden = Array.from(new Set([...(state.settings.hiddenNoteTypes || []), type]));
@@ -17773,7 +17797,6 @@ function bindEvents() {
       else if (act === 'toggle-item-size-preset') { toggleItemSizePreset(el.dataset.id, el.dataset.preset); }
       else if (act === 'add-note-category') { addNoteCategory(); }
       else if (act === 'remove-note-category') { removeNoteCategory(parseInt(el.dataset.idx)); }
-      else if (act === 'edit-note-category') { openEditNoteCategory(parseInt(el.dataset.idx)); }
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }

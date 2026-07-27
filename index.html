@@ -6029,14 +6029,20 @@ function colorDotButton(kind, id, color, opts) {
   // per-page sizes or shapes (opts.size is ignored on purpose).
   const size = 22;
   const img = opts.image || '';
-  const bg = img ? `center/cover no-repeat url("${img}")` : (color || 'transparent');
-  return `<button type="button" class="color-dot-btn ${(color || img) ? '' : 'empty'}" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="${color || ''}" data-image="${esc(img)}" data-photo="${opts.photo ? '1' : '0'}" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" style="width:${size}px;height:${size}px;background:${bg};vertical-align:middle;" title="${opts.title || 'Change colour or photo'}"></button>`;
+  // opts.bg lets a texture (table finish) show on the dot without becoming the
+  // data-color value; opts.finish marks which finish swatch the popover ticks.
+  const bg = img ? `center/cover no-repeat url("${img}")` : (color || opts.bg || 'transparent');
+  return `<button type="button" class="color-dot-btn ${(color || img || opts.bg) ? '' : 'empty'}" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="${color || ''}" data-finish="${opts.finish || ''}" data-image="${esc(img)}" data-photo="${opts.photo ? '1' : '0'}" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" style="width:${size}px;height:${size}px;background:${bg};vertical-align:middle;" title="${opts.title || 'Change colour or photo'}"></button>`;
 }
-function colorPopoverInnerHTML(color, allowClear, palette, photo, image) {
+function colorPopoverInnerHTML(color, allowClear, palette, photo, image, finish) {
   palette = palette || PRESET_COLORS;
   const recent = state.savedColors.filter(c => !palette.some(p => p.toLowerCase() === c.toLowerCase()));
   const all = [...palette, ...recent];
   return `
+    ${finish ? `
+    <div class="color-popover-grid" style="padding-bottom:8px;border-bottom:1px solid var(--steel-200);">
+      ${TABLE_FINISHES.map(f => `<button type="button" class="color-swatch finish-swatch ${!color && finish.current === f.key ? 'selected' : ''}" data-finish="${f.key}" style="background:${f.bg || 'var(--surface)'};" title="${esc(f.label)}"></button>`).join('')}
+    </div>` : ''}
     <div class="color-popover-grid">
       ${all.map(c => `<button type="button" class="color-swatch ${color && color.toLowerCase() === c.toLowerCase() ? 'selected' : ''}" data-color="${c}" style="background:${c};" title="${c}"></button>`).join('')}
     </div>
@@ -6073,17 +6079,22 @@ function openColorPopover(btn) {
   const photo = btn.dataset.photo === '1';
   const image = btn.dataset.image || '';
   _cpCtx = { kind: btn.dataset.kind, id: btn.dataset.id, btn };
-  const palette = (_cpCtx.kind === 'table-color' || _cpCtx.kind === 'floor-table-new') ? TABLE_MATERIAL_COLORS : PRESET_COLORS;
+  const isTableKind = _cpCtx.kind === 'table-color' || _cpCtx.kind === 'floor-table-new';
+  const palette = isTableKind ? TABLE_MATERIAL_COLORS : PRESET_COLORS;
+  const finish = isTableKind ? { current: btn.dataset.finish || 'plain' } : null;
   const el = document.createElement('div');
   el.className = 'color-popover';
-  el.innerHTML = colorPopoverInnerHTML(color, allowClear, palette, photo, image);
+  el.innerHTML = colorPopoverInnerHTML(color, allowClear, palette, photo, image, finish);
   document.body.appendChild(el);
   _cpEl = el;
   positionColorPopoverEl(btn, el);
   el.addEventListener('mousedown', (e) => e.stopPropagation());
   el.addEventListener('click', (e) => e.stopPropagation());
-  el.querySelectorAll('.color-swatch, .color-popover-clear').forEach(sw => {
+  el.querySelectorAll('.color-swatch:not(.finish-swatch), .color-popover-clear').forEach(sw => {
     sw.addEventListener('click', () => pickColorValue(sw.dataset.color || null));
+  });
+  el.querySelectorAll('.finish-swatch').forEach(sw => {
+    sw.addEventListener('click', () => pickFinishValue(sw.dataset.finish));
   });
   const native = el.querySelector('.color-popover-native');
   if (native) {
@@ -6128,6 +6139,23 @@ function pickColorValue(color) {
   if (btn) { btn.style.background = color || 'transparent'; btn.classList.toggle('empty', !color); btn.dataset.color = color || ''; }
   closeColorPopover();
   applyColorForKind(kind, id, color);
+}
+// Table finishes ride the same popover as colours (table kinds only) —
+// picking a texture clears the solid colour, and vice-versa the colour grid
+// simply wins because display precedence is colour-first.
+function pickFinishValue(key) {
+  const ctx = _cpCtx;
+  if (!ctx) return;
+  const { kind, id, btn } = ctx;
+  const fin = tableFinish(key);
+  if (btn) { btn.style.background = fin.bg || 'var(--surface)'; btn.classList.toggle('empty', !fin.bg); btn.dataset.color = ''; btn.dataset.finish = key; }
+  closeColorPopover();
+  if (kind === 'floor-table-new') { state.floorTableFinish = key; state.floorTableColor = null; render(); }
+  else if (kind === 'table-color') updateTableFinish(id, key);
+}
+async function updateTableFinish(id, key) {
+  const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
+  if (fp) patchFloorObject(fp.id, id, { finish: key, color: null });
 }
 // Photo is an alternative to colour on the same popover; picking one clears the
 // other (mutually exclusive "look" for the entity).
@@ -12629,19 +12657,14 @@ function renderFloorPlanAdmin() {
     </div>
     <div class="pp-group">
       <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · style` : 'Table style'}</div>
-      <div class="pp-row" style="align-items:center;">
+      <div class="pp-row" style="align-items:center;min-height:38px;">
         ${(() => {
           const curColor = selTable ? selTable.color : state.floorTableColor;
           const curFinish = selTable ? (selTable.finish || 'plain') : (state.floorTableFinish || 'plain');
-          return `
-        <span style="display:inline-block;width:30px;height:24px;border-radius:6px;border:1px solid var(--steel-300);flex:none;background:${curColor || tableFinish(curFinish).bg || 'var(--surface)'};"></span>
-        <select class="pp-select pp-style-select" ${selTable ? `data-id="${selTable.id}" data-fp="${fp.id}"` : ''} title="${selTable ? 'Change this table’s style' : 'Style applied to tables you place'}">
-          ${curColor ? `<option value="" selected>Solid colour</option>` : ''}
-          ${TABLE_FINISHES.map(f => `<option value="${f.key}" ${!curColor && curFinish === f.key ? 'selected' : ''}>${esc(f.label)}</option>`).join('')}
-        </select>
-        ${selTable
-          ? colorDotButton('table-color', selTable.id, selTable.color, { size: 26, title: 'Table colour' })
-          : colorDotButton('floor-table-new', 'new', state.floorTableColor, { size: 26, title: 'Solid colour applied to tables you place' })}`;
+          const dotOpts = { bg: curColor ? null : tableFinish(curFinish).bg, finish: curFinish };
+          return selTable
+            ? colorDotButton('table-color', selTable.id, selTable.color, { ...dotOpts, title: 'Table style & colour' })
+            : colorDotButton('floor-table-new', 'new', state.floorTableColor, { ...dotOpts, title: 'Style applied to tables you place' });
         })()}
       </div>
     </div>
@@ -16877,15 +16900,6 @@ document.addEventListener('change', (e) => {
     state.floorPlacing = e.target.value || null;
     state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
     render();
-  }
-  // Table style dropdown: restyles the selected table, or sets the style for
-  // tables you're about to place.
-  if (e.target && e.target.classList && e.target.classList.contains('pp-style-select')) {
-    const key = e.target.value;
-    if (key) {
-      if (e.target.dataset.id) patchFloorObject(e.target.dataset.fp, e.target.dataset.id, { finish: key, color: null });
-      else { state.floorTableFinish = key; state.floorTableColor = null; render(); }
-    }
   }
   // With an object selected, the same dropdown re-types it instead of placing.
   if (e.target && e.target.classList && e.target.classList.contains('pp-retype-select')) {

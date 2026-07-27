@@ -231,12 +231,6 @@ html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-prim
 .menu-scroll{flex:1;overflow-y:auto;padding:8px 18px 18px;}
 .cat-title{font-family:var(--font-display);font-size:calc(15px*var(--menu-fs,1));margin:14px 0 10px;}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--item-min-w,118px),1fr));gap:var(--grid-gap,10px);}
-/* Quick repeat — recent tickets, one tap to re-add. Sits above the menu grid. */
-.repeat-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;}
-.repeat-chip{flex:1 1 190px;min-width:0;background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--radius);padding:10px 12px;cursor:pointer;text-align:left;display:flex;flex-direction:column;gap:3px;}
-.repeat-chip .rc-top{font-weight:700;font-size:13px;color:var(--text-primary);}
-.repeat-chip .rc-sub{font-size:11px;color:var(--charcoal-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.repeat-chip .rc-total{font-family:var(--font-mono);font-size:11.5px;font-weight:600;color:var(--green);}
 /* One fixed height per size setting: a long name never makes a taller button.
    Names clamp to two lines (one when sharing space with a photo or icon); the
    price sits pinned to the bottom in the tile's own text colour. Tiles with a
@@ -2862,7 +2856,7 @@ app.get('/api/settings', (req, res) => {
 
 app.put('/api/settings', (req, res) => {
   const data = readData();
-  const { coversEnabled, seatNumbersEnabled, promptSeatOnAdd, seatPrefix, sharedSeatLabel, roundColors, tipsEnabled, tipPresets, managerApprovalForVoid, allergyCustomEnabled, courses, ticketHeader, ticketFooter, showStaffOnTicket, showCoversOnTicket, showPrices, showTilePrices, printEnabled, autoPrintReceipt, autoPrintKitchenDocket, takeawayEnabled, deliveryEnabled, kitchenInstructions, hiddenNoteTypes, qtyPadEnabled, tableStatusColors, paperWidth, printColorMode, printFontScale, panelOrder, quickRepeatEnabled, tableMode, simpleTableCount, terminal: terminalSettings } = req.body;
+  const { coversEnabled, seatNumbersEnabled, promptSeatOnAdd, seatPrefix, sharedSeatLabel, roundColors, tipsEnabled, tipPresets, managerApprovalForVoid, allergyCustomEnabled, courses, ticketHeader, ticketFooter, showStaffOnTicket, showCoversOnTicket, showPrices, showTilePrices, printEnabled, autoPrintReceipt, autoPrintKitchenDocket, takeawayEnabled, deliveryEnabled, kitchenInstructions, hiddenNoteTypes, qtyPadEnabled, tableStatusColors, paperWidth, printColorMode, printFontScale, panelOrder, tableMode, simpleTableCount, terminal: terminalSettings } = req.body;
   if (req.body.tax !== undefined) {
     const t = req.body.tax || {};
     data.settings.tax = {
@@ -2882,7 +2876,6 @@ app.put('/api/settings', (req, res) => {
     const n = parseInt(simpleTableCount);
     if (!isNaN(n)) data.settings.simpleTableCount = Math.max(1, Math.min(200, n));
   }
-  if (quickRepeatEnabled !== undefined) data.settings.quickRepeatEnabled = !!quickRepeatEnabled;
   if (req.body.coursePagedDocket !== undefined) data.settings.coursePagedDocket = !!req.body.coursePagedDocket;
   if (req.body.showItemIcons !== undefined) data.settings.showItemIcons = !!req.body.showItemIcons;
   if (req.body.catIconsOnly !== undefined) data.settings.catIconsOnly = !!req.body.catIconsOnly;
@@ -7054,40 +7047,6 @@ function defaultModSelections(item) {
 function removedSig(line) {
   return lineBuild(line).removed.map(c => c.source + ':' + c.id).sort().join(',');
 }
-// The handful of recent tickets offered by Quick repeat.
-function recentRepeatableOrders(limit = 3) {
-  return (state.orders || [])
-    .filter(o => o.status !== 'void' && (o.items || []).length > 0)
-    .slice(0, limit); // /api/orders already returns newest-first
-}
-// Re-add every line of a past order to the cart in one tap. Rebuilds each line
-// from the recorded variantId/modSelections rather than going through
-// addToCart(), so nothing re-prompts — those choices were made when the order
-// was placed. Prices are re-composed at CURRENT menu prices, not the historical
-// ones. 86'd or deleted items are skipped and reported.
-function repeatOrder(orderId) {
-  const order = (state.orders || []).find(o => String(o.id) === String(orderId));
-  if (!order) return;
-  let added = 0;
-  const skipped = [];
-  (order.items || []).forEach(li => {
-    const item = state.menu.find(m => m.id === li.menuItemId);
-    if (!item || item.disabled || item.out) { skipped.push(li.name); return; }
-    const composed = composeCartLine(item, li.variantId || null, li.modSelections || {});
-    const course = item.defaultCourse || state.activeCourse;
-    if (course > state.courseCount) state.courseCount = course;
-    const qty = li.qty || 1;
-    const existing = state.cart.find(c => c.id === composed.id && c.course === course && c.seat === null);
-    if (existing) existing.qty += qty;
-    else state.cart.push({ id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: null, note: '', variantId: li.variantId || null, modSelections: li.modSelections || {}, removed: li.removed || [] });
-    added += 1;
-  });
-  state.toast = skipped.length
-    ? `Added ${added} — unavailable: ${skipped.join(', ')}`
-    : `Added ${added} item${added === 1 ? '' : 's'}`;
-  render();
-  setTimeout(() => { state.toast = null; render(); }, 2600);
-}
 
 function addToCart(item, variant, modifiers, seat) {
   // Sold-out is a soft warning now, not a block — you can still add and send.
@@ -8083,22 +8042,6 @@ function renderMenuScrollBody() {
       ${state.settings.showPrices && state.settings.showTilePrices !== false ? `<div class="item-tile-price">${money(combo.price)}</div>` : ''}
     </button>`;
   return `
-        ${state.settings.quickRepeatEnabled && !state.search ? (() => {
-          const recents = recentRepeatableOrders(3);
-          if (recents.length === 0) return '';
-          return `<div class="repeat-row">
-            ${recents.map(o => {
-              const units = (o.items || []).reduce((s, i) => s + (i.qty || 0), 0);
-              const summary = (o.items || []).map(i => `${i.qty > 1 ? i.qty + ' ' : ''}${i.name}`).join(' · ');
-              const where = o.table ? (findTableById(o.table) ? tableDisplayLabel(o.table) : 'Table ' + esc(String(o.table))) : (o.customerName ? esc(o.customerName) : '');
-              return `<button class="repeat-chip" data-act="repeat-order" data-id="${o.id}" title="${esc(summary)}">
-                <span class="rc-top">↻ ${fmtTime(o.createdAt)}${where ? ' · ' + where : ''}</span>
-                <span class="rc-sub">${esc(summary)}</span>
-                <span class="rc-total">${units} · ${money(o.total)}</span>
-              </button>`;
-            }).join('')}
-          </div>`;
-        })() : ''}
         ${catsToShow.map(cat => {
           const catObj = state.categories.find(c => c.name === cat);
           const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
@@ -13098,10 +13041,6 @@ function renderScreenAdmin() {
     </div>
   </div>
   <div class="settings-card" id="ctl-extras">
-    <div class="th" style="margin-bottom:14px;">Quick repeat</div>
-    <div class="pay-options" style="margin-bottom:18px;">
-      ${togglePill(state.settings.quickRepeatEnabled, 'set-quick-repeat')}
-    </div>
     <div class="th" style="margin-bottom:14px;">Quantity number pad</div>
     <div class="pay-options">
       ${togglePill(state.settings.qtyPadEnabled, 'set-qtypad-enabled')}
@@ -14851,14 +14790,6 @@ async function setQtyPadEnabled(val) {
     const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ qtyPadEnabled: val }) });
     state.settings = s;
   } catch (e) {}
-}
-async function setQuickRepeatEnabled(val) {
-  state.settings.quickRepeatEnabled = val;
-  render();
-  try {
-    const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ quickRepeatEnabled: val }) });
-    state.settings = s;
-  } catch (e) { state.toast = 'Could not save quick repeat.'; render(); }
 }
 function tapQtyPad(key) {
   const buf = state.qtyPadBuffer || '';
@@ -17592,8 +17523,6 @@ function bindEvents() {
       else if (act === 'tkt-width-minus') { setThemeDraft({ tktWidth: Math.max(260, (state.theme.tktWidth || 360) - 20) }); }
       else if (act === 'tkt-width-plus') { setThemeDraft({ tktWidth: Math.min(560, (state.theme.tktWidth || 360) + 20) }); }
       else if (act === 'tkt-width-reset') { setThemeDraft({ tktWidth: 360 }); }
-      else if (act === 'set-quick-repeat') { setQuickRepeatEnabled(el.dataset.val === 'true'); }
-      else if (act === 'repeat-order') { repeatOrder(el.dataset.id); }
       else if (act === 'save-appearance') { saveAppearance(); }
       else if (act === 'add-variant') { addVariantRow(); }
       else if (act === 'toggle-size-item') { toggleSizeItemExpand(el.dataset.id); }

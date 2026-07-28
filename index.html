@@ -5898,9 +5898,9 @@ function printKitchenDocket(courseNumber) {
   // Thermal mode: the server prints the course's items on the right stations.
   if ((state.settings.printColorMode || 'thermal') !== 'color') {
     const o = activeOpenOrder();
-    if (!o) { state.toast = 'Nothing sent yet — dockets print when you Send.'; render(); setTimeout(() => { state.toast = null; render(); }, 2600); return; }
+    if (!o) { state.toast = 'Nothing sent yet — dockets print when you Send.'; render(); armToastTimer(2600); return; }
     api(`/api/orders/${o.id}/print-course`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course: courseNumber }) })
-      .catch(e => { state.toast = e.message || 'Could not print the docket.'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); });
+      .catch(e => { state.toast = e.message || 'Could not print the docket.'; render(); armToastTimer(3000); });
     return;
   }
   // Cumulative: shows every course fired so far for this table, with the
@@ -5965,12 +5965,12 @@ function sampleDocketCtx() {
 async function sendTestPrint() {
   if ((state.settings.printColorMode || 'thermal') !== 'color') {
     const ips = [...new Set((state.printerStations || []).flatMap(s => (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : []))))];
-    if (!ips.length) { state.toast = 'Add a printer station first (with an IP).'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); return; }
+    if (!ips.length) { state.toast = 'Add a printer station first (with an IP).'; render(); armToastTimer(3000); return; }
     state.toast = `Sending test page to ${ips.length} printer${ips.length === 1 ? '' : 's'}…`; render();
     const results = await Promise.allSettled(ips.map(ip => api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) })));
     const failed = ips.filter((ip, i) => results[i].status === 'rejected');
     state.toast = failed.length ? `Test failed on ${failed.join(', ')}` : `Test page sent to ${ips.length} printer${ips.length === 1 ? '' : 's'} ✓`;
-    render(); setTimeout(() => { state.toast = null; render(); }, 3500);
+    render(); armToastTimer(3500);
     return;
   }
   const html = `
@@ -6875,7 +6875,7 @@ async function closeRegister() {
       await loadRegisterData();
       state.toast = 'Register closed.';
       render();
-      setTimeout(() => { state.toast = null; render(); }, 3200);
+      armToastTimer(3200);
     } catch (e) {
       state.toast = 'Could not close the register — check the server.';
       render();
@@ -7203,7 +7203,7 @@ function removedSig(line) {
 
 function addToCart(item, variant, modifiers, seat) {
   // Sold-out is a soft warning now, not a block — you can still add and send.
-  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; clearTimeout(state._toastTimer); state._toastTimer = setTimeout(() => { state.toast = null; render(); }, 3000); }
+  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; clearTimeout(state._toastTimer); state._toastTimer = armToastTimer(3000); }
   const needsVariant = item.variants && item.variants.length > 0;
   // Only 'ordering' groups force the options pane; 'default' groups auto-apply
   // and 'later' groups wait for the line editor.
@@ -7342,8 +7342,28 @@ function removeLine(idx) {
   state.toast = 'Item removed';
   state.toastAction = { label: 'Undo', act: 'undo-remove' };
   clearTimeout(state._toastTimer);
-  state._toastTimer = setTimeout(() => { state.toast = null; state.toastAction = null; state.lastRemoved = null; render(); }, 5000);
+  state._toastFor = state.toast;
+  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; state.lastRemoved = null; render(); }, 5000);
   render();
+}
+// One shared toast timer, bound to the message it was armed for — an old
+// toast's timeout can never delete a newer toast early, and every toast
+// (even ones set without a timer) auto-dismisses via ensureToastTimer(),
+// which render() calls on every pass.
+function armToastTimer(ms) {
+  clearTimeout(state._toastTimer);
+  state._toastFor = state.toast;
+  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; render(); }, ms);
+}
+function ensureToastTimer() {
+  if (!state.toast) {
+    if (state._toastTimer) { clearTimeout(state._toastTimer); state._toastTimer = null; state._toastFor = null; }
+    return;
+  }
+  if (state._toastTimer && state._toastFor === state.toast) return; // already counting down for this exact message
+  clearTimeout(state._toastTimer);
+  state._toastFor = state.toast;
+  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; render(); }, 4000);
 }
 function undoRemoveLine() {
   if (state.lastRemoved) {
@@ -7418,7 +7438,7 @@ async function markBillPrinted(orderId) {
   if ((state.settings.printColorMode || 'thermal') !== 'color') {
     // Thermal: the server prints the bill on the receipt station(s).
     api(`/api/orders/${orderId}/print-bill`, { method: 'POST' })
-      .catch(e => { state.toast = e.message || 'Could not print the bill.'; render(); setTimeout(() => { state.toast = null; render(); }, 3000); });
+      .catch(e => { state.toast = e.message || 'Could not print the bill.'; render(); armToastTimer(3000); });
   } else {
     try { printReceipt(order); } catch (e) {}
   }
@@ -7817,7 +7837,7 @@ async function sendToKitchen() {
     await refreshOrders();
     state.menu = await api('/api/menu');
     render();
-    setTimeout(() => { state.toast = null; render(); }, 3200);
+    armToastTimer(3200);
   } catch (e) {
     state.toast = 'Could not send items — check the server.';
     render();
@@ -7849,7 +7869,7 @@ async function runTerminalPurchase(amount) {
         state.terminalPending = null;
         state.toast = s.message || 'Card declined';
         render();
-        setTimeout(() => { state.toast = null; render(); }, 3500);
+        armToastTimer(3500);
         return false;
       }
       if (s.message && state.terminalPending) { state.terminalPending.message = s.message; render(); }
@@ -7858,7 +7878,7 @@ async function runTerminalPurchase(amount) {
     state.terminalPending = null;
     state.toast = e.message || 'Could not reach the card terminal';
     render();
-    setTimeout(() => { state.toast = null; render(); }, 3500);
+    armToastTimer(3500);
     return false;
   }
 }
@@ -7911,7 +7931,7 @@ async function confirmPayment() {
       await refreshSummary();
       render();
       if (state.settings.printEnabled && state.settings.autoPrintReceipt) printReceipt(order);
-      setTimeout(() => { state.toast = null; render(); }, 3200);
+      armToastTimer(3200);
     } catch (e) {
       state.toast = e.message || 'Could not close the tab — check the server.';
       render();
@@ -7959,7 +7979,7 @@ async function confirmPayment() {
     state.menu = await api('/api/menu');
     render();
     if (state.settings.printEnabled && state.settings.autoPrintReceipt) printReceipt(order);
-    setTimeout(() => { state.toast = null; render(); }, 3200);
+    armToastTimer(3200);
   } catch (e) {
     state.toast = e.message || 'Could not save the order — check the server.';
     render();
@@ -8034,6 +8054,10 @@ function render() {
   // render(), so guarding here covers every trigger. The pending render is
   // replayed the moment the drag ends (see endSortDrag/up()).
   if (state._sortDragging || state._mockDragging) { state._renderQueuedDuringDrag = true; return; }
+
+  // Every visible toast gets a dismiss timer keyed to its message — set a
+  // toast anywhere, it shows for ~4s (or the site's own armToastTimer span).
+  ensureToastTimer();
 
   const _prevExp = snapshotExpKeys();
   const app = document.getElementById('app');
@@ -8410,7 +8434,7 @@ function doAddServing(match) {
     variantId: item.variantId, modSelections: item.modSelections });
   state.toast = `Added another ${item.name}`;
   render();
-  setTimeout(() => { state.toast = null; render(); }, 2000);
+  armToastTimer(2000);
   return true;
 }
 function addAnotherServing() { const m = state.editSent; state.editSent = null; if (!doAddServing(m)) render(); }
@@ -8432,7 +8456,7 @@ async function doRepriceSent(match, newPrice) {
     state.editSent = null;
     state.toast = 'Price updated';
     render();
-    setTimeout(() => { state.toast = null; render(); }, 2000);
+    armToastTimer(2000);
   } catch (e) { state.toast = 'Could not update price'; render(); }
 }
 function repriceSentItem() {
@@ -8501,7 +8525,7 @@ async function doRemoveSent(match) {
     state.editSent = null;
     state.toast = 'Item removed';
     render();
-    setTimeout(() => { state.toast = null; render(); }, 2000);
+    armToastTimer(2000);
   } catch (e) { state.toast = 'Could not remove item'; render(); }
 }
 function removeSentItem() { doRemoveSent(state.editSent); }
@@ -10603,7 +10627,7 @@ async function testPrinterIp(ip) {
     state.toast = e.message || `Could not reach ${ip}.`;
   }
   render();
-  setTimeout(() => { state.toast = null; render(); }, 3500);
+  armToastTimer(3500);
 }
 async function toggleStationPaused(stationId) {
   const s = state.printerStations.find(x => x.id === stationId);
@@ -10617,7 +10641,7 @@ async function toggleStationPaused(stationId) {
       ? `${now.name} paused${fb ? ` — its dockets go to ${fb.name}` : ' — its dockets will NOT print'}`
       : `${now ? now.name : 'Station'} printing again.`;
     render();
-    setTimeout(() => { state.toast = null; render(); }, 3500);
+    armToastTimer(3500);
   } catch (e) { state.toast = e.message; render(); }
 }
 
@@ -10632,7 +10656,7 @@ async function pollPrintAlerts() {
       printAlertLastId = alerts[alerts.length - 1].id;
       state.toast = alerts[alerts.length - 1].message;
       render();
-      setTimeout(() => { state.toast = null; render(); }, 6000);
+      armToastTimer(6000);
     }
   } catch (e) { /* server unreachable — the offline dot already shows that */ }
 }
@@ -10645,7 +10669,7 @@ async function assignPrinterIp(stationId, ip) {
     const s = state.printerStations.find(x => x.id === stationId);
     state.toast = `${ip} assigned to ${s ? s.name : 'station'}.`;
     render();
-    setTimeout(() => { state.toast = null; render(); }, 3000);
+    armToastTimer(3000);
   } catch (e) { state.toast = e.message; render(); }
 }
 // ---------- Backups ----------
@@ -10688,7 +10712,7 @@ async function downloadDataFile() {
     a.download = 'pos-data-' + new Date().toISOString().slice(0, 10) + '.json';
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 4000);
-  } catch (e) { state.toast = 'Could not download the data file.'; render(); setTimeout(() => { state.toast = null; render(); }, 2500); }
+  } catch (e) { state.toast = 'Could not download the data file.'; render(); armToastTimer(2500); }
 }
 function importDataFile(file) {
   const reader = new FileReader();
@@ -10697,7 +10721,7 @@ function importDataFile(file) {
     try { data = JSON.parse(reader.result); } catch (e) { data = null; }
     if (!data || !Array.isArray(data.menu) || !data.settings) {
       state.toast = 'That file does not look like POS data.'; render();
-      setTimeout(() => { state.toast = null; render(); }, 3000);
+      armToastTimer(3000);
       return;
     }
     openConfirm({ message: 'Replace ALL current data with this file?\n\nA safety copy of right now is taken first, so this can be undone from Backups.', confirmLabel: 'Import', danger: true }, async () => {
@@ -10717,7 +10741,7 @@ async function backupNow() {
     state.toast = 'Backup written.';
     await loadBackups();
   } catch (e) { state.toast = e.message; render(); }
-  setTimeout(() => { state.toast = null; render(); }, 2500);
+  armToastTimer(2500);
 }
 async function restoreBackup(file) {
   openConfirm({ message: `Replace ALL current data with the backup from this point in time?\n\nA safety copy of right now is taken first, so this can be undone.`, confirmLabel: 'Restore', danger: true }, async () => {
@@ -10783,7 +10807,7 @@ async function saveDoshiiConfig() {
     state.toast = 'Doshii connection saved.';
   } catch (e) { state.toast = e.message; }
   render();
-  setTimeout(() => { state.toast = null; render(); }, 3000);
+  armToastTimer(3000);
 }
 
 async function testDoshii() {
@@ -10794,7 +10818,7 @@ async function testDoshii() {
     state.toast = `Connected — Doshii sees your venue${r.location ? ` "${r.location}"` : ''}.`;
   } catch (e) { state.toast = e.message; }
   render();
-  setTimeout(() => { state.toast = null; render(); }, 4000);
+  armToastTimer(4000);
 }
 
 async function syncDoshiiMenu() {
@@ -10805,7 +10829,7 @@ async function syncDoshiiMenu() {
     state.toast = `Menu synced — ${r.items} items now visible to apps.`;
   } catch (e) { state.toast = e.message; }
   render();
-  setTimeout(() => { state.toast = null; render(); }, 4000);
+  armToastTimer(4000);
 }
 
 // ---------- Card terminal (integrated EFTPOS) ----------
@@ -10872,14 +10896,14 @@ async function pairLinklyTerminal() {
     state.toast = e.message || 'Pairing failed.';
   }
   render();
-  setTimeout(() => { state.toast = null; render(); }, 4000);
+  armToastTimer(4000);
 }
 
 async function terminalTestCharge() {
   const ok = await runTerminalPurchase(1.00);
   state.toast = ok ? 'Terminal approved the $1.00 test.' : (state.toast || 'Test charge failed.');
   render();
-  setTimeout(() => { state.toast = null; render(); }, 3500);
+  armToastTimer(3500);
 }
 
 // One home for everything printing: Setup (hardware, stations, routing),
@@ -11321,7 +11345,7 @@ async function applyVoucherCode() {
     state.checkoutVoucherCode = '';
     state.toast = `Voucher ${voucher.code} applied`;
     render();
-    setTimeout(() => { state.toast = null; render(); }, 2500);
+    armToastTimer(2500);
   } catch (e) {
     state.toast = e.message || 'Invalid voucher code.';
     render();
@@ -12741,7 +12765,7 @@ async function applySimpleTables(countRaw) {
       state.toast = kept.length
         ? `Tables updated — kept ${kept.map(x => x.n).join(', ')} (open orders)`
         : 'Tables updated';
-      setTimeout(() => { state.toast = null; render(); }, 3000);
+      armToastTimer(3000);
     } catch (e) { state.toast = e.message; }
     render();
   };
@@ -14044,7 +14068,7 @@ function pickTable(id) {
   if (target && target.mergedInto && target.mergedInto !== id) {
     state.toast = `Table ${esc(target.label)} is merged into ${tableDisplayLabel(target.mergedInto)}`;
     id = target.mergedInto;
-    setTimeout(() => { state.toast = null; render(); }, 2500);
+    armToastTimer(2500);
   }
   const proceed = (forceLock) => {
     if (id !== state.table) releaseTableLock(state.table);
@@ -14074,7 +14098,7 @@ function pickTable(id) {
     } else {
       state.toast = `In use — ${lock.staff}`;
       render();
-      setTimeout(() => { state.toast = null; render(); }, 2500);
+      armToastTimer(2500);
     }
     return;
   }
@@ -14118,7 +14142,7 @@ async function transferToTable(newTableId) {
   state.showTablePicker = false;
   state.toast = `Moved to ${tableDisplayLabel(newTableId)}`;
   render();
-  setTimeout(() => { state.toast = null; render(); }, 2500);
+  armToastTimer(2500);
 }
 
 async function mergeIntoTable(otherTableId) {
@@ -14140,7 +14164,7 @@ async function mergeIntoTable(otherTableId) {
   state.showTablePicker = false;
   state.toast = `Table ${esc(otherTable.label)} merged into ${tableDisplayLabel(state.table)}`;
   render();
-  setTimeout(() => { state.toast = null; render(); }, 2500);
+  armToastTimer(2500);
 }
 
 async function unmergeTable(tableId) {
@@ -15589,7 +15613,7 @@ async function confirmRefundModal() {
     state.adminError = '';
     state.toast = `Refunded ${money(order.refunds[order.refunds.length - 1].amount)} on order #${order.id}`;
     render();
-    setTimeout(() => { state.toast = null; render(); }, 3200);
+    armToastTimer(3200);
   } catch (e) {
     state.adminError = e.message || 'Could not process the refund.';
     render();
@@ -16069,7 +16093,7 @@ async function quickUn86(itemId) {
     state.menu = await api('/api/menu');
     state.toast = `${item.name} is available again`;
     clearTimeout(state._toastTimer);
-    state._toastTimer = setTimeout(() => { state.toast = null; render(); }, 2500);
+    state._toastTimer = armToastTimer(2500);
     render();
   } catch (e) { state.toast = 'Could not update availability.'; state.menu = await api('/api/menu'); render(); }
 }
@@ -16959,7 +16983,7 @@ async function saveBulkEditModal() {
     state.adminError = '';
     state.toast = `Updated ${ids.length} item(s)`;
     render();
-    setTimeout(() => { state.toast = null; render(); }, 2500);
+    armToastTimer(2500);
   } catch (e) {
     state.adminError = 'Could not apply that change to all selected items.';
     render();

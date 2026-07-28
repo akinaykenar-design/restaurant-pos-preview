@@ -1487,6 +1487,12 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
 .acct-tile-label{ font-weight:800; font-size:13.5px; }
 .acct-tile-sub{ font-family:var(--font-mono); font-size:12px; color:var(--charcoal-soft); }
 
+/* Long-press quantity popover on item tiles (½ ×2 ×3 ×4 ×5). */
+.qty-pop{ position:fixed; z-index:80; display:flex; gap:6px; padding:8px; background:var(--surface);
+  border:1px solid var(--steel-200); border-radius:12px; box-shadow:0 8px 24px rgba(20,24,25,.28); }
+.qty-pop button{ min-width:48px; height:44px; border:1px solid var(--steel-200); border-radius:10px;
+  background:var(--surface); color:var(--text-primary); font-family:var(--font-mono); font-weight:800; font-size:16px; cursor:pointer; }
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -7260,7 +7266,7 @@ function removedSig(line) {
 
 function addToCart(item, variant, modifiers, seat) {
   // Sold-out is a soft warning now, not a block — you can still add and send.
-  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; clearTimeout(state._toastTimer); state._toastTimer = armToastTimer(3000); }
+  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; armToastTimer(3000); }
   const needsVariant = item.variants && item.variants.length > 0;
   // Only 'ordering' groups force the options pane; 'default' groups auto-apply
   // and 'later' groups wait for the line editor.
@@ -15041,6 +15047,51 @@ document.addEventListener('touchmove', (e) => {
   moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); });
+// Long-press an item tile → quantity popover (½ ×2 ×3 ×4 ×5). No hidden mode:
+// hold the tile, pick a quantity, done. The pick funnels through the same
+// qtyPadBuffer path the 123 pad uses, so items with options inherit the
+// quantity too (the options pane opens showing "Add ×N").
+let _qtyPopEl = null, _qtyHoldTimer = 0, _qtyHoldFired = false;
+function closeQtyPop() { if (_qtyPopEl) { _qtyPopEl.remove(); _qtyPopEl = null; } }
+function openQtyPop(card) {
+  closeQtyPop();
+  const id = card.dataset.id;
+  const el = document.createElement('div');
+  el.className = 'qty-pop';
+  el.innerHTML = ['0.5', '2', '3', '4', '5'].map(q => `<button data-q="${q}">${q === '0.5' ? '½' : '×' + q}</button>`).join('');
+  document.body.appendChild(el);
+  const r = card.getBoundingClientRect();
+  el.style.left = Math.max(8, Math.min(innerWidth - el.offsetWidth - 8, r.left + r.width / 2 - el.offsetWidth / 2)) + 'px';
+  const above = r.top - el.offsetHeight - 10;
+  el.style.top = (above > 8 ? above : r.bottom + 10) + 'px';
+  el.querySelectorAll('button').forEach(b => b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeQtyPop();
+    const item = state.menu.find(m => m.id === id);
+    if (!item) return;
+    state.qtyPadBuffer = b.dataset.q;
+    addToCart(item);
+  }));
+  _qtyPopEl = el;
+  if (navigator.vibrate) try { navigator.vibrate(10); } catch (err) {}
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.target.closest && e.target.closest('.qty-pop')) return;
+  closeQtyPop();
+  const card = e.target.closest && e.target.closest('.item-card[data-act="add"]');
+  if (!card || card.closest('.mk-wrap')) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  _qtyHoldFired = false;
+  const end = () => { clearTimeout(_qtyHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) { end(); closeQtyPop(); } };
+  _qtyHoldTimer = setTimeout(() => { _qtyHoldFired = true; openQtyPop(card); }, 450);
+  document.addEventListener('pointermove', mv, { passive: true });
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}, { passive: true });
+document.addEventListener('scroll', closeQtyPop, true);
+// Long-press must not summon the browser context menu on the tiles.
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card')) e.preventDefault(); });
 // Touch press feedback: browsers delay :active on touch while deciding
 // tap-vs-scroll, and a tap's re-render replaces the node before :active ever
 // paints — so on phones the universal darken-on-press cue never showed. Add
@@ -16205,7 +16256,7 @@ async function quickUn86(itemId) {
     state.menu = await api('/api/menu');
     state.toast = `${item.name} is available again`;
     clearTimeout(state._toastTimer);
-    state._toastTimer = armToastTimer(2500);
+    armToastTimer(2500);
     render();
   } catch (e) { state.toast = 'Could not update availability.'; state.menu = await api('/api/menu'); render(); }
 }
@@ -17743,7 +17794,7 @@ function bindEvents() {
         render();
       }
       else if (act === 'subcat') { state.activeSubcat = el.dataset.val === '__all__' ? null : el.dataset.val; render(); }
-      else if (act === 'add') { addToCart(state.menu.find(m => m.id === el.dataset.id)); }
+      else if (act === 'add') { if (_qtyHoldFired) { _qtyHoldFired = false; return; } addToCart(state.menu.find(m => m.id === el.dataset.id)); }
       else if (act === 'quick-un86') { quickUn86(el.dataset.id); }
       else if (act === 'qty-inc') { changeQty(parseInt(el.dataset.idx), 1); }
       else if (act === 'qty-dec') { changeQty(parseInt(el.dataset.idx), -1); }

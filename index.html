@@ -287,7 +287,7 @@ body[data-appbar-pos="left"] .topbar .staff-badge,body[data-appbar-pos="right"] 
    Names clamp to two lines (one when sharing space with a photo or icon); the
    price sits pinned to the bottom in the tile's own text colour. Tiles with a
    photo grow to fit it — uniformly, since the photo height is fixed too. */
-.item-card{background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--radius);padding:var(--item-pad,12px);cursor:pointer;text-align:left;display:flex;flex-direction:column;gap:3px;position:relative;height:var(--item-h,92px);}
+.item-card{background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--radius);padding:var(--item-pad,12px);cursor:pointer;text-align:var(--tile-align,left);display:flex;flex-direction:column;gap:3px;position:relative;height:var(--item-h,92px);}
 .item-card:has(img){height:auto;}
 .item-name{font-weight:700;font-size:calc(var(--item-name-size,13.5px)*var(--menu-fs,1));line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .item-name.one-line{-webkit-line-clamp:1;}
@@ -1300,10 +1300,9 @@ input:focus, select:focus, textarea:focus{
 .stb-seats{font-size:10.5px;opacity:.65;font-weight:600;}
 .stb-merged{position:absolute;top:6px;left:7px;font-size:11px;}
 
-/* Items already on the ticket: no ring — the tile itself glows brighter
-   (works on every colour) and the green count badge carries the number. */
-.item-card.in-cart{ filter:brightness(1.16) saturate(1.35); }
-body[data-theme="dark"] .item-card.in-cart,
+/* Items already on the ticket: a soft green wash on the TILE only — no
+   filter, so the count badge and allergen badge keep their exact colours. */
+.item-card.in-cart{ background:color-mix(in srgb, var(--green) 10%, var(--surface)); border-color:color-mix(in srgb, var(--green) 40%, var(--steel-200)); }
 body[data-theme="dark"] .allergy-item-card.selected,
 body[data-theme="dark"] .pay-opt.active.item-size-pill,
 body[data-theme="dark"] .pay-opt.active.item-mod-pill{ filter:brightness(1.35) saturate(1.02); }
@@ -1506,6 +1505,8 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
   background:var(--red); color:#fff; display:flex; align-items:center; justify-content:center;
   box-shadow:0 0 0 2px var(--surface); }
 .allergen-badge .sys-i{ width:13px; height:13px; }
+/* Yellow variant: every matched allergen can be removed or substituted. */
+.allergen-badge.sub{ background:#EDC53F; color:#24211A; }
 /* The matrix, in chip form: red = contains, cannot remove; yellow = can be
    removed or substituted. Shown on the line editor, sent-item pane, item
    options, the warning modal and the item editor's note rows. */
@@ -3161,6 +3162,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.showItemIcons !== undefined) data.settings.showItemIcons = !!req.body.showItemIcons;
   if (req.body.catIconsOnly !== undefined) data.settings.catIconsOnly = !!req.body.catIconsOnly;
   if (req.body.iconStyle !== undefined) data.settings.iconStyle = req.body.iconStyle === 'bw' ? 'bw' : 'emoji';
+  if (req.body.tileTextAlign !== undefined) data.settings.tileTextAlign = ['left', 'center', 'right'].includes(req.body.tileTextAlign) ? req.body.tileTextAlign : 'left';
   if (req.body.venueStyle !== undefined) {
     const allowed = ['classic', 'finedining', 'sushi', 'asian', 'burger', 'diner', 'steakhouse', 'seafood', 'pizzeria', 'mexican', 'cafe', 'bakery', 'cocktail', 'winebar', 'pub'];
     data.settings.venueStyle = allowed.includes(req.body.venueStyle) ? req.body.venueStyle : 'classic';
@@ -6983,6 +6985,8 @@ function applyPanelLayout() {
   let bar = (state.settings.appBarPos || {})[dev] || 'top';
   if (dev === 'mobile' && (bar === 'left' || bar === 'right')) bar = 'top';
   document.body.setAttribute('data-appbar-pos', bar);
+  // Tile text alignment (order-screen item tiles AND the mockup's copies).
+  document.body.style.setProperty('--tile-align', state.settings.tileTextAlign || 'left');
 }
 async function saveAppBarPos(val) {
   const dev = state.mockDevice || 'pc';
@@ -8668,7 +8672,16 @@ function renderMenuScrollBody() {
               ${state.settings.showPrices && state.settings.showTilePrices !== false ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' + money(Math.min(...item.variants.map(v => v.price))) : money(item.price)}</div>` : ''}
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots" title="Asks for options">⋯</span>` : ''}
               ${inCartQty ? `<span class="cart-qty-badge">${inCartQty}</span>` : ''}
-              ${allergenMatches(item).length ? `<span class="allergen-badge" title="Table allergy: ${esc(allergenMatches(item).map(h => h.allergy).join(', '))}">${SYS_WARN_SVG}</span>` : ''}
+              ${(() => {
+                const hits = allergenMatches(item);
+                if (!hits.length) return '';
+                // Red badge = at least one hit CANNOT be removed; yellow badge
+                // = every hit is removable/substitutable (matrix semantics).
+                const bases = hits.map(h => String(h.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase());
+                const tags = itemAllergens(item).filter(t => bases.includes(t.name.toLowerCase()));
+                const sub = tags.length > 0 && tags.every(t => t.level === 'removable');
+                return `<span class="allergen-badge${sub ? ' sub' : ''}" title="Table allergy: ${esc(hits.map(h => h.allergy).join(', '))}${sub ? ' — can remove/substitute' : ''}">${SYS_WARN_SVG}</span>`;
+              })()}
             </button>`;
           };
           if (subcats.length === 0) {
@@ -13716,8 +13729,12 @@ function renderScreenAdmin() {
       ${togglePill(!!state.settings.showPrices, 'set-show-prices')}
     </div>
     <div class="th" style="margin-bottom:14px;">Item prices</div>
-    <div class="pay-options">
+    <div class="pay-options" style="margin-bottom:18px;">
       ${togglePill(state.settings.showTilePrices !== false, 'set-tile-prices')}
+    </div>
+    <div class="th" style="margin-bottom:14px;">Tile text</div>
+    <div class="pay-options">
+      ${['left', 'center', 'right'].map(a => `<div class="pay-opt ${(state.settings.tileTextAlign || 'left') === a ? 'active' : ''}" data-act="set-tile-align" data-val="${a}">${a === 'left' ? 'Left' : a === 'center' ? 'Centre' : 'Right'}</div>`).join('')}
     </div>
   </div>
   <div class="settings-card" id="ctl-rail">
@@ -18526,6 +18543,7 @@ function bindEvents() {
       else if (act === 'set-course-paged') { saveTicketSetting({ coursePagedDocket: el.dataset.val === 'true' }); }
       else if (act === 'set-icon-style') { saveTicketSetting({ iconStyle: el.dataset.val }); }
       else if (act === 'set-venue-style') { saveTicketSetting({ venueStyle: el.dataset.val }); }
+      else if (act === 'set-tile-align') { saveTicketSetting({ tileTextAlign: el.dataset.val }).then(() => applyPanelLayout()); }
       else if (act === 'toggle-sort') { state.sortMenuOpen = state.sortMenuOpen === el.dataset.list ? null : el.dataset.list; render(); }
       else if (act === 'set-sort') { setListSort(el.dataset.list, el.dataset.key); }
       else if (act === 'qty-pad-key') { tapQtyPad(el.dataset.key); }

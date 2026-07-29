@@ -1507,10 +1507,12 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
 .allergen-badge .sys-i{ width:13px; height:13px; }
 /* Yellow variant: every matched allergen can be removed or substituted. */
 .allergen-badge.sub{ background:#EDC53F; color:#24211A; }
-/* "Avoid" pill: the badge stretches to name the covers to keep it from
-   (seat numbers, or All for a whole-table allergy). */
-.allergen-badge.wide{ width:auto; min-width:22px; padding:0 7px 0 5px; border-radius:11px; gap:3px; }
-.allergen-badge .ab-seats{ font-size:11px; font-weight:800; font-family:var(--font-mono); line-height:1; }
+/* "Avoid" tag inside the cover-picker squares: the allergic seat's square
+   (and Share, naming who makes sharing risky) flags the clash while the
+   waiter is choosing the cover — tiles stay quiet. */
+.seat-avoid{ font-size:10.5px; font-weight:800; line-height:1.2; background:var(--red); color:#fff;
+  border-radius:6px; padding:2px 7px; margin-top:3px; align-self:center; }
+.seat-avoid.sub{ background:#EDC53F; color:#24211A; }
 /* The matrix, in chip form: red = contains, cannot remove; yellow = can be
    removed or substituted. Shown on the line editor, sent-item pane, item
    options, the warning modal and the item editor's note rows. */
@@ -7574,6 +7576,20 @@ function allergenMatches(item, seat) {
   }
   return hits;
 }
+// "Avoid" tag for a seat square in the cover pickers: does THIS dish clash
+// for that seat (or for anyone, when the square is Share)? Returns markup or ''.
+function seatAvoidTag(item, seat) {
+  const hits = allergenMatches(item, seat);
+  if (!hits.length) return '';
+  const bases = hits.map(h => String(h.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase());
+  const tags = itemAllergens(item).filter(t => bases.includes(t.name.toLowerCase()));
+  const sub = tags.length > 0 && tags.every(t => t.level === 'removable');
+  // On the Share square, name WHO makes sharing risky ("avoid 1·3"); on a
+  // numbered square the number is right there — just say "avoid".
+  const seats = [...new Set(hits.map(h => (h.seat == null ? 'all' : h.seat)))];
+  const who = seat === 'all' && !seats.includes('all') ? ' ' + seats.sort((a, b) => a - b).join('·') : '';
+  return `<div class="seat-avoid${sub ? ' sub' : ''}" title="${esc(hits.map(h => h.allergy).join(', '))}${sub ? ' — can remove/substitute' : ''}">avoid${who}</div>`;
+}
 // The red/yellow chip row used on the line editor, sent-item pane and the
 // warning modal — the matrix view, in chip form. Short labels only.
 // onlyNames (lowercased) narrows the row to specific allergens — the warning
@@ -8695,10 +8711,7 @@ function renderMenuScrollBody() {
                 const bases = hits.map(h => String(h.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase());
                 const tags = itemAllergens(item).filter(t => bases.includes(t.name.toLowerCase()));
                 const sub = tags.length > 0 && tags.every(t => t.level === 'removable');
-                // Which covers to avoid: seat numbers, or the whole table.
-                const seats = [...new Set(hits.map(h => (h.seat == null ? 'all' : h.seat)))];
-                const who = seats.includes('all') ? 'All' : seats.sort((a, b) => a - b).join('·');
-                return `<span class="allergen-badge${sub ? ' sub' : ''} wide" title="Avoid ${seats.includes('all') ? 'whole table' : 'seat ' + seats.join(', ')}: ${esc(hits.map(h => h.allergy).join(', '))}${sub ? ' — can remove/substitute' : ''}">${SYS_WARN_SVG}<span class="ab-seats">${who}</span></span>`;
+                return `<span class="allergen-badge${sub ? ' sub' : ''}" title="Table allergy: ${esc(hits.map(h => h.allergy).join(', '))}${sub ? ' — can remove/substitute' : ''}">${SYS_WARN_SVG}</span>`;
               })()}
             </button>`;
           };
@@ -14765,8 +14778,8 @@ function renderItemOptionsMiddle() {
         <div class="grid" style="margin:6px 0 14px;">
           ${(() => {
             const assigned = new Set([...(io.assignedSeats || []), ...state.cart.filter(c => c.menuItemId === io.itemId).map(c => c.seat)]);
-            return `<button class="item-card allergy-item-card ${io.seat === 'all' ? 'selected' : assigned.has('all') ? 'assigned' : ''}" data-act="io-pick-seat" data-seat="all" title="Shared by the table"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'Share')}</div></button>`
-              + Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${io.seat === n ? 'selected' : assigned.has(n) ? 'assigned' : ''}" data-act="io-pick-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('');
+            return `<button class="item-card allergy-item-card ${io.seat === 'all' ? 'selected' : assigned.has('all') ? 'assigned' : ''}" data-act="io-pick-seat" data-seat="all" title="Shared by the table"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'Share')}</div>${seatAvoidTag(item, 'all')}</button>`
+              + Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${io.seat === n ? 'selected' : assigned.has(n) ? 'assigned' : ''}" data-act="io-pick-seat" data-seat="${n}"><div class="item-name">${n}</div>${seatAvoidTag(item, n)}</button>`).join('');
           })()}
         </div>`;
   };
@@ -14939,8 +14952,8 @@ function renderLineEditMiddle() {
       ${seatEnabled ? `
         <label>Seat</label>
         <div class="grid" style="margin:6px 0 16px;">
-          <button class="item-card allergy-item-card ${line.seat === 'all' || !line.seat ? 'selected' : ''}" data-act="edit-line-seat" data-seat="all" title="Shared by the table"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'Share')}</div></button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${line.seat === n ? 'selected' : ''}" data-act="edit-line-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('')}
+          <button class="item-card allergy-item-card ${line.seat === 'all' || !line.seat ? 'selected' : ''}" data-act="edit-line-seat" data-seat="all" title="Shared by the table"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'Share')}</div>${seatAvoidTag(item, 'all')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${line.seat === n ? 'selected' : ''}" data-act="edit-line-seat" data-seat="${n}"><div class="item-name">${n}</div>${seatAvoidTag(item, n)}</button>`).join('')}
         </div>` : ''}
       <label>Note</label>
       <input id="edit-line-note-input" type="text" value="${esc(line.note || '')}">

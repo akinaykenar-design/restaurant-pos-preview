@@ -7553,12 +7553,18 @@ function itemAllergens(item) {
 }
 // The table's recorded allergies vs the item's allergen tags. Sub-typed
 // entries ("Nuts (peanuts)") match on their base name.
-function allergenMatches(item) {
+// SEAT-AWARE: pass the seat the dish is going to and seat-specific allergies
+// only fire for that seat — everyone else orders without warnings. Shared or
+// unassigned dishes (seat null/'all') can reach anyone, so they still match.
+// Whole-table entries (a.seat == null) always apply. seat === undefined means
+// "any seat" (no target known).
+function allergenMatches(item, seat) {
   const tags = itemAllergens(item);
   if (!tags.length || !(state.allergies || []).length) return [];
   const names = tags.map(t => t.name.toLowerCase());
   const hits = [];
   for (const a of state.allergies) {
+    if (seat !== undefined && a.seat != null && !(seat == null || seat === 'all' || a.seat === seat)) continue;
     const base = String(a.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
     if (names.includes(base)) hits.push(a);
   }
@@ -7576,15 +7582,6 @@ function allergenChipRow(item, onlyNames) {
     <span class="algn-chip ${t.level}" title="${t.level === 'removable' ? 'Can remove / substitute' : 'Cannot remove'}">${esc(t.name)}${t.note ? `<small>${esc(t.note)}</small>` : ''}</span>`).join('')}</div>`;
 }
 function addToCart(item, variant, modifiers, seat) {
-  // Allergen cross-check: a soft block, same shape as the stock warning —
-  // the waiter can cancel or knowingly add anyway (e.g. it's another seat's dish).
-  if (!state._allergenAck) {
-    const hits = allergenMatches(item);
-    if (hits.length) { state.allergenWarnModal = { itemId: item.id, variant, modifiers, seat, hits }; render(); return; }
-  }
-  state._allergenAck = false;
-  // Sold-out is a soft warning now, not a block — you can still add and send.
-  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; armToastTimer(3000); }
   const needsVariant = item.variants && item.variants.length > 0;
   // Only 'ordering' groups force the options pane; 'default' groups auto-apply
   // and 'later' groups wait for the line editor.
@@ -7594,7 +7591,18 @@ function addToCart(item, variant, modifiers, seat) {
   // add, so there's no per-item seat pop-up unless the active seat is "Ask".
   const activeSeat = state.activeSeat === 'all' ? 'all' : ((state.activeSeat && state.activeSeat <= state.covers) ? state.activeSeat : null);
   const seatToUse = seat || activeSeat;
-  if ((needsVariant && !variant) || (needsModifiers && !modifiers) || (needsSeat && !seatToUse)) {
+  const willPrompt = (needsVariant && !variant) || (needsModifiers && !modifiers) || (needsSeat && !seatToUse);
+  // Allergen cross-check: a soft block, same shape as the stock warning.
+  // SEAT-AWARE — checked against the seat this dish is actually going to, and
+  // deferred to the options pane when the seat gets picked there instead.
+  if (!willPrompt && !state._allergenAck) {
+    const hits = allergenMatches(item, seatToUse || null);
+    if (hits.length) { state.allergenWarnModal = { itemId: item.id, variant, modifiers, seat, hits, resume: 'add' }; render(); return; }
+  }
+  state._allergenAck = false;
+  // Sold-out is a soft warning now, not a block — you can still add and send.
+  if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; armToastTimer(3000); }
+  if (willPrompt) {
     // Capture the typed quantity now (before it's cleared) so the options pane
     // can, when a seat is prompted, ask a cover for EACH serving.
     const q0 = parseFloat(state.qtyPadBuffer);
@@ -8673,7 +8681,10 @@ function renderMenuScrollBody() {
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots" title="Asks for options">⋯</span>` : ''}
               ${inCartQty ? `<span class="cart-qty-badge">${inCartQty}</span>` : ''}
               ${(() => {
-                const hits = allergenMatches(item);
+                // Badge follows the ACTIVE seat: ordering for seat 3 hides
+                // other seats' warnings; no active seat = show any conflict.
+                const badgeSeat = state.activeSeat === 'all' ? 'all' : ((state.activeSeat && state.activeSeat <= state.covers) ? state.activeSeat : undefined);
+                const hits = allergenMatches(item, badgeSeat);
                 if (!hits.length) return '';
                 // Red badge = at least one hit CANNOT be removed; yellow badge
                 // = every hit is removable/substitutable (matrix semantics).
@@ -14845,6 +14856,12 @@ function pickIoSeat(seat) {
   // is a single pick and the button adds all the servings to it.)
   if (itemAddNeedsSeatPrompt() && Number.isInteger(io.qty) && io.qty > 1 && !ioHasChoiceButton()) {
     const item = state.menu.find(m => m.id === io.itemId);
+    // Seat-aware allergen check per serving — only the allergic cover warns.
+    if (!state._allergenAck) {
+      const hits = allergenMatches(item, seat);
+      if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, seat, hits, resume: 'io-seat' }; render(); return; }
+    }
+    state._allergenAck = false;
     const variant = item.variants.find(v => v.id === io.variantId);
     pushCartLine(item, variant, ioModifierObjects(io, item), seat, 1);
     io.assigned = (io.assigned || 0) + 1;
@@ -14859,6 +14876,13 @@ function pickIoSeat(seat) {
 function confirmItemOptions() {
   const io = state.itemOptions;
   const item = state.menu.find(m => m.id === io.itemId);
+  // Seat-aware allergen check at the moment the line is final (covers the
+  // auto-add path and the explicit Add tick alike).
+  if (!state._allergenAck) {
+    const hits = allergenMatches(item, io.seat || null);
+    if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, hits, resume: 'io-confirm' }; render(); return; }
+  }
+  state._allergenAck = false;
   const variant = item.variants.find(v => v.id === io.variantId);
   pushCartLine(item, variant, ioModifierObjects(io, item), io.seat, io.qty || 1);
   state.itemOptions = null;
@@ -18211,9 +18235,15 @@ function bindEvents() {
       else if (act === 'close-stock-warn' || act === 'stock-warn-bg') { state.stockWarnModal = null; render(); }
       else if (act === 'close-allergen-warn') { state.allergenWarnModal = null; render(); }
       else if (act === 'allergen-warn-add') {
+        // Resume exactly the flow the warning interrupted — direct add, the
+        // per-serving seat pick, or the options-pane confirm.
         const m = state.allergenWarnModal; state.allergenWarnModal = null;
-        const it = m && state.menu.find(x => x.id === m.itemId);
-        if (it) { state._allergenAck = true; addToCart(it, m.variant, m.modifiers, m.seat); }
+        if (m) {
+          state._allergenAck = true;
+          if (m.resume === 'io-seat' && state.itemOptions) pickIoSeat(m.seat);
+          else if (m.resume === 'io-confirm' && state.itemOptions) confirmItemOptions();
+          else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
+        }
       }
       else if (act === 'toggle-item-allergen') {
         // Tri-state cycle, matrix semantics: off → contains (red) → removable (yellow) → off.

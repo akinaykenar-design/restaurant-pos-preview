@@ -9948,6 +9948,72 @@ function rosterDateKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1
 function rosterShiftHours(s) { const p = t => { const a = String(t || '0:0').split(':'); return (+a[0]) * 60 + (+a[1] || 0); }; let m = p(s.end) - p(s.start); if (m <= 0) m += 1440; return m / 60; }
 const ROSTER_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+// Pre-shift briefing: one glance before service — tonight's bookings, what
+// the book is warning about, what the menu can't do, and who's on. Reads
+// only data the POS already holds; nothing to configure.
+async function loadBriefingData() {
+  try {
+    const [res, roster] = await Promise.all([api('/api/reservations'), api('/api/roster')]);
+    state.reservations = res; state.roster = roster; state._briefingLoaded = true;
+    render();
+  } catch (e) {}
+}
+function renderBriefingAdmin() {
+  if (!state._briefingLoaded) loadBriefingData();
+  const now = new Date();
+  const todayKey = rosterDateKey(now);
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayEnd = dayStart + 86400000;
+  const bookings = (state.reservations || [])
+    .filter(r => { const t = new Date(r.time).getTime(); return t >= dayStart && t < dayEnd && r.status !== 'cancelled'; })
+    .sort((a, b) => new Date(a.time) - new Date(b.time));
+  const covers = bookings.reduce((s, r) => s + (r.partySize || 0), 0);
+  const fmtTime = (t) => { const d = new Date(t); return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; };
+  const tableName = (id) => { const t = id && allTables().find(x => x.id === id); return t ? t.label : null; };
+  const eightySixed = state.menu.filter(m => m.out && !m.disabled);
+  const low = state.menu.filter(m => !m.out && !m.disabled && m.trackStock && (m.stockCount || 0) <= (m.lowStockThreshold || 5));
+  const onToday = (state.roster || []).filter(r => r.date === todayKey)
+    .sort((a, b) => String(a.start).localeCompare(String(b.start)));
+  const staffName = (id) => { const s = (state.staffList || []).find(x => x.id === id); return s ? s.name : '?'; };
+  const liveNotes = allTables().filter(t => (t.allergies || []).length);
+  return `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Bookings — ${bookings.length ? `${bookings.length} (${covers} covers)` : 'none today'}</div>
+    ${bookings.map(r => `
+      <div class="detail-line" style="align-items:center;gap:10px;">
+        <span style="font-family:var(--font-mono);font-weight:700;flex-shrink:0;">${fmtTime(r.time)}</span>
+        <span style="font-weight:700;">${esc(r.name)}</span>
+        <span class="ts">${r.partySize} pax${tableName(r.tableId) ? ` · T${esc(tableName(r.tableId))}` : ''}</span>
+        <span style="flex:1;"></span>
+        ${r.notes ? `<span class="seat-chip">${esc(r.notes)}</span>` : ''}
+      </div>`).join('')}
+  </div>
+  ${liveNotes.length ? `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Allergies on open tables</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;">
+      ${liveNotes.map(t => (t.allergies || []).map(a => `<span class="algn-chip contains">T${esc(t.label)}${a.seat ? ' · seat ' + a.seat : ''}<small>${esc(a.allergy)}</small></span>`).join('')).join('')}
+    </div>
+  </div>` : ''}
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Menu watch</div>
+    ${eightySixed.length || low.length ? `
+    <div style="display:flex;flex-wrap:wrap;gap:8px;">
+      ${eightySixed.map(m => `<span class="algn-chip contains">${esc(m.name)}<small>86'd</small></span>`).join('')}
+      ${low.map(m => `<span class="algn-chip removable">${esc(m.name)}<small>${m.stockCount || 0} left</small></span>`).join('')}
+    </div>` : `<div class="ts">Everything available.</div>`}
+  </div>
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Staff on — ${onToday.length || 'none rostered'}</div>
+    ${onToday.map(r => `
+      <div class="detail-line" style="align-items:center;gap:10px;">
+        <span style="font-family:var(--font-mono);font-weight:700;flex-shrink:0;">${esc(String(r.start || ''))}–${esc(String(r.end || ''))}</span>
+        <span style="font-weight:700;">${esc(staffName(r.staffId))}</span>
+        ${r.role ? `<span class="ts">${esc(r.role)}</span>` : ''}
+      </div>`).join('')}
+  </div>`;
+}
+
 function renderRosterAdmin() {
   const weekStart = state.rosterWeekStart || rosterMonday(Date.now());
   const days = ROSTER_DAYS.map((lbl, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return { lbl, date: d, key: rosterDateKey(d) }; });
@@ -11951,6 +12017,7 @@ function renderRefundModal() {
 // and people, then pricing, then one-time settings last.
 const ADMIN_SECTIONS = [
   { group: 'Dashboard', children: [
+    { key: 'briefing', label: 'Tonight' },
     { key: 'register', label: 'Open Orders' },
     { key: 'orders', label: 'Sales Summary' },
     { key: 'kitchen', label: 'Kitchen' },
@@ -12179,6 +12246,7 @@ function renderAdminView() {
         : state.adminTab === 'screen' ? renderScreenAdmin()
         : state.adminTab === 'floorplan' ? renderFloorPlanAdmin()
         : state.adminTab === 'audit' ? renderAuditLogAdmin()
+        : state.adminTab === 'briefing' ? renderBriefingAdmin()
         : state.adminTab === 'settings-courses' ? renderCoursesSettingsAdmin()
         : state.adminTab === 'settings-allergies' ? renderAllergySettingsAdmin()
         : state.adminTab === 'settings-vip' ? renderVipSettingsAdmin()

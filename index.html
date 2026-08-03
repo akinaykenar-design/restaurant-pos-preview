@@ -5854,6 +5854,7 @@ let state = {
   discount: null, // { type: 'percent'|'fixed', value, reason }
   discountModal: null, // { type, value, reason }
   activeCourse: 1,
+  autoCourseOverride: null, // waiter's mid-order Auto toggle (null = follow the admin default)
   courseCount: 1,
   firedCourses: {}, // { courseNumber: timestamp }
   callAway: false, // when true, the call-away middle pane covers the menu
@@ -7811,8 +7812,11 @@ function addToCart(item, variant, modifiers, seat) {
 // Where a dish files on the docket, resolved item → subsection → section →
 // the active course tab. One setting on a section covers every dish in it;
 // the item's own Default course (All settings) stays as the override.
+function autoCourseOn() {
+  return state.autoCourseOverride !== null ? state.autoCourseOverride : state.settings.autoCourse !== false;
+}
 function itemDefaultCourse(item) {
-  if (state.settings.autoCourse === false) return null; // Courses panel switch
+  if (!autoCourseOn()) return null; // admin default, overridable from the docket's Auto tab
   if (item.defaultCourse) return item.defaultCourse;
   let sub = state.subcategories.find(s => s.id === item.subcategoryId);
   while (sub) {
@@ -7974,6 +7978,7 @@ function clearCart() {
   state.activeCourse = firstEnabledCourseNumber();
   state.courseCount = state.settings.courses.length || 1;
   state.firedCourses = {};
+  state.autoCourseOverride = null;
   state.callAway = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   render();
@@ -9386,7 +9391,7 @@ function renderTicketPanel() {
             ${esc(info.name)}${(() => { if (state.settings.coursePagedDocket !== true) return ''; const cnt = state.cart.filter(c => c.course === n).reduce((s2, c) => s2 + c.qty, 0) + Object.values(sentByCourse[n] || {}).reduce((s2, e) => s2 + (e.qty || e.sentQty || 0), 0); return cnt ? ` ${cnt}` : ''; })()}${state.firedCourses[n] ? ' ✓' : ''}
           </button>`;
         }).join('') + (hidden > 0 || state.allCourseTabs ? `<button class="course-tab add" data-act="toggle-all-courses" title="${state.allCourseTabs ? 'Fewer' : 'All courses'}">${state.allCourseTabs ? '−' : '⋯'}</button>` : '')
-          + (state.cart.length && state.settings.autoCourse !== false ? `<button class="course-tab add" data-act="auto-course-cart" title="Course every item by its default">Auto</button>` : '');
+          + `<button class="course-tab ${autoCourseOn() ? 'active' : 'add'}" data-act="toggle-auto-course-order" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}">Auto</button>`;
       })()}
     </div>
     <div class="ticket-items">
@@ -15084,6 +15089,7 @@ function pickTable(id) {
     // Keep an unsent cart when this is the FIRST table picked (fresh login has
     // no table now) — the waiter may have rung items up before choosing.
     if (hadTable) { state.cart = []; state.firedCourses = {}; }
+    state.autoCourseOverride = null;
     state.covers = (t && t.covers) || 0;
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
@@ -19282,14 +19288,16 @@ function bindEvents() {
       else if (act === 'toggle-all-courses') { state.allCourseTabs = !state.allCourseTabs; render(); }
       else if (act === 'set-auto-course') { saveTicketSetting({ autoCourse: state.settings.autoCourse === false }); }
       else if (act === 'auto-assign-courses') { autoAssignCourses(); }
-      else if (act === 'auto-course-cart') {
+      else if (act === 'toggle-auto-course-order') {
+        const next = !autoCourseOn();
+        state.autoCourseOverride = next === (state.settings.autoCourse !== false) ? null : next;
         let moved = 0;
-        state.cart.forEach(c => {
+        if (next) state.cart.forEach(c => {
           const item = state.menu.find(m => m.id === c.menuItemId);
           const def = item && itemDefaultCourse(item);
           if (def && c.course !== def) { c.course = def; if (def > state.courseCount) state.courseCount = def; moved++; }
         });
-        state.toast = moved ? `${moved} item${moved === 1 ? '' : 's'} coursed` : 'Already coursed';
+        state.toast = next ? (moved ? `Auto course on — ${moved} item${moved === 1 ? '' : 's'} coursed` : 'Auto course on') : 'Auto course off';
         render(); armToastTimer(2000);
       }
       else if (act === 'edit-line-course') {

@@ -6022,7 +6022,6 @@ let state = {
   selectedTipPresetIdxs: [], // bulk-select: tip presets (index-based)
   bulkCategoryModal: null, // { colorMode, color }
   bulkColorModal: null, // { list: 'sales-category'|'modifier'|'combo', colorMode, color }
-  tableBulkModal: null, // { seatsMode:'none'|'set', seats, colorMode:'none'|'set'|'clear', color } — bulk edit for selected tables
   floorMultiTap: false, // "Select many": taps toggle tables into the multi-selection (touch-friendly ctrl+click)
   expandedMenuItemIds: [],
   menuAdminCategoryFilter: '',
@@ -6730,8 +6729,18 @@ function pickFinishValue(key) {
   else if (kind === 'table-color') updateTableFinish(id, key);
 }
 async function updateTableFinish(id, key) {
-  const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
-  if (fp) patchFloorObject(fp.id, id, { finish: key, color: null });
+  for (const tid of tableEditTargets(id)) {
+    const fp = state.floorPlans.find(f => f.tables.some(t => t.id === tid));
+    if (fp) await patchFloorObject(fp.id, tid, { finish: key, color: null });
+  }
+}
+// The selected-tables dropdowns edit the whole selection: id 'multi' (or an id
+// that's part of a >1 selection) fans out to every selected table.
+function tableEditTargets(id) {
+  const sel = state.selectedAdminTableIds;
+  if (id === 'multi') return sel.slice();
+  if (sel.length > 1 && sel.includes(id)) return sel.slice();
+  return [id];
 }
 // Photo is an alternative to colour on the same popover; picking one clears the
 // other (mutually exclusive "look" for the entity).
@@ -6846,7 +6855,6 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-edit-modal') { state.bulkEditModal.color = color; render(); }
   else if (kind === 'bulk-category-modal') { state.bulkCategoryModal.color = color; render(); }
   else if (kind === 'bulk-color-modal') { state.bulkColorModal.color = color; render(); }
-  else if (kind === 'table-bulk-modal') { state.tableBulkModal.color = color; render(); }
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
   else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
   else if (kind === 'bulk-vip') bulkSetVipColor(color);
@@ -6890,9 +6898,11 @@ async function quickUpdateComboColor(id, color) {
     render();
   } catch (e) { state.toast = 'Could not update colour.'; render(); }
 }
-function updateTableColor(id, color) {
-  const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
-  if (fp) patchFloorObject(fp.id, id, { color: color || null });
+async function updateTableColor(id, color) {
+  for (const tid of tableEditTargets(id)) {
+    const fp = state.floorPlans.find(f => f.tables.some(t => t.id === tid));
+    if (fp) await patchFloorObject(fp.id, tid, { color: color || null });
+  }
 }
 async function quickUpdateModifierGroupColor(id, color) {
   const g = state.modifierGroups.find(x => x.id === id);
@@ -8838,7 +8848,6 @@ function render() {
     ${state.bulkEditModal ? renderBulkEditModal() : ''}
     ${state.bulkCategoryModal ? renderBulkCategoryModal() : ''}
     ${state.bulkColorModal ? renderBulkColorModal() : ''}
-    ${state.tableBulkModal ? renderTableBulkModal() : ''}
     ${state.bulkStaffModal ? renderBulkStaffModal() : ''}
     ${state.reservationModal ? renderReservationModal() : ''}
     ${state.customerModal ? renderCustomerModal() : ''}
@@ -13773,6 +13782,13 @@ function tableLabelCompare(a, b) {
 function renderSimpleTablesAdmin() {
   const tables = allTables().slice().sort(tableLabelCompare);
   const openLabels = new Set(state.orders.filter(o => o.status === 'open').map(o => String(o.table)));
+  // Selection editing happens right in the header row with the same controls a
+  // single table gets — no separate bulk-edit modal.
+  const selT = tables.filter(t => state.selectedAdminTableIds.includes(t.id));
+  const same = (vals) => vals.length && vals.every(v => v === vals[0]) ? vals[0] : null;
+  const mSeats = same(selT.map(t => t.seats || 0));
+  const mColor = same(selT.map(t => t.color || '')) || null;
+  const mFinish = same(selT.map(t => t.finish || 'plain')) || 'plain';
   return `
   <div class="settings-card">
     <div class="th">How many tables?</div>
@@ -13789,7 +13805,9 @@ function renderSimpleTablesAdmin() {
   <div class="settings-card wide" style="max-width:100%;">
     <div class="th" style="margin-bottom:10px;">Your tables</div>
     <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-simple-tables" data-act="simple-table-select-all" ${state.selectedAdminTableIds.length > 0 && state.selectedAdminTableIds.length === tables.length ? 'checked' : ''}></label>${state.selectedAdminTableIds.length > 0 ? `
-      <button class="icon-sq" title="Edit selected" data-act="open-table-bulk">${ACT_PENCIL_SVG}</button>
+      <span class="ts" style="margin:0 2px 0 6px;">${state.selectedAdminTableIds.length} selected · Seats</span>
+      <input id="table-seats-input" type="number" min="1" max="20" step="1" value="${mSeats || ''}" placeholder="—" data-id="multi" style="width:56px;padding:7px 8px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);">
+      ${colorDotButton('table-color', 'multi', mColor, { bg: mColor ? null : tableFinish(mFinish).bg, finish: mFinish, title: 'Colour & finish for selected' })}
       <button class="icon-sq" title="Clear selection" data-act="clear-table-selection">${ACT_X_SVG}</button>
     ` : ''}</div>
     ${tables.length ? `<div class="simple-table-grid">
@@ -13869,6 +13887,13 @@ function renderFloorPlanAdmin() {
     const selTable = selected && selected.type !== 'decor' ? selected : null;
     const selDecor = selected && selected.type === 'decor' ? selected : null;
     const multi = state.selectedAdminTableIds.length;
+    // Multi-selection edits use the SAME controls as a single table (no bulk
+    // modal): blank/neutral when the selection is mixed.
+    const selMany = state.selectedAdminTableIds.map(id => fp.tables.find(t => t.id === id)).filter(t => t && t.type !== 'decor');
+    const same = (vals) => vals.length && vals.every(v => v === vals[0]) ? vals[0] : null;
+    const mSeats = same(selMany.map(t => t.seats || 0));
+    const mColor = same(selMany.map(t => t.color || '')) || null;
+    const mFinish = same(selMany.map(t => t.finish || 'plain')) || 'plain';
     const tableTpl = selTable ? TABLE_TEMPLATES.find(t => t.shape === selTable.shape && t.seats === selTable.seats) : null;
     const decorTpl = selDecor ? DECOR_TEMPLATES.find(t => t.key === selDecor.decorType) : null;
     return `
@@ -13911,11 +13936,22 @@ function renderFloorPlanAdmin() {
         ${DECOR_TEMPLATES.map(t => `<option value="decor:${t.key}" ${state.floorPlacing === `decor:${t.key}` ? 'selected' : ''}>${t.icon} ${esc(t.label)}</option>`).join('')}
       </select>`}
     </div>
-    ${selected || multi ? `
+    ${multi ? `
     <div class="pp-group">
-      <div class="pp-label">${multi ? `${multi} selected` : 'Selected'}</div>
+      <div class="pp-label">${multi} selected</div>
       <div class="pp-row" style="align-items:center;">
-        ${selected ? `
+        <label class="ts" style="margin:0;">Seats</label>
+        <input id="table-seats-input" type="number" min="1" max="20" step="1" value="${mSeats || ''}" placeholder="—" data-id="multi" data-fp="${fp.id}" style="width:56px;padding:8px;border-radius:8px;border:1px solid var(--steel-300);">
+        ${colorDotButton('table-color', 'multi', mColor, { bg: mColor ? null : tableFinish(mFinish).bg, finish: mFinish, title: 'Colour & finish for all selected' })}
+        <span class="ts" style="margin:0;">Colour &amp; finish</span>
+        <span style="flex:1;"></span>
+        <button class="icon-sq" data-act="delete-selected-tables" title="Delete">${ACT_TRASH_SVG}</button>
+        <button class="icon-sq" data-act="clear-table-selection" title="Done">${ACT_X_SVG}</button>
+      </div>
+    </div>` : selected ? `
+    <div class="pp-group">
+      <div class="pp-label">Selected</div>
+      <div class="pp-row" style="align-items:center;">
         <input id="table-label-input" type="text" value="${esc(selected.label)}" placeholder="Label" data-id="${selected.id}" data-fp="${fp.id}" style="width:110px;padding:8px 12px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
         ${selTable ? `
         <label class="ts" style="margin:0;">Seats</label>
@@ -13929,10 +13965,9 @@ function renderFloorPlanAdmin() {
           <button class="icon-sq" data-act="rotate-object" data-dir="-15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate left">${ACT_RESET_SVG}</button>
           <span class="ts" style="min-width:34px;text-align:center;">${selected.rotation || 0}°</span>
           <button class="icon-sq" data-act="rotate-object" data-dir="15" data-id="${selected.id}" data-fp="${fp.id}" title="Rotate right">${ACT_ROTR_SVG}</button>
-        </div>` : ''}` : ''}
+        </div>` : ''}
         <span style="flex:1;"></span>
-        ${(multi || selTable) ? `<button class="icon-sq" data-act="open-table-bulk" title="Edit selected">${ACT_PENCIL_SVG}</button>` : ''}
-        <button class="icon-sq" data-act="${multi ? 'delete-selected-tables' : 'delete-table'}" ${selected ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''} title="Delete">${ACT_TRASH_SVG}</button>
+        <button class="icon-sq" data-act="delete-table" data-id="${selected.id}" data-fp="${fp.id}" title="Delete">${ACT_TRASH_SVG}</button>
         <button class="icon-sq" data-act="clear-table-selection" title="Done">${ACT_X_SVG}</button>
       </div>
     </div>` : ''}
@@ -14701,61 +14736,6 @@ function renderBulkColorModal() {
       </div>
     </div>
   </div>`;
-}
-function renderTableBulkModal() {
-  const m = state.tableBulkModal;
-  const n = state.selectedAdminTableIds.length || (state.selectedAdminTableId ? 1 : 0);
-  return `
-  <div class="modal-bg" data-act="close-table-bulk">
-    <div class="modal" data-stop="1">
-      <h2>Bulk edit ${n} table${n === 1 ? '' : 's'}</h2>
-      <label>Seats</label>
-      <div class="pay-options" style="margin-bottom:${m.seatsMode === 'set' ? '10px' : '0'};">
-        <div class="pay-opt ${m.seatsMode === 'none' ? 'active' : ''}" data-act="table-bulk-seats-mode" data-val="none">No change</div>
-        <div class="pay-opt ${m.seatsMode === 'set' ? 'active' : ''}" data-act="table-bulk-seats-mode" data-val="set">Set seats</div>
-      </div>
-      ${m.seatsMode === 'set' ? `<input id="table-bulk-seats" type="number" min="1" max="20" step="1" value="${m.seats}" style="width:80px;padding:9px 10px;border:1px solid var(--steel-300);border-radius:8px;background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);margin-bottom:6px;">` : ''}
-      <label>Background color</label>
-      <div class="pay-options" style="margin-bottom:${m.colorMode === 'set' ? '10px' : '0'};">
-        <div class="pay-opt ${m.colorMode === 'none' ? 'active' : ''}" data-act="table-bulk-color-mode" data-val="none">No change</div>
-        <div class="pay-opt ${m.colorMode === 'set' ? 'active' : ''}" data-act="table-bulk-color-mode" data-val="set">Set color</div>
-        <div class="pay-opt ${m.colorMode === 'clear' ? 'active' : ''}" data-act="table-bulk-color-mode" data-val="clear">Clear color</div>
-      </div>
-      ${m.colorMode === 'set' ? `<div style="margin-bottom:6px;">${colorDotButton('table-bulk-modal', 'x', m.color, { size: 28, allowClear: false })}</div>` : ''}
-      <div class="modal-actions">
-        <button class="icon-action discard" title="Cancel" data-act="close-table-bulk">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" title="Apply" data-act="save-table-bulk">${ACT_TICK_SVG}<span class="ia-label">Apply</span></button>
-      </div>
-    </div>
-  </div>`;
-}
-// Any modal re-render rebuilds the seats input — keep what was typed.
-function captureTableBulkSeats() {
-  const el = document.getElementById('table-bulk-seats');
-  if (el && state.tableBulkModal) state.tableBulkModal.seats = parseInt(el.value) || state.tableBulkModal.seats;
-}
-function openTableBulkModal() {
-  state.tableBulkModal = { seatsMode: 'none', seats: 4, colorMode: 'none', color: '#E67E22' };
-  render();
-}
-async function saveTableBulkModal() {
-  const m = state.tableBulkModal;
-  captureTableBulkSeats();
-  const ids = state.selectedAdminTableIds.length ? [...state.selectedAdminTableIds] : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
-  state.tableBulkModal = null;
-  for (const id of ids) {
-    const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
-    const t = fp && fp.tables.find(x => x.id === id);
-    if (!fp || !t || t.type === 'decor') continue;
-    const patch = {};
-    if (m.seatsMode === 'set') patch.seats = Math.max(1, Math.min(20, m.seats));
-    if (m.colorMode === 'set') patch.color = m.color;
-    if (m.colorMode === 'clear') patch.color = null;
-    if (Object.keys(patch).length) await patchFloorObject(fp.id, id, patch);
-  }
-  state.toast = 'Tables updated.';
-  render();
-  armToastTimer(2200);
 }
 function openBulkColorModal(list) { state.bulkColorModal = { list, colorMode: 'none', color: '#E67E22' }; state.adminError = ''; render(); }
 function closeBulkColorModal() { state.bulkColorModal = null; state.adminError = ''; render(); }
@@ -15983,6 +15963,19 @@ function startFloorDrag(e, tableId) {
   const markerEl = e.currentTarget;
   const canvasEl = markerEl.closest('.floor-canvas');
   floorDrag = { tableId, canvasEl, markerEl, moved: false };
+  // HOLD a marker = toggle it into the multi-selection (touch ctrl+click).
+  floorDrag.holdTimer = setTimeout(() => {
+    if (floorDrag && !floorDrag.moved) { floorDrag.holdFired = true; toggleTableMultiSelect(tableId); floorDrag = null; }
+  }, 450);
+  // Dragging a table that's PART of the multi-selection moves the whole group.
+  if (state.selectedAdminTableIds.length > 1 && state.selectedAdminTableIds.includes(tableId)) {
+    const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+    floorDrag.group = state.selectedAdminTableIds.map(id => {
+      const t = fp && fp.tables.find(x => x.id === id);
+      const el = canvasEl.querySelector(`.admin-floor-marker[data-id="${id}"]`);
+      return t && el ? { id, startX: t.x, startY: t.y, el } : null;
+    }).filter(Boolean);
+  }
   e.preventDefault();
 }
 function toggleTableMultiSelect(tableId) {
@@ -16051,6 +16044,7 @@ function endMarquee() {
 
 function moveFloorDrag(clientX, clientY) {
   if (!floorDrag) return;
+  if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const rect = floorDrag.canvasEl.getBoundingClientRect();
   let x = ((clientX - rect.left) / rect.width) * 100;
   let y = ((clientY - rect.top) / rect.height) * 100;
@@ -16063,15 +16057,37 @@ function moveFloorDrag(clientX, clientY) {
     y = Math.round(y / g) * g;
   }
   floorDrag.moved = true;
-  floorDrag.markerEl.style.left = x + '%';
-  floorDrag.markerEl.style.top = y + '%';
+  if (floorDrag.group) {
+    // Whole selection rides along: same delta for every member, each clamped.
+    const me = floorDrag.group.find(g => g.id === floorDrag.tableId);
+    const dx = x - me.startX, dy = y - me.startY;
+    for (const g of floorDrag.group) {
+      g.lastX = Math.max(2, Math.min(98, g.startX + dx));
+      g.lastY = Math.max(2, Math.min(98, g.startY + dy));
+      g.el.style.left = g.lastX + '%';
+      g.el.style.top = g.lastY + '%';
+    }
+  } else {
+    floorDrag.markerEl.style.left = x + '%';
+    floorDrag.markerEl.style.top = y + '%';
+  }
   floorDrag.lastX = x;
   floorDrag.lastY = y;
 }
 
 function endFloorDrag() {
   if (!floorDrag) return;
+  if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const { tableId, moved, lastX, lastY } = floorDrag;
+  if (moved && floorDrag.group) {
+    // Group move: save every member's new spot (no overlap veto between
+    // group members — they moved rigidly together).
+    for (const g of floorDrag.group) {
+      if (g.lastX !== undefined) saveTablePosition(g.id, Math.round(g.lastX * 10) / 10, Math.round(g.lastY * 10) / 10);
+    }
+    floorDrag = null;
+    return;
+  }
   if (moved && lastX !== undefined) {
     const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
     const t = fp && fp.tables.find(x => x.id === tableId);
@@ -19689,11 +19705,6 @@ function bindEvents() {
       else if (act === 'set-burn-cap') { const v = el.dataset.val; saveTicketSetting({ burnMinutes: v === 'null' ? null : v === 'booking' ? 'booking' : parseInt(v) }); }
       else if (act === 'set-course-wait') { const v = el.dataset.val; saveTicketSetting({ courseWaitMinutes: v === 'null' ? null : parseInt(v) }); }
       else if (act === 'set-tablenum-size') { saveTicketSetting({ tableNumSize: el.dataset.val }).then(() => applyPanelLayout()); }
-      else if (act === 'open-table-bulk') { openTableBulkModal(); }
-      else if (act === 'close-table-bulk') { state.tableBulkModal = null; render(); }
-      else if (act === 'save-table-bulk') { saveTableBulkModal(); }
-      else if (act === 'table-bulk-seats-mode') { captureTableBulkSeats(); state.tableBulkModal.seatsMode = el.dataset.val; render(); }
-      else if (act === 'table-bulk-color-mode') { captureTableBulkSeats(); state.tableBulkModal.colorMode = el.dataset.val; render(); }
       else if (act === 'toggle-floor-multitap') { state.floorMultiTap = !state.floorMultiTap; render(); }
       else if (act === 'simple-table-toggle') { toggleTableMultiSelect(el.dataset.id); }
       else if (act === 'simple-table-select-all') {
@@ -20933,8 +20944,12 @@ function bindEvents() {
     if (label) patchFloorObject(tableLabelInput.dataset.fp, tableLabelInput.dataset.id, { label });
   });
   const tableSeatsInput = document.getElementById('table-seats-input');
-  if (tableSeatsInput) tableSeatsInput.addEventListener('change', (e) => {
-    patchFloorObject(tableSeatsInput.dataset.fp, tableSeatsInput.dataset.id, { seats: parseInt(e.target.value) || 1 });
+  if (tableSeatsInput) tableSeatsInput.addEventListener('change', async (e) => {
+    const seats = Math.max(1, Math.min(20, parseInt(e.target.value) || 1));
+    for (const tid of tableEditTargets(tableSeatsInput.dataset.id)) {
+      const fp = state.floorPlans.find(f => f.tables.some(t => t.id === tid));
+      if (fp) await patchFloorObject(fp.id, tid, { seats });
+    }
   });
   const decorWidthInput = document.getElementById('decor-width-input');
   if (decorWidthInput) decorWidthInput.addEventListener('change', (e) => {

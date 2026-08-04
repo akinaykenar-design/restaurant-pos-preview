@@ -1158,6 +1158,8 @@ input:focus, select:focus, textarea:focus{
    (left-aligned) so the thumb barely travels. */
 /* Covers pad: the SAME popup as the item hold pad, dead centre of the screen. */
 .covers-pop{ left:50%; top:50%; transform:translate(-50%,-50%); }
+/* Link mode: the table you're about to weld onto lights up under the drag. */
+.link-target{ outline:3px dashed var(--orange); outline-offset:3px; }
 
 /* Compact item label where a middle pane needs the item's name (no header row). */
 .pane-name{ font-weight:800; font-size:14.5px; padding:16px 20px 0; color:var(--text-primary); }
@@ -15429,40 +15431,54 @@ async function doTransferToTable(newTableId) {
 // Link fromId INTO intoId's group. Staff physically push the tables together —
 // the map does the same: the linked table snaps against the main one (same
 // layout only), remembering where it came from so unlink puts it back.
+// Link two tables (or their whole groups). The LOWEST table number runs the
+// joined group — everyone else re-points to it and fades. The dragged table
+// snaps against the one it was dropped on (same layout only), remembering its
+// old spot so unlink puts it back.
 async function linkTables(fromId, intoId) {
-  const t = findTableById(fromId);
-  let main = findTableById(intoId);
-  if (main && main.mergedInto && main.mergedInto !== main.id) main = findTableById(main.mergedInto);
-  if (!t || !main || t.id === main.id) { render(); return false; }
-  if (t.mergedInto) { state.toast = 'That table is already linked elsewhere.'; render(); return false; }
-  const fp = findFloorPlanForTable(t.id);
-  const fpMain = findFloorPlanForTable(main.id);
-  if (!fp) return false;
-  const patch = { mergedInto: main.id };
-  if (fpMain && fpMain.id === fp.id) {
-    patch.prevX = t.x;
-    patch.prevY = t.y;
-    const side = t.x >= main.x ? 1 : -1;
-    patch.x = Math.max(2, Math.min(98, Math.round((main.x + side * (main.width + t.width) / 2) * 10) / 10));
-    patch.y = main.y;
-  }
+  const a = findTableById(fromId);
+  const b = findTableById(intoId);
+  if (!a || !b || a.id === b.id) { render(); return false; }
+  const mainOf = (t) => (t.mergedInto && t.mergedInto !== t.id && findTableById(t.mergedInto)) || t;
+  const ma = mainOf(a), mb = mainOf(b);
+  if (ma.id === mb.id) { render(); return false; } // already one group
+  const main = tableLabelCompare(ma, mb) <= 0 ? ma : mb;
+  const demoted = main.id === ma.id ? mb : ma;
+  // Everyone in the demoted side's group (its main included) joins under main.
+  const joining = [demoted, ...allTables().filter(t => t.mergedInto === demoted.id && t.id !== main.id)];
+  const fpB = findFloorPlanForTable(b.id);
   try {
-    await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    Object.assign(t, patch);
+    for (const t of joining) {
+      const fp = findFloorPlanForTable(t.id);
+      if (!fp) continue;
+      const patch = { mergedInto: main.id };
+      if (t.id === a.id && fpB && fpB.id === fp.id) {
+        // The physically dragged table lands snapped against its partner.
+        patch.prevX = t.x;
+        patch.prevY = t.y;
+        const side = t.x >= b.x ? 1 : -1;
+        patch.x = Math.max(2, Math.min(98, Math.round((b.x + side * (b.width + t.width) / 2) * 10) / 10));
+        patch.y = b.y;
+      }
+      await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      Object.assign(t, patch);
+    }
   } catch (e) { render(); return false; }
-  state.toast = `Table ${esc(t.label)} linked to ${tableDisplayLabel(main.id)}`;
+  const n = allTables().filter(t => t.mergedInto === main.id).length;
+  state.toast = `Linked — table ${esc(String(main.label))} runs the group of ${n + 1}`;
   render();
   armToastTimer(2500);
   return true;
 }
+// Tap flow in Link mode: tapping a table links it with the current one. The
+// mode STAYS armed so you can keep chaining tables — leave it via Select /
+// Close, never by being yanked into an order.
 async function mergeIntoTable(otherTableId) {
-  if (otherTableId === state.table) { state.mergeMode = false; state.showTablePicker = false; render(); return; }
-  state.mergeMode = false;
-  // Stay on the map so you SEE the tables joined before carrying on.
+  if (otherTableId === state.table) { render(); return; }
   state.showTablePicker = true;
   await linkTables(otherTableId, state.table);
 }
@@ -15486,10 +15502,17 @@ document.addEventListener('pointermove', (e) => {
   mergeDrag.el.style.transform = `${base}translate(${dx}px, ${dy}px)`;
   mergeDrag.el.style.zIndex = '50';
   mergeDrag.el.style.pointerEvents = 'none';
+  // Light up the table you're ABOUT to weld onto.
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const tEl = under && under.closest ? under.closest('[data-act="pick-table"]') : null;
+  if (mergeDrag.overEl && mergeDrag.overEl !== tEl) mergeDrag.overEl.classList.remove('link-target');
+  mergeDrag.overEl = (tEl && tEl.dataset.id !== mergeDrag.fromId) ? tEl : null;
+  if (mergeDrag.overEl) mergeDrag.overEl.classList.add('link-target');
 });
 document.addEventListener('pointerup', (e) => {
   if (!mergeDrag) return;
   const d = mergeDrag; mergeDrag = null;
+  if (d.overEl) d.overEl.classList.remove('link-target');
   if (!d.moved) return; // plain tap — the click flow links into the current table
   d.el.style.pointerEvents = '';
   const under = document.elementFromPoint(e.clientX, e.clientY);
@@ -16242,23 +16265,27 @@ function startRotateDrag(e, tableId) {
   const clientX = e.touches ? e.touches[0].clientX : e.clientX;
   const clientY = e.touches ? e.touches[0].clientY : e.clientY;
   const startAngle = Math.atan2(clientY - centerYpx, clientX - centerXpx) * 180 / Math.PI;
-  floorRotateDrag = { tableId, fpId: fp.id, markerEl, centerXpx, centerYpx, startAngle, startRotation: t.rotation || 0 };
+  floorRotateDrag = { tableId, fpId: fp.id, markerEl, centerXpx, centerYpx, startAngle, startRotation: t.rotation || 0, scx: clientX, scy: clientY };
   e.preventDefault();
 }
 
 function moveRotateDrag(clientX, clientY) {
   if (!floorRotateDrag) return;
+  // A steady finger is a TAP (steps 45° on release) — only a real circle drag
+  // engages rotation, snapping to the basic angles.
+  if (!floorRotateDrag.engaged && Math.hypot(clientX - floorRotateDrag.scx, clientY - floorRotateDrag.scy) < 8) return;
+  floorRotateDrag.engaged = true;
   const angle = Math.atan2(clientY - floorRotateDrag.centerYpx, clientX - floorRotateDrag.centerXpx) * 180 / Math.PI;
-  // Hand rotation snaps to 15° presets — easy to line tables up by eye.
-  const rotation = Math.round((floorRotateDrag.startRotation + (angle - floorRotateDrag.startAngle)) / 15) * 15;
+  const rotation = Math.round((floorRotateDrag.startRotation + (angle - floorRotateDrag.startAngle)) / 45) * 45;
   floorRotateDrag.markerEl.style.transform = `translate(-50%,-50%) rotate(${rotation}deg)`;
   floorRotateDrag.lastRotation = ((rotation % 360) + 360) % 360;
 }
 
 function endRotateDrag() {
   if (!floorRotateDrag) return;
-  const { tableId, fpId, lastRotation } = floorRotateDrag;
-  if (lastRotation !== undefined) patchFloorObject(fpId, tableId, { rotation: lastRotation });
+  const { tableId, fpId, lastRotation, engaged, startRotation } = floorRotateDrag;
+  if (engaged && lastRotation !== undefined) patchFloorObject(fpId, tableId, { rotation: lastRotation });
+  else patchFloorObject(fpId, tableId, { rotation: (startRotation + 45) % 360 }); // tap = next basic angle
   floorRotateDrag = null;
 }
 

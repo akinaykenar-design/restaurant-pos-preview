@@ -1158,8 +1158,13 @@ input:focus, select:focus, textarea:focus{
    (left-aligned) so the thumb barely travels. */
 /* Covers pad: the SAME popup as the item hold pad, dead centre of the screen. */
 .covers-pop{ left:50%; top:50%; transform:translate(-50%,-50%); }
-/* Link mode: the table you're about to weld onto lights up under the drag. */
+/* Link mode: the table you're about to weld onto lights up under the drag,
+   and the finger drags the TABLE, not the page. */
 .link-target{ outline:3px dashed var(--orange); outline-offset:3px; }
+body[data-linkmode] [data-act="pick-table"]{ touch-action:none; }
+/* The picker's Close sits right under the map — not stranded at the very
+   bottom of a mostly-empty phone screen. */
+.tp-actions{ margin-top:16px; }
 
 /* Compact item label where a middle pane needs the item's name (no header row). */
 .pane-name{ font-weight:800; font-size:14.5px; padding:16px 20px 0; color:var(--text-primary); }
@@ -5823,14 +5828,20 @@ const TABLE_TEMPLATES = [
   { key: 'rect', label: 'Rectangle', shape: 'rect', width: 16, height: 12, seats: 6 },
   { key: 'half-round', label: 'Half-round', shape: 'half', width: 12, height: 8, seats: 4 },
 ];
-// Keep a table fully INSIDE the floor: clamp its centre so no edge can hang
-// past the canvas, whatever its size (centre-only clamping let wide tables
-// poke out of the grid).
-function clampToFloor(x, y, w, h) {
-  const hw = Math.min((w || 0) / 2, 50), hh = Math.min((h || 0) / 2, 50);
+// Keep a table fully INSIDE the floor: clamp its centre so no part can hang
+// past the canvas. Uses the ROTATED bounding box — a table turned 45° pokes
+// its corners past the plain width/height box (that was the "tables outside
+// the grid" glitch). Width% is of canvas width, height% of canvas height, so
+// the rotation mix converts between the axes via the canvas aspect.
+function clampToFloor(x, y, w, h, rot, fpHeight) {
+  const rad = ((rot || 0) * Math.PI) / 180;
+  const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
+  const r = (fpHeight || 500) / 900; // canvas H/W ratio (aspect-ratio 900/fpHeight)
+  const hw = Math.min(((w || 0) * c + (h || 0) * r * s) / 2, 50);
+  const hh = Math.min(((w || 0) / r * s + (h || 0) * c) / 2, 50);
   return {
-    x: Math.max(hw, Math.min(100 - hw, x)),
-    y: Math.max(hh, Math.min(100 - hh, y)),
+    x: Math.max(hw, Math.min(100 - hw, Math.round(x * 10) / 10)),
+    y: Math.max(hh, Math.min(100 - hh, Math.round(y * 10) / 10)),
   };
 }
 // Corner rounding per shape — 'oval' is a stretched circle, 'half' a booth
@@ -8901,6 +8912,8 @@ function render() {
     !state.showCheckout && !state.callAway && !state.quickNotePad && !state.notesPanel &&
     !state.itemOptions && !state.editLine && !state.editSent && !state.priceEntry;
   document.body.toggleAttribute('data-fs-picker', !!fsPicker);
+  // In Link mode a finger on a table must DRAG the table, never scroll the page.
+  document.body.toggleAttribute('data-linkmode', !!(state.mergeMode && state.showTablePicker));
 }
 
 // Two lines at most, never clipped: a name that would need a third line (or
@@ -15312,7 +15325,7 @@ function renderTablePickerMiddle() {
         return '';
       })()}
     </div>
-    <div class="pane-actions" style="padding-left:20px;padding-right:20px;">
+    <div class="pane-actions tp-actions" style="padding-left:20px;padding-right:20px;">
       ${(() => {
         // Call away is a MODE, armed beside Close: tap it, then tap a table —
         // its course confirm pops up, no table entry, no list.
@@ -15478,7 +15491,7 @@ async function linkTables(fromId, intoId) {
         patch.prevX = t.x;
         patch.prevY = t.y;
         const side = t.x >= b.x ? 1 : -1;
-        const cs = clampToFloor(Math.round((b.x + side * (b.width + t.width) / 2) * 10) / 10, b.y, t.width, t.height);
+        const cs = clampToFloor(Math.round((b.x + side * (b.width + t.width) / 2) * 10) / 10, b.y, t.width, t.height, t.rotation, fpB.height);
         patch.x = cs.x;
         patch.y = cs.y;
       }
@@ -15943,12 +15956,12 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
   if (kind === 'decor') {
     const tpl = DECOR_TEMPLATES.find(t => t.key === key);
     if (!tpl) return;
-    const cd = clampToFloor(xPct, yPct, tpl.width, tpl.height);
+    const cd = clampToFloor(xPct, yPct, tpl.width, tpl.height, 0, fp.height);
     payload = { label: tpl.label, x: cd.x, y: cd.y, shape: 'square', width: tpl.width, height: tpl.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon, rotation: 0 };
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
     if (!tpl) return;
-    const ct = clampToFloor(xPct, yPct, tpl.width, tpl.height);
+    const ct = clampToFloor(xPct, yPct, tpl.width, tpl.height, 0, fp.height);
     xPct = ct.x; yPct = ct.y;
     if (tableWouldOverlap(fp, xPct, yPct, tpl.width, tpl.height, null)) {
       state.toast = 'Tables can’t overlap — drop it somewhere clear';
@@ -16224,23 +16237,23 @@ function moveFloorDrag(clientX, clientY) {
     y = Math.round(y / g) * g;
   }
   floorDrag.moved = true;
-  const dims = (id) => { const t = fp && fp.tables.find(z => z.id === id); return t ? [t.width, t.height] : [0, 0]; };
+  const dims = (id) => { const t = fp && fp.tables.find(z => z.id === id); return t ? [t.width, t.height, t.rotation] : [0, 0, 0]; };
   if (floorDrag.group) {
     // Whole selection rides along: same delta for every member, each kept
     // fully inside the floor.
     const me = floorDrag.group.find(g => g.id === floorDrag.tableId);
     const dx = x - me.startX, dy = y - me.startY;
     for (const g of floorDrag.group) {
-      const [w, h] = dims(g.id);
-      const c = clampToFloor(g.startX + dx, g.startY + dy, w, h);
+      const [w, h, rot] = dims(g.id);
+      const c = clampToFloor(g.startX + dx, g.startY + dy, w, h, rot, fp && fp.height);
       g.lastX = c.x;
       g.lastY = c.y;
       g.el.style.left = g.lastX + '%';
       g.el.style.top = g.lastY + '%';
     }
   } else {
-    const [w, h] = dims(floorDrag.tableId);
-    const c = clampToFloor(x, y, w, h);
+    const [w, h, rot] = dims(floorDrag.tableId);
+    const c = clampToFloor(x, y, w, h, rot, fp && fp.height);
     x = c.x; y = c.y;
     floorDrag.markerEl.style.left = x + '%';
     floorDrag.markerEl.style.top = y + '%';
@@ -16321,8 +16334,13 @@ function moveRotateDrag(clientX, clientY) {
 function endRotateDrag() {
   if (!floorRotateDrag) return;
   const { tableId, fpId, lastRotation, engaged, startRotation } = floorRotateDrag;
-  if (engaged && lastRotation !== undefined) patchFloorObject(fpId, tableId, { rotation: lastRotation });
-  else patchFloorObject(fpId, tableId, { rotation: (startRotation + 45) % 360 }); // tap = next basic angle
+  const rotation = engaged && lastRotation !== undefined ? lastRotation : (startRotation + 45) % 360; // tap = next basic angle
+  // A rotated table's corners reach further than its box — nudge it back
+  // inside if the new angle would poke past the floor edge.
+  const fp = state.floorPlans.find(f => f.id === fpId);
+  const t = fp && fp.tables.find(x => x.id === tableId);
+  const cr = t ? clampToFloor(t.x, t.y, t.width, t.height, rotation, fp.height) : null;
+  patchFloorObject(fpId, tableId, { rotation, ...(cr && (cr.x !== t.x || cr.y !== t.y) ? { x: cr.x, y: cr.y } : {}) });
   floorRotateDrag = null;
 }
 
@@ -16385,7 +16403,7 @@ function endResizeDrag() {
       return;
     }
     // A grown table near the edge gets nudged back fully inside the floor.
-    const cr = t ? clampToFloor(t.x, t.y, lastWidth, lastHeight) : null;
+    const cr = t ? clampToFloor(t.x, t.y, lastWidth, lastHeight, t.rotation, fp && fp.height) : null;
     patchFloorObject(fpId, tableId, { width: lastWidth, height: lastHeight, ...(cr && (cr.x !== t.x || cr.y !== t.y) ? { x: cr.x, y: cr.y } : {}) });
   }
   floorResizeDrag = null;

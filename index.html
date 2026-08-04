@@ -8147,7 +8147,9 @@ function middlePaneDirty() {
 }
 function escapeMiddlePane() {
   const close =
-    state.coversPad ? () => { state.coversPad = null; render(); }
+    state.callAwayPick ? () => { state.callAwayPick = null; render(); }
+    : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
+    : state.coversPad ? () => { state.coversPad = null; render(); }
     : state.showCheckout ? () => closeCheckout()
     : state.callAway ? () => { state.callAway = false; render(); }
     : state.quickNotePad ? () => { state.quickNotePad = false; render(); }
@@ -8432,6 +8434,27 @@ function openConfirm(opts, onConfirm) {
   };
   render();
 }
+// Call-away pick: armed the mode, tapped a table — confirm its course here.
+function renderCallAwayPickModal() {
+  const p = state.callAwayPick;
+  if (!p) return '';
+  return `
+  <div class="modal-bg" data-act="callaway-pick-cancel">
+    <div class="modal" data-stop="1" style="max-width:360px;">
+      <h2 style="margin-bottom:10px;">Table ${esc(String(p.label))}</h2>
+      <div style="display:flex;align-items:center;gap:8px;font-size:14.5px;font-weight:700;color:var(--text-primary);margin-bottom:6px;">
+        <span class="course-dot" style="background:${p.color || 'var(--steel-300)'};width:12px;height:12px;"></span>
+        ${p.courseName ? esc(p.courseName) : 'Last course'}
+        <span style="font-weight:600;color:var(--charcoal-soft);">· sent ${elapsedMinLabel(p.sentAt)}</span>
+      </div>
+      <div class="modal-actions">
+        <button class="icon-action discard" title="Cancel" data-act="callaway-pick-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action send" data-act="callaway-pick-go">${ACT_TICK_SVG}<span class="ia-label">Call away</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function renderConfirmDialog() {
   const c = state.confirmDialog;
   if (!c) return '';
@@ -8822,6 +8845,7 @@ function render() {
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
     ${state.stockWarnModal ? renderStockWarnModal() : ''}
     ${state.allergenWarnModal ? renderAllergenWarnModal() : ''}
+    ${state.callAwayPick ? renderCallAwayPickModal() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
@@ -14963,7 +14987,7 @@ function tableCourseStatus(tableLabel) {
   // A call-away resets the timer; otherwise use the last round's sent time.
   const calledAway = (order.calledAwayAt || 0) > (last.sentAt || 0);
   const since = Math.max(last.sentAt || 0, order.calledAwayAt || 0);
-  return { sentAt: since, color, orderId: order.id, calledAway, seatedAt: order.createdAt };
+  return { sentAt: since, color, orderId: order.id, calledAway, seatedAt: order.createdAt, courseN, courseName: courseN ? courseInfo(courseN).name : null };
 }
 // ---------- Table burn: time as colour, no digits ----------
 // The occupied chip's whole body walks green→teal → gold → violet across the
@@ -15188,24 +15212,12 @@ function renderTablePickerMiddle() {
     </div>
     <div class="pane-actions" style="padding-left:20px;padding-right:20px;">
       ${(() => {
-        // Call away lives beside Close — same shape button. The per-table
-        // list pops up above it.
+        // Call away is a MODE, armed beside Close: tap it, then tap a table —
+        // its course confirm pops up, no table entry, no list.
         if (state.transferMode || state.mergeMode) return '';
-        const open = allTables().map(t => ({ t, cs: tableCourseStatus(t.label) })).filter(x => x.cs);
-        if (!open.length) return '';
-        return `
-        <div class="callaway-fab-wrap in-actions">
-          ${state.tablesCallAway ? `<div class="callaway-fab-list">
-            ${open.map(({ t, cs }) => `
-            <div class="cfl-row">
-              <span class="course-dot" style="background:${cs.color || 'var(--steel-300)'};"></span>
-              <span class="cfl-label">${esc(t.label)}</span>
-              <span class="tbl-elapsed ts" data-fired="${cs.sentAt}">${elapsedMinLabel(cs.sentAt)}</span>
-              <button class="btn-confirm cfl-go" data-act="call-away-table" data-order="${cs.orderId}" title="Call away ${esc(t.label)}">✓</button>
-            </div>`).join('')}
-          </div>` : ''}
-          <button class="icon-action callaway ${state.tablesCallAway ? 'active' : ''}" data-act="toggle-tables-callaway" title="Call away a course">${DKT_FLAME_SVG}<span class="ia-label">Call away</span></button>
-        </div>`;
+        const anyOpen = allTables().some(t => tableCourseStatus(t.label));
+        if (!anyOpen) return '';
+        return `<button class="icon-action callaway ${state.tablesCallAway ? 'active' : ''}" data-act="toggle-tables-callaway" title="Call away: tap this, then tap a table">${DKT_FLAME_SVG}<span class="ia-label">Call away</span></button>`;
       })()}
       <button class="icon-action discard" title="Close" data-act="close-table-picker">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
     </div>
@@ -19175,7 +19187,7 @@ function bindEvents() {
       }
       else if (act === 'cat') {
         state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
-        state.showTablePicker = false; state.transferMode = false; state.mergeMode = false;
+        state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false; state.callAwayPick = null;
         state.notesPanel = null; state.vipModal = null; state.allergyModal = null; state.customNoteDraft = null;
         state.comboBuilder = null; // tapping any category just leaves the set-menu builder
         state.callAway = false; state.quickNotePad = false; state.coversPad = null; // same for call-away / quick-note / covers panes
@@ -19486,7 +19498,11 @@ function bindEvents() {
       }
       else if (act === 'fire-course') { fireCourse(parseInt(el.dataset.val)); }
       else if (act === 'call-away-table') { callAwayTable(el.dataset.order); }
-      else if (act === 'toggle-tables-callaway') { state.tablesCallAway = !state.tablesCallAway; render(); }
+      else if (act === 'toggle-tables-callaway') {
+        state.tablesCallAway = !state.tablesCallAway;
+        if (state.tablesCallAway) { state.toast = 'Tap a table to call it away.'; armToastTimer(2600); }
+        render();
+      }
       else if (act === 'open-table-picker') { openTablePicker(); }
       else if (act === 'toggle-account-menu') { state.accountMenuOpen = !state.accountMenuOpen; render(); }
       else if (act === 'acct-go') {
@@ -19511,7 +19527,20 @@ function bindEvents() {
       else if (act === 'pick-table') {
         if (state.transferMode) transferToTable(el.dataset.id);
         else if (state.mergeMode) mergeIntoTable(el.dataset.id);
+        else if (state.tablesCallAway) {
+          // Call-away mode: tapping a table pops its course confirm — the
+          // waiter never enters the table.
+          const t = findTableById(el.dataset.id);
+          const cs = t ? tableCourseStatus(t.label) : null;
+          if (!cs) { state.toast = 'Nothing to call away on that table.'; render(); armToastTimer(2200); }
+          else { state.callAwayPick = { orderId: cs.orderId, label: t.label, color: cs.color, courseName: cs.courseName, sentAt: cs.sentAt }; render(); }
+        }
         else pickTable(el.dataset.id);
+      }
+      else if (act === 'callaway-pick-cancel') { state.callAwayPick = null; render(); }
+      else if (act === 'callaway-pick-go') {
+        const p = state.callAwayPick; state.callAwayPick = null; state.tablesCallAway = false;
+        if (p) callAwayTable(p.orderId);
       }
       else if (act === 'picker-floorplan-tab') { state.pickerFloorPlanId = el.dataset.id; render(); }
       else if (act === 'add-object') { addObject(el.dataset.fp); }
@@ -19791,7 +19820,7 @@ function bindEvents() {
       else if (act === 'save-discount-modal') { saveDiscountModal(); }
       else if (act === 'toggle-notes-panel') { toggleNotesPanel(); }
       else if (act === 'close-notes-panel') { closeNotesPanel(); }
-      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; render(); }
+      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false; state.callAwayPick = null; render(); }
       else if (act === 'toggle-callaway') { toggleCallAway(); }
       else if (act === 'close-callaway') { state.callAway = false; render(); }
       else if (act === 'clear-fired-course') { clearFiredCourse(parseInt(el.dataset.val)); }

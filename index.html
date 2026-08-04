@@ -15492,40 +15492,82 @@ async function doTransferToTable(newTableId) {
   armToastTimer(2500);
 }
 
-async function mergeIntoTable(otherTableId) {
-  const otherTable = findTableById(otherTableId);
-  const currentTable = findTableById(state.table);
-  if (!otherTable || !currentTable || otherTableId === state.table) { state.mergeMode = false; state.showTablePicker = false; render(); return; }
-  if (otherTable.mergedInto) { state.toast = 'That table is already merged elsewhere.'; render(); return; }
-  const fp = findFloorPlanForTable(otherTableId);
-  const fpMain = findFloorPlanForTable(state.table);
-  if (!fp) return;
-  // Staff physically push the tables together — the map does the same: the
-  // linked table snaps against the main one (same layout only), remembering
-  // where it came from so unlink puts it back.
-  const patch = { mergedInto: state.table };
+// Link fromId INTO intoId's group. Staff physically push the tables together —
+// the map does the same: the linked table snaps against the main one (same
+// layout only), remembering where it came from so unlink puts it back.
+async function linkTables(fromId, intoId) {
+  const t = findTableById(fromId);
+  let main = findTableById(intoId);
+  if (main && main.mergedInto && main.mergedInto !== main.id) main = findTableById(main.mergedInto);
+  if (!t || !main || t.id === main.id) { render(); return false; }
+  if (t.mergedInto) { state.toast = 'That table is already linked elsewhere.'; render(); return false; }
+  const fp = findFloorPlanForTable(t.id);
+  const fpMain = findFloorPlanForTable(main.id);
+  if (!fp) return false;
+  const patch = { mergedInto: main.id };
   if (fpMain && fpMain.id === fp.id) {
-    patch.prevX = otherTable.x;
-    patch.prevY = otherTable.y;
-    const side = otherTable.x >= currentTable.x ? 1 : -1;
-    patch.x = Math.max(2, Math.min(98, Math.round((currentTable.x + side * (currentTable.width + otherTable.width) / 2) * 10) / 10));
-    patch.y = currentTable.y;
+    patch.prevX = t.x;
+    patch.prevY = t.y;
+    const side = t.x >= main.x ? 1 : -1;
+    patch.x = Math.max(2, Math.min(98, Math.round((main.x + side * (main.width + t.width) / 2) * 10) / 10));
+    patch.y = main.y;
   }
   try {
-    await api(`/api/floorplans/${fp.id}/tables/${otherTableId}`, {
+    await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     });
-    Object.assign(otherTable, patch);
-  } catch (e) {}
+    Object.assign(t, patch);
+  } catch (e) { render(); return false; }
+  state.toast = `Table ${esc(t.label)} linked to ${tableDisplayLabel(main.id)}`;
+  render();
+  armToastTimer(2500);
+  return true;
+}
+async function mergeIntoTable(otherTableId) {
+  if (otherTableId === state.table) { state.mergeMode = false; state.showTablePicker = false; render(); return; }
   state.mergeMode = false;
   // Stay on the map so you SEE the tables joined before carrying on.
   state.showTablePicker = true;
-  state.toast = `Table ${esc(otherTable.label)} linked to ${tableDisplayLabel(state.table)}`;
-  render();
-  armToastTimer(2500);
+  await linkTables(otherTableId, state.table);
 }
+
+// Link mode also works by DRAG: pick a table up and drop it ON another to
+// attach it there (a plain tap still links into the current table).
+let mergeDrag = null; // { fromId, el, sx, sy, moved }
+let _mergeDragSwallow = false;
+document.addEventListener('pointerdown', (e) => {
+  if (!state.mergeMode || !state.showTablePicker) return;
+  const el = e.target.closest ? e.target.closest('[data-act="pick-table"]') : null;
+  if (!el) return;
+  mergeDrag = { fromId: el.dataset.id, el, sx: e.clientX, sy: e.clientY, moved: false };
+});
+document.addEventListener('pointermove', (e) => {
+  if (!mergeDrag) return;
+  const dx = e.clientX - mergeDrag.sx, dy = e.clientY - mergeDrag.sy;
+  if (!mergeDrag.moved && Math.hypot(dx, dy) < 8) return;
+  mergeDrag.moved = true;
+  const base = mergeDrag.el.classList.contains('floor-marker') ? 'translate(-50%,-50%) ' : '';
+  mergeDrag.el.style.transform = `${base}translate(${dx}px, ${dy}px)`;
+  mergeDrag.el.style.zIndex = '50';
+  mergeDrag.el.style.pointerEvents = 'none';
+});
+document.addEventListener('pointerup', (e) => {
+  if (!mergeDrag) return;
+  const d = mergeDrag; mergeDrag = null;
+  if (!d.moved) return; // plain tap — the click flow links into the current table
+  d.el.style.pointerEvents = '';
+  const under = document.elementFromPoint(e.clientX, e.clientY);
+  const tEl = under && under.closest ? under.closest('[data-act="pick-table"]') : null;
+  d.el.style.transform = ''; d.el.style.zIndex = '';
+  _mergeDragSwallow = true;
+  if (tEl && tEl.dataset.id !== d.fromId) linkTables(d.fromId, tEl.dataset.id);
+  else render(); // dropped on nothing: snap the ghost back
+});
+document.addEventListener('click', (e) => {
+  if (_mergeDragSwallow) { _mergeDragSwallow = false; e.stopPropagation(); e.preventDefault(); }
+}, true);
 
 async function unmergeTable(tableId) {
   const table = findTableById(tableId);

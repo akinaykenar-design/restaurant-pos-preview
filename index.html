@@ -8042,9 +8042,17 @@ function toggleCallAway() {
   if (state.callAway) { state.callAway = false; render(); return; }
   dropMobileDrawer();
   state.callAway = true;
+  state._callAwayReturn = false;
   state.notesPanel = null; state.showCheckout = false; state.discountModal = null;
   state.showTablePicker = false; state.itemOptions = null; state.comboBuilder = null;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
+  render();
+}
+// Closing the call-away pane returns to wherever it was opened from: the
+// docket (normal) or the full-screen table picker (call-away mode).
+function closeCallAwayPane() {
+  state.callAway = false;
+  if (state._callAwayReturn) { state._callAwayReturn = false; openTablePicker(); return; }
   render();
 }
 function clearFiredCourse(n) {
@@ -8147,11 +8155,10 @@ function middlePaneDirty() {
 }
 function escapeMiddlePane() {
   const close =
-    state.callAwayPick ? () => { state.callAwayPick = null; render(); }
-    : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
+    state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.coversPad ? () => { state.coversPad = null; render(); }
     : state.showCheckout ? () => closeCheckout()
-    : state.callAway ? () => { state.callAway = false; render(); }
+    : state.callAway ? () => closeCallAwayPane()
     : state.quickNotePad ? () => { state.quickNotePad = false; render(); }
     : state.notesPanel ? () => closeNotesPanel()
     : state.itemOptions ? () => closeItemOptions()
@@ -8434,27 +8441,6 @@ function openConfirm(opts, onConfirm) {
   };
   render();
 }
-// Call-away pick: armed the mode, tapped a table — confirm its course here.
-function renderCallAwayPickModal() {
-  const p = state.callAwayPick;
-  if (!p) return '';
-  return `
-  <div class="modal-bg" data-act="callaway-pick-cancel">
-    <div class="modal" data-stop="1" style="max-width:360px;">
-      <h2 style="margin-bottom:10px;">Table ${esc(String(p.label))}</h2>
-      <div style="display:flex;align-items:center;gap:8px;font-size:14.5px;font-weight:700;color:var(--text-primary);margin-bottom:6px;">
-        <span class="course-dot" style="background:${p.color || 'var(--steel-300)'};width:12px;height:12px;"></span>
-        ${p.courseName ? esc(p.courseName) : 'Last course'}
-        <span style="font-weight:600;color:var(--charcoal-soft);">· sent ${elapsedMinLabel(p.sentAt)}</span>
-      </div>
-      <div class="modal-actions">
-        <button class="icon-action discard" title="Cancel" data-act="callaway-pick-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" data-act="callaway-pick-go">${ACT_TICK_SVG}<span class="ia-label">Call away</span></button>
-      </div>
-    </div>
-  </div>`;
-}
-
 function renderConfirmDialog() {
   const c = state.confirmDialog;
   if (!c) return '';
@@ -8845,7 +8831,6 @@ function render() {
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
     ${state.stockWarnModal ? renderStockWarnModal() : ''}
     ${state.allergenWarnModal ? renderAllergenWarnModal() : ''}
-    ${state.callAwayPick ? renderCallAwayPickModal() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
@@ -9856,7 +9841,7 @@ function renderCallAwayMiddle() {
                      ${state.settings.printEnabled ? `<button class="btn-secondary" style="width:auto;padding:9px 12px;" data-act="print-docket" data-val="${n}" title="Print docket">${SYS_PRINTER_SVG}</button>` : ''}
                      <button class="btn-secondary" style="width:auto;padding:9px 12px;" data-act="clear-fired-course" data-val="${n}" title="Clear so you can call away again">↺ Clear</button>`
                   : total
-                  ? `<button class="btn-confirm" style="width:auto;padding:9px 22px;font-size:18px;line-height:1;" data-act="fire-course" data-val="${n}" title="Call away ${esc(info.name)}">✓</button>`
+                  ? `<button class="icon-action send" data-act="fire-course" data-val="${n}" title="Call away ${esc(info.name)}">${ACT_TICK_SVG}<span class="ia-label">Call away</span></button>`
                   : ''}
               </div>
             </div>`;
@@ -19187,7 +19172,7 @@ function bindEvents() {
       }
       else if (act === 'cat') {
         state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
-        state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false; state.callAwayPick = null;
+        state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false;
         state.notesPanel = null; state.vipModal = null; state.allergyModal = null; state.customNoteDraft = null;
         state.comboBuilder = null; // tapping any category just leaves the set-menu builder
         state.callAway = false; state.quickNotePad = false; state.coversPad = null; // same for call-away / quick-note / covers panes
@@ -19528,19 +19513,25 @@ function bindEvents() {
         if (state.transferMode) transferToTable(el.dataset.id);
         else if (state.mergeMode) mergeIntoTable(el.dataset.id);
         else if (state.tablesCallAway) {
-          // Call-away mode: tapping a table pops its course confirm — the
-          // waiter never enters the table.
+          // Call-away mode: tapping a table opens THE call-away pane — the
+          // exact same one as the docket's flame button — for that table.
+          // Close brings you straight back to the picker.
           const t = findTableById(el.dataset.id);
           const cs = t ? tableCourseStatus(t.label) : null;
           if (!cs) { state.toast = 'Nothing to call away on that table.'; render(); armToastTimer(2200); }
-          else { state.callAwayPick = { orderId: cs.orderId, label: t.label, color: cs.color, courseName: cs.courseName, sentAt: cs.sentAt }; render(); }
+          else {
+            state.tablesCallAway = false;
+            pickTable(t.id);
+            if (String(state.table) === String(t.id)) {
+              state.coversPad = null; state.showTablePicker = false;
+              state.callAway = true; state._callAwayReturn = true;
+              render();
+            } else {
+              state.tablesCallAway = true; // blocked (e.g. locked) — stay armed
+            }
+          }
         }
         else pickTable(el.dataset.id);
-      }
-      else if (act === 'callaway-pick-cancel') { state.callAwayPick = null; render(); }
-      else if (act === 'callaway-pick-go') {
-        const p = state.callAwayPick; state.callAwayPick = null; state.tablesCallAway = false;
-        if (p) callAwayTable(p.orderId);
       }
       else if (act === 'picker-floorplan-tab') { state.pickerFloorPlanId = el.dataset.id; render(); }
       else if (act === 'add-object') { addObject(el.dataset.fp); }
@@ -19820,9 +19811,9 @@ function bindEvents() {
       else if (act === 'save-discount-modal') { saveDiscountModal(); }
       else if (act === 'toggle-notes-panel') { toggleNotesPanel(); }
       else if (act === 'close-notes-panel') { closeNotesPanel(); }
-      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false; state.callAwayPick = null; render(); }
+      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.mergeMode = false; state.tablesCallAway = false; render(); }
       else if (act === 'toggle-callaway') { toggleCallAway(); }
-      else if (act === 'close-callaway') { state.callAway = false; render(); }
+      else if (act === 'close-callaway') { closeCallAwayPane(); }
       else if (act === 'clear-fired-course') { clearFiredCourse(parseInt(el.dataset.val)); }
       else if (act === 'switch-notes-tab') { switchNotesTab(el.dataset.val); }
       else if (act === 'toggle-allergy-preset') {

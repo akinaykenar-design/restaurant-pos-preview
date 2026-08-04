@@ -1660,10 +1660,10 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 /* Pad ✕/✓ are the standard icon-action cross/tick, pad-height. */
 .qty-pop .icon-action{ min-width:0; height:46px; border-radius:var(--btn-radius); }
 .qty-pop .icon-action svg{ width:18px; height:18px; }
-/* Countdown row: type how many are left, ✓ (blank ✓ = off). */
-.qp-count span{ font-size:12px; font-weight:700; color:var(--charcoal-soft); padding:0 2px 0 4px; }
-.qp-count input{ flex:1; min-width:0; height:44px; padding:0 10px; border:1px solid var(--steel-300); border-radius:var(--btn-radius);
-  background:var(--surface); color:var(--text-primary); font-family:var(--font-mono); font-weight:700; font-size:16px; }
+/* Managers get a Quantity/Countdown tab on top — one pad, the tab says what
+   ✓ does (Countdown: how many left; blank ✓ = off). */
+.qty-pop .qp-mode{ width:100%; }
+.qty-pop .qp-mode button{ flex:1; min-width:0; height:36px; font-family:var(--font-body); font-size:12.5px; }
 
 /* Quantity + allergy marks live IN the tile's name line — no hanging badges.
    "2 Hummus !" — the "!" is red (cannot remove) or gold (substitutable). */
@@ -16379,21 +16379,20 @@ function openQtyPop(card) {
   const item0 = state.menu.find(m => m.id === id);
   const el = document.createElement('div');
   el.className = 'qty-pop';
-  // Row 1: add-quantity. Row 2 (MANAGERS only): the COUNTDOWN — fastest
-  // possible path: hold the tile, type how many are left, Enter/✓. Blank + ✓
-  // switches it off.
+  // ONE pad, two meanings, chosen by a big tab: Quantity (default, every
+  // open) or Countdown (managers) — same digits, the tab says what ✓ does.
+  // No little text box, no hidden mode.
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
-  // Same number-pad graphic as the Covers pad: type the quantity, ✓ adds it.
   el.innerHTML = `
+    ${isManager ? `<div class="seg qp-mode">
+      <button class="active" data-qpmode="qty">Quantity</button>
+      <button data-qpmode="count">Countdown</button>
+    </div>` : ''}
     <div class="covers-pad-display placeholder qp-display">1</div>
     <div class="covers-pad-grid qp-grid">
       ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'].map(k =>
         `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-k="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
     </div>
-    ${isManager ? `<div class="qp-row qp-count">
-      <span>left</span>
-      <input type="number" min="0" step="1" inputmode="numeric" value="${item0 && item0.trackStock ? (item0.stockCount || 0) : ''}" placeholder="—">
-    </div>` : ''}
     <div class="qp-row qp-actions">
       <button class="icon-action discard qp-cancel" title="Cancel">${ACT_CROSS_SVG}</button>
       <button class="icon-action send qp-ok" title="Done">${ACT_TICK_SVG}</button>
@@ -16403,17 +16402,35 @@ function openQtyPop(card) {
   el.style.left = Math.max(8, Math.min(innerWidth - el.offsetWidth - 8, r.left + r.width / 2 - el.offsetWidth / 2)) + 'px';
   const above = r.top - el.offsetHeight - 10;
   el.style.top = (above > 8 ? above : Math.min(r.bottom + 10, innerHeight - el.offsetHeight - 8)) + 'px';
-  // The pad opens showing what's ALREADY on the docket for this item; the
-  // number you leave on the display becomes the new total (✓ sets, not adds).
+  // Quantity opens showing what's ALREADY on the docket; the number you leave
+  // becomes the new total (✓ sets, not adds). Countdown opens showing what's
+  // left in stock; blank + ✓ switches the countdown off.
   const curQty = state.cart.filter(c => c.menuItemId === id).reduce((s2, c) => s2 + c.qty, 0);
+  let mode = 'qty';
   let buf = curQty ? String(curQty) : '';
-  let touched = false; // untouched ✓ = plain "add one more"
+  let touched = false; // untouched ✓ in Quantity = plain "add one more"
   const disp = el.querySelector('.qp-display');
-  const showBuf = () => { disp.textContent = buf === '' ? '1' : buf; disp.classList.toggle('placeholder', buf === ''); };
+  const showBuf = () => {
+    disp.textContent = buf === '' ? (mode === 'qty' ? '1' : '—') : buf;
+    disp.classList.toggle('placeholder', buf === '');
+  };
   showBuf();
+  el.querySelectorAll('[data-qpmode]').forEach(t => t.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (t.dataset.qpmode === mode) return;
+    mode = t.dataset.qpmode;
+    el.querySelectorAll('[data-qpmode]').forEach(x => x.classList.toggle('active', x.dataset.qpmode === mode));
+    const item = state.menu.find(m => m.id === id);
+    buf = mode === 'qty'
+      ? (curQty ? String(curQty) : '')
+      : (item && item.trackStock ? String(item.stockCount || 0) : '');
+    touched = false;
+    showBuf();
+  }));
   el.querySelectorAll('.qp-grid button').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const k = b.dataset.k;
+    if (k === '.' && mode === 'count') return; // countdowns are whole numbers
     if (!touched) { touched = true; if (k !== 'back') buf = ''; } // first key starts fresh
     if (k === 'back') buf = buf.slice(0, -1);
     else if (k === '.') { if (!buf.includes('.')) buf = (buf === '' ? '0' : buf) + '.'; }
@@ -16432,31 +16449,22 @@ function openQtyPop(card) {
     if (delta > 0) { state.qtyPadBuffer = String(delta); addToCart(item); }
     else if (delta < 0) removeQtyFromCart(id, -delta);
   };
-  // ✓ applies whichever was edited: countdown if the manager typed one, else quantity.
+  const applyCount = () => {
+    const item = state.menu.find(m => m.id === id);
+    const v = buf.trim();
+    closeQtyPop();
+    if (!item) return;
+    saveMenuItemCountdown(id, v);
+    state.toast = v === '' ? `${item.name}: countdown off` : `${item.name}: ${Math.max(0, parseInt(v) || 0)} left`;
+    render();
+    armToastTimer(2500);
+  };
+  _qtyPopApplyCount = applyCount;
   el.querySelector('.qp-ok').addEventListener('click', (e) => {
     e.stopPropagation();
-    const cIn = el.querySelector('.qp-count input');
-    if (cIn && cIn.dataset.touched && _qtyPopApplyCount) { _qtyPopApplyCount(); return; }
-    applyQty();
+    if (mode === 'count') applyCount(); else applyQty();
   });
   el.querySelector('.qp-cancel').addEventListener('click', (e) => { e.stopPropagation(); closeQtyPop(); });
-  const cInput = el.querySelector('.qp-count input');
-  if (cInput) {
-    const applyCount = () => {
-      const item = state.menu.find(m => m.id === id);
-      const v = cInput.value.trim();
-      closeQtyPop();
-      if (!item) return;
-      saveMenuItemCountdown(id, v);
-      state.toast = v === '' ? `${item.name}: countdown off` : `${item.name}: ${Math.max(0, parseInt(v) || 0)} left`;
-      render();
-      armToastTimer(2500);
-    };
-    _qtyPopApplyCount = applyCount;
-    cInput.addEventListener('input', () => { cInput.dataset.touched = '1'; });
-    cInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') applyCount(); });
-    cInput.addEventListener('pointerdown', (e) => e.stopPropagation());
-  }
   _qtyPopEl = el;
   if (navigator.vibrate) try { navigator.vibrate(10); } catch (err) {}
 }

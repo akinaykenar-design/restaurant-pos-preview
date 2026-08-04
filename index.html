@@ -1622,13 +1622,14 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 .qty-pop .qp-display{ padding:0 0 2px; font-size:30px; }
 .qty-pop .covers-pad-key{ min-width:0; height:46px; font-size:19px; }
 .qty-pop .covers-pad-key.util{ background:var(--steel-100); color:var(--text-secondary); }
-.qp-actions button{ flex:1; height:46px; font-size:18px; font-weight:800; }
-.qp-cancel{ background:var(--steel-100) !important; }
+.qp-actions button{ flex:1; height:46px; }
+/* Pad ✕/✓ are the standard icon-action cross/tick, pad-height. */
+.qty-pop .icon-action{ min-width:0; height:46px; border-radius:var(--btn-radius); }
+.qty-pop .icon-action svg{ width:18px; height:18px; }
 /* Countdown row: type how many are left, ✓ (blank ✓ = off). */
 .qp-count span{ font-size:12px; font-weight:700; color:var(--charcoal-soft); padding:0 2px 0 4px; }
 .qp-count input{ flex:1; min-width:0; height:44px; padding:0 10px; border:1px solid var(--steel-300); border-radius:var(--btn-radius);
   background:var(--surface); color:var(--text-primary); font-family:var(--font-mono); font-weight:700; font-size:16px; }
-.qty-pop .qp-ok{ background:var(--green); border-color:var(--green); color:#fff; }
 
 /* Quantity + allergy marks live IN the tile's name line — no hanging badges.
    "2 Hummus !" — the "!" is red (cannot remove) or gold (substitutable). */
@@ -16113,6 +16114,19 @@ document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); e
 // quantity too (the options pane opens showing "Add ×N").
 let _qtyPopEl = null, _qtyHoldTimer = 0, _qtyHoldFired = false, _qtyPopApplyCount = null;
 function closeQtyPop() { if (_qtyPopEl) { _qtyPopEl.remove(); _qtyPopEl = null; _qtyPopApplyCount = null; } }
+// Trim an item's unsent quantity down to hit a pad-typed total.
+function removeQtyFromCart(menuItemId, amount) {
+  let left = amount;
+  for (let i = state.cart.length - 1; i >= 0 && left > 0; i--) {
+    const l = state.cart[i];
+    if (l.menuItemId !== menuItemId) continue;
+    const take = Math.min(l.qty, left);
+    l.qty = Math.round((l.qty - take) * 100) / 100;
+    left = Math.round((left - take) * 100) / 100;
+    if (l.qty <= 0) state.cart.splice(i, 1);
+  }
+  render();
+}
 function openQtyPop(card) {
   closeQtyPop();
   const id = card.dataset.id;
@@ -16127,41 +16141,50 @@ function openQtyPop(card) {
   el.innerHTML = `
     <div class="covers-pad-display placeholder qp-display">1</div>
     <div class="covers-pad-grid qp-grid">
-      ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '0.5', '0', 'back'].map(k =>
-        `<button class="covers-pad-key ${k === 'back' ? 'util' : ''}" data-k="${k}">${k === 'back' ? '⌫' : k === '0.5' ? '½' : k}</button>`).join('')}
+      ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'].map(k =>
+        `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-k="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
     </div>
     ${isManager ? `<div class="qp-row qp-count">
       <span>left</span>
       <input type="number" min="0" step="1" inputmode="numeric" value="${item0 && item0.trackStock ? (item0.stockCount || 0) : ''}" placeholder="—">
     </div>` : ''}
     <div class="qp-row qp-actions">
-      <button class="qp-cancel">✕</button>
-      <button class="qp-ok">✓</button>
+      <button class="icon-action discard qp-cancel" title="Cancel">${ACT_CROSS_SVG}</button>
+      <button class="icon-action send qp-ok" title="Done">${ACT_TICK_SVG}</button>
     </div>`;
   document.body.appendChild(el);
   const r = card.getBoundingClientRect();
   el.style.left = Math.max(8, Math.min(innerWidth - el.offsetWidth - 8, r.left + r.width / 2 - el.offsetWidth / 2)) + 'px';
   const above = r.top - el.offsetHeight - 10;
   el.style.top = (above > 8 ? above : Math.min(r.bottom + 10, innerHeight - el.offsetHeight - 8)) + 'px';
-  let buf = '';
+  // The pad opens showing what's ALREADY on the docket for this item; the
+  // number you leave on the display becomes the new total (✓ sets, not adds).
+  const curQty = state.cart.filter(c => c.menuItemId === id).reduce((s2, c) => s2 + c.qty, 0);
+  let buf = curQty ? String(curQty) : '';
+  let touched = false; // untouched ✓ = plain "add one more"
   const disp = el.querySelector('.qp-display');
-  const showBuf = () => { disp.textContent = buf === '' ? '1' : buf === '0.5' ? '½' : buf; disp.classList.toggle('placeholder', buf === ''); };
+  const showBuf = () => { disp.textContent = buf === '' ? '1' : buf; disp.classList.toggle('placeholder', buf === ''); };
+  showBuf();
   el.querySelectorAll('.qp-grid button').forEach(b => b.addEventListener('click', (e) => {
     e.stopPropagation();
     const k = b.dataset.k;
-    if (k === 'back') buf = buf === '0.5' ? '' : buf.slice(0, -1);
-    else if (k === '0.5') buf = '0.5';
-    else buf = (buf === '0.5' ? '' : buf) + k;
-    if (buf.length > 2) buf = buf.slice(0, 2);
+    if (!touched) { touched = true; if (k !== 'back') buf = ''; } // first key starts fresh
+    if (k === 'back') buf = buf.slice(0, -1);
+    else if (k === '.') { if (!buf.includes('.')) buf = (buf === '' ? '0' : buf) + '.'; }
+    else buf = buf + k;
+    if (buf.length > 4) buf = buf.slice(0, 4);
     showBuf();
   }));
   const applyQty = () => {
     const item = state.menu.find(m => m.id === id);
-    const q = buf === '' ? null : buf;
     closeQtyPop();
     if (!item) return;
-    if (q && parseFloat(q) > 0) state.qtyPadBuffer = q;
-    addToCart(item);
+    if (!touched) { addToCart(item); return; } // quick hold-✓ = one more, as before
+    const target = buf === '' ? 0 : parseFloat(buf);
+    if (isNaN(target) || target < 0) return;
+    const delta = Math.round((target - curQty) * 100) / 100;
+    if (delta > 0) { state.qtyPadBuffer = String(delta); addToCart(item); }
+    else if (delta < 0) removeQtyFromCart(id, -delta);
   };
   // ✓ applies whichever was edited: countdown if the manager typed one, else quantity.
   el.querySelector('.qp-ok').addEventListener('click', (e) => {

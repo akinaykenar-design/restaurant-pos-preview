@@ -15481,37 +15481,83 @@ async function linkTables(fromId, intoId, drop) {
   // Everyone in the demoted side's group (its main included) joins under main.
   const joining = [demoted, ...allTables().filter(t => t.mergedInto === demoted.id && t.id !== main.id)];
   const fpB = findFloorPlanForTable(b.id);
+  const fpA = findFloorPlanForTable(a.id);
+  // The physically dragged table ALWAYS welds to its partner — edges exactly
+  // touching, never overlapping — even when it wins mainship (dragging 7
+  // onto 12 used to leave both tables where they stood).
+  let weld = null;
+  if (fpA && fpB && fpA.id === fpB.id) {
+    // Side comes from where you DROPPED it, not where it used to live —
+    // normalised by each pair's combined size, so a drop off the right
+    // edge of a wide table reads as RIGHT, not below. (Raw distances
+    // always favoured the short axis on non-square tables.)
+    const fromX = drop ? drop.x : a.x, fromY = drop ? drop.y : a.y;
+    const halfW = (b.width + a.width) / 2;
+    const halfH = (b.height + a.height) / 2;
+    const ndx = (fromX - b.x) / (halfW || 1);
+    const ndy = (fromY - b.y) / (halfH || 1);
+    // Preferred side first, then walk the other sides: a spot against a wall
+    // or already holding another table is no good — chaining a third table
+    // onto the same side used to stack it ON the second one.
+    const sx = ndx >= 0 ? 1 : -1, sy = ndy >= 0 ? 1 : -1;
+    const xC = { x: b.x + sx * halfW, y: b.y }, xO = { x: b.x - sx * halfW, y: b.y };
+    const yC = { x: b.x, y: b.y + sy * halfH }, yO = { x: b.x, y: b.y - sy * halfH };
+    const cands = Math.abs(ndy) > Math.abs(ndx) ? [yC, xC, xO, yO] : [xC, yC, yO, xO];
+    const others = fpB.tables.filter(o => o.type !== 'decor' && o.id !== a.id);
+    const taken = (cx, cy) => others.some(o =>
+      Math.abs(cx - o.x) < (a.width + o.width) / 2 - 0.5 &&
+      Math.abs(cy - o.y) < (a.height + o.height) / 2 - 0.5);
+    let cs = null;
+    for (const c of cands) {
+      const cl = clampToFloor(c.x, c.y, a.width, a.height, a.rotation, fpB.height);
+      // Accept only if the wall didn't shove it (clamp unmoved) and no other
+      // table already occupies the spot.
+      if (Math.abs(cl.x - c.x) <= 0.06 && Math.abs(cl.y - c.y) <= 0.06 && !taken(cl.x, cl.y)) { cs = cl; break; }
+    }
+    if (!cs) cs = clampToFloor(cands[0].x, cands[0].y, a.width, a.height, a.rotation, fpB.height);
+    // Re-welding keeps the ORIGINAL home in prevX so unlink always walks the
+    // table back to where it truly lives, however many links later.
+    weld = { x: cs.x, y: cs.y, ...(a.prevX == null ? { prevX: a.x, prevY: a.y } : {}) };
+  }
+  // Dragging a group's MAIN brings its members along — same shift, so the
+  // arrangement survives instead of the members being stranded behind.
+  const posPatch = new Map();
+  if (weld) {
+    posPatch.set(a.id, weld);
+    const dxw = weld.x - a.x, dyw = weld.y - a.y;
+    for (const m of allTables().filter(m => m.mergedInto === a.id && m.id !== a.id)) {
+      const mfp = findFloorPlanForTable(m.id);
+      if (!mfp || mfp.id !== fpA.id) continue;
+      const mv = clampToFloor(m.x + dxw, m.y + dyw, m.width, m.height, m.rotation, fpA.height);
+      posPatch.set(m.id, { x: mv.x, y: mv.y, ...(m.prevX == null ? { prevX: m.x, prevY: m.y } : {}) });
+    }
+  }
   try {
+    const done = new Set();
     for (const t of joining) {
       const fp = findFloorPlanForTable(t.id);
       if (!fp) continue;
-      const patch = { mergedInto: main.id };
-      if (t.id === a.id && fpB && fpB.id === fp.id) {
-        // The physically dragged table WELDS to its partner — edges exactly
-        // touching, never overlapping.
-        patch.prevX = t.x;
-        patch.prevY = t.y;
-        const r = (fpB.height || 500) / 900; // canvas H/W
-        // Side comes from where you DROPPED it, not where it used to live.
-        const fromX = drop ? drop.x : t.x, fromY = drop ? drop.y : t.y;
-        const dx = fromX - b.x, dyX = (fromY - b.y) * r;
-        let cs;
-        if (Math.abs(dyX) > Math.abs(dx)) {
-          const side = fromY >= b.y ? 1 : -1;
-          cs = clampToFloor(b.x, b.y + side * ((b.height + t.height) / 2), t.width, t.height, t.rotation, fpB.height);
-        } else {
-          const side = dx >= 0 ? 1 : -1;
-          cs = clampToFloor(b.x + side * ((b.width + t.width) / 2), b.y, t.width, t.height, t.rotation, fpB.height);
-        }
-        patch.x = cs.x;
-        patch.y = cs.y;
-      }
+      const patch = { mergedInto: main.id, ...(posPatch.get(t.id) || {}) };
       await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
       });
       Object.assign(t, patch);
+      done.add(t.id);
+    }
+    // The dragged side won mainship — its tables aren't in the joining list
+    // but still move to the weld spot.
+    for (const [id, pp] of posPatch) {
+      if (done.has(id)) continue;
+      const fp = findFloorPlanForTable(id);
+      if (!fp) continue;
+      await api(`/api/floorplans/${fp.id}/tables/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pp),
+      });
+      Object.assign(findTableById(id), pp);
     }
   } catch (e) { render(); return false; }
   const n = allTables().filter(t => t.mergedInto === main.id).length;
@@ -15545,7 +15591,7 @@ let _mergeDragSwallow = false;
 // against a neighbour. Best = biggest overlap, with a little forgiveness so
 // "almost touching" still counts.
 function mergeDragTarget(d, dx, dy) {
-  const G = 10; // px of forgiveness around the ghost
+  const G = 18; // px of forgiveness around the ghost — a slight touch links
   const r0 = d.startRect;
   const g = { left: r0.left + dx - G, top: r0.top + dy - G, right: r0.right + dx + G, bottom: r0.bottom + dy + G };
   let best = null, bestArea = 0;
@@ -15569,6 +15615,13 @@ document.addEventListener('pointermove', (e) => {
   const dx = e.clientX - mergeDrag.sx, dy = e.clientY - mergeDrag.sy;
   if (!mergeDrag.moved && Math.hypot(dx, dy) < 8) return;
   mergeDrag.moved = true;
+  // A re-render mid-drag (orders poll, toast timer) replaces the DOM and
+  // strands the ghost on a detached node — re-grab the marker by id so the
+  // drag survives any repaint.
+  if (!document.body.contains(mergeDrag.el)) {
+    const fresh = document.querySelector(`[data-act="pick-table"][data-id="${mergeDrag.fromId}"]`);
+    if (fresh) { mergeDrag.el = fresh; mergeDrag.base = fresh.style.transform || ''; }
+  }
   // Screen-space shift FIRST, then the marker's own centring/rotation.
   mergeDrag.el.style.transform = `translate(${dx}px, ${dy}px) ${mergeDrag.base}`;
   mergeDrag.el.style.zIndex = '50';
@@ -15614,7 +15667,11 @@ async function unlinkTapTable(tableId) {
   const t = findTableById(tableId);
   if (!t) return;
   if (t.mergedInto && t.mergedInto !== t.id) {
+    const mainId = t.mergedInto;
     await unmergeTable(t.id);
+    // Last member gone → the main goes home too (it may have been the one
+    // dragged into the weld).
+    if (!allTables().some(x => x.mergedInto === mainId && x.id !== mainId)) await unmergeTable(mainId);
     state.toast = `Table ${esc(String(t.label))} unlinked.`;
   } else {
     const members = allTables().filter(x => x.mergedInto === t.id && x.id !== t.id);
@@ -15624,6 +15681,7 @@ async function unlinkTapTable(tableId) {
       return;
     }
     for (const m of members) await unmergeTable(m.id);
+    await unmergeTable(t.id); // restore the main's own pre-weld position
     state.toast = `Table ${esc(String(t.label))}'s group unlinked.`;
   }
   if (!allTables().some(x => x.mergedInto && x.mergedInto !== x.id)) state.unlinkMode = false;

@@ -15167,20 +15167,76 @@ function sittingWashBg(seatedAt) {
 // still shows through — solid fills hid the wood. Sits between the marker's
 // background and its number (negative z inside the marker's stacking
 // context). Lens decides the wash: sitting time or course wait.
-function tableWashHtml(cs, lock) {
+// The open dine-in order on a table, and when something last HAPPENED on it
+// (seated, round sent, call-away) — the Attention lens runs on this.
+function tableOpenOrder(label) {
+  return (state.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(label));
+}
+function tableIdleMins(o) {
+  const last = Math.max(o.createdAt || 0, o.calledAwayAt || 0, ...(o.rounds || []).map(r => r.sentAt || 0));
+  return Math.max(0, Math.floor((Date.now() - last) / 60000));
+}
+// A booking on this table starting within the next hour (or up to 15 min
+// overdue) — the Booked lens highlights these so walk-ins don't get seated.
+function upcomingBookingFor(tableId) {
+  const now = Date.now();
+  return (state.reservations || []).find(r => {
+    if (r.tableId !== tableId || r.status === 'cancelled' || r.status === 'seated') return false;
+    const at = new Date(r.time).getTime();
+    return at > now - 15 * 60000 && at < now + 60 * 60000;
+  });
+}
+function tableWashHtml(t, cs, lock) {
   let bg = null, op = 0.55;
   if (lock) { bg = 'var(--red)'; op = 0.68; } // locked always shows — safety, not decoration
   else if (state.settings.floorStatusEnabled === false) return '';
-  else if (cs) {
-    if (state.floorStatusView === 'course') {
-      const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-      const mins = Math.floor((Date.now() - cs.sentAt) / 60000);
-      bg = cap && mins >= cap ? 'var(--violet)' : (cs.color || 'var(--teal)');
+  else {
+    const lens = state.floorStatusView;
+    const o = tableOpenOrder(t.label);
+    if (lens === 'booked') {
+      if (!o && upcomingBookingFor(t.id)) { bg = 'var(--orange)'; op = 0.5; }
+    } else if (!o) {
+      bg = null;
+    } else if (lens === 'course') {
+      if (cs) {
+        const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+        const mins = Math.floor((Date.now() - cs.sentAt) / 60000);
+        bg = cap && mins >= cap ? 'var(--violet)' : (cs.color || 'var(--teal)');
+      }
+    } else if (lens === 'attention') {
+      const idle = tableIdleMins(o);
+      bg = idle >= 15 ? 'var(--violet)'
+        : idle >= 8 ? 'linear-gradient(120deg, var(--gold), var(--violet))'
+        : 'linear-gradient(120deg, var(--green), var(--teal))';
+    } else if (lens === 'covers') {
+      bg = 'var(--orange)'; op = 0.35;
     } else {
-      bg = sittingWashBg(cs.seatedAt);
+      bg = sittingWashBg(o.createdAt);
     }
   }
   return bg ? `<span class="tbl-wash" style="background:${bg};opacity:${op};"></span>` : '';
+}
+// The little pill under the table number follows the lens: course dot +
+// wait (default), idle minutes, covers count, or time until the booking.
+function floorPillHtml(t, cs) {
+  const lens = state.settings.floorStatusEnabled === false ? 'sitting' : state.floorStatusView;
+  if (lens === 'attention') {
+    const o = tableOpenOrder(t.label);
+    if (!o) return '';
+    const idle = tableIdleMins(o);
+    return `<span class="tbl-cpill${idle >= 15 ? ' over' : ''}" title="Since last activity"><b>${idle}m</b></span>`;
+  }
+  if (lens === 'covers') {
+    const o = tableOpenOrder(t.label);
+    return o && o.covers ? `<span class="tbl-cpill" title="Covers"><b>${o.covers}</b></span>` : '';
+  }
+  if (lens === 'booked') {
+    const r = upcomingBookingFor(t.id);
+    if (!r) return '';
+    const mins = Math.round((new Date(r.time).getTime() - Date.now()) / 60000);
+    return `<span class="tbl-cpill" title="${esc(r.name)} · ${r.partySize}"><i style="background:var(--orange);"></i><b>${mins <= 0 ? 'now' : mins + 'm'}</b></span>`;
+  }
+  return coursePillHtml(cs);
 }
 // Course pill: dot in the course's colour + minutes since the call-away /
 // last round. Flips solid violet past the course-wait cap — never red.
@@ -15232,7 +15288,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // floor map during service).
   if (opts.hideStatus) return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}`;
   const cs = opts.noPill ? null : tableCourseStatus(t.label);
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${coursePillHtml(cs)}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${floorPillHtml(t, cs)}`;
 }
 
 // A dine-in table's live status, for the floor-map colour theme.
@@ -15317,8 +15373,8 @@ function renderTablePickerMiddle() {
         <button type="button" class="pay-opt ${state.transferMode ? 'active' : ''}" style="flex:none;padding:8px 14px;font-size:12.5px;" data-act="picker-mode" data-mode="transfer">${SYS_SWAP_SVG} Transfer</button>` : ''}
         ${state.settings.floorStatusEnabled !== false ? `
         <div class="seg" style="margin-left:auto;">
-          <button data-act="floor-status-view" data-val="sitting" class="${state.floorStatusView !== 'course' ? 'active' : ''}">Sitting</button>
-          <button data-act="floor-status-view" data-val="course" class="${state.floorStatusView === 'course' ? 'active' : ''}">Course</button>
+          ${[['sitting', 'Sitting'], ['course', 'Course'], ['attention', 'Attention'], ['booked', 'Booked'], ['covers', 'Covers']]
+            .map(([v, l]) => `<button data-act="floor-status-view" data-val="${v}" class="${(state.floorStatusView || 'sitting') === v ? 'active' : ''}">${l}</button>`).join('')}
         </div>` : ''}
         ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="${state.settings.floorStatusEnabled !== false ? '' : 'margin-left:auto;'}" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
       </div>
@@ -15337,14 +15393,14 @@ function renderTablePickerMiddle() {
             const billEdge = tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
             return `
             <div class="simple-table-btn${state.table === t.id ? ' sel' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
-              ${tableWashHtml(cs, lock)}
+              ${tableWashHtml(t, cs, lock)}
               ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
               <span class="stb-num">${esc(t.label)}</span>
               <span class="stb-seats">${(() => {
                 const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
                 return oo && oo.covers ? oo.covers + ' covers' : '';
               })()}</span>
-              ${!lock ? coursePillHtml(cs) : ''}
+              ${!lock ? floorPillHtml(t, cs) : ''}
             </div>`;
           }).join('')}
         </div>`;
@@ -15364,7 +15420,7 @@ function renderTablePickerMiddle() {
           const billEdge = tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
           return `
           <div class="floor-marker" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.table === t.id)}${billEdge}">
-            ${tableWashHtml(cs, lock)}
+            ${tableWashHtml(t, cs, lock)}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
             ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
           </div>`;
@@ -19989,7 +20045,12 @@ function bindEvents() {
         }
       }
       else if (act === 'picker-mode') { state.transferMode = el.dataset.mode === 'transfer'; render(); }
-      else if (act === 'floor-status-view') { state.floorStatusView = el.dataset.val; render(); }
+      else if (act === 'floor-status-view') {
+        state.floorStatusView = el.dataset.val;
+        // The Booked lens reads reservations — fetch them fresh on entry.
+        if (el.dataset.val === 'booked') api('/api/reservations').then(r => { state.reservations = r; render(); }).catch(() => {});
+        render();
+      }
       else if (act === 'pick-table') {
         if (state.transferMode) transferToTable(el.dataset.id);
         else if (state.tablesCallAway) {

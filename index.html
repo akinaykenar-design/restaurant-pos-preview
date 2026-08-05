@@ -1164,6 +1164,10 @@ input:focus, select:focus, textarea:focus{
 /* The picker's Close sits right under the map — not stranded at the very
    bottom of a mostly-empty phone screen. */
 .tp-actions{ margin-top:16px; }
+/* Status wash: translucent tint between the table's finish and its number
+   (negative z inside the marker's stacking context). */
+.tbl-wash{ position:absolute; inset:0; border-radius:inherit; z-index:-1; pointer-events:none; }
+.simple-table-btn{ isolation:isolate; }
 /* Phone: the floor map fills the screen height and pans sideways with a
    finger — markers render finger-sized instead of shrinking with the
    viewport width. Desktop keeps the fit-to-width map. */
@@ -3357,6 +3361,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.showItemIcons !== undefined) data.settings.showItemIcons = !!req.body.showItemIcons;
   if (req.body.catIconsOnly !== undefined) data.settings.catIconsOnly = !!req.body.catIconsOnly;
   if (req.body.tileColors !== undefined) data.settings.tileColors = !!req.body.tileColors;
+  if (req.body.floorStatusEnabled !== undefined) data.settings.floorStatusEnabled = !!req.body.floorStatusEnabled;
   if (req.body.iconStyle !== undefined) data.settings.iconStyle = ['bw', 'soft', 'ink', 'emoji'].includes(req.body.iconStyle) ? req.body.iconStyle : 'emoji';
   if (req.body.tileTextAlign !== undefined) data.settings.tileTextAlign = ['left', 'center', 'right'].includes(req.body.tileTextAlign) ? req.body.tileTextAlign : 'left';
   if (req.body.tileTextVAlign !== undefined) data.settings.tileTextVAlign = ['top', 'middle', 'bottom'].includes(req.body.tileTextVAlign) ? req.body.tileTextVAlign : 'top';
@@ -6006,6 +6011,7 @@ let state = {
   evenSplit: null,  // split-evenly: { n, methods: {key: 'card'|'cash'}, paid: {key: true} }
   transferMode: false,
   floorLinkMode: null, // Table Layout linking tool: null | 'link' | 'unlink'
+  floorStatusView: 'sitting', // picker lens: 'sitting' time or 'course' wait
   detailOrder: null,
   toast: null,
   online: true,
@@ -14562,14 +14568,31 @@ function renderScreenAdmin() {
 
 // Table status colours live with the table layout they colour.
 function renderTableStatusColorsCard() {
+  // An honest legend: what the floor ACTUALLY paints. Washes are
+  // translucent so the table's own finish shows through. Only the bill
+  // colour is configurable — the rest are fixed meanings.
   return `
   <div class="settings-card" style="margin-top:14px;">
-    <div class="th" style="margin-bottom:14px;">Table status colours</div>
-    ${[['available', 'Available'], ['occupied', 'In use'], ['billPrinted', 'Bill printed']].map(([key, label]) => `
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
-        ${colorDotButton('table-status', key, (state.settings.tableStatusColors || {})[key] || TABLE_STATUS_DEFAULTS[key], { size: 26, title: 'Set ' + label + ' colour' })}
-        <div style="font-weight:700;font-size:13.5px;">${label}</div>
-      </div>`).join('')}
+    <div class="th" style="margin-bottom:14px;">Status colours</div>
+    <div class="pay-options" style="margin-bottom:14px;">
+      ${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+      <span style="width:26px;height:26px;border-radius:6px;background:var(--red);opacity:0.68;flex:none;"></span>
+      <div style="font-weight:700;font-size:13.5px;">Locked — open on another till</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+      <span style="width:64px;height:26px;border-radius:6px;background:linear-gradient(90deg,var(--green),var(--gold),var(--violet));opacity:0.6;flex:none;"></span>
+      <div style="font-weight:700;font-size:13.5px;">Sitting time, seated → over</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+      <span style="width:26px;height:26px;border-radius:6px;background:linear-gradient(90deg,var(--teal),var(--violet));opacity:0.6;flex:none;"></span>
+      <div style="font-weight:700;font-size:13.5px;">Course wait — violet past the cap</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+      ${colorDotButton('table-status', 'billPrinted', (state.settings.tableStatusColors || {}).billPrinted || TABLE_STATUS_DEFAULTS.billPrinted, { size: 26, title: 'Bill printed edge colour' })}
+      <div style="font-weight:700;font-size:13.5px;">Bill printed (edge)</div>
+    </div>
     <div class="th" style="margin:16px 0 10px;">One till per table</div>
     <div class="pay-options">
       ${togglePill(state.settings.tableLockEnabled !== false, 'set-table-lock')}
@@ -15130,14 +15153,34 @@ function burnCapMinutes() {
   if (v === 'booking') return state.settings.seatingMinutes || 90;
   return v;
 }
-function tableBurnBg(seatedAt) {
-  const cap = burnCapMinutes();
-  if (!cap || !seatedAt) return null;
+// Sitting lens ALWAYS paints (the filter is the on-switch) — if the colour
+// timer is off, fall back to the sitting length, else 90 min.
+function sittingWashBg(seatedAt) {
+  const cap = burnCapMinutes() || state.settings.seatingMinutes || 90;
   const p = (Date.now() - seatedAt) / 60000 / cap;
   if (p >= 1) return 'var(--violet)';
   if (p < 0.35) return 'linear-gradient(120deg, var(--green), var(--teal))';
   if (p < 0.7) return 'linear-gradient(120deg, var(--green) 15%, var(--gold))';
   return 'linear-gradient(120deg, var(--gold), var(--violet))';
+}
+// Status paints a TRANSLUCENT wash over the table so its finish or colour
+// still shows through — solid fills hid the wood. Sits between the marker's
+// background and its number (negative z inside the marker's stacking
+// context). Lens decides the wash: sitting time or course wait.
+function tableWashHtml(cs, lock) {
+  let bg = null, op = 0.55;
+  if (lock) { bg = 'var(--red)'; op = 0.68; } // locked always shows — safety, not decoration
+  else if (state.settings.floorStatusEnabled === false) return '';
+  else if (cs) {
+    if (state.floorStatusView === 'course') {
+      const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+      const mins = Math.floor((Date.now() - cs.sentAt) / 60000);
+      bg = cap && mins >= cap ? 'var(--violet)' : (cs.color || 'var(--teal)');
+    } else {
+      bg = sittingWashBg(cs.seatedAt);
+    }
+  }
+  return bg ? `<span class="tbl-wash" style="background:${bg};opacity:${op};"></span>` : '';
 }
 // Course pill: dot in the course's colour + minutes since the call-away /
 // last round. Flips solid violet past the course-wait cap — never red.
@@ -15272,7 +15315,12 @@ function renderTablePickerMiddle() {
         ${state.table ? `
         <button type="button" class="pay-opt ${!state.transferMode ? 'active' : ''}" style="flex:none;padding:8px 14px;font-size:12.5px;" data-act="picker-mode" data-mode="select">Select</button>
         <button type="button" class="pay-opt ${state.transferMode ? 'active' : ''}" style="flex:none;padding:8px 14px;font-size:12.5px;" data-act="picker-mode" data-mode="transfer">${SYS_SWAP_SVG} Transfer</button>` : ''}
-        ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="margin-left:auto;" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
+        ${state.settings.floorStatusEnabled !== false ? `
+        <div class="seg" style="margin-left:auto;">
+          <button data-act="floor-status-view" data-val="sitting" class="${state.floorStatusView !== 'course' ? 'active' : ''}">Sitting</button>
+          <button data-act="floor-status-view" data-val="course" class="${state.floorStatusView === 'course' ? 'active' : ''}">Course</button>
+        </div>` : ''}
+        ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="${state.settings.floorStatusEnabled !== false ? '' : 'margin-left:auto;'}" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
       </div>
       ${state.settings.tableMode === 'simple' ? (() => {
         // Simple mode: every table across every layout, as one numbered grid.
@@ -15282,16 +15330,14 @@ function renderTablePickerMiddle() {
           ${tables.map(t => {
             const cs = tableCourseStatus(t.label);
             const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
-            // Body priority: locked = solid red · occupied = the burn ·
-            // free = the table's own colour (or plain). Bill-printed keeps
-            // its gold edge — that state has no colour of its own on the body.
-            const burn = cs ? tableBurnBg(cs.seatedAt) : null;
-            const body = lock ? 'background:var(--red);color:#fff;'
-              : burn ? `background:${burn};color:#fff;`
-              : t.color ? `background:${t.color};color:${contrastTextColor(t.color)};` : '';
+            // Status is a TRANSLUCENT wash over the table's own colour —
+            // locked red, else the active lens (sitting / course). Bill
+            // printed keeps its gold edge.
+            const body = t.color ? `background:${t.color};color:${contrastTextColor(t.color)};` : '';
             const billEdge = tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
             return `
             <div class="simple-table-btn${state.table === t.id ? ' sel' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
+              ${tableWashHtml(cs, lock)}
               ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
               <span class="stb-num">${esc(t.label)}</span>
               <span class="stb-seats">${(() => {
@@ -15313,13 +15359,12 @@ function renderTablePickerMiddle() {
         ${fp.tables.filter(t => t.type !== 'decor').map(t => {
           const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
           const cs = tableCourseStatus(t.label);
-          const burn = cs ? tableBurnBg(cs.seatedAt) : null;
-          // Later declarations win inside a style attribute — the burn (or the
-          // locked red) overrides shapeStyle's own background.
-          const body = lock ? 'background:var(--red);color:#fff;' : burn ? `background:${burn};color:#fff;` : '';
+          // Status is a TRANSLUCENT wash over the finish, not a solid fill —
+          // the table's wood/colour stays visible underneath.
           const billEdge = tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
           return `
-          <div class="floor-marker" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.table === t.id)}${body}${billEdge}">
+          <div class="floor-marker" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.table === t.id)}${billEdge}">
+            ${tableWashHtml(cs, lock)}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
             ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
           </div>`;
@@ -19944,6 +19989,7 @@ function bindEvents() {
         }
       }
       else if (act === 'picker-mode') { state.transferMode = el.dataset.mode === 'transfer'; render(); }
+      else if (act === 'floor-status-view') { state.floorStatusView = el.dataset.val; render(); }
       else if (act === 'pick-table') {
         if (state.transferMode) transferToTable(el.dataset.id);
         else if (state.tablesCallAway) {
@@ -20102,6 +20148,7 @@ function bindEvents() {
       else if (act === 'set-item-icons') { saveTicketSetting({ showItemIcons: el.dataset.val === 'true' }); }
       else if (act === 'set-cat-icons-only') { saveTicketSetting({ catIconsOnly: el.dataset.val === 'true' }); }
       else if (act === 'set-tile-colors') { saveTicketSetting({ tileColors: el.dataset.val === 'true' }); }
+      else if (act === 'set-floor-status') { saveTicketSetting({ floorStatusEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-course-paged') { saveTicketSetting({ coursePagedDocket: el.dataset.val === 'true' }); }
       else if (act === 'set-icon-style') { saveTicketSetting({ iconStyle: el.dataset.val }); }
       else if (act === 'set-venue-style') { saveTicketSetting({ venueStyle: el.dataset.val }); }

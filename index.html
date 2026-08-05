@@ -15458,7 +15458,13 @@ async function linkTables(fromId, intoId, drop) {
   if (!a || !b || a.id === b.id) { render(); return false; }
   const mainOf = (t) => (t.mergedInto && t.mergedInto !== t.id && findTableById(t.mergedInto)) || t;
   const ma = mainOf(a), mb = mainOf(b);
-  if (ma.id === mb.id) { render(); return false; } // already one group
+  if (ma.id === mb.id) {
+    // Silent no-ops read as "linking is broken" — say why nothing happened.
+    state.toast = `Tables ${esc(String(a.label))} and ${esc(String(b.label))} are already linked.`;
+    render();
+    armToastTimer(2500);
+    return false;
+  }
   // Lowest number runs the group — UNLESS one side already has an open order:
   // that table stays in charge so its docket never becomes unreachable. Two
   // open orders can't be welded; one has to be paid or transferred first.
@@ -15532,28 +15538,45 @@ async function mergeIntoTable(otherTableId) {
 
 // Link mode also works by DRAG: pick a table up and drop it ON another to
 // attach it there (a plain tap still links into the current table).
-let mergeDrag = null; // { fromId, el, sx, sy, moved }
+let mergeDrag = null; // { fromId, el, sx, sy, moved, base, startRect }
 let _mergeDragSwallow = false;
+// The weld target is wherever the dragged table's BODY lands, not wherever
+// the finger happens to be — you grab a table by any part of it and park it
+// against a neighbour. Best = biggest overlap, with a little forgiveness so
+// "almost touching" still counts.
+function mergeDragTarget(d, dx, dy) {
+  const G = 10; // px of forgiveness around the ghost
+  const r0 = d.startRect;
+  const g = { left: r0.left + dx - G, top: r0.top + dy - G, right: r0.right + dx + G, bottom: r0.bottom + dy + G };
+  let best = null, bestArea = 0;
+  for (const el of document.querySelectorAll('[data-act="pick-table"]')) {
+    if (el === d.el || el.dataset.id === d.fromId) continue;
+    const r = el.getBoundingClientRect();
+    const w = Math.min(g.right, r.right) - Math.max(g.left, r.left);
+    const h = Math.min(g.bottom, r.bottom) - Math.max(g.top, r.top);
+    if (w > 0 && h > 0 && w * h > bestArea) { bestArea = w * h; best = el; }
+  }
+  return best;
+}
 document.addEventListener('pointerdown', (e) => {
   if (!state.mergeMode || !state.showTablePicker) return;
   const el = e.target.closest ? e.target.closest('[data-act="pick-table"]') : null;
   if (!el) return;
-  mergeDrag = { fromId: el.dataset.id, el, sx: e.clientX, sy: e.clientY, moved: false };
+  mergeDrag = { fromId: el.dataset.id, el, sx: e.clientX, sy: e.clientY, moved: false, base: el.style.transform || '', startRect: el.getBoundingClientRect() };
 });
 document.addEventListener('pointermove', (e) => {
   if (!mergeDrag) return;
   const dx = e.clientX - mergeDrag.sx, dy = e.clientY - mergeDrag.sy;
   if (!mergeDrag.moved && Math.hypot(dx, dy) < 8) return;
   mergeDrag.moved = true;
-  const base = mergeDrag.el.classList.contains('floor-marker') ? 'translate(-50%,-50%) ' : '';
-  mergeDrag.el.style.transform = `${base}translate(${dx}px, ${dy}px)`;
+  // Screen-space shift FIRST, then the marker's own centring/rotation.
+  mergeDrag.el.style.transform = `translate(${dx}px, ${dy}px) ${mergeDrag.base}`;
   mergeDrag.el.style.zIndex = '50';
   mergeDrag.el.style.pointerEvents = 'none';
-  // Light up the table you're ABOUT to weld onto.
-  const under = document.elementFromPoint(e.clientX, e.clientY);
-  const tEl = under && under.closest ? under.closest('[data-act="pick-table"]') : null;
+  // Light up the table the ghost's body is touching — that's the weld target.
+  const tEl = mergeDragTarget(mergeDrag, dx, dy);
   if (mergeDrag.overEl && mergeDrag.overEl !== tEl) mergeDrag.overEl.classList.remove('link-target');
-  mergeDrag.overEl = (tEl && tEl.dataset.id !== mergeDrag.fromId) ? tEl : null;
+  mergeDrag.overEl = tEl;
   if (mergeDrag.overEl) mergeDrag.overEl.classList.add('link-target');
 });
 document.addEventListener('pointerup', (e) => {
@@ -15561,20 +15584,21 @@ document.addEventListener('pointerup', (e) => {
   const d = mergeDrag; mergeDrag = null;
   if (d.overEl) d.overEl.classList.remove('link-target');
   if (!d.moved) return; // plain tap — the click flow links into the current table
-  // Hit-test BEFORE restoring pointer-events, or the dragged table finds
-  // itself under the cursor and eats its own drop.
-  const under = document.elementFromPoint(e.clientX, e.clientY);
-  const tEl = under && under.closest ? under.closest('[data-act="pick-table"]') : null;
+  const dx = e.clientX - d.sx, dy = e.clientY - d.sy;
+  const tEl = mergeDragTarget(d, dx, dy);
   d.el.style.pointerEvents = '';
-  d.el.style.transform = ''; d.el.style.zIndex = '';
+  d.el.style.transform = d.base; d.el.style.zIndex = '';
   _mergeDragSwallow = true;
-  if (tEl && tEl.dataset.id !== d.fromId) {
-    // Where on the floor the drop happened — decides which side it welds to.
+  if (tEl) {
+    // The ghost's CENTRE decides which side it welds to — the side you
+    // dragged the table to, regardless of where your finger was on it.
     const canvas = tEl.closest('.floor-canvas');
     let drop = null;
     if (canvas) {
       const cr = canvas.getBoundingClientRect();
-      drop = { x: ((e.clientX - cr.left) / cr.width) * 100, y: ((e.clientY - cr.top) / cr.height) * 100 };
+      const gcx = d.startRect.left + d.startRect.width / 2 + dx;
+      const gcy = d.startRect.top + d.startRect.height / 2 + dy;
+      drop = { x: ((gcx - cr.left) / cr.width) * 100, y: ((gcy - cr.top) / cr.height) * 100 };
     }
     linkTables(d.fromId, tEl.dataset.id, drop);
   } else render(); // dropped on nothing: snap the ghost back

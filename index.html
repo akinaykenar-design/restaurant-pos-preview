@@ -15515,9 +15515,7 @@ async function linkTables(fromId, intoId, drop) {
       if (Math.abs(cl.x - c.x) <= 0.06 && Math.abs(cl.y - c.y) <= 0.06 && !taken(cl.x, cl.y)) { cs = cl; break; }
     }
     if (!cs) cs = clampToFloor(cands[0].x, cands[0].y, a.width, a.height, a.rotation, fpB.height);
-    // Re-welding keeps the ORIGINAL home in prevX so unlink always walks the
-    // table back to where it truly lives, however many links later.
-    weld = { x: cs.x, y: cs.y, ...(a.prevX == null ? { prevX: a.x, prevY: a.y } : {}) };
+    weld = { x: cs.x, y: cs.y };
   }
   // Dragging a group's MAIN brings its members along — same shift, so the
   // arrangement survives instead of the members being stranded behind.
@@ -15529,7 +15527,7 @@ async function linkTables(fromId, intoId, drop) {
       const mfp = findFloorPlanForTable(m.id);
       if (!mfp || mfp.id !== fpA.id) continue;
       const mv = clampToFloor(m.x + dxw, m.y + dyw, m.width, m.height, m.rotation, fpA.height);
-      posPatch.set(m.id, { x: mv.x, y: mv.y, ...(m.prevX == null ? { prevX: m.x, prevY: m.y } : {}) });
+      posPatch.set(m.id, { x: mv.x, y: mv.y });
     }
   }
   try {
@@ -15667,11 +15665,7 @@ async function unlinkTapTable(tableId) {
   const t = findTableById(tableId);
   if (!t) return;
   if (t.mergedInto && t.mergedInto !== t.id) {
-    const mainId = t.mergedInto;
     await unmergeTable(t.id);
-    // Last member gone → the main goes home too (it may have been the one
-    // dragged into the weld).
-    if (!allTables().some(x => x.mergedInto === mainId && x.id !== mainId)) await unmergeTable(mainId);
     state.toast = `Table ${esc(String(t.label))} unlinked.`;
   } else {
     const members = allTables().filter(x => x.mergedInto === t.id && x.id !== t.id);
@@ -15681,7 +15675,6 @@ async function unlinkTapTable(tableId) {
       return;
     }
     for (const m of members) await unmergeTable(m.id);
-    await unmergeTable(t.id); // restore the main's own pre-weld position
     state.toast = `Table ${esc(String(t.label))}'s group unlinked.`;
   }
   if (!allTables().some(x => x.mergedInto && x.mergedInto !== x.id)) state.unlinkMode = false;
@@ -15693,8 +15686,11 @@ async function unmergeTable(tableId) {
   const table = findTableById(tableId);
   const fp = findFloorPlanForTable(tableId);
   if (!table || !fp) return;
+  // Unlink only DEACTIVATES the link — tables stay exactly where they sit,
+  // nobody gets pushed back around the floor. (Clear any stale prevX from
+  // the old restore behaviour.)
   const patch = { mergedInto: null };
-  if (table.prevX != null) { patch.x = table.prevX; patch.y = table.prevY; patch.prevX = null; patch.prevY = null; }
+  if (table.prevX != null) { patch.prevX = null; patch.prevY = null; }
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, {
       method: 'PUT',

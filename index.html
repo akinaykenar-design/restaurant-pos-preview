@@ -5652,6 +5652,89 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   res.json(order);
 });
 
+// Reprint the full prep docket for an open order (jammed printer, docket in
+// the sink) — same routing as a round, with a REPRINT banner so the kitchen
+// doesn't read it as a new order. No stock or totals change.
+app.post('/api/orders/:id/reprint-docket', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!(order.items || []).length) return res.status(400).json({ error: 'Nothing sent yet' });
+  printing.printDocketsForRound(data, order, order.items, 0, { callAway: 'REPRINT' });
+  logAudit(data, (req.body && req.body.staffName) || order.staffName, `Reprinted docket for Ticket #${order.id}`);
+  writeData(data);
+  res.json({ ok: true });
+});
+
+// Move selected LINES to another table's tab — "those two beers are table
+// 5's". Creates the destination tab if the table has none. Kitchen already
+// made the items, so nothing reprints and stock stays put. A source ticket
+// left empty voids itself (the whole-table move is the transfer endpoint).
+app.post('/api/orders/:id/move-items', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'open') return res.status(400).json({ error: 'That ticket is closed' });
+  const { itemIds, targetTable, staffName } = req.body || {};
+  const ids = (Array.isArray(itemIds) ? itemIds : []).map(String);
+  if (!ids.length) return res.status(400).json({ error: 'Pick items to move' });
+  if (!targetTable || String(targetTable) === String(order.table)) return res.status(400).json({ error: 'Pick a different table' });
+  const moving = (order.items || []).filter(i => ids.includes(String(i.id)));
+  if (!moving.length) return res.status(400).json({ error: 'Those items are no longer on the ticket' });
+  order.items = order.items.filter(i => !ids.includes(String(i.id)));
+  order.rounds = (order.rounds || [])
+    .map(r => ({ ...r, items: (r.items || []).filter(i => !ids.includes(String(i.id))) }))
+    .filter(r => (r.items || []).length);
+  const retotal = (o) => { o.subtotal = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0); o.total = o.subtotal; o.grandTotal = o.subtotal; };
+  retotal(order);
+  let dest = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
+  if (dest) {
+    dest.items = (dest.items || []).concat(moving);
+    dest.rounds = [...(dest.rounds || []), { id: (dest.rounds || []).length + 1, sentAt: Date.now(), color: null, items: moving, moved: true }];
+    retotal(dest);
+  } else {
+    dest = {
+      id: data.ticketCounter,
+      createdAt: Date.now(),
+      orderType: 'dine-in',
+      table: targetTable,
+      customerName: null,
+      covers: null,
+      items: moving,
+      rounds: [{ id: 1, sentAt: Date.now(), color: null, items: moving, moved: true }],
+      subtotal: 0, discount: null, tax: 0, total: 0, tip: 0, grandTotal: 0,
+      paymentMethod: null,
+      status: 'open',
+      staffId: order.staffId || null,
+      staffName: staffName || order.staffName || 'Unknown',
+      customerId: null,
+    };
+    retotal(dest);
+    data.orders.push(dest);
+    data.ticketCounter += 1;
+  }
+  if (!(order.items || []).length) {
+    order.status = 'void';
+    order.voidedBy = staffName || 'Unknown';
+    order.voidReason = `All items moved to Table ${targetTable}`;
+  }
+  logAudit(data, staffName || 'Unknown', `Moved ${moving.length} item${moving.length > 1 ? 's' : ''} from Table ${order.table} to Table ${targetTable} (Ticket #${order.id} → #${dest.id})`);
+  writeData(data);
+  res.json({ source: order, dest });
+});
+
+// Attach / clear the customer on an open tab while ordering.
+app.post('/api/orders/:id/customer', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  const customerId = req.body.customerId || null;
+  if (customerId && !(data.customers || []).some(c => c.id === customerId)) return res.status(400).json({ error: 'Customer not found' });
+  order.customerId = customerId;
+  writeData(data);
+  res.json(order);
+});
+
 const ITEM_STATUSES = ['ordered', 'preparing', 'ready', 'served'];
 app.patch('/api/orders/:id/items/:itemIndex', (req, res) => {
   const data = readData();
@@ -5952,6 +6035,9 @@ let state = {
   floorTableColor: null, // colour applied to tables placed from the toolbar
   floorTableFinish: null, // finish (wood / cloth) applied to tables placed from the toolbar
   accountMenuOpen: false, // the topbar Account dropdown (all docket shortcuts)
+  customerPane: null,     // { q } — attach/remove a customer while ordering
+  moveItems: null,        // { sel: [lineIds] } — move sent lines to another table
+  moveItemsPicking: false, // picker is choosing the move destination
   searchOpen: false, // menu search collapses to a magnifier until tapped
   coversEditOpen: false, // covers stepper reveals on tapping the covers chip
   coversPad: null, // { buffer } number-pad popup for entering covers
@@ -8250,7 +8336,9 @@ function escapeMiddlePane() {
     : state.priceEntry ? () => { state.priceEntry = null; render(); }
     : state.editLine ? () => { state.editLine = null; render(); }
     : state.editSent ? () => { state.editSent = null; render(); }
-    : state.showTablePicker ? () => { state.showTablePicker = false; state.transferMode = false; render(); }
+    : state.showTablePicker ? () => { state.showTablePicker = false; state.transferMode = false; state.moveItemsPicking = false; render(); }
+    : state.customerPane ? () => { state.customerPane = null; render(); }
+    : state.moveItems ? () => { state.moveItems = null; state.moveItemsPicking = false; render(); }
     : state.accountMenuOpen ? () => { state.accountMenuOpen = false; render(); }
     : null;
   if (!close) return;
@@ -9216,6 +9304,8 @@ function renderOrderView() {
   if (state.showCheckout) return shell(renderCheckoutMiddle());
   if (state.discountModal) return shell(renderDiscountMiddle());
   if (state.accountMenuOpen) return shell(renderAccountMiddle());
+  if (state.customerPane) return shell(renderCustomerMiddle());
+  if (state.moveItems && !state.showTablePicker) return shell(renderMoveItemsMiddle());
   if (state.showTablePicker) return shell(renderTablePickerMiddle());
   if (state.notesPanel) return shell(renderNotesMiddle());
   if (state.quickNotePad) return shell(renderQuickNoteMiddle());
@@ -15356,12 +15446,17 @@ async function refreshTableLocks() {
 }
 function renderAccountMiddle() {
   const t = findTableById(state.table);
+  const attached = state.customers.find(c => c.id === state.attachedCustomerId);
+  const sentCount = (() => { const o = state.orders.find(o => o.id === state.openOrderId); return o ? (o.items || []).length : 0; })();
   const sc = [
     ['open-table-picker', DKT_TABLE_SVG, 'Table', t ? String(t.label) : 'none yet'],
     ...(state.settings.coversEnabled ? [['open-covers-pad', DKT_USER_SVG, 'Covers', state.covers ? String(state.covers) : '—']] : []),
     ['toggle-notes-panel', DKT_NOTE_SVG, 'Notes', ''],
     ['toggle-quick-note', DKT_BOLT_SVG, 'Quick note', ''],
     ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
+    ['open-customer-pane', DKT_USER_SVG, 'Customer', attached ? attached.name : '—'],
+    ['reprint-docket', SYS_PRINTER_SVG, 'Reprint docket', ''],
+    ['open-move-items', SYS_SWAP_SVG, 'Move items', sentCount ? `${sentCount} sent` : 'nothing sent'],
   ];
   return `
   <div class="middle-view">
@@ -15380,6 +15475,91 @@ function renderAccountMiddle() {
     </div>
   </div>`;
 }
+// Customer pane: search → tap to attach to the tab (persists on the open
+// order immediately; unsent carts carry it to the send).
+function customerResultsHtml() {
+  const q = (state.customerPane.q || '').toLowerCase().trim();
+  const list = state.customers
+    .filter(c => !q || (c.name || '').toLowerCase().includes(q) || String(c.phone || '').includes(q))
+    .slice(0, 30);
+  return list.map(c => `
+    <button class="pay-opt ${c.id === state.attachedCustomerId ? 'active' : ''}" style="justify-content:flex-start;text-align:left;" data-act="attach-customer" data-id="${c.id}">
+      ${esc(c.name)}${c.phone ? ` · ${esc(c.phone)}` : ''}
+    </button>`).join('') || `<div class="ts">No customers${q ? ' match.' : ' yet — add them in Admin → Customers.'}</div>`;
+}
+function customerSearchInput(v) {
+  state.customerPane.q = v;
+  const box = document.getElementById('customer-results');
+  if (box) box.innerHTML = customerResultsHtml();
+}
+function renderCustomerMiddle() {
+  const attached = state.customers.find(c => c.id === state.attachedCustomerId);
+  return `
+  <div class="middle-view">
+    <div style="padding:20px;display:flex;flex-direction:column;height:100%;gap:12px;">
+      ${attached ? `
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span class="seat-chip" style="font-size:13px;">${esc(attached.name)}${attached.phone ? ` · ${esc(attached.phone)}` : ''}</span>
+        <button class="btn-secondary sm" style="width:auto;" data-act="detach-customer">Remove</button>
+      </div>` : ''}
+      <input id="customer-search-input" type="text" placeholder="Search name or phone…" value="${esc(state.customerPane.q || '')}" oninput="customerSearchInput(this.value)" style="padding:10px 12px;border:1px solid var(--steel-300);border-radius:8px;font-size:14px;background:var(--surface);color:var(--text-primary);">
+      <div id="customer-results" style="display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;align-content:flex-start;">
+        ${customerResultsHtml()}
+      </div>
+      <div class="pane-actions">
+        <button class="icon-action discard" title="Close" data-act="close-customer-pane">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Move-items pane: tap sent lines, then pick the destination table.
+function renderMoveItemsMiddle() {
+  const o = state.orders.find(x => x.id === state.openOrderId);
+  const sel = state.moveItems.sel;
+  const lines = o ? (o.items || []) : [];
+  return `
+  <div class="middle-view">
+    <div style="padding:20px;display:flex;flex-direction:column;height:100%;gap:12px;">
+      <div style="display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;">
+        ${lines.length ? lines.map(i => `
+        <button class="pay-opt ${sel.includes(String(i.id)) ? 'active' : ''}" style="justify-content:space-between;display:flex;" data-act="toggle-move-item" data-id="${i.id}">
+          <span>${i.qty} × ${esc(i.name)}${i.seat && i.seat !== 'all' ? ` · seat ${i.seat}` : ''}</span><span>${money(i.price * i.qty)}</span>
+        </button>`).join('') : `<div class="ts">Nothing sent yet.</div>`}
+      </div>
+      <div class="pane-actions">
+        <button class="icon-action discard" title="Close" data-act="close-move-items">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
+        <button class="icon-action send" title="Pick the table to move to" data-act="move-items-pick-table" ${sel.length ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">To table…</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+async function doMoveItems(targetTableId) {
+  let target = findTableById(targetTableId);
+  if (target && target.mergedInto && target.mergedInto !== target.id) target = findTableById(target.mergedInto) || target;
+  const cur = findTableById(state.table);
+  if (!target || (cur && String(target.label) === String(cur.label))) {
+    state.toast = 'Pick a different table.'; render(); armToastTimer(2200); return;
+  }
+  const n = state.moveItems.sel.length;
+  try {
+    await api(`/api/orders/${state.openOrderId}/move-items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itemIds: state.moveItems.sel, targetTable: target.label, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+    });
+  } catch (e) {
+    state.toast = e.message || 'Could not move those items.'; render(); armToastTimer(2500); return;
+  }
+  await refreshOrders();
+  // The source ticket voids itself when everything moved off it.
+  if (!state.orders.some(o => o.id === state.openOrderId && o.status === 'open')) state.openOrderId = null;
+  state.moveItems = null; state.moveItemsPicking = false; state.showTablePicker = false;
+  state.toast = `Moved ${n} item${n > 1 ? 's' : ''} to table ${esc(String(target.label))}`;
+  render();
+  armToastTimer(2500);
+}
+
 function renderTablePickerMiddle() {
   const fp = state.floorPlans.find(f => f.id === state.pickerFloorPlanId) || state.floorPlans[0];
   return `
@@ -20054,7 +20234,49 @@ function bindEvents() {
         else if (target === 'toggle-notes-panel') toggleNotesPanel();
         else if (target === 'toggle-quick-note') toggleQuickNotePad();
         else if (target === 'toggle-callaway') toggleCallAway();
+        else if (target === 'open-customer-pane') {
+          state.customerPane = { q: '' };
+          render();
+          api('/api/customers').then(c => { state.customers = c; render(); }).catch(() => {});
+        }
+        else if (target === 'reprint-docket') {
+          if (!state.openOrderId) { state.toast = 'Nothing sent yet.'; render(); armToastTimer(2200); }
+          else {
+            api(`/api/orders/${state.openOrderId}/reprint-docket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) })
+              .then(() => { state.toast = 'Docket reprinted.'; render(); armToastTimer(2200); })
+              .catch(e => { state.toast = e.message || 'Could not reprint.'; render(); armToastTimer(2500); });
+            render();
+          }
+        }
+        else if (target === 'open-move-items') {
+          const o = state.orders.find(x => x.id === state.openOrderId);
+          if (!o || !(o.items || []).length) { state.toast = 'Nothing sent yet.'; render(); armToastTimer(2200); }
+          else { state.moveItems = { sel: [] }; render(); }
+        }
       }
+      else if (act === 'attach-customer') {
+        state.attachedCustomerId = el.dataset.id;
+        const c = state.customers.find(x => x.id === el.dataset.id);
+        state.customerPane = null;
+        state.toast = c ? `${esc(c.name)} on the tab.` : 'Customer attached.';
+        if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: state.attachedCustomerId }) }).catch(() => {});
+        render();
+        armToastTimer(2200);
+      }
+      else if (act === 'detach-customer') {
+        state.attachedCustomerId = null;
+        if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: null }) }).catch(() => {});
+        render();
+      }
+      else if (act === 'close-customer-pane') { state.customerPane = null; render(); }
+      else if (act === 'toggle-move-item') {
+        const id = String(el.dataset.id);
+        const i = state.moveItems.sel.indexOf(id);
+        if (i === -1) state.moveItems.sel.push(id); else state.moveItems.sel.splice(i, 1);
+        render();
+      }
+      else if (act === 'close-move-items') { state.moveItems = null; state.moveItemsPicking = false; render(); }
+      else if (act === 'move-items-pick-table') { state.moveItemsPicking = true; openTablePicker(); }
       else if (act === 'goto-table-layout') { state.showTablePicker = false; state.transferMode = false; state.view = 'admin'; state.adminTab = 'floorplan'; render(); }
       else if (act === 'toggle-docket-shortcut') {
         const key = el.dataset.key;
@@ -20072,7 +20294,8 @@ function bindEvents() {
         render();
       }
       else if (act === 'pick-table') {
-        if (state.transferMode) transferToTable(el.dataset.id);
+        if (state.moveItemsPicking) doMoveItems(el.dataset.id);
+        else if (state.transferMode) transferToTable(el.dataset.id);
         else if (state.tablesCallAway) {
           // Call-away mode: tapping a table opens THE call-away pane — the
           // exact same one as the docket's flame button — for that table.
@@ -20433,7 +20656,7 @@ function bindEvents() {
       else if (act === 'save-discount-modal') { saveDiscountModal(); }
       else if (act === 'toggle-notes-panel') { toggleNotesPanel(); }
       else if (act === 'close-notes-panel') { closeNotesPanel(); }
-      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.tablesCallAway = false; render(); }
+      else if (act === 'close-table-picker') { state.showTablePicker = false; state.transferMode = false; state.tablesCallAway = false; state.moveItemsPicking = false; render(); }
       else if (act === 'toggle-callaway') { toggleCallAway(); }
       else if (act === 'close-callaway') { closeCallAwayPane(); }
       else if (act === 'clear-fired-course') { clearFiredCourse(parseInt(el.dataset.val)); }

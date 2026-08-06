@@ -1704,6 +1704,8 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 .qty-pop .qp-mode button{ flex:1; min-width:0; height:36px; font-family:var(--font-body); font-size:12.5px; }
 /* Seat pop: which dish is being seated, then the position pad. */
 .seat-pop .sp-item{ font-weight:800; font-size:14px; text-align:center; color:var(--text-primary); }
+.seat-pop .sp-note{ width:100%; box-sizing:border-box; padding:9px 11px; border:1px solid var(--steel-300);
+  border-radius:8px; font-size:13px; background:var(--surface); color:var(--text-primary); font-family:inherit; }
 .seat-pop .covers-pad-key.assigned{ border-color:var(--green); background:var(--green-dim); color:var(--green); }
 
 /* Quantity + allergy marks live IN the tile's name line — no hanging badges.
@@ -1715,7 +1717,7 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
    overlay — placeTileCounts measures the text after render, so the name
    itself never moves, re-centres or re-wraps. Hidden until placed so it
    can't flash at the wrong spot. */
-.tile-qn{ position:absolute; left:0; top:0; z-index:1; visibility:hidden; font-weight:800;
+.tile-qn{ position:absolute; left:0; top:0; z-index:1; visibility:hidden; font-weight:700;
   font-size:calc(var(--item-name-size,13.5px)*var(--menu-fs,1)); line-height:1; }
 /* Allergen mark: top-LEFT corner overlay (opposite the count) — never in the
    text flow. */
@@ -8153,7 +8155,7 @@ function itemDefaultCourse(item) {
   const cat = state.categories.find(c => c.name === item.category);
   return (cat && cat.defaultCourse) || null;
 }
-function pushCartLine(item, variant, modifiers, seat, qty) {
+function pushCartLine(item, variant, modifiers, seat, qty, note) {
   const course = itemDefaultCourse(item) || state.activeCourse;
   // Under Auto the highlighted tab (and the docket page, when paged) FOLLOWS
   // the dish just added, so what you rang up is always the course on screen.
@@ -8174,8 +8176,10 @@ function pushCartLine(item, variant, modifiers, seat, qty) {
     // 'later' groups start empty — added from the line editor.
   });
   const composed = composeCartLine(item, variantId, modSelections);
-  const line = { id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: seat || null, note: '', variantId, modSelections, removed: [] };
-  const existing = state.cart.find(c => c.id === line.id && c.course === course && c.seat === line.seat && removedSig(c) === removedSig(line));
+  const line = { id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
+  // A noted line never merges into a differently-noted one — the note is
+  // part of what the kitchen reads.
+  const existing = state.cart.find(c => c.id === line.id && c.course === course && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
   if (existing) existing.qty += qty;
   else state.cart.push(line);
 }
@@ -8808,6 +8812,7 @@ function renderSeatPop() {
           <button class="covers-pad-key util" data-act="io-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
           ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${assigned.has(n) ? ' assigned' : ''}" data-act="io-pick-seat" data-seat="${n}">${n}</button>`).join('')}
         </div>
+        <input id="io-note-input" class="sp-note" type="text" maxlength="120" placeholder="Note (optional)" value="${esc(io.note || '')}">
         <div class="qp-row qp-actions">
           <button class="icon-action discard" title="Cancel" data-act="close-item-options">${ACT_CROSS_SVG}</button>
         </div>
@@ -13870,11 +13875,13 @@ function visibleMenuItemsForAdmin() {
   let items = state.menu;
   if (state.menuAdminCategoryFilter) items = items.filter(m => m.category === state.menuAdminCategoryFilter);
   if (state.menuAdminSubsubFilter) items = items.filter(m => m.subcategoryId === state.menuAdminSubsubFilter);
-  else if (state.menuAdminSubcategoryFilter === '__none__') items = items.filter(m => !m.subcategoryId);
-  else if (state.menuAdminSubcategoryFilter) {
+  else if (state.menuAdminSubcategoryFilter && state.menuAdminSubcategoryFilter !== '__none__') {
     const ids = new Set([state.menuAdminSubcategoryFilter, ...state.subcategories.filter(s => s.parentSubcategoryId === state.menuAdminSubcategoryFilter).map(s => s.id)]);
     items = items.filter(m => ids.has(m.subcategoryId));
   }
+  // A picked section shows its LOOSE items only (mirrors the till's top
+  // level) — a subsection's items appear once that subsection is picked.
+  else if (state.menuAdminCategoryFilter) items = items.filter(m => !m.subcategoryId);
   if (state.menuAdminSearch.trim()) {
     const q = state.menuAdminSearch.trim().toLowerCase();
     items = items.filter(m => m.name.toLowerCase().includes(q));
@@ -13901,9 +13908,8 @@ function renderMenuAdmin() {
     </select>
     ${subcatOptions.length > 0 ? `
     <select id="menu-admin-subcategory-filter" class="tb-ctl">
-      <option value="">All subsections</option>
+      <option value="">Subsection…</option>
       ${subcatOptions.map(s => `<option value="${s.id}" ${state.menuAdminSubcategoryFilter === s.id ? 'selected' : ''}>${esc(s.label)}</option>`).join('')}
-      ${(filterCatObj && state.menu.some(m => m.category === filterCatObj.name && !m.subcategoryId)) || state.menuAdminSubcategoryFilter === '__none__' ? `<option value="__none__" ${state.menuAdminSubcategoryFilter === '__none__' ? 'selected' : ''}>No subsection</option>` : ''}
     </select>` : ''}
     ${subsubOptions.length > 0 ? `
     <select id="menu-admin-subsub-filter" class="tb-ctl">
@@ -16333,6 +16339,8 @@ function renderItemOptionsMiddle() {
           </button>`).join('')}
       </div>` : ''}
       ${stepHtml(step)}
+      <label>Note</label>
+      <input id="io-note-input" type="text" maxlength="120" placeholder="Optional — prints with this item" value="${esc(io.note || '')}" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--steel-300);border-radius:8px;font-size:13.5px;background:var(--surface);color:var(--text-primary);font-family:inherit;margin-bottom:12px;">
       <div class="pane-actions">
         <button class="icon-action discard" title="Back" data-act="close-item-options">${ACT_CROSS_SVG}<span class="ia-label">Back</span></button>
         ${ioHasChoiceButton() && cur === steps.length - 1 ? `
@@ -16421,7 +16429,7 @@ function pickIoSeat(seat) {
     }
     state._allergenAck = false;
     const variant = item.variants.find(v => v.id === io.variantId);
-    pushCartLine(item, variant, ioModifierObjects(io, item), seat, 1);
+    pushCartLine(item, variant, ioModifierObjects(io, item), seat, 1, io.note);
     io.assigned = (io.assigned || 0) + 1;
     io.assignedSeats = [...(io.assignedSeats || []), seat];
     if (io.assigned >= io.qty) state.itemOptions = null; else io.seat = null;
@@ -16442,7 +16450,7 @@ function confirmItemOptions() {
   }
   state._allergenAck = false;
   const variant = item.variants.find(v => v.id === io.variantId);
-  pushCartLine(item, variant, ioModifierObjects(io, item), io.seat, io.qty || 1);
+  pushCartLine(item, variant, ioModifierObjects(io, item), io.seat, io.qty || 1, io.note);
   state.itemOptions = null;
   render();
 }
@@ -18558,8 +18566,14 @@ function menuItemPayload(src, overrides) {
 async function quickAddMenuItem() {
   const category = state.menuAdminCategoryFilter || (state.categories[0] ? state.categories[0].name : '');
   if (!category) { state.toast = 'Add a section first.'; render(); return; }
+  // New items start at the TOP of the list being viewed: they take the
+  // active subsection (or none — a picked section shows loose items) and a
+  // sequence below that group's current minimum.
   const subcategoryId = (state.menuAdminSubcategoryFilter && state.menuAdminSubcategoryFilter !== '__none__') ? state.menuAdminSubcategoryFilter : null;
-  const payload = menuItemPayload(null, { name: uniqueDefaultName('New item', state.menu.map(m => m.name)), category, subcategoryId });
+  const seqs = state.menu.filter(m => m.category === category && (m.subcategoryId || null) === subcategoryId)
+    .map(m => m.sequence).filter(s => s !== null && s !== undefined);
+  const sequence = seqs.length ? Math.min(...seqs) - 1 : 0;
+  const payload = menuItemPayload(null, { name: uniqueDefaultName('New item', state.menu.map(m => m.name)), category, subcategoryId, sequence });
   try {
     await api('/api/menu', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     state.menu = await api('/api/menu');
@@ -21667,6 +21681,12 @@ function bindEvents() {
   const editLineNoteInput = document.getElementById('edit-line-note-input');
   if (editLineNoteInput) {
     editLineNoteInput.addEventListener('change', (e) => { if (state.editLine) updateLineNote(state.editLine.idx, e.target.value); });
+  }
+  // Free note while ordering — saved on every keystroke (no re-render) so the
+  // auto-add on the final pick carries whatever was typed.
+  const ioNoteInput = document.getElementById('io-note-input');
+  if (ioNoteInput) {
+    ioNoteInput.addEventListener('input', (e) => { if (state.itemOptions) state.itemOptions.note = e.target.value; });
   }
   document.querySelectorAll('.allergy-subtype-input').forEach(el => {
     el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });

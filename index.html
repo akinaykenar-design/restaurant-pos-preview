@@ -823,6 +823,9 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 /* Same box + stroke weight as the .icon-sq toolbar buttons beside it. */
 .sort-btn{display:inline-flex;align-items:center;justify-content:center;gap:5px;height:34px;min-width:38px;padding:0 9px;border:1px solid var(--steel-200);background:var(--surface);border-radius:var(--btn-radius);font-size:12px;font-weight:700;color:var(--text-primary);cursor:pointer;font-family:inherit;white-space:nowrap;}
 .sort-btn svg{width:20px;height:20px;display:block;}
+/* An icon followed by a label always gets breathing room (⛓Link fix). */
+.btn-secondary svg{ margin-right:6px; vertical-align:-3px; }
+.btn-secondary svg:last-child:first-child{ margin-right:0; } /* icon-only (print docket) stays centred */
 .sort-btn.on{border-color:var(--orange);color:var(--orange);background:var(--orange-dim);}
 .sort-btn:hover{color:var(--text-primary);}
 .sort-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--surface);border:1px solid var(--steel-200);border-radius:10px;box-shadow:var(--shadow);padding:4px;min-width:150px;display:flex;flex-direction:column;gap:1px;}
@@ -8537,7 +8540,9 @@ function saveAllergyModal() {
   const allergies = m.selectedAllergies.map(name => m.subTypeChoices[name] ? `${name} (${m.subTypeChoices[name]})` : name);
   if (custom && !allergies.includes(custom)) allergies.push(custom);
   if (allergies.length === 0) { state.adminError = 'Pick or type at least one allergy.'; render(); return; }
-  if (!m.wholeTable && m.seats.length === 0) { state.adminError = 'Pick at least one seat, or Whole table.'; render(); return; }
+  // No cover picked = the whole table. An enabled tick must never no-op —
+  // a silent nothing on an ALLERGY is the worst possible failure.
+  if (!m.wholeTable && m.seats.length === 0) m.wholeTable = true;
   const notes = m.notes.trim();
   const targets = m.wholeTable ? [null] : m.seats;
   const newEntries = targets.flatMap(seat => allergies.map(allergy => ({ seat, allergy, notes })));
@@ -9265,11 +9270,47 @@ function placeTileCounts() {
     qn.style.visibility = 'visible';
   });
 }
-// Names never shrink: the admin-picked font size is THE size on every tile.
-// A name that doesn't fit its two lines is cut short with an ellipsis
-// instead (owner: consistent size beats squeezing long names in).
+// Names never shrink: the admin-picked size is THE size on every tile.
+// A name too long for its two lines is MIDDLE-cut — the start and the
+// distinctive tail (vintage, cuvée, size) both survive, so two long wines
+// never truncate into identical-looking tiles.
 function fitTileNames() {
-  document.querySelectorAll('.item-card .item-name').forEach(el => { el.style.fontSize = ''; });
+  document.querySelectorAll('.item-card[data-id] .item-name').forEach(el => {
+    el.style.fontSize = '';
+    const card = el.closest('.item-card');
+    const m = state.menu.find(x => x.id === card.dataset.id);
+    if (!m) return;
+    if (el.textContent !== m.name) el.textContent = m.name;
+    if (el.scrollHeight <= el.clientHeight + 1) return;
+    const name = m.name;
+    el.dataset.mcut = '1';
+    middleCut(el, name, 8);
+    el.title = name;
+  });
+  // Two cut names can still collide (same vintage start, same cru tail) —
+  // widen the tail window on later twins until every tile reads distinct.
+  const seen = new Map();
+  document.querySelectorAll('.item-card[data-id] .item-name[data-mcut]').forEach(el => {
+    let bump = 0;
+    while (seen.has(el.textContent) && bump < 4) {
+      bump++;
+      const card = el.closest('.item-card');
+      const m = state.menu.find(x => x.id === card.dataset.id);
+      middleCut(el, m.name, 8 + bump * 5);
+    }
+    seen.set(el.textContent, true);
+  });
+}
+function middleCut(el, name, keepEnd) {
+  el.textContent = name;
+  if (el.scrollHeight <= el.clientHeight + 1) return;
+  let front = Math.max(4, name.length - keepEnd - 1);
+  let guard = 0;
+  el.textContent = name.slice(0, front).trimEnd() + '…' + name.slice(-keepEnd).trimStart();
+  while (el.scrollHeight > el.clientHeight + 1 && front > 4 && guard++ < 80) {
+    front -= 2;
+    el.textContent = name.slice(0, front).trimEnd() + '…' + name.slice(-keepEnd).trimStart();
+  }
 }
 
 // The sticky selection bar pins just below the sticky toolbar (phone
@@ -9376,7 +9417,7 @@ function renderMenuScrollBody() {
   const comboCard = (combo) => `
     <button class="item-card" data-act="open-combo" data-id="${combo.id}">
       <div class="item-name">${esc(combo.name)}</div>
-      ${state.settings.showPrices && state.settings.showTilePrices !== false ? `<div class="item-tile-price">${money(combo.price)}</div>` : ''}
+      ${state.settings.showPrices && state.settings.showTilePrices !== false && combo.price > 0 ? `<div class="item-tile-price">${money(combo.price)}</div>` : ''}
     </button>`;
   return `
         ${catsToShow.map(cat => {
@@ -9412,7 +9453,7 @@ function renderMenuScrollBody() {
               ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
               ${inCartQty ? `<span class="tile-qn">${inCartQty}</span>` : ''}
               <div class="item-name">${esc(item.name)}</div>${warnMark}
-              ${state.settings.showPrices && state.settings.showTilePrices !== false ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' + money(Math.min(...item.variants.map(v => v.price))) : money(item.price)}</div>` : ''}
+              ${(() => { if (!state.settings.showPrices || state.settings.showTilePrices === false) return ''; const p = (item.variants || []).length ? Math.min(...item.variants.map(v => v.price)) : item.price; return p > 0 ? `<div class="item-tile-price">${(item.variants || []).length ? 'from ' : ''}${money(p)}</div>` : ''; })()}
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots${item.trackStock ? ' shift' : ''}" title="Asks for options">⋯</span>` : ''}
               ${item.trackStock ? (() => {
                 // Countdown: live remaining = stock minus what's on this docket.
@@ -9528,6 +9569,7 @@ function renderOrderView() {
   // A stale editor pointing at a removed cart line falls back to the menu
   // instead of rendering a blank panel.
   if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null;
+  if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null; // line gone — never blank the panel
   if (state.editLine) return shell(renderLineEditMiddle());
   if (state.editSent) return shell(renderEditSentMiddle());
   if (state.itemOptions && !state.itemOptions.seatOnly) return shell(renderItemOptionsMiddle());
@@ -14679,7 +14721,7 @@ function renderScreenMockup() {
   const mkCard = (m) => {
     const showIcon = state.settings.showItemIcons !== false && !!m.icon;
     // Mockup mirrors the till: colour + manual row breaks.
-    return `<div class="item-card" data-mkel="itemSize" data-mkname="Menu tile" ${(() => { const s = `${m.color && state.settings.tileColors !== false ? `background:${m.color};color:${contrastTextColor(m.color)};` : ''}${m.rowBreak ? 'grid-column-start:1;' : ''}`; return s ? `style="${s}"` : ''; })()}>${m.image ? `<img src="${m.image}" alt="" style="width:100%;height:var(--item-img-h,64px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}${showIcon ? `<div class="item-tile-icon" data-mkel="toggle:itemIcons" data-mkname="Item icon">${m.icon}</div>` : ''}<div class="item-name" data-mkel="tileFont" data-mkname="Tile text">${esc(m.name)}</div>${state.settings.showPrices && state.settings.showTilePrices !== false ? `<div class="item-tile-price" data-mkel="toggle:tilePrices" data-mkname="Price">${money(m.price)}</div>` : ''}</div>`;
+    return `<div class="item-card" data-mkel="itemSize" data-mkname="Menu tile" ${(() => { const s = `${m.color && state.settings.tileColors !== false ? `background:${m.color};color:${contrastTextColor(m.color)};` : ''}${m.rowBreak ? 'grid-column-start:1;' : ''}`; return s ? `style="${s}"` : ''; })()}>${m.image ? `<img src="${m.image}" alt="" style="width:100%;height:var(--item-img-h,64px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}${showIcon ? `<div class="item-tile-icon" data-mkel="toggle:itemIcons" data-mkname="Item icon">${m.icon}</div>` : ''}<div class="item-name" data-mkel="tileFont" data-mkname="Tile text">${esc(m.name)}</div>${state.settings.showPrices && state.settings.showTilePrices !== false && m.price > 0 ? `<div class="item-tile-price" data-mkel="toggle:tilePrices" data-mkname="Price">${money(m.price)}</div>` : ''}</div>`;
   };
   // Every region of the carbon copy is a door to its settings card below.
   // Subsections preview as the bar OR as folder tiles, matching the setting.

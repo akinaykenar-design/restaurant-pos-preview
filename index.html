@@ -1441,6 +1441,9 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    style). No ring, no glow — the colour change IS the signal, and the
    button's size never moves. Works identically on light and dark. */
 .item-card.in-cart{ background:linear-gradient(120deg, var(--green), var(--teal)) !important; color:#fff !important; border-color:transparent; box-shadow:none; }
+/* The tile whose options/seat pane is open: glowing blue ring (overlay only —
+   never moves layout) so you can see WHICH item is asking for size/seat. */
+.item-card.prompting{ box-shadow:0 0 0 3px var(--blue), 0 0 14px 3px color-mix(in srgb, var(--blue) 45%, transparent) !important; z-index:1; }
 body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
 .item-card{ transition:filter .15s ease, background-color .15s ease, border-color .15s ease, transform .1s ease; }
 
@@ -1693,6 +1696,9 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
    ✓ does (Countdown: how many left; blank ✓ = off). */
 .qty-pop .qp-mode{ width:100%; }
 .qty-pop .qp-mode button{ flex:1; min-width:0; height:36px; font-family:var(--font-body); font-size:12.5px; }
+/* Seat pop: which dish is being seated, then the position pad. */
+.seat-pop .sp-item{ font-weight:800; font-size:14px; text-align:center; color:var(--text-primary); }
+.seat-pop .covers-pad-key.assigned{ border-color:var(--green); background:var(--green-dim); color:var(--green); }
 
 /* Quantity + allergy marks live IN the tile's name line — no hanging badges.
    "2 Hummus !" — the "!" is red (cannot remove) or gold (substitutable). */
@@ -8101,7 +8107,10 @@ function addToCart(item, variant, modifiers, seat) {
     const q0 = parseFloat(state.qtyPadBuffer);
     const q = (q0 && q0 > 0) ? q0 : 1;
     state.qtyPadBuffer = '';
-    state.itemOptions = { itemId: item.id, variantId: null, modSelections: defaultModSelections(item), seat: null, qty: q, assigned: 0 };
+    // Seat is the ONLY question → a compact pop over the grid (tile keeps its
+    // glow) instead of swapping the whole middle pane away.
+    const seatOnly = !(needsVariant && !variant) && !(needsModifiers && !modifiers);
+    state.itemOptions = { itemId: item.id, variantId: null, modSelections: defaultModSelections(item), seat: null, qty: q, assigned: 0, seatOnly };
     render();
     return;
   }
@@ -8767,6 +8776,29 @@ function renderCoversPop() {
         </div>
       </div>`;
 }
+// Seat-only prompt: the item needs nothing but a seat, so the grid stays put
+// and this compact pop asks for the position — the tapped tile keeps its blue
+// glow behind it. Same centred popup grammar as Covers; buttons reuse the
+// io-pick-seat flow (auto-adds on pick, per-serving when qty > 1).
+function renderSeatPop() {
+  const io = state.itemOptions;
+  const item = state.menu.find(m => m.id === io.itemId);
+  if (!item) return '';
+  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
+  const assigned = new Set([...(io.assignedSeats || []), ...state.cart.filter(c => c.menuItemId === io.itemId).map(c => c.seat)]);
+  return `
+      <div class="qty-pop covers-pop seat-pop">
+        <div class="sp-item">${esc(item.name)}${Number.isInteger(io.qty) && io.qty > 1 ? ` · ${(io.assigned || 0) + 1} of ${io.qty}` : ''}</div>
+        <div class="covers-pad-display qp-display" style="font-size:17px;">${esc(prefix)}</div>
+        <div class="covers-pad-grid qp-grid">
+          <button class="covers-pad-key util" data-act="io-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${assigned.has(n) ? ' assigned' : ''}" data-act="io-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action discard" title="Cancel" data-act="close-item-options">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
+}
 // Table-number pad: the layout rail's Number control is tap-only — same
 // centred popup grammar as Covers, saves through patchFloorObject.
 function renderTableNumPop() {
@@ -9118,6 +9150,7 @@ function render() {
     ${state.allergenWarnModal ? renderAllergenWarnModal() : ''}
     ${state.coversPad ? renderCoversPop() : ''}
     ${state.tableNumPad ? renderTableNumPop() : ''}
+    ${state.itemOptions && state.itemOptions.seatOnly ? renderSeatPop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
@@ -9290,7 +9323,7 @@ function renderMenuScrollBody() {
             // line break in the arrangement.
             const tstyle = `${item.color && state.settings.tileColors !== false ? `background:${item.color};color:${contrastTextColor(item.color)};` : ''}${item.rowBreak ? 'grid-column-start:1;' : ''}`;
             return `
-            <button class="item-card ${sizeClass} ${item.out ? 'out' : ''} ${inCartQty ? 'in-cart' : ''}" data-act="add" data-id="${item.id}" ${tstyle ? `style="${tstyle}"` : ''} ${item.out ? 'title="None left — tap to order anyway"' : ''}>
+            <button class="item-card ${sizeClass} ${item.out ? 'out' : ''} ${inCartQty ? 'in-cart' : ''}${state.itemOptions && state.itemOptions.itemId === item.id ? ' prompting' : ''}" data-act="add" data-id="${item.id}" ${tstyle ? `style="${tstyle}"` : ''} ${item.out ? 'title="None left — tap to order anyway"' : ''}>
               ${item.image ? `<img src="${item.image}" alt="" style="width:100%;height:var(--item-img-h,70px);object-fit:cover;border-radius:6px;margin-bottom:2px;">` : ''}
               ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
               <span class="tile-qn">${inCartQty || ''}</span>
@@ -9414,7 +9447,7 @@ function renderOrderView() {
   if (state.editLine) return shell(renderLineEditMiddle());
   if (state.editSent) return shell(renderEditSentMiddle());
   if (state.priceEntry) return shell(renderPriceEntryMiddle());
-  if (state.itemOptions) return shell(renderItemOptionsMiddle());
+  if (state.itemOptions && !state.itemOptions.seatOnly) return shell(renderItemOptionsMiddle());
   if (state.comboBuilder) return shell(renderComboBuilderMiddle());
   if (state.showCheckout) return shell(renderCheckoutMiddle());
   if (state.discountModal) return shell(renderDiscountMiddle());
@@ -16226,7 +16259,7 @@ function renderItemOptionsMiddle() {
         ${(min !== 1 || max !== 1) && cur < steps.length - 1 ? `<button class="btn-secondary" style="width:100%;margin-bottom:10px;" data-act="io-next-step" ${countOk ? '' : 'disabled'}>Next →</button>` : ''}`;
     }
     return `
-        ${itemAddNeedsSeatPrompt() && Number.isInteger(io.qty) && io.qty > 1 ? `<label>${(io.assigned || 0) + 1} of ${io.qty}</label>` : ''}
+        <label>${esc((state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat')}${itemAddNeedsSeatPrompt() && Number.isInteger(io.qty) && io.qty > 1 ? ` · ${(io.assigned || 0) + 1} of ${io.qty}` : ''}</label>
         <div class="grid" style="margin:6px 0 14px;">
           ${(() => {
             const assigned = new Set([...(io.assignedSeats || []), ...state.cart.filter(c => c.menuItemId === io.itemId).map(c => c.seat)]);

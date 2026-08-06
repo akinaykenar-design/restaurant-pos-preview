@@ -5739,6 +5739,22 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   const { table, staffName } = req.body;
   if (!table) return res.status(400).json({ error: 'Missing destination table' });
   const oldTable = order.table;
+  // Destination already has an open tab → COMBINE: its lines and rounds ride
+  // over, totals re-add, and the source ticket closes as merged.
+  const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
+  if (dest) {
+    dest.items = [...(dest.items || []), ...(order.items || [])];
+    dest.rounds = [...(dest.rounds || []), ...(order.rounds || [])];
+    if (order.covers) dest.covers = (dest.covers || 0) + order.covers;
+    const sub = dest.items.reduce((s, i) => s + i.price * i.qty, 0);
+    dest.subtotal = sub; dest.total = sub; dest.grandTotal = sub;
+    order.status = 'void';
+    order.voidedBy = staffName || 'Unknown';
+    order.voidReason = `Combined into Ticket #${dest.id} (Table ${table})`;
+    logAudit(data, staffName || 'Unknown', `Combined Ticket #${order.id} (Table ${oldTable}) into Ticket #${dest.id} (Table ${table})`);
+    writeData(data);
+    return res.json(dest);
+  }
   order.table = table;
   logAudit(data, staffName || 'Unknown', `Transferred Ticket #${order.id} from Table ${oldTable} to Table ${table}`);
   writeData(data);
@@ -16060,9 +16076,14 @@ function transferToTable(newTableId) {
   const newTable = findTableById(newTableId);
   if (!newTable || newTableId === oldTableId) { state.transferMode = false; state.transferFrom = null; state.showTablePicker = false; render(); return; }
   if (newTable.mergedInto) { state.toast = 'Pick a table that is not merged into another.'; render(); return; }
-  const destOpenOrder = state.orders.find(o => o.status === 'open' && o.table === newTable.label);
-  if (destOpenOrder) { state.toast = 'That table already has an open tab.'; render(); return; }
-  openConfirm({ message: `Move ${tableDisplayLabel(oldTableId)} to ${esc(newTable.label)}?`, confirmLabel: 'Transfer', danger: false }, () => doTransferToTable(newTableId));
+  // A destination with its own open tab is fine — the two tabs COMBINE.
+  const destOpenOrder = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
+  openConfirm({
+    message: destOpenOrder
+      ? `Combine ${tableDisplayLabel(oldTableId)} into ${esc(newTable.label)}? Both tabs become one.`
+      : `Move ${tableDisplayLabel(oldTableId)} to ${esc(newTable.label)}?`,
+    confirmLabel: destOpenOrder ? 'Combine' : 'Transfer', danger: false,
+  }, () => doTransferToTable(newTableId));
 }
 async function doTransferToTable(newTableId) {
   const oldTableId = state.transferFrom || state.table;
@@ -16091,17 +16112,27 @@ async function doTransferToTable(newTableId) {
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
   const allergies = movingOwn ? state.allergies : (oldTable && oldTable.allergies) || [];
   const vipType = movingOwn ? state.vipType : (oldTable && oldTable.vipType) || '';
-  await saveTableCovers(newTableId, covers);
-  await saveTableAllergies(newTableId, allergies);
-  await saveTableVip(newTableId, vipType);
+  // Combining into a live table: sitting details ADD to what's there.
+  const combined = !!srcOrder && state.orders.some(o => o.id !== srcOrder.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
+  await saveTableCovers(newTableId, combined ? ((newTable.covers || 0) + covers) : covers);
+  await saveTableAllergies(newTableId, combined ? [...(newTable.allergies || []), ...allergies] : allergies);
+  await saveTableVip(newTableId, combined ? (newTable.vipType || vipType) : vipType);
   await saveTableCovers(oldTableId, 0);
   await saveTableAllergies(oldTableId, []);
   await saveTableVip(oldTableId, '');
   const movedLabel = oldTable ? oldTable.label : '';
-  if (movingOwn) state.table = newTableId;
+  if (movingOwn) {
+    state.table = newTableId;
+    // After a combine the live tab is the DESTINATION's order — re-point.
+    state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
+    state.covers = newTable.covers || 0;
+    state.allergies = newTable.allergies || [];
+    state.vipType = newTable.vipType || '';
+  }
   state.transferMode = false; state.transferFrom = null;
   state.showTablePicker = false;
-  state.toast = movingOwn ? `Moved to ${tableDisplayLabel(newTableId)}` : `Moved table ${esc(String(movedLabel))} to ${esc(String(newTable.label))}`;
+  state.toast = combined ? `Combined table ${esc(String(movedLabel))} into ${esc(String(newTable.label))}`
+    : movingOwn ? `Moved to ${tableDisplayLabel(newTableId)}` : `Moved table ${esc(String(movedLabel))} to ${esc(String(newTable.label))}`;
   render();
   armToastTimer(2500);
 }

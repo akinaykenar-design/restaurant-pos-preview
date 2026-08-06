@@ -1360,11 +1360,17 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 /* Course pill on occupied tables: dot = which course is away, minutes = how
    long since the call. Flips solid violet past the course-wait cap — the
    sitting itself is told by the chip body's burn, digitless. */
-.tbl-cpill{ position:absolute; top:5px; left:5px; z-index:2; display:inline-flex; align-items:center; gap:4px;
-  background:rgba(20,22,24,.5); border-radius:20px; padding:3px 7px 3px 4px; pointer-events:none; }
-.tbl-cpill i{ width:10px; height:10px; border-radius:50%; display:block; border:1.5px solid rgba(255,255,255,.85); box-sizing:border-box; }
-.tbl-cpill b{ font-size:10px; font-weight:800; color:#fff; line-height:1; font-family:var(--font-mono); }
+/* Detached: the pill floats just off the table's bottom-right corner. */
+.tbl-cpill{ position:absolute; bottom:-16px; right:-12px; top:auto; left:auto; z-index:4; display:inline-flex; align-items:center; gap:5px; white-space:nowrap;
+  background:rgba(20,22,24,.62); color:#fff; border-radius:20px; padding:5px 10px 5px 7px; pointer-events:none; box-shadow:0 1px 5px rgba(0,0,0,.3); }
+.tbl-cpill i{ width:12px; height:12px; border-radius:50%; display:block; border:1.5px solid rgba(255,255,255,.85); box-sizing:border-box; }
+.tbl-cpill b{ font-size:12.5px; font-weight:800; color:inherit; line-height:1; font-family:var(--font-mono); }
 .tbl-cpill.over{ background:var(--violet); box-shadow:0 0 0 1.5px rgba(255,255,255,.8); }
+/* Allergy / VIP marks: top-right overlay stack — tiny, permanent, no flow. */
+.tbl-marks{ position:absolute; top:4px; right:4px; z-index:3; display:inline-flex; gap:3px; pointer-events:none; }
+.tbl-mark{ width:20px; height:20px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:900; line-height:1; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+.tbl-mark-allergy{ background:var(--red); color:#fff; }
+.tbl-mark-vip{ background:#2b2b33; color:var(--gold); }
 
 /* Larger + active variants of the square icon button (docket discount/clear) */
 .icon-sq.lg{ width:44px; height:40px; font-size:17px; }
@@ -14973,16 +14979,12 @@ function renderTableStatusColorsCard() {
         ${colorDotButton('table-status', key, sc[key] || null, { bg: sc[key] || null, title: 'Change colour' })}
         <div style="font-weight:700;font-size:13.5px;">${label}</div>
       </div>`;
-      return row('locked', 'var(--red)', 'Glow — locked, open on another till')
-        + row('billPrinted', 'var(--gold)', 'Glow — bill printed')
-        + row('over', 'var(--violet)', 'Glow — needs you: ignored or over time')
+      return row('occupied', '#34C759', 'Open tab — active')
+        + + row('billPrinted', 'var(--blue)', 'Bill printed')
+        + + row('locked', '#FF9500', 'In use — another till')
+        + row('pillWarn', '#FFCC00', 'Pill — running long')
+        + row('pillDanger', '#FF3B30', 'Pill — over')
         + `
-      <div style="display:flex;align-items:center;gap:14px;margin-bottom:12px;">
-        ${colorDotButton('table-status', 'sitStart', sc.sitStart || null, { bg: sc.sitStart || null, title: 'Sitting wash — start colour' })}
-        ${colorDotButton('table-status', 'sitEnd', sc.sitEnd || null, { bg: sc.sitEnd || null, title: 'Sitting wash — end colour' })}
-        <span style="width:52px;height:22px;border-radius:6px;background:linear-gradient(90deg,${sc.sitStart || 'var(--green)'},${sc.sitEnd || 'var(--gold)'});opacity:${washOpacity() + 0.15};flex:none;"></span>
-        <div style="font-weight:700;font-size:13.5px;">Soft wash — sitting, start → late</div>
-      </div>
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
         <div style="font-weight:700;font-size:13.5px;">Wash strength</div>
         <div class="seg">
@@ -15592,58 +15594,78 @@ function tableStatusFx(t, cs, lock) {
   const op = washOpacity();
   const wash = (bg, o2) => ({ glow: '', wash: `<span class="tbl-wash" style="background:${bg};opacity:${o2 || op};"></span>` });
   const none = { wash: '', glow: '' };
-  const lockedC = statusColor('locked', 'var(--red)');
-  const overC = statusColor('over', 'var(--violet)');
-  const s0 = statusColor('sitStart', 'var(--green)');
-  const s1 = statusColor('sitEnd', 'var(--gold)');
-  if (lock) return glow(lockedC); // safety — shows even with status colours off
+  if (lock) return wash(statusColor('locked', '#FF9500'), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
   if (state.settings.floorStatusEnabled === false) return none;
-  if (tableStatus(t.label) === 'billPrinted') return glow(statusColor('billPrinted', 'var(--gold)'));
-  const lens = state.floorStatusView;
+  // Semantic layers, the owner's way round: NATURAL WOOD = empty table (its
+  // regular state), GREEN = open tab running fine, BLUE = bill printed
+  // (matches the blue Bill button), RED = needs you (ignored or over time).
+  const st = tableStatus(t.label);
+  if (st === 'billPrinted') return wash(statusColor('billPrinted', 'var(--blue)'), Math.min(op + 0.13, 0.8));
   const o = tableOpenOrder(t.label);
-  if (lens === 'booked') return !o && upcomingBookingFor(t.id) ? wash('var(--orange)', Math.min(op + 0.13, 0.8)) : none;
-  if (!o) return none;
-  if (lens === 'course') {
-    if (!cs) return none;
-    const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-    const mins = Math.floor((Date.now() - cs.sentAt) / 60000);
-    return cap && mins >= cap ? glow(overC) : wash(cs.color || 'var(--teal)');
-  }
-  if (lens === 'attention') {
-    const idle = tableIdleMins(o);
-    if (idle >= 15) return glow(overC);
-    return wash(idle >= 8 ? `linear-gradient(120deg, ${s1}, ${overC})` : `linear-gradient(120deg, ${s0}, color-mix(in srgb, ${s0} 55%, var(--teal)))`);
-  }
-  if (lens === 'covers') return wash('var(--orange)', Math.max(op - 0.05, 0.2));
-  // Sitting: soft wash walking start → end colour, glow once the sitting is OVER.
-  const cap = burnCapMinutes() || state.settings.seatingMinutes || 90;
-  const p = (Date.now() - o.createdAt) / 60000 / cap;
-  if (p >= 1) return glow(overC);
-  return wash(p < 0.35 ? `linear-gradient(120deg, ${s0}, color-mix(in srgb, ${s0} 55%, var(--teal)))`
-    : p < 0.7 ? `linear-gradient(120deg, ${s0} 15%, ${s1})`
-    : `linear-gradient(120deg, ${s1}, ${overC})`);
+  // GREEN = your active open table. Urgency never recolours the table — it
+  // lives in the pill alone (dark → yellow → red), so nothing mashes.
+  if (o) return wash(statusColor('occupied', '#34C759'));
+  return none; // empty — a table at rest is just a table
 }
 // The little pill under the table number follows the lens: course dot +
 // wait (default), idle minutes, covers count, or time until the booking.
+// Persistent safety/service marks: allergy "!" and VIP star ride the
+// table's top-right corner, every lens, service pickers only.
+function tableMarksHtml(t) {
+  const allergy = (t.allergies || []).length ? `<span class="tbl-mark tbl-mark-allergy" title="Table has allergies">!</span>` : '';
+  const vip = t.vipType ? `<span class="tbl-mark tbl-mark-vip" title="${esc(t.vipType)}">★</span>` : '';
+  return allergy || vip ? `<span class="tbl-marks">${allergy}${vip}</span>` : '';
+}
+function pillDur(mins) {
+  return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
+}
 function floorPillHtml(t, cs) {
-  const lens = state.settings.floorStatusEnabled === false ? 'sitting' : state.floorStatusView;
+  // The pill follows the lens; its COLOUR is a danger scale — green fine,
+  // yellow closing in, red over — each editable in Table Layout.
+  const sev = (ratio) => {
+    if (ratio < 0.65) return ''; // fine — quiet dark pill
+    const c = ratio >= 1 ? statusColor('pillDanger', '#FF3B30') : statusColor('pillWarn', '#FFCC00');
+    return `background:${c};color:${contrastTextColor(c)};`;
+  };
+  const pill = (style, inner, title) => `<span class="tbl-cpill" style="${style}" title="${title}">${inner}</span>`;
+  const lens = state.settings.floorStatusEnabled === false ? 'course' : state.floorStatusView;
+  const o = tableOpenOrder(t.label);
+  // A called-away course outranks every lens: show how long the kitchen's
+  // been firing it, danger-scaled against the course-wait cap.
+  if (o && o.calledAwayAt && lens !== 'booked') {
+    const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+    const mins = Math.max(0, Math.floor((Date.now() - o.calledAwayAt) / 60000));
+    return pill(sev(cap ? mins / cap : 0), `<b>${pillDur(mins)}</b>`, 'Called away — being fired');
+  }
+  if (lens === 'sitting') {
+    if (!o) return '';
+    const cap = burnCapMinutes() || state.settings.seatingMinutes || 90;
+    const mins = Math.max(0, Math.floor((Date.now() - o.createdAt) / 60000));
+    return pill(sev(mins / cap), `<b>${pillDur(mins)}</b>`, 'Time seated');
+  }
   if (lens === 'attention') {
-    const o = tableOpenOrder(t.label);
     if (!o) return '';
     const idle = tableIdleMins(o);
-    return `<span class="tbl-cpill${idle >= 15 ? ' over' : ''}" title="Since last activity"><b>${idle}m</b></span>`;
+    return pill(sev(idle / 15), `<b>${pillDur(idle)}</b>`, 'Since last activity');
   }
-  if (lens === 'covers') {
-    const o = tableOpenOrder(t.label);
-    return o && o.covers ? `<span class="tbl-cpill" title="Covers"><b>${o.covers}</b></span>` : '';
+  if (lens === 'guests') {
+    const al = t.allergies || [];
+    const parts = [];
+    if (al.length) parts.push(`! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}`);
+    if (t.vipType) parts.push('★');
+    return parts.length ? pill(al.length ? `background:var(--red);color:#fff;` : 'background:#2b2b33;color:var(--gold);', `<b>${parts.join(' · ')}</b>`, 'Allergies / VIP') : '';
   }
   if (lens === 'booked') {
     const r = upcomingBookingFor(t.id);
     if (!r) return '';
     const mins = Math.round((new Date(r.time).getTime() - Date.now()) / 60000);
-    return `<span class="tbl-cpill" title="${esc(r.name)} · ${r.partySize}"><i style="background:var(--orange);"></i><b>${mins <= 0 ? 'now' : mins + 'm'}</b></span>`;
+    return pill('background:var(--orange);color:#fff;', `<b>${mins <= 0 ? 'now' : 'in ' + pillDur(mins)}</b>`, `${esc(r.name)} · ${r.partySize}`);
   }
-  return coursePillHtml(cs);
+  // Course lens: the course's own dot + a danger-scaled wait.
+  if (!cs) return '';
+  const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+  const mins = Math.max(0, Math.floor((Date.now() - cs.sentAt) / 60000));
+  return pill(sev(cap ? mins / cap : 0), `<i style="background:${cs.color || 'var(--teal)'};"></i><b>${pillDur(mins)}</b>`, 'Course wait');
 }
 // Course pill: dot in the course's colour + minutes since the call-away /
 // last round. Flips solid violet past the course-wait cap — never red.
@@ -15705,7 +15727,7 @@ function tableStatus(tableLabel) {
 }
 // Every table gets a solid, opaque status shade — green free, red in use,
 // gold bill printed — overridable per status in Table Layout.
-const TABLE_STATUS_DEFAULTS = { available: '#5C9720', occupied: '#C7402C', billPrinted: '#C08A00' };
+const TABLE_STATUS_DEFAULTS = { available: '#34C759', occupied: '#FF3B30', billPrinted: '#FFCC00' };
 function tableStatusColor(tableLabel) {
   const sc = (state.settings && state.settings.tableStatusColors) || {};
   const st = tableStatus(tableLabel);
@@ -15867,7 +15889,7 @@ function renderTablePickerMiddle() {
 ` : ''}
         ${state.settings.floorStatusEnabled !== false ? `
         <div class="seg" style="margin-left:auto;">
-          ${[['sitting', 'Sitting'], ['course', 'Course'], ['attention', 'Attention'], ['booked', 'Booked'], ['covers', 'Covers']]
+          ${[['sitting', 'Sitting'], ['course', 'Course'], ['attention', 'Attention'], ['guests', 'Guests'], ['booked', 'Booked']]
             .map(([v, l]) => `<button data-act="floor-status-view" data-val="${v}" class="${(state.floorStatusView || 'sitting') === v ? 'active' : ''}">${l}</button>`).join('')}
         </div>` : ''}
         ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="${state.settings.floorStatusEnabled !== false ? '' : 'margin-left:auto;'}" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
@@ -15884,11 +15906,12 @@ function renderTablePickerMiddle() {
             // along (tableStatusFx). Bill's inset edge only without a glow.
             const fx = tableStatusFx(t, cs, lock);
             const body = t.color ? `background:${t.color};color:${contrastTextColor(t.color)};` : '';
-            const billEdge = !fx.glow && tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
+            const billEdge = fx.ring || '';
             return `
             <div class="simple-table-btn${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' sel' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${fx.glow}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
               ${fx.wash}
               ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
+              ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
               <span class="stb-num">${esc(t.label)}</span>
               <span class="stb-seats">${(() => {
                 const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
@@ -15914,11 +15937,12 @@ function renderTablePickerMiddle() {
           // Status grammar: glow halo = needs a human, soft wash = ticking
           // along (tableStatusFx). Bill's inset edge only without a glow.
           const fx = tableStatusFx(t, cs, lock);
-          const billEdge = !fx.glow && tableStatus(t.label) === 'billPrinted' ? `box-shadow:inset 0 0 0 3px ${tableStatusColor(t.label)};` : '';
+          const billEdge = fx.ring || '';
           return `
           <div class="floor-marker${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
             ${fx.wash}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
+            ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
             ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
           </div>`;
         }).join('')}

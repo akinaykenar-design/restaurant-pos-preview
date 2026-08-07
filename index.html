@@ -4604,7 +4604,7 @@ app.post('/api/printers/test', async (req, res) => {
 
 app.post('/api/printer-stations', (req, res) => {
   const data = readData();
-  const { name, categories, ip, ips, backupIp, receipts } = req.body;
+  const { name, categories, ip, ips, backupIp, receipts, labels } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Station name is required' });
   const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
   const cleanIps = (Array.isArray(ips) ? ips : [ip]).map(x => String(x || '').trim()).filter(Boolean);
@@ -4612,7 +4612,7 @@ app.post('/api/printer-stations', (req, res) => {
   const cleanBackup = String(backupIp || '').trim();
   if (cleanBackup && !IP_RE.test(cleanBackup)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
   const pw = req.body.paperWidth === '58' ? '58' : '80';
-  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, paused: false, fallbackId: null };
+  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null };
   data.printerStations = [...(data.printerStations || []), station];
   logAudit(data, staffFromReq(req), `Added printer station: ${station.name}`);
   writeData(data);
@@ -4623,7 +4623,7 @@ app.put('/api/printer-stations/:id', (req, res) => {
   const data = readData();
   const station = (data.printerStations || []).find(s => s.id === req.params.id);
   if (!station) return res.status(404).json({ error: 'Station not found' });
-  const { name, categories, ip, ips, backupIp, receipts, paused, fallbackId } = req.body;
+  const { name, categories, ip, ips, backupIp, receipts, labels, paused, fallbackId } = req.body;
   if (name !== undefined && name.trim()) station.name = name.trim();
   if (Array.isArray(categories)) station.categories = categories;
   const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
@@ -4645,6 +4645,7 @@ app.put('/api/printer-stations/:id', (req, res) => {
   }
   if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : '80';
   if (receipts !== undefined) station.receipts = !!receipts;
+  if (labels !== undefined) station.labels = !!labels;
   if (paused !== undefined) {
     station.paused = !!paused;
     logAudit(data, staffFromReq(req), `${station.paused ? 'Paused' : 'Resumed'} printer station: ${station.name}`);
@@ -6618,6 +6619,22 @@ function sampleReceiptOrder() {
     subtotal: 113.0, discount: null, tax: 9.04, total: 122.04, tip: 0, grandTotal: 122.04,
     paymentMethod: 'card', staffName: 'Alex',
   };
+}
+// The sticker mock shown in the station modal when the label roll is on:
+// one label per item unit, dashed line = where the printer cuts.
+function sampleLabelPreview() {
+  const sticker = (name, seat, n) => `
+    <div style="text-align:center;padding:6px 2px;">
+      <div style="font-weight:700;font-size:11px;">TABLE 12</div>
+      <div style="font-weight:800;font-size:15px;">${name}</div>
+      <div style="font-size:11px;">seat ${seat}</div>
+      <div style="display:flex;justify-content:space-between;font-size:10.5px;margin-top:2px;"><span>${n} of 2</span><span>7:24 pm</span></div>
+    </div>`;
+  return `<div class="print-doc dk mode-thermal">
+    ${sticker('Espresso Martini', 2, 1)}
+    <div style="border-top:1.5px dashed #999;margin:2px -8px;"></div>
+    ${sticker('Ribeye Steak', 1, 2)}
+  </div>`;
 }
 function sampleDocketCtx() {
   return {
@@ -11927,14 +11944,14 @@ async function loadPrinterStations() {
   render();
 }
 function openAddPrinterStation() {
-  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, fallbackId: null });
+  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, labels: false, fallbackId: null });
   state.adminError = '';
   render();
 }
 function openEditPrinterStation(id) {
   const s = state.printerStations.find(x => x.id === id);
   const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
-  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, fallbackId: s.fallbackId || null });
+  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null });
   state.adminError = '';
   render();
 }
@@ -11956,7 +11973,7 @@ async function savePrinterStationModal() {
     ips: ipInputs.length ? ipInputs.map(el => el.value.trim()).filter(Boolean) : m.ips.filter(Boolean),
     backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
     paperWidth: m.paperWidth === '58' ? '58' : '80',
-    receipts: !!m.receipts, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
+    receipts: !!m.receipts, labels: !!m.labels, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
   };
   try {
     if (m.mode === 'add') await api('/api/printer-stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -12322,7 +12339,7 @@ function renderPrintersSetupTab() {
     ${state.printerStations.length === 0 ? `<div class="empty-hist">No printer stations yet.</div>` : state.printerStations.map(s => `
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
         <div class="order-info">
-          <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
+          <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.labels ? `<span class="status-chip paid">labels</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
           <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
@@ -12453,6 +12470,10 @@ function renderPrinterStationModal() {
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
         ${togglePill(!!m.receipts, 'toggle-printer-station-receipts')} Also prints customer receipts
       </label>
+      <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
+        ${togglePill(!!m.labels, 'toggle-printer-station-labels')} Sticker roll — one label per item
+      </label>
+      ${m.labels ? `<div class="paper-preview" style="max-width:230px;margin:4px 0 0;">${sampleLabelPreview()}</div>` : ''}
       <div class="modal-actions">
         <button class="icon-action discard" title="Cancel" data-act="close-printer-station-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
         ${state.printerStationModal && state.printerStationModal.id ? `<button type="button" class="btn-modal-delete" data-act="modal-delete-printer-station">Delete</button>` : ''}
@@ -21010,6 +21031,7 @@ function bindEvents() {
       else if (act === 'toggle-station-paused') { toggleStationPaused(el.dataset.id); }
       else if (act === 'bulk-price-mode') { state.bulkEditModal.priceMode = el.dataset.val; render(); }
       else if (act === 'toggle-printer-station-receipts') { const m = state.printerStationModal; if (m) { const inp = document.getElementById('printer-station-ip-input'); if (inp) m.ip = inp.value.trim(); m.receipts = !m.receipts; render(); } }
+      else if (act === 'toggle-printer-station-labels') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.labels = !m.labels; render(); } }
       else if (act === 'apply-simple-tables') {
         const n = state.simpleCountDraft != null ? state.simpleCountDraft : (state.settings.simpleTableCount || allTables().length || 12);
         state.simpleCountDraft = null;

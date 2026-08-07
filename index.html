@@ -1133,6 +1133,21 @@ input:focus, select:focus, textarea:focus{
 button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
 .cat-btn, .pay-opt, .course-tab, .seg, .staff-tile{ -webkit-user-select: none; user-select: none; }
 
+/* ── On-screen keyboard ───────────────────────────────────────────────
+   The app's own compact keyboard for text fields on touch screens —
+   replaces the OS keyboard (huge, mismatched, unreliable in app mode).
+   A persistent overlay outside #app: render() never rebuilds it. */
+.osk{position:fixed;left:0;right:0;bottom:0;z-index:2500;background:var(--steel-100);border-top:1px solid var(--steel-200);padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));box-shadow:0 -6px 24px rgba(0,0,0,.14);display:none;}
+.osk.open{display:block;}
+.osk-rows{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:6px;}
+.osk-row{display:flex;gap:6px;justify-content:center;}
+.osk-key{flex:1;max-width:82px;height:46px;border:1px solid var(--steel-200);border-radius:9px;background:var(--surface);color:var(--text-primary);font-family:var(--font-body);font-size:var(--fs-lg);font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+.osk-key:active{background:var(--orange-dim);}
+.osk-key.wide{max-width:120px;flex:1.6;font-size:var(--fs-md);}
+.osk-key.space{max-width:420px;flex:6;}
+.osk-key.on{background:var(--orange-dim);border-color:var(--orange);color:var(--orange);}
+.osk-key.act{background:var(--charcoal);color:#fff;border-color:var(--charcoal);}
+
 /* Softer, layered depth for floating surfaces. */
 .modal{ box-shadow: 0 10px 25px rgba(0,0,0,.12), 0 30px 60px rgba(0,0,0,.22); }
 .toast{ box-shadow: 0 8px 24px rgba(20,24,25,.28); }
@@ -7604,6 +7619,107 @@ function applyTheme() {
   }
 }
 window.addEventListener('resize', applyTheme);
+// ---------- On-screen keyboard (touch tablets / tills) ----------
+// Text fields get the app's own compact keyboard instead of the OS one.
+// Lives OUTSIDE #app so render() never rebuilds it mid-word; appears only
+// when a text field is focused BY TOUCH on a big screen — physical
+// keyboards type as normal, phones keep their native keyboard.
+const OSK_MIN_WIDTH = 900;
+let _oskEl = null, _oskTarget = null, _oskMode = 'lower', _oskPtrTouch = false;
+function oskEligible() {
+  return (navigator.maxTouchPoints > 0 || 'ontouchstart' in window) && window.innerWidth >= OSK_MIN_WIDTH;
+}
+const OSK_TEXT_SEL = 'input[type="text"], input[type="search"], input:not([type]), textarea';
+function oskRows() {
+  if (_oskMode === 'sym') return [
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+    ['-', '/', ':', ';', '(', ')', '$', '&', '@', '"'],
+    ['ABC', '.', ',', '?', '!', "'", '%', '⌫'],
+    ['ABC', '␣', '✓'],
+  ];
+  const letters = [
+    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
+    ['⇧', 'z', 'x', 'c', 'v', 'b', 'n', 'm', '⌫'],
+    ['?123', '␣', '✓'],
+  ];
+  if (_oskMode === 'upper') return letters.map(r => r.map(k => k.length === 1 && /[a-z]/.test(k) ? k.toUpperCase() : k));
+  return letters;
+}
+function oskPaint() {
+  if (!_oskEl) return;
+  _oskEl.innerHTML = `<div class="osk-rows">${oskRows().map(row => `<div class="osk-row">${row.map(k => {
+    const wide = ['⇧', '⌫', '?123', 'ABC', '✓'].includes(k);
+    const cls = 'osk-key' + (wide ? ' wide' : '') + (k === '␣' ? ' space' : '') + (k === '⇧' && _oskMode === 'upper' ? ' on' : '') + (k === '✓' ? ' act' : '');
+    return `<button type="button" class="${cls}" data-k="${k === '"' ? '&quot;' : k}">${k === '␣' ? '' : k}</button>`;
+  }).join('')}</div>`).join('')}`;
+}
+function oskInsert(ch) {
+  const el = _oskTarget;
+  if (!el || !document.contains(el)) { oskHide(); return; }
+  el.focus();
+  try {
+    const s = el.selectionStart == null ? el.value.length : el.selectionStart;
+    const e = el.selectionEnd == null ? el.value.length : el.selectionEnd;
+    if (ch === '⌫') { if (s === e && s > 0) el.setRangeText('', s - 1, s, 'end'); else el.setRangeText('', s, e, 'end'); }
+    else el.setRangeText(ch, s, e, 'end');
+  } catch (err) { // fields without selection API
+    if (ch === '⌫') el.value = el.value.slice(0, -1); else el.value += ch;
+  }
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  if (_oskMode === 'upper') { _oskMode = 'lower'; oskPaint(); }
+}
+function oskKey(k) {
+  if (k === '⇧') { _oskMode = _oskMode === 'upper' ? 'lower' : 'upper'; oskPaint(); return; }
+  if (k === '?123') { _oskMode = 'sym'; oskPaint(); return; }
+  if (k === 'ABC') { _oskMode = 'lower'; oskPaint(); return; }
+  if (k === '✓') {
+    const el = _oskTarget;
+    if (el && document.contains(el)) { el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); }
+    oskHide(); return;
+  }
+  oskInsert(k === '␣' ? ' ' : k);
+}
+function oskShow(target) {
+  _oskTarget = target;
+  if (!_oskEl) {
+    _oskEl = document.createElement('div');
+    _oskEl.className = 'osk';
+    // pointerdown (not click) + preventDefault: the tap must never steal
+    // focus from the field being typed into.
+    _oskEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const key = e.target.closest('.osk-key');
+      if (key) oskKey(key.dataset.k === '&quot;' ? '"' : key.dataset.k);
+    });
+    document.body.appendChild(_oskEl);
+  }
+  _oskMode = 'lower';
+  oskPaint();
+  _oskEl.classList.add('open');
+  setTimeout(() => { if (_oskTarget && document.contains(_oskTarget)) _oskTarget.scrollIntoView({ block: 'center' }); }, 120);
+}
+function oskHide() {
+  if (_oskEl) _oskEl.classList.remove('open');
+  _oskTarget = null;
+}
+document.addEventListener('pointerdown', (e) => { _oskPtrTouch = e.pointerType === 'touch'; }, true);
+document.addEventListener('focusin', (e) => {
+  const t = e.target;
+  if (!t.matches || !t.matches(OSK_TEXT_SEL)) return;
+  if (!oskEligible() || !_oskPtrTouch) return;
+  oskShow(t);
+});
+document.addEventListener('focusout', () => {
+  setTimeout(() => {
+    if (_oskEl && _oskEl.classList.contains('open') && document.activeElement !== _oskTarget) oskHide();
+  }, 80);
+});
+// Keep the OS keyboard away on eligible devices: our keyboard is the one.
+function oskMarkInputs() {
+  if (!oskEligible()) return;
+  document.querySelectorAll(OSK_TEXT_SEL).forEach(el => { el.inputMode = 'none'; });
+}
 // Touch screens: press-and-hold must never pop the browser's copy/paste
 // menu mid-service. Real text fields keep theirs.
 document.addEventListener('contextmenu', (e) => {
@@ -9353,6 +9469,7 @@ function render() {
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
   bindEvents();
+  oskMarkInputs();
   savedScroll.forEach(({ sel, top, left }) => {
     const el = document.querySelector(sel);
     if (el) { el.scrollTop = top; el.scrollLeft = left; }

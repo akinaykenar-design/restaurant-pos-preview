@@ -5999,6 +5999,38 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled promise rejection (server kept running):', err);
 });
 
+// ---------- Connect a device (Settings → Devices) ----------
+
+// The wifi addresses tablets can reach this server on.
+function lanAddresses() {
+  const nets = os.networkInterfaces();
+  const out = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) out.push(net.address);
+    }
+  }
+  return out;
+}
+
+app.get('/api/lan-info', (req, res) => {
+  res.json({ port: PORT, addresses: lanAddresses() });
+});
+
+// QR of the server's wifi address — a tablet camera scans it straight into
+// Safari, no typing. ?i=1 picks the 2nd address when the machine has several.
+app.get('/connect.svg', async (req, res) => {
+  const addrs = lanAddresses();
+  const i = Math.min(parseInt(req.query.i, 10) || 0, Math.max(0, addrs.length - 1));
+  if (!addrs.length) return res.status(404).send('No wifi address found');
+  try {
+    const svg = await require('qrcode').toString(`http://${addrs[i]}:${PORT}`, { type: 'svg', margin: 1, width: 260 });
+    res.type('image/svg+xml').send(svg);
+  } catch (e) {
+    res.status(503).send('QR unavailable — run npm install');
+  }
+});
+
 // ---------- Start the server ----------
 app.listen(PORT, '0.0.0.0', () => {
   const nets = os.networkInterfaces();
@@ -12308,6 +12340,29 @@ function renderPrinterStationsSettingsAdmin() {
   </div>`;
 }
 
+// Settings → Devices: everything needed to put the POS on another screen.
+async function loadLanInfo() {
+  try { state.lanInfo = await api('/api/lan-info'); } catch (e) { state.lanInfo = { port: 3000, addresses: [] }; }
+  render();
+}
+function renderDevicesSettingsAdmin() {
+  if (!state.lanInfo) { loadLanInfo(); return `<div class="empty-hist">…</div>`; }
+  const { port, addresses } = state.lanInfo;
+  return `
+    <div class="settings-card wide" style="max-width:640px;">
+      <div class="th" style="margin-bottom:6px;">Connect a device</div>
+      ${addresses.length ? `
+      <div style="display:flex;gap:18px;align-items:center;flex-wrap:wrap;">
+        <img src="/connect.svg" alt="QR" style="width:200px;height:200px;background:#fff;border-radius:8px;padding:8px;">
+        <div>
+          ${addresses.map(a => `<div class="t1" style="font-family:var(--font-mono);font-size:18px;margin-bottom:4px;">http://${esc(a)}:${port}</div>`).join('')}
+          <div class="t2" style="margin-top:8px;">Phone: scan · open · Add to Home Screen</div>
+          <div class="t2">Windows tablet: run windows\\tablet-pos.bat once</div>
+        </div>
+      </div>` : `<div class="empty-hist">No wifi address found — check the network cable/wifi.</div>`}
+    </div>`;
+}
+
 function renderPrintersSetupTab() {
   const s = state.settings;
   const w = s.paperWidth === '58' ? '58' : '80';
@@ -12868,6 +12923,7 @@ const ADMIN_SECTIONS = [
   ] },
   { group: 'Settings', children: [
     { key: 'settings-printers', label: 'Printers' },
+    { key: 'settings-devices', label: 'Devices' },
     { key: 'screen', label: 'Design' },
     { key: 'floorplan', label: 'Table Layout' },
     { key: 'settings-courses', label: 'Courses' },
@@ -12885,6 +12941,7 @@ const SETTINGS_INDEX = [
   { page: 'screen', label: 'Show or hide prices', terms: 'prices show hide menu' },
   { page: 'settings-tax', label: 'Tax — name, rate & mode', terms: 'tax gst vat rate percent inclusive exclusive included finance' },
   { page: 'settings-backups', label: 'Download full backup', terms: 'backup download export data file' },
+  { page: 'settings-devices', label: 'Connect a device', terms: 'device tablet ipad phone qr connect address wifi add home screen' },
   { page: 'screen', label: 'Colours & theme', terms: 'theme colour color accent dark light palette' },
   { page: 'screen', label: 'Menu tile size', terms: 'tile size item button small medium large' },
   { page: 'screen', label: 'Order screen mockup', terms: 'screen mockup preview order font text size docket width panel resize' },
@@ -13067,6 +13124,7 @@ function renderAdminView() {
         : state.adminTab === 'settings-tips' ? renderTipsSettingsAdmin()
         : state.adminTab === 'settings-void' ? renderVoidReasonsSettingsAdmin()
         : state.adminTab === 'settings-printers' ? renderPrinterStationsSettingsAdmin()
+        : state.adminTab === 'settings-devices' ? renderDevicesSettingsAdmin()
         : state.adminTab === 'settings-payments' ? renderCardTerminalSettingsAdmin()
         : state.adminTab === 'settings-doshii' ? renderDoshiiSettingsAdmin()
         : state.adminTab === 'settings-backups' ? renderBackupsSettingsAdmin()

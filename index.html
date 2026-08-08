@@ -2000,6 +2000,20 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 /* Pop header line: which dish this pop is about (seat + price pops). */
 .qty-pop .sp-item{ font-weight:800; font-size:14px; text-align:center; color:var(--text-primary); }
 .seat-pop .covers-pad-key.assigned{ border-color:var(--green); background:var(--green-dim); color:var(--green); }
+/* Table peek: hold a table on the picker — read-only order summary, no lock. */
+.qty-pop.peek-pop{ width:340px; }
+.peek-meta{ text-align:center; font-size:12.5px; color:var(--charcoal-soft); }
+.peek-chips{ display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-top:4px; }
+.peek-list{ max-height:44vh; overflow:auto; width:100%; text-align:left; }
+.peek-course{ font-size:12.5px; font-weight:800; color:var(--charcoal-soft); text-transform:uppercase; letter-spacing:.04em; margin:10px 0 4px; }
+.peek-list .peek-course:first-child{ margin-top:0; }
+.peek-line{ display:flex; align-items:baseline; gap:8px; padding:3px 0; font-size:14px; }
+.peek-qty{ flex:0 0 auto; font-weight:800; color:var(--green); min-width:28px; font-variant-numeric:tabular-nums; }
+.peek-name{ flex:1; min-width:0; font-weight:600; color:var(--text-primary); }
+.peek-seat{ white-space:nowrap; color:var(--charcoal-soft); font-weight:600; }
+.peek-note{ display:block; font-size:12.5px; color:var(--charcoal-soft); font-weight:500; }
+.peek-price{ flex:0 0 auto; font-weight:700; color:var(--text-primary); font-variant-numeric:tabular-nums; }
+.peek-total{ display:flex; justify-content:space-between; width:100%; padding-top:8px; border-top:1px solid var(--steel-200); font-weight:800; font-size:15px; color:var(--text-primary); }
 
 /* Quantity + allergy marks live IN the tile's name line — no hanging badges.
    "2 Hummus !" — the "!" is red (cannot remove) or gold (substitutable). */
@@ -8976,7 +8990,8 @@ function middlePaneDirty() {
 }
 function escapeMiddlePane() {
   const close =
-    state.noteSeatPop ? () => { state.noteSeatPop = false; render(); }
+    state.tablePeek ? () => { state.tablePeek = null; render(); }
+    : state.noteSeatPop ? () => { state.noteSeatPop = false; render(); }
     : state.allergySeatPop ? () => { state.allergySeatPop = false; render(); }
     : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.coversPad ? () => { state.coversPad = null; state.pickFlashId = null; render(); }
@@ -9383,6 +9398,55 @@ function renderTableNumPop() {
         </div>
       </div>`;
 }
+// Table peek: hold a table on the picker to read its whole order without
+// entering the table — no lock is taken, nothing changes. Same stationary
+// centred pop as everything else; unlike the must-choose pads, tapping the
+// scrim closes it (it's read-only, there's nothing to decide).
+function renderTablePeekPop() {
+  const t = findTableById(state.tablePeek);
+  const o = t && tableOpenOrder(t.label);
+  if (!t || !o) return '';
+  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
+  // Merge every sent round into per-course lines, same grammar as the ticket.
+  const byCourse = {};
+  (o.rounds || []).forEach(r => (r.items || []).forEach(it => {
+    const c = it.course || 1;
+    const key = `${it.name}|${it.seat || ''}|${it.note || ''}|${it.price}|${removedSig(it)}`;
+    const bucket = (byCourse[c] = byCourse[c] || {});
+    if (bucket[key]) bucket[key].qty += it.qty;
+    else bucket[key] = { ...it };
+  }));
+  const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
+  const mins = Math.max(0, Math.round((Date.now() - (o.createdAt || Date.now())) / 60000));
+  const line = (it) => {
+    const removed = lineBuild(it).removed.map(c => 'no ' + c.name);
+    return `
+      <div class="peek-line">
+        <span class="peek-qty">${it.qty} ×</span>
+        <span class="peek-name">${esc(it.name)}${it.seat ? ` <span class="peek-seat">(${it.seat === 'all' ? esc(state.settings.sharedSeatLabel || 'All') : esc(prefix) + '&nbsp;' + it.seat})</span>` : ''}
+          ${removed.length ? `<span class="peek-note">${esc(removed.join(', '))}</span>` : ''}
+          ${it.note ? `<span class="peek-note">${esc(it.note)}</span>` : ''}
+        </span>
+        <span class="peek-price">${it.price > 0 ? money(it.price * it.qty) : ''}</span>
+      </div>`;
+  };
+  return `
+      <div class="pop-scrim" data-act="peek-close"></div>
+      <div class="qty-pop covers-pop peek-pop">
+        <div class="sp-item">${tableDisplayLabel(t.id)}</div>
+        <div class="peek-meta">${o.covers ? `${o.covers} covers · ` : ''}${esc(o.staffName || '')} · ${mins}m</div>
+        ${(t.allergies || []).length ? `<div class="peek-chips">${t.allergies.map(a => `<span class="algn-chip contains">${esc(a.allergy)}${a.seat ? ` · ${esc(prefix).toLowerCase()} ${a.seat}` : ''}</span>`).join('')}</div>` : ''}
+        <div class="peek-list">
+          ${Object.keys(byCourse).map(Number).sort((a, b) => a - b).map(n => `
+            <div class="peek-course">${esc(courseInfo(n).name)}</div>
+            ${Object.values(byCourse[n]).map(line).join('')}`).join('')}
+        </div>
+        <div class="peek-total"><span>Total</span><span>${money(total)}</span></div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action discard" title="Close" data-act="peek-close">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
+}
 
 async function sendToKitchen() {
   if (state.cart.length === 0 || state.sending) return;
@@ -9726,6 +9790,7 @@ function render() {
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
     ${state.allergySeatPop && state.allergyModal ? renderAllergySeatPop() : ''}
+    ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
@@ -18126,8 +18191,26 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointercancel', end);
 }, { passive: true });
 document.addEventListener('scroll', closeQtyPop, true);
+// Table peek: press-and-hold an occupied table on the picker to read its
+// order (same hold grammar as the qty pop). The fired flag swallows the
+// release's click so holding never also selects the table.
+let _peekHoldTimer = 0, _peekHoldFired = false;
+document.addEventListener('pointerdown', (e) => {
+  const tile = e.target.closest && e.target.closest('[data-act="pick-table"]');
+  if (!tile || state.tablePeek) return;
+  const t = findTableById(tile.dataset.id);
+  if (!t || !tableOpenOrder(t.label)) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  _peekHoldFired = false;
+  const end = () => { clearTimeout(_peekHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
+  _peekHoldTimer = setTimeout(() => { _peekHoldFired = true; state.tablePeek = t.id; render(); }, 450);
+  document.addEventListener('pointermove', mv, { passive: true });
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}, { passive: true });
 // Long-press must not summon the browser context menu on the tiles.
-document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card')) e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker')) e.preventDefault(); });
 // Some touch screens eat the click after a LONG press (the browser treats
 // it as a long-press gesture, not a tap). For controls whose hold has no
 // other meaning — rail categories and subsection folder tiles — fire the
@@ -21569,7 +21652,9 @@ function bindEvents() {
         if (el.dataset.val === 'booked') api('/api/reservations').then(r => { state.reservations = r; render(); }).catch(() => {});
         render();
       }
+      else if (act === 'peek-close') { state.tablePeek = null; render(); }
       else if (act === 'pick-table') {
+        if (_peekHoldFired) { _peekHoldFired = false; return; }
         if (state.moveItemsPicking) doMoveItems(el.dataset.id);
         else if (state.transferMode) transferPickTable(el.dataset.id);
         else if (state.showTablePicker && state.floorStatusView === 'booked' && (() => {

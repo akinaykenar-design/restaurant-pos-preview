@@ -9499,7 +9499,9 @@ async function sendToKitchen() {
     // Docket's away — when the venue runs one till for many staff, hand it
     // straight to the next person (send + log off in one tap). Only on
     // SUCCESS: a failed send must never dump someone onto the lock screen.
-    if (state.settings.logoffAfterSend) {
+    // _logoffOnce is the hold-Send gesture: same handover, just this once.
+    if (state.settings.logoffAfterSend || state._logoffOnce) {
+      state._logoffOnce = false;
       logOut();
       return;
     }
@@ -9509,6 +9511,7 @@ async function sendToKitchen() {
     render();
     armToastTimer(3200);
   } catch (e) {
+    state._logoffOnce = false;
     state.toast = 'Could not send items — check the server.';
     render();
   } finally {
@@ -10539,7 +10542,7 @@ function renderTicketPanel() {
         return shown.map(n => {
           const info = courseInfo(n);
           return `
-          <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}" ${auto ? `title="Auto-coursing is on — tapping takes manual control on this course"` : ''}>
+          <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}" title="${auto ? 'Auto-coursing is on — tapping takes manual control on this course. ' : ''}Hold: call away ${esc(info.name)}${state.firedCourses[n] ? ' — hold again to take it back' : ''}">
             ${esc(info.name)}${state.firedCourses[n] ? '<span class="ct-fired">✓</span>' : ''}
           </button>`;
         }).join('')
@@ -10668,7 +10671,7 @@ function renderTicketPanel() {
         <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" title="${openOrder && openOrder.billPrinted ? 'Bill printed — print again' : 'Print bill'}" ${!openOrder ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
         <button class="icon-action pay" title="Take payment or apply a discount / surcharge" data-act="checkout" ${!openOrder && !state.cart.length ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" title="Discard changes" data-act="clear" ${state.cart.length === 0 ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Discard</span></button>
-        <button class="icon-action send" title="${state.sending ? 'Sending…' : 'Send to kitchen'}" data-act="send-to-kitchen" ${state.sending || state.cart.length === 0 ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : 'Send'}</span></button>
+        <button class="icon-action send" title="${state.sending ? 'Sending…' : 'Send to kitchen — hold to send + log off'}" data-act="send-to-kitchen" ${state.sending || state.cart.length === 0 ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : 'Send'}</span></button>
       </div>
     </div>
     ${state.settings.ticketFooter ? `<div class="ticket-footer-msg">${esc(state.settings.ticketFooter)}</div>` : ''}
@@ -18209,8 +18212,41 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
 }, { passive: true });
+// Hold grammar on the docket: hold a course tab to call it away (hold again
+// takes it back — the ✓ appears/disappears), hold Send to send + log off just
+// this once. Taps keep their meaning; fired flags swallow the release's click.
+let _dktHoldTimer = 0, _courseHoldFired = false, _sendHoldFired = false;
+document.addEventListener('pointerdown', (e) => {
+  const tab = e.target.closest && e.target.closest('.course-tab[data-act="set-course"]');
+  const send = !tab && e.target.closest && e.target.closest('[data-act="send-to-kitchen"]');
+  const el = tab || send;
+  if (!el || el.disabled || el.closest('.mk-wrap')) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  // Some touch screens eat the click after a long press — the swallow flags
+  // must not outlive the release, or they'd eat the NEXT honest tap too.
+  const end = () => { clearTimeout(_dktHoldTimer); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
+  _dktHoldTimer = setTimeout(() => {
+    if (tab) {
+      _courseHoldFired = true;
+      const n = parseInt(tab.dataset.val);
+      if (state.firedCourses[n]) {
+        clearFiredCourse(n);
+        state.toast = `${courseInfo(n).name} call away taken back`;
+        render();
+      } else fireCourse(n);
+    } else {
+      _sendHoldFired = true;
+      state._logoffOnce = true;
+      sendToKitchen();
+    }
+  }, 450);
+  document.addEventListener('pointermove', mv, { passive: true });
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}, { passive: true });
 // Long-press must not summon the browser context menu on the tiles.
-document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker')) e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send')) e.preventDefault(); });
 // Some touch screens eat the click after a LONG press (the browser treats
 // it as a long-press gesture, not a tap). For controls whose hold has no
 // other meaning — rail categories and subsection folder tiles — fire the
@@ -21268,8 +21304,12 @@ function bindEvents() {
       else if (act === 'clear') { clearCart(); }
       else if (act === 'checkout') { openCheckout(); }
       else if (act === 'print-bill') { markBillPrinted(el.dataset.order); }
-      else if (act === 'send-to-kitchen') { sendToKitchen(); }
-      else if (act === 'close-stock-warn' || act === 'stock-warn-bg') { state.stockWarnModal = null; render(); }
+      else if (act === 'send-to-kitchen') {
+        if (_sendHoldFired) { _sendHoldFired = false; return; }
+        state._logoffOnce = false; // plain tap never inherits an old hold's intent
+        sendToKitchen();
+      }
+      else if (act === 'close-stock-warn' || act === 'stock-warn-bg') { state.stockWarnModal = null; state._logoffOnce = false; render(); }
       else if (act === 'close-allergen-warn') { state.allergenWarnModal = null; render(); }
       else if (act === 'allergen-warn-add') {
         // Resume exactly the flow the warning interrupted — direct add, the
@@ -21551,6 +21591,7 @@ function bindEvents() {
       else if (act === 'menu-out-toggle') { state.menuModal.out = !state.menuModal.out; render(); }
       else if (act === 'remove-variant') { removeVariantRow(parseInt(el.dataset.vidx)); }
       else if (act === 'set-course') {
+        if (_courseHoldFired) { _courseHoldFired = false; return; }
         // Tapping a course while Auto is on takes manual control right there —
         // no need to tap Auto off first.
         if (autoCourseOn()) state.autoCourseOverride = (state.settings.autoCourse !== false) ? false : null;

@@ -1134,6 +1134,27 @@ input:focus, select:focus, textarea:focus{
 button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
 .cat-btn, .pay-opt, .course-tab, .seg, .staff-tile{ -webkit-user-select: none; user-select: none; }
 
+/* ── Lock screen ──────────────────────────────────────────────────────
+   PIN-first login: whole screen, always dark (it is a lock screen — it
+   also hides the till from passers-by), no staff list. Literal colours
+   on purpose: identical in light and dark themes. */
+.login-screen.pinfirst{position:fixed;inset:0;background:#1E1C19;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;z-index:10;}
+.lg-clock{font-family:var(--font-mono);font-size:56px;font-weight:800;color:#F5F1E8;line-height:1;letter-spacing:1px;}
+.lg-date{font-size:var(--fs-lg);font-weight:600;color:#918E88;margin:10px 0 2px;}
+.lg-venue{font-size:var(--fs-chip);font-weight:700;letter-spacing:2.5px;text-transform:uppercase;color:#6F6B64;margin-top:4px;}
+.pin-dots.lg{display:flex;gap:16px;margin:34px 0 26px;}
+.pin-dots.lg .pin-dot{width:13px;height:13px;border-radius:50%;background:transparent;border:1.5px solid #6F6B64;}
+.pin-dots.lg .pin-dot.filled{background:#F5F1E8;border-color:#F5F1E8;}
+@keyframes lgShake{0%,100%{translate:0 0}20%{translate:-7px 0}40%{translate:6px 0}60%{translate:-4px 0}80%{translate:3px 0}}
+.pin-dots.lg.shake{animation:lgShake .3s ease;}
+.pin-pad.lg{display:grid;grid-template-columns:repeat(3, 84px);gap:14px;}
+.pin-pad.lg button{height:74px;border-radius:16px;border:1px solid rgba(245,241,232,.14);background:rgba(245,241,232,.06);color:#F5F1E8;font-family:var(--font-body);font-size:26px;font-weight:600;cursor:pointer;}
+.pin-pad.lg button:active{background:rgba(245,241,232,.16);}
+.pin-pad.lg button.util{font-size:20px;color:#918E88;}
+.lg-dupes{display:flex;gap:14px;margin-top:30px;flex-wrap:wrap;justify-content:center;}
+.lg-dupe{display:flex;align-items:center;gap:12px;padding:16px 22px;border-radius:14px;border:1px solid rgba(245,241,232,.14);background:rgba(245,241,232,.06);color:#F5F1E8;font-size:var(--fs-lg);font-weight:700;cursor:pointer;font-family:inherit;}
+.lg-ava{width:38px;height:38px;border-radius:50%;background:rgba(245,241,232,.12);display:inline-flex;align-items:center;justify-content:center;font-weight:800;}
+
 /* ── Tap feedback ─────────────────────────────────────────────────────
    The pressed control acknowledges the finger the instant it lands —
    only under YOUR finger (:active), springs back on release, never
@@ -4227,6 +4248,19 @@ app.post('/api/staff/verify-pin', (req, res) => {
   if (pinRateBlocked(req, res)) return;
   const data = readData();
   const { staffId, pin } = req.body;
+  // PIN-first login: no staffId means the PIN itself identifies the person.
+  // If two people share a PIN (legacy data), the client shows just those
+  // faces to pick from and retries with the staffId.
+  if (!staffId) {
+    // PINs are enforced unique at save, so one PIN = one person.
+    const match = data.staff.find(s => s.pin === pin);
+    if (!match) {
+      pinRecordFailure(req);
+      return res.status(401).json({ error: 'Incorrect PIN' });
+    }
+    pinRecordSuccess(req);
+    return res.json({ id: match.id, name: match.name, role: match.role });
+  }
   const staff = data.staff.find(s => s.id === staffId);
   if (!staff || staff.pin !== pin) {
     pinRecordFailure(req);
@@ -4247,6 +4281,16 @@ app.post('/api/staff/verify-manager-pin', (req, res) => {
   }
   pinRecordSuccess(req);
   res.json({ id: manager.id, name: manager.name, role: manager.role });
+});
+
+// Manager eye on the Team page: reveal one PIN, and leave a trace.
+app.get('/api/staff/:id/pin', (req, res) => {
+  const data = readData();
+  const staff = data.staff.find(s => s.id === req.params.id);
+  if (!staff) return res.status(404).json({ error: 'Staff member not found' });
+  logAudit(data, staffFromReq(req), `Viewed PIN for ${staff.name}`);
+  writeData(data);
+  res.json({ pin: staff.pin });
 });
 
 app.post('/api/staff', (req, res) => {
@@ -7679,6 +7723,8 @@ function applyTheme() {
   }
 }
 window.addEventListener('resize', applyTheme);
+// Lock-screen clock stays right while nobody's signed in.
+setInterval(() => { if (!state.currentStaff) render(); }, 30000);
 // ---------- On-screen keyboard (touch tablets / tills) ----------
 // Text fields get the app's own compact keyboard instead of the OS one.
 // Lives OUTSIDE #app so render() never rebuilds it mid-word; appears only
@@ -7945,28 +7991,55 @@ function backToStaffGrid() {
   render();
 }
 
+// Team page eye: reveal a staff PIN in place (fetched on demand — PINs
+// never ride the normal staff payload — and the reveal is audit-logged).
+async function toggleStaffPinView(id) {
+  const input = document.querySelector(`.staff-pin-quick-edit[data-id="${id}"]`);
+  if (state.pinRevealId === id) {
+    state.pinRevealId = null;
+    if (input) { input.value = ''; input.type = 'password'; }
+    render();
+    return;
+  }
+  try {
+    const r = await api(`/api/staff/${id}/pin`);
+    state.pinRevealId = id;
+    render();
+    const inp = document.querySelector(`.staff-pin-quick-edit[data-id="${id}"]`);
+    if (inp) { inp.type = 'text'; inp.value = r.pin; }
+  } catch (e) {
+    state.toast = 'Could not fetch the PIN.'; render(); armToastTimer(2500);
+  }
+}
+
+function finishLogin(staff) {
+  state.currentStaff = staff;
+  try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
+  state.loginSelectedId = null;
+  state.loginPin = '';
+  state.loginError = '';
+  state.loginDupMatches = null;
+  state.view = staff.role === 'chef' ? 'kitchen' : 'order';
+  render();
+  loadInitial().then(() => { if (staff.role === 'chef') loadKdsData(); });
+}
+// PIN-first: the PIN alone names the person. A shared PIN (legacy data)
+// surfaces just the matching faces to pick from.
 async function pressPinDigit(d) {
   if (state.loginPin.length >= 4) return;
   state.loginPin += d;
+  state.loginError = '';
   render();
   if (state.loginPin.length === 4) {
     try {
-      const staff = await api('/api/staff/verify-pin', {
+      const r = await api('/api/staff/verify-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ staffId: state.loginSelectedId, pin: state.loginPin }),
+        body: JSON.stringify({ pin: state.loginPin }),
       });
-      state.currentStaff = staff;
-      try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
-      state.loginSelectedId = null;
-      state.loginPin = '';
-      state.loginError = '';
-      state.view = staff.role === 'chef' ? 'kitchen' : 'order';
-      render();
-      await loadInitial();
-      if (staff.role === 'chef') loadKdsData();
+      finishLogin(r);
     } catch (e) {
-      state.loginError = 'Incorrect PIN, try again';
+      state.loginError = 'shake';
       state.loginPin = '';
       render();
     }
@@ -9645,42 +9718,26 @@ function setToolbarHeightVar() {
 }
 window.addEventListener('resize', setToolbarHeightVar);
 
+// Lock screen: whole-screen, dark, PIN-first. No staff list on display —
+// the PIN is the identity. Clock up top like a till should have.
 function renderLoginScreen() {
-  const selected = state.staffList.find(s => s.id === state.loginSelectedId);
-  if (!selected) {
-    return `
-    <div class="login-screen">
-      <div class="login-card">
-        <div class="brand" style="justify-content:center;margin-bottom:22px;">
-          <div class="brand-mark">L</div>
-          <div><div class="brand-name">LINE</div><div class="brand-sub">In-house POS</div></div>
-        </div>
-        <div class="login-title">Who's working?</div>
-        <div class="staff-grid">
-          ${state.staffList.map(s => `
-            <button class="staff-tile" data-act="login-select" data-id="${s.id}">
-              <div class="staff-avatar">${esc(s.name.charAt(0))}</div>
-              <div class="staff-tile-name">${esc(s.name)}</div>
-            </button>`).join('')}
-        </div>
-      </div>
-    </div>`;
-  }
+  const now = new Date();
+  const time = now.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const date = now.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'long' });
+  const venue = (state.settings && state.settings.ticketHeader) || '';
   return `
-  <div class="login-screen">
-    <div class="login-card">
-      <button class="link-btn" data-act="login-back">&larr; Back</button>
-      <div class="login-title">Enter PIN for ${esc(selected.name)}</div>
-      <div class="pin-dots">
-        ${[0, 1, 2, 3].map(i => `<span class="pin-dot ${i < state.loginPin.length ? 'filled' : ''}"></span>`).join('')}
-      </div>
-      ${state.loginError ? `<div class="login-error">${state.loginError}</div>` : ''}
-      <div class="pin-pad">
-        ${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(d => `<button data-act="pin-digit" data-val="${d}">${d}</button>`).join('')}
-        <div></div>
-        <button data-act="pin-digit" data-val="0">0</button>
-        <button data-act="pin-back">&larr;</button>
-      </div>
+  <div class="login-screen pinfirst">
+    <div class="lg-clock">${esc(time)}</div>
+    <div class="lg-date">${esc(date)}</div>
+    ${venue ? `<div class="lg-venue">${esc(venue)}</div>` : ''}
+    <div class="pin-dots lg${state.loginError === 'shake' ? ' shake' : ''}">
+      ${[0, 1, 2, 3].map(i => `<span class="pin-dot ${i < state.loginPin.length ? 'filled' : ''}"></span>`).join('')}
+    </div>
+    <div class="pin-pad lg">
+      ${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(d => `<button data-act="pin-digit" data-val="${d}">${d}</button>`).join('')}
+      <div></div>
+      <button data-act="pin-digit" data-val="0">0</button>
+      <button class="util" data-act="pin-back">⌫</button>
     </div>
   </div>`;
 }
@@ -13897,8 +13954,15 @@ function renderStaffAdmin() {
             </div>
             <div style="display:flex;gap:8px;align-items:flex-end;">
               <div style="display:flex;flex-direction:column;gap:6px;">
-                <label class="field-label">New 4-digit PIN</label>
-                <input type="text" maxlength="4" class="staff-pin-quick-edit" data-id="${s.id}" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:200px;">
+                <label class="field-label">PIN</label>
+                <div style="display:flex;gap:6px;align-items:center;">
+                  <input type="password" maxlength="4" class="staff-pin-quick-edit" data-id="${s.id}" placeholder="••••" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:160px;">
+                  <button class="icon-sq ${state.pinRevealId === s.id ? 'active' : ''}" data-act="toggle-staff-pin-view" data-id="${s.id}" title="${state.pinRevealId === s.id ? 'Hide PIN' : 'Show PIN'}">
+                    ${state.pinRevealId === s.id
+                      ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
+                      : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'}
+                  </button>
+                </div>
               </div>
               <button class="btn-secondary sm" data-act="save-staff-pin" data-id="${s.id}">Update PIN</button>
             </div>
@@ -20884,8 +20948,6 @@ function bindEvents() {
       else if (act === 'refund-modal-bg') { if (e.target === el) closeRefundModal(); }
       else if (act === 'confirm-refund-modal') { confirmRefundModal(); }
       else if (act === 'modal-bg') { if (e.target === el) closeCheckout(); }
-      else if (act === 'login-select') { selectLoginStaff(el.dataset.id); }
-      else if (act === 'login-back') { backToStaffGrid(); }
       else if (act === 'pin-digit') { pressPinDigit(el.dataset.val); }
       else if (act === 'pin-back') { pressPinBackspace(); }
       else if (act === 'logout') { offerCloseEmptyTable(() => logOut()); }
@@ -20963,6 +21025,7 @@ function bindEvents() {
       else if (act === 'save-staff-modal') { saveStaffModal(); }
       else if (act === 'toggle-staff-expand') { toggleStaffExpand(el.dataset.id); }
       else if (act === 'save-staff-pin') { saveStaffPin(el.dataset.id); }
+      else if (act === 'toggle-staff-pin-view') { toggleStaffPinView(el.dataset.id); }
       else if (act === 'clear-staff-selection') { state.selectedStaffIds = []; render(); }
       else if (act === 'delete-selected-staff') { deleteSelectedStaff(); }
       else if (act === 'open-bulk-staff') { state.bulkStaffModal = { role: 'staff' }; render(); }

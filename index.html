@@ -610,7 +610,9 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .staff-badge{display:flex;align-items:center;gap:10px;font-size:12.5px;font-weight:600;color:var(--text-primary);margin-left:8px;}
 .staff-badge button{background:var(--steel-100);border:1px solid var(--steel-200);color:var(--text-primary);font-size:var(--fs-sm);padding:8px 18px;border-radius:9px;cursor:pointer;font-weight:600;min-height:52px;}
 .staff-badge button.active{background:var(--orange-dim);border-color:var(--orange);color:var(--orange);}
-.staff-badge button svg{width:22px;height:22px;display:block;}
+/* Topbar glyphs match the docket icons' weight: 26px boxes and the same
+   ~2.33px absolute stroke (docket = stroke 2 in a 24 box at 28px). */
+.staff-badge button svg{width:26px;height:26px;display:block;stroke-width:2.15;}
 
 /* Login screen */
 .login-screen{flex:1;display:flex;align-items:center;justify-content:center;background:var(--steel-100);padding:20px;}
@@ -8972,7 +8974,8 @@ function middlePaneDirty() {
 }
 function escapeMiddlePane() {
   const close =
-    state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
+    state.noteSeatPop ? () => { state.noteSeatPop = false; render(); }
+    : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.coversPad ? () => { state.coversPad = null; state.pickFlashId = null; render(); }
     : state.showCheckout ? () => closeCheckout()
     : state.callAway ? () => closeCallAwayPane()
@@ -9075,7 +9078,13 @@ function saveCustomNoteDraft() {
   const m = state.customNoteDraft;
   const text = m.text.trim();
   if (!text) { state.adminError = 'Type a note.'; render(); return; }
-  if (!m.wholeTable && m.seats.length === 0) { state.adminError = 'Pick at least one seat, or Whole table.'; render(); return; }
+  if (!m.wholeTable && m.seats.length === 0) {
+    // Same grammar as adding an item: the centred seat pop asks which
+    // cover the note applies to (All = whole table). No seats set up →
+    // it's simply a whole-table note.
+    if (state.settings.seatNumbersEnabled && state.covers > 0) { state.noteSeatPop = true; state.adminError = ''; render(); return; }
+    m.wholeTable = true;
+  }
   const targets = m.wholeTable ? [null] : m.seats;
   const newEntries = targets.map(seat => ({ seat, categoryId: m.categoryId || null, text }));
   // Editing an existing chip replaces it instead of appending a duplicate.
@@ -9701,6 +9710,7 @@ function render() {
     ${state.coversPad ? renderCoversPop() : ''}
     ${state.tableNumPad ? renderTableNumPop() : ''}
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
+    ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
@@ -9880,7 +9890,7 @@ function renderTopbar() {
       ${!state.online ? `<span title="Cannot reach server" style="display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;color:var(--red);"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);"></span>Offline</span>` : ''}
       ${state.view === 'order' && !isChef && state.orderType === 'dine-in' ? (() => {
         const t = findTableById(state.table);
-        return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}${t ? `<span class="acct-tbl">${esc(String(t.label))}</span>` : ''}</button></span>`;
+        return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}</button></span>`;
       })() : ''}
       ${state.view === 'order' && !isChef && state.settings.searchEnabled !== false ? `<button class="${(state.searchOpen || state.search) ? 'active' : ''}" data-act="${(state.searchOpen || state.search) ? 'close-search' : 'open-search'}" title="Search the menu">${SYS_SEARCH_SVG}</button>` : ''}
       <button data-act="logout" title="Log out">${ACT_POWER_SVG}</button>
@@ -10453,7 +10463,7 @@ function renderTicketPanel() {
             ${esc(info.name)}${state.firedCourses[n] ? '<span class="ct-fired">✓</span>' : ''}
           </button>`;
         }).join('')
-          + `<button class="course-tab ${autoCourseOn() ? 'active' : 'auto-off'}" data-act="toggle-auto-course-order" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}">Auto</button>`;
+          + `<button class="course-tab ${autoCourseOn() ? 'active' : 'auto-off'}" data-act="toggle-auto-course-order" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}">✨ Auto</button>`;
       })()}
     </div>
     <div class="ticket-items">
@@ -10707,11 +10717,37 @@ function renderAllergyTabContent() {
 `;
 }
 
+function renderNoteSeatPop() {
+  const m = state.customNoteDraft;
+  if (!m) return '';
+  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop seat-pop">
+        <div class="sp-item">${esc(m.text.trim())}</div>
+        <div class="covers-pad-display qp-display" style="font-size:17px;">${esc(prefix)}</div>
+        <div class="covers-pad-grid qp-grid">
+          <button class="covers-pad-key util" data-act="note-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key" data-act="note-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action discard" title="Cancel" data-act="close-note-seat-pop">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
+}
+function pickNoteSeat(seat) {
+  const m = state.customNoteDraft;
+  if (!m) { state.noteSeatPop = false; render(); return; }
+  if (seat === 'all') { m.wholeTable = true; m.seats = []; }
+  else { m.wholeTable = false; m.seats = [seat]; }
+  state.noteSeatPop = false;
+  saveCustomNoteDraft();
+}
+
 function renderCustomNoteTabContent(categoryId) {
   const m = state.customNoteDraft;
   if (!m) return '';
   const cat = state.noteCategories.find(c => c.id === categoryId);
-  const seatOptions = state.settings.seatNumbersEnabled && state.covers > 0 ? Array.from({ length: state.covers }, (_, i) => i + 1) : [];
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   ${cat && (cat.presets || []).length ? `
@@ -10721,11 +10757,6 @@ function renderCustomNoteTabContent(categoryId) {
     </div>` : ''}
   <label>${cat ? esc(cat.name) : 'Note'}</label>
   <input id="custom-note-text-input" class="note-input-btn" type="text" value="${esc(m.text)}" placeholder="+ Type a note…">
-  <label>Applies to</label>
-  <div class="grid" style="margin-top:2px;">
-    <button type="button" class="item-card allergy-item-card ${m.wholeTable ? 'selected' : ''}" data-act="pick-note-whole-table"><div class="item-name">Whole table</div></button>
-    ${seatOptions.map(n => `<button type="button" class="item-card allergy-item-card ${!m.wholeTable && m.seats.includes(n) ? 'selected' : ''}" data-act="toggle-note-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('')}
-  </div>
 `;
 }
 
@@ -21968,6 +21999,8 @@ function bindEvents() {
         render();
       }
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
+      else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
+      else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
       else if (act === 'remove-note') { removeNoteEntry(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-entry') {
         // Tap a note chip -> its tab opens prefilled; saving replaces the entry.

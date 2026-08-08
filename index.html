@@ -8975,6 +8975,7 @@ function middlePaneDirty() {
 function escapeMiddlePane() {
   const close =
     state.noteSeatPop ? () => { state.noteSeatPop = false; render(); }
+    : state.allergySeatPop ? () => { state.allergySeatPop = false; render(); }
     : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.coversPad ? () => { state.coversPad = null; state.pickFlashId = null; render(); }
     : state.showCheckout ? () => closeCheckout()
@@ -9039,9 +9040,13 @@ function saveAllergyModal() {
   const allergies = m.selectedAllergies.map(name => m.subTypeChoices[name] ? `${name} (${m.subTypeChoices[name]})` : name);
   if (custom && !allergies.includes(custom)) allergies.push(custom);
   if (allergies.length === 0) { state.adminError = 'Pick or type at least one allergy.'; render(); return; }
-  // No cover picked = the whole table. An enabled tick must never no-op —
-  // a silent nothing on an ALLERGY is the worst possible failure.
-  if (!m.wholeTable && m.seats.length === 0) m.wholeTable = true;
+  // No cover picked yet: the centred seat pop asks (same grammar as items
+  // and notes). An enabled tick still never no-ops — with seat numbers off
+  // it saves for the whole table straight away.
+  if (!m.wholeTable && m.seats.length === 0) {
+    if (state.settings.seatNumbersEnabled && state.covers > 0) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
+    m.wholeTable = true;
+  }
   const notes = m.notes.trim();
   const targets = m.wholeTable ? [null] : m.seats;
   const newEntries = targets.flatMap(seat => allergies.map(allergy => ({ seat, allergy, notes })));
@@ -9711,6 +9716,7 @@ function render() {
     ${state.tableNumPad ? renderTableNumPop() : ''}
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
+    ${state.allergySeatPop && state.allergyModal ? renderAllergySeatPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
 
@@ -10685,7 +10691,6 @@ function renderVoidModal() {
 function renderAllergyTabContent() {
   const m = state.allergyModal;
   if (!m) return '';
-  const seatOptions = state.settings.seatNumbersEnabled && state.covers > 0 ? Array.from({ length: state.covers }, (_, i) => i + 1) : [];
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   <div class="grid" style="margin-bottom:6px;">
@@ -10709,10 +10714,6 @@ function renderAllergyTabContent() {
   }).join('')}
   ${state.settings.allergyCustomEnabled ? `
     <input id="allergy-custom-input" class="note-input-btn" type="text" placeholder="+ Other allergy…" value="${m.customAllergy}">` : ''}
-  <div class="grid" style="margin-top:10px;">
-    <button type="button" class="item-card allergy-item-card ${m.wholeTable ? 'selected' : ''}" data-act="pick-allergy-whole-table"><div class="item-name">Whole table</div></button>
-    ${seatOptions.map(n => `<button type="button" class="item-card allergy-item-card ${!m.wholeTable && m.seats.includes(n) ? 'selected' : ''}" data-act="toggle-allergy-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('')}
-  </div>
   <input id="allergy-notes-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.notes)}" style="margin-top:8px;">
 `;
 }
@@ -10742,6 +10743,34 @@ function pickNoteSeat(seat) {
   else { m.wholeTable = false; m.seats = [seat]; }
   state.noteSeatPop = false;
   saveCustomNoteDraft();
+}
+
+function renderAllergySeatPop() {
+  const m = state.allergyModal;
+  if (!m) return '';
+  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
+  const what = [...m.selectedAllergies, m.customAllergy.trim()].filter(Boolean).join(', ');
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop seat-pop">
+        <div class="sp-item">${esc(what)}</div>
+        <div class="covers-pad-display qp-display" style="font-size:17px;">${esc(prefix)}</div>
+        <div class="covers-pad-grid qp-grid">
+          <button class="covers-pad-key util" data-act="allergy-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key" data-act="allergy-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action discard" title="Cancel" data-act="close-allergy-seat-pop">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
+}
+function pickAllergySeat(seat) {
+  const m = state.allergyModal;
+  if (!m) { state.allergySeatPop = false; render(); return; }
+  if (seat === 'all') { m.wholeTable = true; m.seats = []; }
+  else { m.wholeTable = false; m.seats = [seat]; }
+  state.allergySeatPop = false;
+  saveAllergyModal();
 }
 
 function renderCustomNoteTabContent(categoryId) {
@@ -22001,6 +22030,8 @@ function bindEvents() {
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
+      else if (act === 'allergy-pick-seat') { pickAllergySeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
+      else if (act === 'close-allergy-seat-pop') { state.allergySeatPop = false; render(); }
       else if (act === 'remove-note') { removeNoteEntry(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-entry') {
         // Tap a note chip -> its tab opens prefilled; saving replaces the entry.

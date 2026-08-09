@@ -393,11 +393,6 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
    muscle memory. Long custom names ellipsize inside their cell. */
 .course-tabs{display:grid;grid-template-columns:repeat(3, 1fr);gap:6px;padding:10px 18px;border-bottom:1px dashed var(--chit-line);flex-shrink:0;}
 .course-tabs .course-tab{width:100%;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding-left:6px;padding-right:6px;}
-/* The ✨ Auto toggle is a MODE, not a course — visibly smaller than the
-   course tabs, and its ON colour is gold (allergy-yellow pairing), never
-   the blue that means "this course is open". */
-.course-tabs .course-tab.auto-tab{width:auto;justify-self:end;align-self:center;min-height:38px;padding:6px 13px;font-size:calc(11px*var(--tkt-fs,1));}
-.course-tab.auto-tab.active{background:#EDC53F;color:#24211A;border-color:#EDC53F;}
 .course-tab{background:var(--surface);border:1px solid var(--chit-line);border-radius:var(--btn-radius);padding:9px 16px;min-height:46px;font-size:calc(13px*var(--tkt-fs,1));font-weight:700;cursor:pointer;font-family:var(--font-mono);}
 .course-tab.active{background:var(--orange);color:#fff;border-color:var(--orange);}
 .course-tab.add{width:28px;padding:5px 0;text-align:center;}
@@ -3917,7 +3912,7 @@ app.put('/api/settings', (req, res) => {
   if (subcatStyle === 'bar' || subcatStyle === 'tiles') data.settings.subcatStyle = subcatStyle;
   if (req.body.docketShortcuts && typeof req.body.docketShortcuts === 'object') {
     const next = Object.assign({}, data.settings.docketShortcuts);
-    for (const k of ['table', 'notes', 'quickNote', 'callAway']) {
+    for (const k of ['table', 'notes', 'quickNote', 'callAway', 'auto']) {
       if (typeof req.body.docketShortcuts[k] === 'boolean') next[k] = req.body.docketShortcuts[k];
     }
     data.settings.docketShortcuts = next;
@@ -8877,6 +8872,27 @@ function clearCart() {
 }
 
 function setActiveCourse(n) { state.activeCourse = n; render(); }
+// One auto-coursing toggle for every entry point (account tile, docket icon):
+// flipping it ON re-courses the unsent cart to the items' defaults.
+function toggleAutoCourseOrder() {
+  const next = !autoCourseOn();
+  state.autoCourseOverride = next === (state.settings.autoCourse !== false) ? null : next;
+  let moved = 0;
+  if (next) state.cart.forEach(c => {
+    const item = state.menu.find(m => m.id === c.menuItemId);
+    const def = item && itemDefaultCourse(item);
+    if (def && c.course !== def) { c.course = def; if (def > state.courseCount) state.courseCount = def; moved++; }
+  });
+  state.toast = next ? (moved ? `Auto course on — ${moved} item${moved === 1 ? '' : 's'} coursed` : 'Auto course on') : 'Auto course off';
+  render(); armToastTimer(2000);
+}
+// The tab tick marks only the LAST called course (owner call: one tick, not
+// a growing trail) — earlier courses stay fired in state for dockets/KDS.
+function lastFiredCourse() {
+  let best = null, bt = -1;
+  Object.entries(state.firedCourses).forEach(([n, t]) => { if (t > bt) { bt = t; best = parseInt(n); } });
+  return best;
+}
 function fireCourse(n) {
   state.firedCourses[n] = Date.now();
   state.toast = `${courseInfo(n).name} called away`;
@@ -10448,6 +10464,9 @@ const DKT_USER_SVG = `<svg class="act-i" viewBox="0 0 24 24" fill="none" stroke=
 const DKT_NOTE_SVG = `<svg class="act-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 9h6"/><path d="M9 14h4"/></svg>`;
 const DKT_BOLT_SVG = `<svg class="act-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4.7 13.5h5.1L9 22l8.3-11.5h-5.1z"/></svg>`;
 const DKT_FLAME_SVG = `<svg class="act-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0 0 11 12c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 1 1-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 0 0 2.5 2.5z"/></svg>`;
+// Auto-coursing sparkle, drawn in the same stroke grammar as the other
+// docket glyphs (replaces the ✨ emoji everywhere).
+const DKT_AUTO_SVG = `<svg class="act-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 4.5l1.6 4.4 4.4 1.6-4.4 1.6L10 16.5l-1.6-4.4L4 10.5l4.4-1.6z"/><path d="M17.5 14.5v5M15 17h5"/></svg>`;
 // Inline (1em) variants of the docket-head glyphs for headings and chips.
 const SYS_NOTE_SVG = DKT_NOTE_SVG.replace('act-i', 'sys-i');
 const SYS_FLAME_SVG = DKT_FLAME_SVG.replace('act-i', 'sys-i');
@@ -10507,6 +10526,7 @@ function renderTicketPanel() {
           ${sc.notes !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.notesPanel ? 'active' : ''}" title="Notes" data-act="toggle-notes-panel">${DKT_NOTE_SVG}</button>` : ''}
           ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active' : ''}" title="Quick note — next docket only" data-act="toggle-quick-note">${DKT_BOLT_SVG}</button>` : ''}
           ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${DKT_FLAME_SVG}</button>` : ''}
+          ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}" data-act="toggle-auto-course-order">${DKT_AUTO_SVG}</button>` : ''}
         </div>`;
       })() : ''}
       ${state.orderType === 'dine-in' ? `
@@ -10557,11 +10577,10 @@ function renderTicketPanel() {
         return shown.map(n => {
           const info = courseInfo(n);
           return `
-          <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}" title="${auto ? 'Auto-coursing is on — tapping takes manual control on this course. ' : ''}Hold: call away ${esc(info.name)}${state.firedCourses[n] ? ' — hold again to take it back' : ''}">
-            ${esc(info.name)}${state.firedCourses[n] ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : ''}
+          <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}" title="${auto ? 'Auto-coursing is on — tapping takes manual control on this course. ' : ''}Hold: call away ${esc(info.name)}${lastFiredCourse() === n ? ' — hold again to take it back' : ''}">
+            ${esc(info.name)}${lastFiredCourse() === n ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : ''}
           </button>`;
-        }).join('')
-          + `<button class="course-tab auto-tab ${autoCourseOn() ? 'active' : 'auto-off'}" data-act="toggle-auto-course-order" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}">✨</button>`;
+        }).join('');
       })()}
     </div>
     <div class="ticket-items">
@@ -15738,6 +15757,7 @@ function renderScreenAdmin() {
           ['notes', 'Notes', sc.notes !== false],
           ['quickNote', 'Quick note', sc.quickNote !== false],
           ['callAway', 'Call away', sc.callAway !== false],
+          ['auto', 'Auto course', sc.auto === true],
         ];
         return chips.map(([key, label, on]) => `<div class="pay-opt ${on ? 'active' : ''}" data-act="toggle-docket-shortcut" data-key="${key}">${label}</div>`).join('');
       })()}
@@ -16603,6 +16623,7 @@ function renderAccountMiddle() {
     ['toggle-notes-panel', DKT_NOTE_SVG, 'Notes', ''],
     ['toggle-quick-note', DKT_BOLT_SVG, 'Quick note', ''],
     ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
+    ['toggle-auto-course-order', DKT_AUTO_SVG, 'Auto course', autoCourseOn() ? 'On' : 'Off'],
     ['open-customer-pane', DKT_USER_SVG, 'Customer', attached ? attached.name : '—'],
     ['reprint-docket', SYS_PRINTER_SVG, 'Reprint docket', ''],
     ['open-move-items', SYS_SWAP_SVG, 'Move items', sentCount ? `${sentCount} sent` : 'nothing sent'],
@@ -18245,7 +18266,9 @@ document.addEventListener('pointerdown', (e) => {
     if (tab) {
       _courseHoldFired = true;
       const n = parseInt(tab.dataset.val);
-      if (state.firedCourses[n]) {
+      // Only the TICKED (last called) course takes back; holding any other
+      // course calls it away — re-holding an old one re-fires it fresh.
+      if (lastFiredCourse() === n) {
         clearFiredCourse(n);
         state.toast = `${courseInfo(n).name} call away taken back`;
         render();
@@ -21616,18 +21639,7 @@ function bindEvents() {
       else if (act === 'toggle-all-courses') { state.allCourseTabs = !state.allCourseTabs; render(); }
       else if (act === 'set-auto-course') { saveTicketSetting({ autoCourse: state.settings.autoCourse === false }); }
       else if (act === 'auto-assign-courses') { autoAssignCourses(); }
-      else if (act === 'toggle-auto-course-order') {
-        const next = !autoCourseOn();
-        state.autoCourseOverride = next === (state.settings.autoCourse !== false) ? null : next;
-        let moved = 0;
-        if (next) state.cart.forEach(c => {
-          const item = state.menu.find(m => m.id === c.menuItemId);
-          const def = item && itemDefaultCourse(item);
-          if (def && c.course !== def) { c.course = def; if (def > state.courseCount) state.courseCount = def; moved++; }
-        });
-        state.toast = next ? (moved ? `Auto course on — ${moved} item${moved === 1 ? '' : 's'} coursed` : 'Auto course on') : 'Auto course off';
-        render(); armToastTimer(2000);
-      }
+      else if (act === 'toggle-auto-course-order') { toggleAutoCourseOrder(); }
       else if (act === 'edit-line-course') {
         const l = state.cart[state.editLine && state.editLine.idx];
         if (l) { l.course = parseInt(el.dataset.val); if (l.course > state.courseCount) state.courseCount = l.course; render(); }
@@ -21649,6 +21661,7 @@ function bindEvents() {
         else if (target === 'toggle-notes-panel') toggleNotesPanel();
         else if (target === 'toggle-quick-note') toggleQuickNotePad();
         else if (target === 'toggle-callaway') toggleCallAway();
+        else if (target === 'toggle-auto-course-order') toggleAutoCourseOrder();
         else if (target === 'open-customer-pane') {
           state.customerPane = { q: '' };
           render();
@@ -21696,6 +21709,12 @@ function bindEvents() {
       else if (act === 'toggle-docket-shortcut') {
         const key = el.dataset.key;
         if (key === 'covers') { saveTicketSetting({ coversEnabled: !state.settings.coversEnabled }); }
+        else if (key === 'auto') {
+          // Auto is the one OPT-IN shortcut (default hidden — it always
+          // lives in the Account menu).
+          const cur = state.settings.docketShortcuts || {};
+          saveTicketSetting({ docketShortcuts: { ...cur, auto: cur.auto !== true } });
+        }
         else {
           const cur = state.settings.docketShortcuts || {};
           saveTicketSetting({ docketShortcuts: { ...cur, [key]: cur[key] === false } });

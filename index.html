@@ -3860,6 +3860,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.burnMinutes !== undefined) data.settings.burnMinutes = req.body.burnMinutes === null ? null : req.body.burnMinutes === 'booking' ? 'booking' : Math.max(10, Math.min(600, parseInt(req.body.burnMinutes) || 90));
   if (req.body.tableNumSize !== undefined) data.settings.tableNumSize = ['xs', 'sm', 'md', 'lg', 'xl'].includes(req.body.tableNumSize) ? req.body.tableNumSize : 'md';
   if (req.body.courseWaitMinutes !== undefined) data.settings.courseWaitMinutes = req.body.courseWaitMinutes === null ? null : Math.max(1, Math.min(120, parseInt(req.body.courseWaitMinutes) || 15));
+  if (req.body.pillWarnMinutes !== undefined) data.settings.pillWarnMinutes = req.body.pillWarnMinutes === null ? null : Math.max(0, Math.min(240, parseInt(req.body.pillWarnMinutes) || 0));
   if (req.body.seatingMinutes !== undefined) data.settings.seatingMinutes = req.body.seatingMinutes ? Math.max(0, parseInt(req.body.seatingMinutes) || 0) || null : null;
   if (req.body.ticketPos && typeof req.body.ticketPos === 'object') {
     const next = Object.assign({}, data.settings.ticketPos);
@@ -6640,6 +6641,7 @@ let state = {
   selectedAdminTableId: null,
   selectedAdminTableIds: [], // multi-select set (Ctrl+click / marquee) in the floor editor
   floorPlacing: null, // when set (e.g. "table:round"), click the canvas to drop that item
+  floorAddCat: 'tables', // layout editor "Add to floor" category: tables | objects | areas
   simpleCountDraft: null, // simple-numbers count being stepped, applied on "Apply"
   floorTableColor: null, // colour applied to tables placed from the toolbar
   floorTableFinish: null, // finish (wood / cloth) applied to tables placed from the toolbar
@@ -13836,14 +13838,17 @@ function renderHouseAdmin() {
   today.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + (e.value || 0); });
   const totalToday = today.reduce((s, e) => s + (e.value || 0), 0);
   const draft = state.houseDraft || { item: '', qty: '1', value: '', reason: 'Wastage' };
-  return `
-  <div class="hist-summary">
-    <div class="sum-card"><div class="sum-label">House total today</div><div class="sum-value">${money(totalToday)}</div></div>
-    ${Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, v]) =>
-      `<div class="sum-card"><div class="sum-label">${esc(r)}</div><div class="sum-value">${money(v)}</div></div>`).join('')}
-  </div>
-
-  ${(() => {
+  // One dropdown keeps the account tidy as sections grow — pick what to work on.
+  const section = state.houseSection || 'stock';
+  const SECTIONS = [['stock', 'Stock count'], ['wastage', 'Wastage & comps']];
+  const picker = `
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap;">
+    <div class="th" style="margin:0;">System account</div>
+    <select class="pp-select" style="width:220px;" onchange="state.houseSection=this.value; render();">
+      ${SECTIONS.map(([v, l]) => `<option value="${v}" ${section === v ? 'selected' : ''}>${l}</option>`).join('')}
+    </select>
+  </div>`;
+  const stockSection = (() => {
     const tracked = state.menu.filter(m => m.trackStock).sort((a, b) => (a.stockCount || 0) - (b.stockCount || 0));
     return `
   <div class="settings-card" style="margin-bottom:16px;">
@@ -13864,8 +13869,13 @@ function renderHouseAdmin() {
       <div id="stock-add-results" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">${stockAddResultsHtml()}</div>
     </div>
   </div>`;
-  })()}
-
+  })();
+  const wastageSection = `
+  <div class="hist-summary">
+    <div class="sum-card"><div class="sum-label">House total today</div><div class="sum-value">${money(totalToday)}</div></div>
+    ${Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, v]) =>
+      `<div class="sum-card"><div class="sum-label">${esc(r)}</div><div class="sum-value">${money(v)}</div></div>`).join('')}
+  </div>
   <div class="settings-card" style="margin-bottom:16px;">
     <div class="th" style="margin-bottom:12px;">Log wastage / comp / staff meal</div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
@@ -13881,7 +13891,6 @@ function renderHouseAdmin() {
     </div>
     <button class="btn-confirm" style="width:auto;padding:10px 20px;" data-act="house-log-add">＋ Add to house log</button>
   </div>
-
   <div class="th" style="margin-bottom:10px;">House log</div>
   ${log.length === 0 ? `<div class="empty-hist">Nothing logged yet.</div>` : log.slice(0, 200).map(e => `
     <div class="order-row">
@@ -13892,6 +13901,7 @@ function renderHouseAdmin() {
       <div class="order-total">${money(e.value || 0)}</div>
     </div>`).join('')}
   `;
+  return picker + (section === 'stock' ? stockSection : wastageSection);
 }
 
 function renderAuditLogAdmin() {
@@ -15677,6 +15687,10 @@ function renderFloorPlanAdmin() {
       <label class="ts" style="margin:0;">Floor colour</label>
       ${colorDotButton('floor-bg', fp.id, fp.bgColor, { size: 24, title: 'Floor background colour' })}
     </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <label class="ts" style="margin:0;" title="Set every table on this floor to one size">All tables size</label>
+      <div class="seg">${TABLE_SIZE_STEPS.map((s, i) => `<button data-act="size-all-tables" data-step="${s}" title="Every table → ${TABLE_SIZE_LABELS[i]}">${TABLE_SIZE_LABELS[i]}</button>`).join('')}</div>
+    </div>
   </div>` : ''}
   <div class="fp-wrap">
     <div class="fp-rail">
@@ -15692,48 +15706,42 @@ function renderFloorPlanAdmin() {
     const mFinish = same(selMany.map(t => t.finish || 'plain')) || 'plain';
     const decorTpl = selDecor ? DECOR_TEMPLATES.find(t => t.key === selDecor.decorType) : null;
     return `
-    <div class="pp-group">
-      <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · shape` : multi ? `${multi} selected · shape` : 'Place / edit table'}</div>
-      ${(() => {
-        // Visual shape chips: each shows the shape in the CURRENT colour/finish,
-        // so the picker previews what you'll get. Nothing selected → tap arms
-        // placement (then tap the floor); a table/selection selected → the tap
-        // changes its shape.
+    ${(() => {
+      // Shape chips (tables). idAttr empty = placement mode; set = edit that table/selection.
+      const chipsHtml = (idAttr) => {
         const pvColor = selTable ? selTable.color : multi ? mColor : state.floorTableColor;
         const pvFinish = selTable ? (selTable.finish || 'plain') : multi ? mFinish : (state.floorTableFinish || 'plain');
         const pvBg = pvColor || tableFinish(pvFinish).bg;
         const placingShape = state.floorPlacing && state.floorPlacing.startsWith('table:') ? (TABLE_TEMPLATES.find(t => `table:${t.key}` === state.floorPlacing) || {}).shape : null;
         const activeShape = selTable ? selTable.shape : multi ? same(selMany.map(t => t.shape)) : placingShape;
-        const idAttr = selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '';
         const dims = { round: [26, 26], oval: [36, 22], square: [26, 26], rect: [36, 22], half: [30, 20] };
-        return `<div class="shape-chip-row">
-          ${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.shape] || [26, 26];
-            return `<button class="shape-chip ${t.shape === activeShape ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}">
-              <span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${tableRadius(t.shape)};background:${pvBg};"></span>
-            </button>`; }).join('')}
-        </div>`;
-      })()}
-    </div>
-    ${(() => {
-      const selGroup = selDecor ? (decorTpl ? decorTpl.group || 'object' : 'object') : null;
-      const groupBlock = (grp, heading, placeLabel) => {
-        const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
-        const showRetype = selDecor && selGroup === grp;
-        return `
-    <div class="pp-group">
-      <div class="pp-label">${showRetype ? `${esc(selDecor.label)} · type` : heading}</div>
-      ${showRetype ? `
-      <select class="pp-select pp-retype-select" data-id="${selDecor.id}" data-fp="${fp.id}" title="Change this object's type">
-        <option value="">${decorTpl ? 'Keep as is' : 'Custom object'}</option>
-        ${list.map(t => `<option value="decor:${t.key}" ${decorTpl && decorTpl.key === t.key ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}
-      </select>` : `
-      <select class="pp-select pp-place-select" title="Pick, then tap the floor to place">
-        <option value="">${placeLabel}</option>
-        ${list.map(t => `<option value="decor:${t.key}" ${state.floorPlacing === `decor:${t.key}` ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}
-      </select>`}
-    </div>`;
+        return `<div class="shape-chip-row">${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.shape] || [26, 26];
+          return `<button class="shape-chip ${t.shape === activeShape ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${tableRadius(t.shape)};background:${pvBg};"></span></button>`; }).join('')}</div>`;
       };
-      return groupBlock('object', 'Objects', '＋ Place an object…') + groupBlock('area', 'Areas & walls', '＋ Draw an area / wall…');
+      const placeSelect = (grp, placeLabel) => {
+        const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
+        return `<select class="pp-select pp-place-select" title="Pick, then tap the floor to place"><option value="">${placeLabel}</option>${list.map(t => `<option value="decor:${t.key}" ${state.floorPlacing === `decor:${t.key}` ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}</select>`;
+      };
+      // EDIT a selected table (or multi): just its shape chips.
+      if (selTable || multi) {
+        return `<div class="pp-group"><div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · shape` : `${multi} selected · shape`}</div>${chipsHtml(selTable ? `data-id="${selTable.id}"` : 'data-id="multi"')}</div>`;
+      }
+      // EDIT a selected object: its type dropdown (within its own group).
+      if (selDecor) {
+        const grp = decorTpl ? (decorTpl.group || 'object') : 'object';
+        const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
+        return `<div class="pp-group"><div class="pp-label">${esc(selDecor.label)} · type</div>
+      <select class="pp-select pp-retype-select" data-id="${selDecor.id}" data-fp="${fp.id}" title="Change this object's type"><option value="">${decorTpl ? 'Keep as is' : 'Custom object'}</option>${list.map(t => `<option value="decor:${t.key}" ${decorTpl && decorTpl.key === t.key ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}</select></div>`;
+      }
+      // NOTHING selected → ONE tidy "Add to floor" group: category dropdown + matching picker.
+      const cat = state.floorAddCat || 'tables';
+      const catSelect = `<select class="pp-select" style="margin-bottom:8px;" onchange="state.floorAddCat=this.value; state.floorPlacing=null; render();">
+        <option value="tables" ${cat === 'tables' ? 'selected' : ''}>Tables</option>
+        <option value="objects" ${cat === 'objects' ? 'selected' : ''}>Objects</option>
+        <option value="areas" ${cat === 'areas' ? 'selected' : ''}>Areas &amp; walls</option>
+      </select>`;
+      const picker = cat === 'tables' ? chipsHtml('') : cat === 'objects' ? placeSelect('object', '＋ Place an object…') : placeSelect('area', '＋ Draw an area / wall…');
+      return `<div class="pp-group"><div class="pp-label">Add to floor</div>${catSelect}${picker}</div>`;
     })()}
     <div class="pp-group">
       <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · style` : selDecor ? `${esc(selDecor.label)} · colour` : multi ? `${multi} selected · style` : 'Table style'}</div>
@@ -15779,7 +15787,8 @@ function renderFloorPlanAdmin() {
       <div class="pp-row" style="align-items:center;flex-wrap:wrap;">
         ${selTable ? `
         <label class="ts" style="margin:0;">Number</label>
-        <button class="btn-secondary" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="width:auto;padding:8px 14px;font-family:'IBM Plex Mono',monospace;font-weight:800;">${esc(String(selected.label))}</button>` : `
+        <input id="table-num-input" type="text" maxlength="5" value="${esc(String(selected.label))}" data-id="${selected.id}" data-fp="${fp.id}" title="Type the table number" style="width:72px;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;font-weight:800;text-align:center;background:var(--surface);color:var(--text-primary);">
+        <button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" title="Number pad">${SYS_HASH_SVG}</button>` : `
         <input id="table-label-input" type="text" value="${esc(selected.label)}" placeholder="Label" data-id="${selected.id}" data-fp="${fp.id}" style="width:86px;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
         <label class="ts" style="margin:0;">W</label>
         <button class="icon-sq" data-act="step-decor-dim" data-dim="width" data-dir="-1" data-id="${selected.id}" data-fp="${fp.id}">−</button>
@@ -16368,6 +16377,21 @@ function renderTableStatusColorsCard() {
         + row('locked', '#FF9500', 'In use — another till')
         + row('pillWarn', '#FFCC00', 'Pill — running long')
         + row('pillDanger', '#FF3B30', 'Pill — over')
+        + (() => {
+          const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+          const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
+          return `
+      <div style="display:flex;align-items:center;gap:14px;margin:6px 0 14px;flex-wrap:wrap;">
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label class="ts" style="margin:0;">Running long after</label>
+          <input type="number" min="0" max="180" step="1" value="${warn}" onblur="saveTicketSetting({ pillWarnMinutes: Math.max(0, parseInt(this.value,10)||0) })" style="width:64px;padding:7px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);"><span class="ts">min</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label class="ts" style="margin:0;">Over after</label>
+          <input type="number" min="0" max="240" step="1" value="${over}" onblur="saveTicketSetting({ courseWaitMinutes: Math.max(0, parseInt(this.value,10)||0) })" style="width:64px;padding:7px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);"><span class="ts">min</span>
+        </div>
+      </div>`;
+        })()
         + `
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
         <div style="font-weight:700;font-size:var(--fs-md);">Wash strength</div>
@@ -17023,10 +17047,15 @@ function floorPillHtml(t, cs) {
   // A called-away course outranks every lens: show how long the kitchen's
   // been firing it, danger-scaled against the course-wait cap.
   if (o && o.calledAwayAt && lens !== 'booked') {
-    const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+    // "Running long" (warn) and "over" thresholds are both editable in Table
+    // Layout → Status colours; the pill turns yellow then red on those minutes.
+    const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+    const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
     const mins = Math.max(0, Math.floor((Date.now() - o.calledAwayAt) / 60000));
+    const col = (over && mins >= over) ? statusColor('pillDanger', '#FF3B30') : (warn && mins >= warn) ? statusColor('pillWarn', '#FFCC00') : '';
+    const style = col ? `background:${col};color:${contrastTextColor(col)};` : '';
     const cn = cs && cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
-    return pill(sev(cap ? mins / cap : 0), `<b>${cn}${pillDur(mins)}</b>`, 'Called away — being fired');
+    return pill(style, `<b>${cn}${pillDur(mins)}</b>`, 'Called away — being fired');
   }
   if (lens === 'sitting') {
     if (!o) return '';
@@ -18177,6 +18206,23 @@ async function scaleSelectedTables(dir) {
   }));
 }
 
+// Uniform size: set EVERY table on the current floor to one preset step,
+// keeping each shape's proportions (circles stay circular). One tap tidies
+// a floor of hand-dragged sizes.
+async function sizeAllTables(step) {
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  if (!fp) return;
+  await Promise.all(fp.tables.filter(t => t.type !== 'decor').map(t => {
+    const base = tableBaseDims(t.shape) || { width: t.width, height: t.height };
+    const width = Math.round(base.width * step * 10) / 10;
+    const height = t.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * step * 10) / 10;
+    return patchFloorObject(fp.id, t.id, { width, height });
+  }));
+  const li = TABLE_SIZE_STEPS.indexOf(step);
+  state.toast = `All tables → Size ${TABLE_SIZE_LABELS[li] || ''}`;
+  armToastTimer(1600);
+}
+
 // A search hit lands ON the thing: scroll its row (matched by data-id /
 // data-selkey / element id) into view and flash it, once the page has rendered.
 function jumpToAdminRow(id) {
@@ -18674,28 +18720,34 @@ function moveResizeDrag(clientX, clientY) {
     floorResizeDrag.lastHeight = Math.round(height * 10) / 10;
     return;
   }
-  // Tables SNAP to preset sizes so the floor stays consistent. Drag outward
-  // to grow; the drag maps to a scale that lands on the nearest step, and the
-  // shape's base proportions are held so the table keeps its shape.
+  // Tables: SMOOTH during the drag (continuous scale, clamped between the
+  // smallest and largest preset so dragging "past" XL just stops instead of
+  // jittering), then SNAP to the nearest preset on release. Shape proportions
+  // held, so the table keeps its shape.
   const base = floorResizeDrag.base;
+  const steps = TABLE_SIZE_STEPS;
+  const minStep = steps[0], maxStep = steps[steps.length - 1];
   const growPct = (dxPct + dyPct) / 2;
-  const targetScale = floorResizeDrag.startScale + (growPct / ((base.width + base.height) / 2)) * 1.1;
-  const step = TABLE_SIZE_STEPS.reduce((a, b) => Math.abs(b - targetScale) < Math.abs(a - targetScale) ? b : a);
-  const width = Math.round(base.width * step * 10) / 10;
-  // A circle stays a true circle; every other shape keeps its template ratio.
-  const height = floorResizeDrag.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * step * 10) / 10;
+  let scale = floorResizeDrag.startScale + (growPct / ((base.width + base.height) / 2)) * 1.1;
+  scale = Math.max(minStep, Math.min(maxStep, scale));
+  const width = Math.round(base.width * scale * 10) / 10;
+  const height = floorResizeDrag.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * scale * 10) / 10;
   floorResizeDrag.markerEl.style.width = width + '%';
   floorResizeDrag.markerEl.style.height = height + '%';
-  floorResizeDrag.lastWidth = width;
-  floorResizeDrag.lastHeight = height;
-  floorResizeDrag.lastStep = step;
+  floorResizeDrag.lastScale = scale;
 }
 
 function endResizeDrag() {
   if (!floorResizeDrag) return;
-  const { tableId, fpId, lastWidth, lastHeight, lastStep } = floorResizeDrag;
-  if (lastStep !== undefined) {
-    const li = TABLE_SIZE_STEPS.indexOf(lastStep);
+  const { tableId, fpId, isDecor } = floorResizeDrag;
+  let lastWidth = floorResizeDrag.lastWidth, lastHeight = floorResizeDrag.lastHeight;
+  if (!isDecor && floorResizeDrag.lastScale !== undefined) {
+    // Snap the continuous drag to the nearest preset step.
+    const base = floorResizeDrag.base, sc = floorResizeDrag.lastScale;
+    const step = TABLE_SIZE_STEPS.reduce((a, b) => Math.abs(b - sc) < Math.abs(a - sc) ? b : a);
+    lastWidth = Math.round(base.width * step * 10) / 10;
+    lastHeight = floorResizeDrag.shape === 'round' ? circleHeightPct(lastWidth) : Math.round(base.height * step * 10) / 10;
+    const li = TABLE_SIZE_STEPS.indexOf(step);
     if (li >= 0) { state.toast = `Size ${TABLE_SIZE_LABELS[li]}`; armToastTimer(1400); }
   }
   if (lastWidth !== undefined) {
@@ -18984,6 +19036,24 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && state.floorPlacing) { stopPlacing(); }
   else if (e.key === 'Escape' && state.selectedAdminTableIds.length) { clearTableSelection(); }
+});
+// Ctrl/Cmd+A in the layout editor: with one thing selected, select ALL of the
+// same kind (tables → every table, an object → every object).
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'a' || e.key === 'A') && (e.ctrlKey || e.metaKey)
+      && state.view === 'admin' && state.adminTab === 'floorplan' && !typingInField()) {
+    const selId = state.selectedAdminTableId || state.selectedAdminTableIds[0];
+    if (!selId) return;
+    const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+    if (!fp) return;
+    const sel = fp.tables.find(t => t.id === selId);
+    if (!sel) return;
+    e.preventDefault();
+    const wantDecor = sel.type === 'decor';
+    state.selectedAdminTableIds = fp.tables.filter(t => (t.type === 'decor') === wantDecor).map(t => t.id);
+    state.selectedAdminTableId = null;
+    render();
+  }
 });
 // A till with a real keyboard should be able to TYPE into any number pad
 // instead of tapping — covers, table number, price, and the login PIN.
@@ -22649,6 +22719,7 @@ function bindEvents() {
         }
       }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
+      else if (act === 'size-all-tables') { sizeAllTables(parseFloat(el.dataset.step)); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
       else if (act === 'set-covers-enabled') { setCoversEnabled(el.dataset.val === 'true'); }
@@ -23846,6 +23917,13 @@ function bindEvents() {
     const label = e.target.value.trim();
     if (label) patchFloorObject(tableLabelInput.dataset.fp, tableLabelInput.dataset.id, { label });
   });
+  // Type the table number directly on the selected table (Enter commits too).
+  const tableNumInput = document.getElementById('table-num-input');
+  if (tableNumInput) {
+    const save = () => { const label = tableNumInput.value.trim().slice(0, 5); if (label) patchFloorObject(tableNumInput.dataset.fp, tableNumInput.dataset.id, { label }); };
+    tableNumInput.addEventListener('change', save);
+    tableNumInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { save(); tableNumInput.blur(); } });
+  }
   const decorWidthInput = document.getElementById('decor-width-input');
   if (decorWidthInput) decorWidthInput.addEventListener('change', (e) => {
     patchFloorObject(decorWidthInput.dataset.fp, decorWidthInput.dataset.id, { width: parseFloat(e.target.value) || 5 });

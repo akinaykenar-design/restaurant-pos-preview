@@ -428,6 +428,12 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .empty-ticket-sub{font-size:12px;color:var(--charcoal-soft);opacity:.7;}
 .ticket-line{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--chit-line);border-radius:10px;background:var(--surface);margin-bottom:calc(6px*var(--tkt-gap,1));}
 .ticket-line.editing{background:var(--docket-sel, var(--orange-dim));border-color:var(--docket-sel-b, var(--orange));opacity:1;}
+/* House account → Stock count rows: name · count field · clear. */
+.stock-count-row{ display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid var(--chit-line); }
+.stock-count-row:last-child{ border-bottom:none; }
+.scr-name{ flex:1; min-width:0; font-size:var(--fs-md); font-weight:600; display:flex; align-items:center; gap:6px; }
+.scr-input{ width:78px; padding:8px 10px; border-radius:8px; border:1px solid var(--steel-300); background:var(--surface); color:var(--text-primary); font-family:var(--font-mono); font-size:var(--fs-md); text-align:center; }
+
 /* Floor editor: visual shape chips (replace the shape dropdown). Each previews
    the shape in the table's current colour/finish. */
 .shape-chip-row{ display:flex; gap:6px; flex-wrap:wrap; }
@@ -6664,6 +6670,7 @@ let state = {
   auditLog: [],
   houseLog: [],
   houseDraft: null,
+  stockCountSearch: '', // House account → Stock count "add" search box
   registerCurrent: null,
   registerCloses: [],
   registerCashCounted: '',
@@ -8412,6 +8419,23 @@ async function loadAuditLog() {
     state.auditLog = await api('/api/audit-log');
   } catch (e) {}
   render();
+}
+// Stock count "add" search: untracked menu items matching the query, each with
+// a qty field that starts a countdown on blur.
+function stockAddResultsHtml() {
+  const q = (state.stockCountSearch || '').toLowerCase().trim();
+  if (!q) return '';
+  const list = state.menu.filter(m => !m.trackStock && !m.disabled && m.name.toLowerCase().includes(q)).slice(0, 8);
+  if (!list.length) return `<div class="ts">No untracked items match.</div>`;
+  return list.map(m => `<div class="stock-count-row">
+    <div class="scr-name">${esc(m.name)}</div>
+    <input type="number" min="0" step="1" placeholder="Qty" class="scr-input" title="Type a count to start tracking" onblur="if(this.value!=='')saveMenuItemCountdown('${m.id}', this.value)">
+  </div>`).join('');
+}
+function stockSearchInput(v) {
+  state.stockCountSearch = v;
+  const box = document.getElementById('stock-add-results');
+  if (box) box.innerHTML = stockAddResultsHtml();
 }
 async function loadHouseLog() {
   try { state.houseLog = await api('/api/house-log'); } catch (e) {}
@@ -13818,6 +13842,29 @@ function renderHouseAdmin() {
     ${Object.entries(byReason).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([r, v]) =>
       `<div class="sum-card"><div class="sum-label">${esc(r)}</div><div class="sum-value">${money(v)}</div></div>`).join('')}
   </div>
+
+  ${(() => {
+    const tracked = state.menu.filter(m => m.trackStock).sort((a, b) => (a.stockCount || 0) - (b.stockCount || 0));
+    return `
+  <div class="settings-card" style="margin-bottom:16px;">
+    <div class="th" style="margin-bottom:6px;">Stock count</div>
+    <div class="ts" style="margin-bottom:12px;">Every item running a live countdown. Set a new number, or clear it to switch the countdown off. 86s automatically at zero.</div>
+    ${tracked.length === 0 ? `<div class="ts">No countdowns running yet.</div>` : tracked.map(m => {
+      const n = m.stockCount || 0;
+      const chip = n <= 0 ? `<span class="status-chip void">86'd</span>` : n <= (m.lowStockThreshold || 5) ? `<span class="status-chip course">low</span>` : '';
+      return `<div class="stock-count-row">
+        <div class="scr-name">${esc(m.name)} ${chip}</div>
+        <input type="number" min="0" step="1" value="${n}" title="Set the count" onblur="saveMenuItemCountdown('${m.id}', this.value)" class="scr-input">
+        <button class="icon-sq" data-act="stock-clear" data-id="${m.id}" title="Clear countdown (stop tracking)">${ACT_X_SVG}</button>
+      </div>`;
+    }).join('')}
+    <div style="margin-top:14px;">
+      <label class="field-label" style="display:block;margin-bottom:5px;">Add a stock count</label>
+      <input id="stock-count-search" type="text" value="${esc(state.stockCountSearch || '')}" placeholder="Search an item, then type a count…" oninput="stockSearchInput(this.value)" style="width:100%;max-width:320px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);">
+      <div id="stock-add-results" style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">${stockAddResultsHtml()}</div>
+    </div>
+  </div>`;
+  })()}
 
   <div class="settings-card" style="margin-bottom:16px;">
     <div class="th" style="margin-bottom:12px;">Log wastage / comp / staff meal</div>
@@ -21974,6 +22021,7 @@ function bindEvents() {
         render();
       }
       else if (act === 'house-log-add') { addHouseLogEntry(); }
+      else if (act === 'stock-clear') { saveMenuItemCountdown(el.dataset.id, ''); }
       else if (act === 'hist-table-clear') { state.histTableFilter = ''; render(); }
       else if (act === 'close-void-reason') { state.voidItemPrompt = null; render(); }
       else if (act === 'remove-sent-line') { removeSentLine(el); }

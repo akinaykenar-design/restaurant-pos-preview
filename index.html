@@ -441,6 +441,20 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
   border:1px solid var(--steel-300); border-radius:8px; background:var(--surface); cursor:pointer; padding:0 6px; }
 .shape-chip.active{ border-color:var(--orange); box-shadow:inset 0 0 0 1px var(--orange); }
 .shape-chip-preview{ display:block; border:1px solid rgba(20,24,25,.18); }
+/* Colour swatches (floor bg, objects): a tidy row of fixed choices, no full picker. */
+.swatch-row{ display:flex; gap:6px; flex-wrap:wrap; }
+.swatch{ width:30px; height:30px; border-radius:7px; border:1px solid var(--steel-300); cursor:pointer; padding:0;
+  background-clip:padding-box; }
+.swatch.active{ border-color:var(--orange); box-shadow:inset 0 0 0 2px var(--surface), 0 0 0 2px var(--orange); }
+/* Object / area place chips: icon or colour block + short label, matches shape chips. */
+.decor-chip-row{ display:flex; gap:6px; flex-wrap:wrap; }
+.decor-chip{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:3px;
+  min-width:60px; height:56px; border:1px solid var(--steel-300); border-radius:8px; background:var(--surface);
+  cursor:pointer; padding:4px 6px; }
+.decor-chip.active{ border-color:var(--orange); box-shadow:inset 0 0 0 1px var(--orange); }
+.decor-chip-ic{ font-size:20px; line-height:1; }
+.decor-chip-block{ width:26px; height:14px; border-radius:3px; border:1px solid rgba(20,24,25,.18); }
+.decor-chip-lbl{ font-size:var(--fs-chip); font-weight:600; color:var(--text-secondary); }
 
 /* Account tile pinned to the docket: gold outline + a corner pin, both overlay
    so pinning never shifts the grid. */
@@ -6614,6 +6628,31 @@ const DECOR_TEMPLATES = [
 // (a %, so it scales on any screen) times one factor keeps the shape's look.
 const DECOR_SIZE_STEPS = [0.7, 1, 1.4];
 const DECOR_SIZE_LABELS = ['S', 'M', 'L'];
+// Floor background: a small set of calm neutrals only — a loud floor fights the
+// tables for attention. Objects/areas (walls, zones) get greys + muted tones so
+// they recede behind the tables rather than compete.
+const FLOOR_COLORS = [
+  { v: '', label: 'Default' },
+  { v: '#EFEAE0', label: 'Sand' },
+  { v: '#E8E9E9', label: 'Grey' },
+  { v: '#E1E6E2', label: 'Sage' },
+  { v: '#E6E3EA', label: 'Slate' },
+];
+const OBJECT_COLORS = [
+  { v: '', label: 'Icon only' },
+  { v: '#5b5f66', label: 'Charcoal' },
+  { v: '#8a8f97', label: 'Grey' },
+  { v: '#b8bdc4', label: 'Light' },
+  { v: '#C9B79C', label: 'Tan' },
+  { v: '#A9B6A0', label: 'Sage' },
+];
+function swatchRow(act, current, colors, dataAttrs = '') {
+  return `<div class="swatch-row">${colors.map(c => {
+    const on = String(current || '') === String(c.v);
+    const face = c.v || 'repeating-linear-gradient(45deg,var(--steel-200) 0 4px,var(--surface) 4px 8px)';
+    return `<button class="swatch${on ? ' active' : ''}" data-act="${act}" data-val="${c.v}" ${dataAttrs} title="${c.label}" style="background:${face};"></button>`;
+  }).join('')}</div>`;
+}
 function decorSizeChips(obj, fp) {
   const tpl = DECOR_TEMPLATES.find(t => t.key === obj.decorType);
   const base = tpl ? tpl.width : (obj.width || 6);
@@ -6689,6 +6728,7 @@ let state = {
   floorAddCat: 'tables', // layout editor "Add to floor" category: tables | objects | areas
   simpleCountDraft: null, // simple-numbers count being stepped, applied on "Apply"
   floorTableColor: null, // colour applied to tables placed from the toolbar
+  floorStatusCardOpen: false, // Status colours & timers card starts collapsed
   floorTableFinish: null, // finish (wood / cloth) applied to tables placed from the toolbar
   accountMenuOpen: false, // the topbar Account dropdown (all docket shortcuts)
   customerPane: null,     // { q } — attach/remove a customer while ordering
@@ -15654,7 +15694,6 @@ function renderSimpleTablesAdmin() {
         </div>
         ${state.floorLinkMode === 'link' ? '' : ''}
       </div>
-      <button class="btn-secondary" style="width:100%;padding:8px 12px;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Timers & number size">⚙ Options</button>
     </div>
     <div class="fp-main">
       <div class="settings-card wide" style="max-width:100%;">
@@ -15690,14 +15729,6 @@ function tableTimerControls() {
         </div>`;
       })()}
       ${(() => {
-        const cur = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-        const chip = (val, label) => `<button class="${String(cur) === String(val) ? 'active' : ''}" data-act="set-course-wait" data-val="${val}">${label}</button>`;
-        return `<div style="display:flex;align-items:center;gap:8px;">
-          <label class="field-label" style="margin:0;" title="The course pill on a table turns violet once the called course has waited this long.">Course wait cap</label>
-          <div class="seg">${chip(10, '10m')}${chip(15, '15m')}${chip(20, '20m')}${chip('null', 'Off')}</div>
-        </div>`;
-      })()}
-      ${(() => {
         const cur = state.settings.tableNumSize || 'md';
         const chip = (v) => `<button class="${cur === v ? 'active' : ''}" data-act="set-tablenum-size" data-val="${v}">${v.toUpperCase()}</button>`;
         return `<div style="display:flex;align-items:center;gap:8px;">
@@ -15726,10 +15757,6 @@ function renderFloorPlanAdmin() {
     <span style="flex:1;"></span>
     ${modeSeg}
   </div>
-  ${state.floorAdvancedOpen ? `
-  <div data-expkey="floor-adv" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-    ${tableTimerControls()}
-  </div>` : ''}
   ` + renderSimpleTablesAdmin();
   }
   // Floor mode: the map is the hero — a slim tool rail sits beside it and the
@@ -15747,19 +15774,18 @@ function renderFloorPlanAdmin() {
   </div>
   ${fp ? `
   ${state.floorAdvancedOpen ? `
-  <div data-expkey="floor-adv" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
-    ${tableTimerControls()}
-    <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;cursor:pointer;">
-      <input type="checkbox" id="floorplan-snap-input" data-fp="${fp.id}" ${fp.snapToGrid ? 'checked' : ''}> Snap to grid
-    </label>
-    <div style="display:flex;align-items:center;gap:6px;">
+  <div data-expkey="floor-adv" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;">
+    <div style="display:flex;align-items:center;gap:8px;">
       <label class="ts" style="margin:0;">Floor colour</label>
-      ${colorDotButton('floor-bg', fp.id, fp.bgColor, { size: 24, title: 'Floor background colour' })}
+      ${swatchRow('set-floor-color', fp.bgColor, FLOOR_COLORS, `data-fp="${fp.id}"`)}
     </div>
     <div style="display:flex;align-items:center;gap:8px;">
       <label class="ts" style="margin:0;" title="Set every table on this floor to one size">All tables size</label>
       <div class="seg">${TABLE_SIZE_STEPS.map((s, i) => `<button data-act="size-all-tables" data-step="${s}" title="Every table → ${TABLE_SIZE_LABELS[i]}">${TABLE_SIZE_LABELS[i]}</button>`).join('')}</div>
     </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;cursor:pointer;">
+      <input type="checkbox" id="floorplan-snap-input" data-fp="${fp.id}" ${fp.snapToGrid ? 'checked' : ''}> Snap to grid
+    </label>
   </div>` : ''}
   <div class="fp-wrap">
     <div class="fp-rail">
@@ -15787,9 +15813,15 @@ function renderFloorPlanAdmin() {
         return `<div class="shape-chip-row">${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.shape] || [26, 26];
           return `<button class="shape-chip ${t.shape === activeShape ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${tableRadius(t.shape)};background:${pvBg};"></span></button>`; }).join('')}</div>`;
       };
-      const placeSelect = (grp, placeLabel) => {
+      // Objects/areas as a visual chip grid (matches the table shape chips) —
+      // tap to arm, then tap the floor. Areas show a colour block, objects an icon.
+      const placeChips = (grp) => {
         const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
-        return `<select class="pp-select pp-place-select" title="Pick, then tap the floor to place"><option value="">${placeLabel}</option>${list.map(t => `<option value="decor:${t.key}" ${state.floorPlacing === `decor:${t.key}` ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}</select>`;
+        return `<div class="decor-chip-row">${list.map(t => {
+          const val = `decor:${t.key}`;
+          const face = t.icon ? `<span class="decor-chip-ic">${t.icon}</span>` : `<span class="decor-chip-block" style="background:${t.color || 'var(--steel-300)'};"></span>`;
+          return `<button class="decor-chip${state.floorPlacing === val ? ' active' : ''}" data-act="palette-place" data-val="${val}" title="${esc(t.label)} — tap, then tap the floor">${face}<span class="decor-chip-lbl">${esc(t.label)}</span></button>`;
+        }).join('')}</div>`;
       };
       // EDIT a selected table (or multi): just its shape chips.
       if (selTable || multi) {
@@ -15802,44 +15834,42 @@ function renderFloorPlanAdmin() {
         return `<div class="pp-group"><div class="pp-label">${esc(selDecor.label)} · type</div>
       <select class="pp-select pp-retype-select" data-id="${selDecor.id}" data-fp="${fp.id}" title="Change this object's type"><option value="">${decorTpl ? 'Keep as is' : 'Custom object'}</option>${list.map(t => `<option value="decor:${t.key}" ${decorTpl && decorTpl.key === t.key ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}</select></div>`;
       }
-      // NOTHING selected → ONE tidy "Add to floor" group: category dropdown + matching picker.
+      // NOTHING selected → ONE tidy "Add to floor" group: a category segment
+      // (all visual) + the matching chip picker.
       const cat = state.floorAddCat || 'tables';
-      const catSelect = `<select class="pp-select" style="margin-bottom:8px;" onchange="state.floorAddCat=this.value; state.floorPlacing=null; render();">
-        <option value="tables" ${cat === 'tables' ? 'selected' : ''}>Tables</option>
-        <option value="objects" ${cat === 'objects' ? 'selected' : ''}>Objects</option>
-        <option value="areas" ${cat === 'areas' ? 'selected' : ''}>Areas &amp; walls</option>
-      </select>`;
-      const picker = cat === 'tables' ? chipsHtml('') : cat === 'objects' ? placeSelect('object', '＋ Place an object…') : placeSelect('area', '＋ Draw an area / wall…');
-      return `<div class="pp-group"><div class="pp-label">Add to floor</div>${catSelect}${picker}</div>`;
+      const catSeg = `<div class="seg" style="margin-bottom:8px;width:100%;">${[['tables', 'Tables'], ['objects', 'Objects'], ['areas', 'Areas']].map(([v, l]) => `<button class="${cat === v ? 'active' : ''}" data-act="set-floor-cat" data-val="${v}" style="flex:1;padding:7px 2px;font-size:var(--fs-sm);">${l}</button>`).join('')}</div>`;
+      const picker = cat === 'tables' ? chipsHtml('') : cat === 'objects' ? placeChips('object') : placeChips('area');
+      return `<div class="pp-group"><div class="pp-label">Add to floor</div>${catSeg}${picker}</div>`;
     })()}
+    ${(!selected && !multi && (state.floorAddCat || 'tables') !== 'tables') ? '' : `
     <div class="pp-group">
-      <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · style` : selDecor ? `${esc(selDecor.label)} · colour` : multi ? `${multi} selected · style` : 'Table style'}</div>
-      <div class="pp-row" style="align-items:center;min-height:30px;">
+      <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · colour` : selDecor ? `${esc(selDecor.label)} · colour` : multi ? `${multi} selected · colour` : 'New table colour'}</div>
+      ${selDecor
+        ? swatchRow('set-object-color', selDecor.color, OBJECT_COLORS, `data-id="${selDecor.id}" data-fp="${fp.id}"`)
+        : `<div class="pp-row" style="align-items:center;min-height:30px;">
         ${(() => {
-          // ONE style dot: edits the selected table, an object, the whole
-          // multi-selection, or (nothing selected) the style new tables get.
-          const curColor = selTable ? selTable.color : selDecor ? selDecor.color : multi ? mColor : state.floorTableColor;
+          // ONE style dot: edits the selected table, the whole multi-selection,
+          // or (nothing selected) the style new tables get.
+          const curColor = selTable ? selTable.color : multi ? mColor : state.floorTableColor;
           const curFinish = selTable ? (selTable.finish || 'plain') : multi ? mFinish : (state.floorTableFinish || 'plain');
           const dotOpts = { bg: curColor ? null : tableFinish(curFinish).bg, finish: curFinish };
           return (selTable
             ? colorDotButton('table-color', selTable.id, selTable.color, { ...dotOpts, title: 'Table style & colour' })
-            : selDecor
-              ? colorDotButton('table-color', selDecor.id, selDecor.color, { bg: selDecor.color || null, title: 'Object colour (blank = icon only)' })
             : multi
               ? colorDotButton('table-color', 'multi', mColor, { ...dotOpts, title: 'Colour & finish for all selected' })
               : colorDotButton('floor-table-new', 'new', state.floorTableColor, { ...dotOpts, title: 'Style applied to tables you place' }))
-            + `<span class="ts" style="margin-left:8px;">${selDecor ? 'Colour' : 'Colour &amp; finish'}</span>`;
+            + `<span class="ts" style="margin-left:8px;">Colour &amp; finish</span>`;
         })()}
-      </div>
-    </div>
+      </div>`}
+    </div>`}
+    ${(selTable || multi) ? `
     <div class="pp-group">
       <div class="pp-label">Linking</div>
       <div class="pp-row">
         <button class="btn-secondary" style="flex:1;padding:8px 12px;${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="floor-link-mode" data-mode="link" title="Drag a table onto another to link them">${SYS_LINK_SVG} Link</button>
         ${allTables().some(t => t.mergedInto && t.mergedInto !== t.id) ? `<button class="btn-secondary" style="flex:1;padding:8px 12px;${state.floorLinkMode === 'unlink' ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="floor-link-mode" data-mode="unlink" title="Tap a linked table to unlink it">Unlink</button>` : ''}
       </div>
-      ${state.floorLinkMode === 'link' ? '' : ''}
-    </div>
+    </div>` : ''}
     ${multi ? `
     <div class="pp-group">
       <div class="pp-label">${multi} selected</div>
@@ -15867,7 +15897,7 @@ function renderFloorPlanAdmin() {
     </div>` : ''}
     <div style="flex:1;"></div>
     ${state.floorPlacing ? `<span class="pp-hint"><button type="button" class="pp-cancel" data-act="stop-placing">✕</button></span>` : ``}
-    <button class="btn-secondary" style="width:100%;padding:8px 12px;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Timers, sizes, grid & floor colour">⚙ Options</button>`;
+    <button class="btn-secondary" style="width:100%;padding:8px 12px;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Floor colour, all-tables size & grid snap">⚙ Floor</button>`;
   })()}
     </div>
     <div class="fp-main">
@@ -16418,9 +16448,15 @@ function renderTableStatusColorsCard() {
   // An honest legend: what the floor ACTUALLY paints. Washes are
   // translucent so the table's own finish shows through. Only the bill
   // colour is configurable — the rest are fixed meanings.
+  const open = state.floorStatusCardOpen;
   return `
   <div class="settings-card" style="margin-top:14px;">
-    <div class="th" style="margin-bottom:14px;">Status colours</div>
+    <button data-act="toggle-floor-status-card" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;${open ? 'margin-bottom:14px;' : ''}">
+      <span class="th" style="margin:0;">Status colours &amp; timers</span>
+      <span style="flex:1;"></span>
+      <span class="ts" style="transform:rotate(${open ? 90 : 0}deg);transition:transform .15s;">▸</span>
+    </button>
+    ${!open ? '' : `
     <div class="pay-options" style="margin-bottom:14px;">
       ${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}
     </div>
@@ -16461,10 +16497,14 @@ function renderTableStatusColorsCard() {
         </div>
       </div>`;
     })()}
+    <div class="th" style="margin:16px 0 10px;">Timers &amp; number</div>
+    <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px;">
+      ${tableTimerControls()}
+    </div>
     <div class="th" style="margin:16px 0 10px;">One till per table</div>
     <div class="pay-options">
       ${togglePill(state.settings.tableLockEnabled !== false, 'set-table-lock')}
-    </div>
+    </div>`}
   </div>`;
 }
 function renderQtyPad() {
@@ -22783,6 +22823,7 @@ function bindEvents() {
       else if (act === 'start-placing') { startPlacing(el.dataset.fp); }
       else if (act === 'stop-placing') { stopPlacing(); }
       else if (act === 'toggle-floor-advanced') { state.floorAdvancedOpen = !state.floorAdvancedOpen; render(); }
+      else if (act === 'toggle-floor-status-card') { state.floorStatusCardOpen = !state.floorStatusCardOpen; render(); }
       else if (act === 'floor-link-mode') { state.floorLinkMode = state.floorLinkMode === el.dataset.mode ? null : el.dataset.mode; state.simpleLinkFirst = null; render(); }
       else if (act === 'open-tablenum-pad') {
         const t = findTableById(el.dataset.id);
@@ -22859,6 +22900,7 @@ function bindEvents() {
         state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
         render();
       }
+      else if (act === 'set-floor-cat') { state.floorAddCat = el.dataset.val; state.floorPlacing = null; render(); }
       else if (act === 'mock-jump') {
         if (e.target.closest('.mk-grip,.mk-railgrip')) return; // edge drag, not a jump
         if (_mkHoldFired) { _mkHoldFired = false; return; } // hold-edit release, not a jump
@@ -22951,6 +22993,8 @@ function bindEvents() {
       }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
       else if (act === 'size-all-tables') { sizeAllTables(parseFloat(el.dataset.step)); }
+      else if (act === 'set-floor-color') { updateFloorPlanBgColor(el.dataset.fp, el.dataset.val || null); }
+      else if (act === 'set-object-color') { const fp = state.floorPlans.find(f => f.id === el.dataset.fp); const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id)); if (t) patchFloorObject(el.dataset.fp, t.id, { color: el.dataset.val || null }); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
       else if (act === 'set-covers-enabled') { setCoversEnabled(el.dataset.val === 'true'); }

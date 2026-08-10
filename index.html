@@ -2270,8 +2270,16 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
     color:var(--charcoal-soft); font-size:var(--fs-sm); font-weight:700;
     line-height:1.15; word-break:break-word;
   }
-  .mw-cat.active{ color:var(--orange); }
-  .mw-cat.active[style*="--mwc"]{ color:var(--mwc); }
+  .mw-cat{ display:flex; flex-direction:column; align-items:center; gap:1px; }
+  .mw-ico{ font-size:17px; line-height:1; }
+  .mw-name{ display:block; }
+  /* .near = what the lens will land on — lights up live during the spin. */
+  .mw-cat.active, .mw-cat.near{ color:var(--orange); }
+  .mw-cat.active[style*="--mwc"], .mw-cat.near[style*="--mwc"]{ color:var(--mwc); }
+  .md-tick{
+    position:absolute; width:4px; height:4px; border-radius:50%;
+    background:var(--steel-300); transform:translate(-50%,-50%); pointer-events:none;
+  }
   /* The lens: a ring at the dial's 3 o'clock — the pick point. */
   .md-lens{
     position:absolute; width:62px; height:62px; border-radius:50%;
@@ -10539,9 +10547,16 @@ function renderMobFan() {
 // 3 o'clock point) becomes the active section. A plain tap picks directly.
 function renderMobWheel() {
   const cats = state.categories.filter(c => !c.disabled);
+  const ico = (c) => {
+    if (c.iconEnabled === false) return '';
+    const ch = c.icon || CATEGORY_ICONS[c.name] || '🍴';
+    const glyph = sbwOn() && SBW_CAT_MAP[ch] ? SBW[SBW_CAT_MAP[ch]] : esc(ch);
+    return `<span class="mw-ico">${glyph}</span>`;
+  };
   return `<div class="mob-wheel">
     <span class="md-disc"></span>
-    ${cats.map((c, i) => `<button class="mw-cat${state.activeCat === c.name ? ' active' : ''}" data-act="cat" data-val="${esc(c.name)}" data-idx="${i}" ${c.color ? `style="--mwc:${c.color};"` : ''}>${esc(c.name)}</button>`).join('')}
+    ${cats.map((c, i) => `<span class="md-tick"></span>`).join('')}
+    ${cats.map((c, i) => `<button class="mw-cat${state.activeCat === c.name ? ' active' : ''}" data-act="cat" data-val="${esc(c.name)}" data-idx="${i}" ${c.color ? `style="--mwc:${c.color};"` : ''}>${ico(c)}<span class="mw-name">${esc(c.name)}</span></button>`).join('')}
     <span class="md-lens"></span>
     <div class="md-touch"></div>
   </div>`;
@@ -10567,31 +10582,47 @@ function renderMobWheelDocket() {
   <button class="mob-send-fab" data-act="send-to-kitchen" title="Save — hold to log off">${ACT_TICK_SVG} Save</button>`;
 }
 
-// The dial's motion. Sections sit on a circle whose centre is off-screen
-// left; a vertical drag spins the rim (like rolling a coin), release snaps
-// to the nearest section and picks it. Labels scale/fade away from the lens.
+// The dial's motion — a real rotary feel. The thumb spins it by ANGLE
+// around the hub (any direction of stroke works), a flick carries momentum
+// that decays with friction, every detent crossing blips the vibration
+// motor, the ends rubber-band, and the release settles with an ease onto
+// the nearest section before picking it. The label about to land in the
+// lens highlights live during the spin.
 let _dialOff = null; // continuous index offset — survives re-renders mid-spin
 function setupMobWheel() {
   const dial = document.querySelector('.mob-wheel');
   if (!dial) return;
   const btns = [...dial.querySelectorAll('.mw-cat')];
+  const ticks = [...dial.querySelectorAll('.md-tick')];
   if (!btns.length) return;
+  const N = btns.length;
   const activeIdx = Math.max(0, btns.findIndex(b => b.classList.contains('active')));
   if (_dialOff === null || Math.abs(_dialOff - Math.round(_dialOff)) < 0.01) _dialOff = activeIdx;
-  const R = 128, CX = -22, STEP = 24, BASE = -48; // centre off the corner; lens on the diagonal
+  const R = 128, TR = 88, CX = -22, STEP = 24, BASE = -48, MAXA = 0.78;
+  const stepRad = STEP * Math.PI / 180;
   const place = () => {
     const CY = dial.clientHeight + 22;
-    for (const b of btns) {
-      const th = (BASE + (parseInt(b.dataset.idx, 10) - _dialOff) * STEP) * Math.PI / 180;
+    const nearest = Math.max(0, Math.min(N - 1, Math.round(_dialOff)));
+    btns.forEach((b, i) => {
+      const th = (BASE + (i - _dialOff) * STEP) * Math.PI / 180;
       const rel = Math.abs(th - BASE * Math.PI / 180);
-      if (rel > 0.78) { b.style.display = 'none'; continue; }
-      b.style.display = '';
-      const d = Math.min(1, rel / 0.78);
-      b.style.left = (CX + Math.cos(th) * R) + 'px';
-      b.style.top = (CY + Math.sin(th) * R) + 'px';
-      b.style.transform = `translate(-50%,-50%) scale(${(1.06 - 0.3 * d).toFixed(3)})`;
-      b.style.opacity = (1 - 0.6 * d).toFixed(3);
-    }
+      const show = rel <= MAXA;
+      b.style.display = show ? '' : 'none';
+      if (show) {
+        const d = Math.min(1, rel / MAXA);
+        b.style.left = (CX + Math.cos(th) * R) + 'px';
+        b.style.top = (CY + Math.sin(th) * R) + 'px';
+        b.style.transform = `translate(-50%,-50%) scale(${(1.08 - 0.34 * d).toFixed(3)})`;
+        b.style.opacity = (1 - 0.6 * d).toFixed(3);
+        b.classList.toggle('near', i === nearest);
+      }
+      const t = ticks[i];
+      if (t) {
+        const show2 = rel <= MAXA + 0.14;
+        t.style.display = show2 ? '' : 'none';
+        if (show2) { t.style.left = (CX + Math.cos(th) * TR) + 'px'; t.style.top = (CY + Math.sin(th) * TR) + 'px'; }
+      }
+    });
     const disc = dial.querySelector('.md-disc');
     if (disc) { disc.style.left = (CX - 176) + 'px'; disc.style.top = (CY - 176) + 'px'; }
     const lens = dial.querySelector('.md-lens');
@@ -10599,20 +10630,57 @@ function setupMobWheel() {
     if (lens) { lens.style.left = (CX + Math.cos(la) * R) + 'px'; lens.style.top = (CY + Math.sin(la) * R) + 'px'; }
   };
   place();
+
   const touch = dial.querySelector('.md-touch');
-  let y0 = 0, off0 = 0, moved = false;
+  let anim = 0;
+  const setOff = (v) => {
+    // Rubber past the ends: movement, but only a third of it.
+    if (v < 0) v = v * 0.34;
+    else if (v > N - 1) v = (N - 1) + (v - (N - 1)) * 0.34;
+    const before = Math.round(Math.max(0, Math.min(N - 1, _dialOff)));
+    _dialOff = v;
+    const after = Math.round(Math.max(0, Math.min(N - 1, v)));
+    // A detent per section — the thumb feels each stop go by.
+    if (after !== before && navigator.vibrate) { try { navigator.vibrate(8); } catch (e) {} }
+    place();
+  };
+  const settle = () => {
+    // Ease onto the nearest detent, then make it the active section.
+    const target = Math.max(0, Math.min(N - 1, Math.round(_dialOff)));
+    const from = _dialOff, dist = target - from, t0 = performance.now();
+    const DUR = 170;
+    const tick = (now) => {
+      const k = Math.min(1, (now - t0) / DUR);
+      _dialOff = from + dist * (1 - Math.pow(1 - k, 3));
+      place();
+      if (k < 1) { anim = requestAnimationFrame(tick); return; }
+      anim = 0;
+      const btn = btns[target];
+      if (btn && !btn.classList.contains('active')) btn.click();
+    };
+    anim = requestAnimationFrame(tick);
+  };
+  const angOf = (e) => {
+    const r = dial.getBoundingClientRect();
+    return Math.atan2(e.clientY - (r.top + dial.clientHeight + 22), e.clientX - (r.left + CX));
+  };
+  let a0 = 0, off0 = 0, cum = 0, moved = false, vel = 0, lastA = 0, lastT = 0;
   touch.addEventListener('pointerdown', (e) => {
-    y0 = e.clientY; off0 = _dialOff; moved = false;
+    if (anim) { cancelAnimationFrame(anim); anim = 0; }
+    a0 = lastA = angOf(e); off0 = _dialOff; cum = 0; moved = false; vel = 0; lastT = performance.now();
     touch.setPointerCapture(e.pointerId);
   });
   touch.addEventListener('pointermove', (e) => {
     if (!touch.hasPointerCapture(e.pointerId)) return;
-    const dy = e.clientY - y0;
-    if (Math.abs(dy) > 6) moved = true;
-    if (!moved) return;
-    // Drag down rolls the rim down: earlier sections come round to the lens.
-    _dialOff = Math.max(0, Math.min(btns.length - 1, off0 - dy / 56));
-    requestAnimationFrame(place);
+    const a = angOf(e), now = performance.now();
+    let da = a - lastA;
+    if (da > Math.PI) da -= 2 * Math.PI; else if (da < -Math.PI) da += 2 * Math.PI;
+    cum += da;
+    const dt = Math.max(1, now - lastT);
+    vel = 0.75 * vel + 0.25 * (da / dt); // rad/ms, smoothed
+    lastA = a; lastT = now;
+    if (Math.abs(cum) > 0.05) moved = true;
+    if (moved) setOff(off0 - cum / stepRad);
   });
   touch.addEventListener('pointerup', (e) => {
     if (!moved) {
@@ -10624,10 +10692,19 @@ function setupMobWheel() {
       if (btn) { _dialOff = parseInt(btn.dataset.idx, 10); btn.click(); }
       return;
     }
-    _dialOff = Math.max(0, Math.min(btns.length - 1, Math.round(_dialOff)));
-    place();
-    const target = btns[_dialOff];
-    if (target && !target.classList.contains('active')) target.click();
+    // Flick: keep spinning with friction, then settle on a detent.
+    let v = -vel / stepRad, last = performance.now();
+    const coast = (now) => {
+      const dt = now - last; last = now;
+      _dialOff += v * dt;
+      v *= Math.exp(-dt / 140);
+      if (_dialOff < -0.35 || _dialOff > N - 1 + 0.35) v = 0; // hit the rubber
+      setOff(Math.max(-0.35, Math.min(N - 1 + 0.35, _dialOff)));
+      if (Math.abs(v) > 0.0016) { anim = requestAnimationFrame(coast); return; }
+      settle();
+    };
+    if (Math.abs(v) > 0.003) anim = requestAnimationFrame(coast);
+    else settle();
   });
 }
 

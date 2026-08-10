@@ -1661,6 +1661,8 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 .tbl-cpill b{ font-size:12.5px; font-weight:800; color:inherit; line-height:1; font-family:var(--font-mono); }
 .tbl-cpill.over{ background:var(--violet); box-shadow:0 0 0 1.5px rgba(255,255,255,.8); }
 /* Allergy / VIP marks: top-right overlay stack — tiny, permanent, no flow. */
+/* Always-on RES chip (booking clock time), top-left like the lock badge. */
+.tbl-res{ position:absolute; top:3px; left:3px; z-index:3; background:var(--blue); color:#fff; font-size:9px; font-weight:800; padding:2px 6px; border-radius:10px; line-height:1.4; white-space:nowrap; pointer-events:none; box-shadow:0 1px 3px rgba(0,0,0,.35); }
 .tbl-marks{ position:absolute; top:4px; right:4px; z-index:3; display:inline-flex; gap:3px; pointer-events:none; }
 .tbl-mark{ width:20px; height:20px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:13px; font-weight:900; line-height:1; box-shadow:0 1px 3px rgba(0,0,0,.35); }
 .tbl-mark-allergy{ background:var(--red); color:#fff; }
@@ -6524,6 +6526,10 @@ const TABLE_TEMPLATES = [
 // Dragging the resize handle lands on the nearest step; the shape's aspect is
 // held, so a round table stays round — it just grows to a known size.
 const TABLE_SIZE_STEPS = [0.85, 1, 1.25, 1.55];
+// The floor renders at ONE standard aspect (900×500 ≈ 16:9-ish) on every
+// screen — width:100% keeps it responsive. No per-plan height any more, so
+// tables never squish; positions stay in %.
+const STD_FLOOR_H = 500;
 const TABLE_SIZE_LABELS = ['S', 'M', 'L', 'XL'];
 function tableBaseDims(shape) {
   const tpl = TABLE_TEMPLATES.find(x => x.shape === shape);
@@ -6646,6 +6652,7 @@ let state = {
   floorTableColor: null, // colour applied to tables placed from the toolbar
   floorTableFinish: null, // finish (wood / cloth) applied to tables placed from the toolbar
   accountMenuOpen: false, // the topbar Account dropdown (all docket shortcuts)
+  managerQuickOpen: false, // floor "Manager" pop: during-service quick actions
   customerPane: null,     // { q } — attach/remove a customer while ordering
   moveItems: null,        // { sel: [lineIds] } — move sent lines to another table
   moveItemsPicking: false, // picker is choosing the move destination
@@ -10141,6 +10148,7 @@ function render() {
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
+    ${state.managerQuickOpen ? renderManagerQuick() : ''}
     ${state.idleWarn ? renderIdleWarn() : ''}
     ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
 
@@ -10834,6 +10842,7 @@ const ACT_POWER_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor
 const ACT_DOWNLOAD_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>`;
 // Inline (1em) derivatives of icons defined above — must stay below them.
 const SYS_EDIT_SVG = ACT_PENCIL_SVG.replace('<svg ', '<svg class="sys-i" ');
+const SYS_SLIDERS_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>`;
 const SYS_TRASH_SVG = ACT_TRASH_SVG.replace('<svg ', '<svg class="sys-i" ');
 const SYS_BOLT_SVG = DKT_BOLT_SVG.replace('act-i', 'sys-i');
 const SYS_DOLLAR_SVG = ACT_PAY_SVG.replace('<svg ', '<svg class="sys-i" ');
@@ -15674,12 +15683,6 @@ function renderFloorPlanAdmin() {
   ${state.floorAdvancedOpen ? `
   <div data-expkey="floor-adv" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;">
     ${tableTimerControls()}
-    <div style="display:flex;align-items:center;gap:8px;">
-      <label class="ts" style="margin:0;">Floor height</label>
-      <button class="icon-sq" data-act="step-floor-height" data-dir="-1" title="Shorter">−</button>
-      <span class="ts" style="min-width:44px;text-align:center;font-weight:700;">${fp.height}</span>
-      <button class="icon-sq" data-act="step-floor-height" data-dir="1" title="Taller">＋</button>
-    </div>
     <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;cursor:pointer;">
       <input type="checkbox" id="floorplan-snap-input" data-fp="${fp.id}" ${fp.snapToGrid ? 'checked' : ''}> Snap to grid
     </label>
@@ -15787,8 +15790,7 @@ function renderFloorPlanAdmin() {
       <div class="pp-row" style="align-items:center;flex-wrap:wrap;">
         ${selTable ? `
         <label class="ts" style="margin:0;">Number</label>
-        <input id="table-num-input" type="text" maxlength="5" value="${esc(String(selected.label))}" data-id="${selected.id}" data-fp="${fp.id}" title="Type the table number" style="width:72px;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;font-weight:800;text-align:center;background:var(--surface);color:var(--text-primary);">
-        <button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" title="Number pad">${SYS_HASH_SVG}</button>` : `
+        <button class="btn-secondary" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="width:auto;padding:8px 14px;font-family:'IBM Plex Mono',monospace;font-weight:800;" title="Tap for the pad — or just start typing the number">${esc(String(selected.label))}</button>` : `
         <input id="table-label-input" type="text" value="${esc(selected.label)}" placeholder="Label" data-id="${selected.id}" data-fp="${fp.id}" style="width:86px;padding:8px 10px;border-radius:8px;border:1px solid var(--steel-300);font-family:'IBM Plex Mono',monospace;">
         <label class="ts" style="margin:0;">W</label>
         <button class="icon-sq" data-act="step-decor-dim" data-dim="width" data-dir="-1" data-id="${selected.id}" data-fp="${fp.id}">−</button>
@@ -15808,7 +15810,7 @@ function renderFloorPlanAdmin() {
   })()}
     </div>
     <div class="fp-main">
-  <div class="floor-canvas${state.floorPlacing ? ' placing' : ''}" id="admin-floor-canvas" style="position:relative;width:100%;max-width:100%;aspect-ratio:900 / ${fp.height};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;border:1px dashed var(--steel-300);${fp.snapToGrid ? `background-image:linear-gradient(to right, var(--steel-300) 1px, transparent 1px),linear-gradient(to bottom, var(--steel-300) 1px, transparent 1px);background-size:${FLOOR_GRID}% ${FLOOR_GRID}%;` : ''}">
+  <div class="floor-canvas${state.floorPlacing ? ' placing' : ''}" id="admin-floor-canvas" style="position:relative;width:100%;max-width:100%;aspect-ratio:900 / ${STD_FLOOR_H};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;border:1px dashed var(--steel-300);${fp.snapToGrid ? `background-image:linear-gradient(to right, var(--steel-300) 1px, transparent 1px),linear-gradient(to bottom, var(--steel-300) 1px, transparent 1px);background-size:${FLOOR_GRID}% ${FLOOR_GRID}%;` : ''}">
     ${state.floorPlacing ? (() => {
       const [kind, key] = state.floorPlacing.split(':');
       const tpl = kind === 'decor' ? DECOR_TEMPLATES.find(t => t.key === key) : TABLE_TEMPLATES.find(t => t.key === key);
@@ -16981,13 +16983,22 @@ function tableIdleMins(o) {
 }
 // A booking on this table starting within the next hour (or up to 15 min
 // overdue) — the Booked lens highlights these so walk-ins don't get seated.
-function upcomingBookingFor(tableId) {
+function upcomingBookingFor(tableId, aheadMin) {
   const now = Date.now();
-  return (state.reservations || []).find(r => {
-    if (r.tableId !== tableId || r.status === 'cancelled' || r.status === 'seated') return false;
-    const at = new Date(r.time).getTime();
-    return at > now - 15 * 60000 && at < now + 60 * 60000;
-  });
+  const ahead = (aheadMin || 60) * 60000;
+  return (state.reservations || [])
+    .filter(r => r.tableId === tableId && r.status !== 'cancelled' && r.status !== 'seated')
+    .filter(r => { const at = new Date(r.time).getTime(); return at > now - 15 * 60000 && at < now + ahead; })
+    .sort((a, b) => new Date(a.time) - new Date(b.time))[0];
+}
+// A small always-on RES chip (clock time) for a table with a booking coming up
+// in the next few hours — shown in every lens, like OrderMate's blue tag.
+function tableResChip(t) {
+  if (t.type === 'decor') return '';
+  const r = upcomingBookingFor(t.id, 180);
+  if (!r) return '';
+  const d = new Date(r.time), hh = (d.getHours() % 12) || 12, mm = String(d.getMinutes()).padStart(2, '0');
+  return `<span class="tbl-res" title="Booked — ${esc(r.name)} · ${r.partySize} · ${hh}:${mm}">RES ${hh}:${mm}</span>`;
 }
 // Two-tier status grammar (owner-picked, Aug 2026): a GLOW HALO means "this
 // table needs a human" — locked, bill printed, ignored past the cap, over
@@ -17077,10 +17088,12 @@ function floorPillHtml(t, cs) {
     return pill(`background:var(--red);color:#fff;`, `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
   }
   if (lens === 'booked') {
-    const r = upcomingBookingFor(t.id);
+    const r = upcomingBookingFor(t.id, 180);
     if (!r) return '';
-    const mins = Math.round((new Date(r.time).getTime() - Date.now()) / 60000);
-    return pill('background:var(--orange);color:#fff;', `<b>${mins <= 0 ? 'now' : 'in ' + pillDur(mins)}</b>`, `${esc(r.name)} · ${r.partySize}`);
+    const d = new Date(r.time), hh = (d.getHours() % 12) || 12, mm = String(d.getMinutes()).padStart(2, '0');
+    const mins = Math.round((d.getTime() - Date.now()) / 60000);
+    const rel = mins <= 0 ? 'now' : 'in ' + pillDur(mins);
+    return pill('background:var(--orange);color:#fff;', `<b>${hh}:${mm} · ${rel}</b>`, `${esc(r.name)} · ${r.partySize}`);
   }
   // Course lens: the course's own dot + a danger-scaled wait.
   if (!cs) return '';
@@ -17197,6 +17210,29 @@ async function unlockTable(tableId, staffName) {
 }
 async function refreshTableLocks() {
   try { state.tableLocks = await api('/api/table-locks'); } catch (e) {}
+}
+// Floor "Manager" pop — DURING-SERVICE tasks only (not a mini-Admin clone;
+// full setup stays in the Admin tab). Each tile jumps to the right page.
+function renderManagerQuick() {
+  const tiles = [
+    ['house', 'stock', 'Stock / 86', SYS_HASH_SVG],
+    ['house', 'wastage', 'Wastage & comps', SYS_HUB_SVG],
+    ['register', '', 'Cash-up', ACT_PAY_SVG],
+    ['settings-tax', '', 'Surcharges', SYS_CHART_SVG],
+    ['reservations', '', 'Bookings', SYS_CALENDAR_SVG],
+    ['floorplan', '', 'Floor layout', SYS_MAP_SVG],
+  ];
+  return `
+  <div class="modal-bg" data-act="close-manager-quick">
+    <div class="modal" data-stop="1" style="max-width:460px;">
+      <h2>Manager</h2>
+      <div class="ts" style="margin:-6px 0 14px;">Quick changes during service. Full setup lives in Admin.</div>
+      <div class="acct-grid">
+        ${tiles.map(([tab, sec, label, icon]) => `<button class="acct-tile" data-act="mgr-quick-go" data-tab="${tab}" data-section="${sec}">${icon}<span class="acct-tile-label">${label}</span></button>`).join('')}
+      </div>
+      <div class="modal-actions"><button class="icon-action neutral" title="Close" data-act="close-manager-quick">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button></div>
+    </div>
+  </div>`;
 }
 function renderAccountMiddle() {
   const t = findTableById(state.table);
@@ -17339,7 +17375,8 @@ function renderTablePickerMiddle() {
           ${[['sitting', 'Sitting'], ['course', 'Course'], ['attention', 'Attention'], ['guests', 'Guests'], ['booked', 'Booked']]
             .map(([v, l]) => `<option value="${v}" ${(state.floorStatusView || 'sitting') === v ? 'selected' : ''}>${l}</option>`).join('')}
         </select>` : ''}
-        ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="${state.settings.floorStatusEnabled !== false ? '' : 'margin-left:auto;'}" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
+        ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" style="${state.settings.floorStatusEnabled !== false ? '' : 'margin-left:auto;'}" data-act="open-manager-quick" title="Manager — during-service tasks">${SYS_SLIDERS_SVG}</button>` : ''}
+        ${state.currentStaff && state.currentStaff.role === 'manager' ? `<button type="button" class="icon-sq" data-act="goto-table-layout" title="Edit layout">${SYS_EDIT_SVG}</button>` : ''}
       </div>
       ${state.settings.tableMode === 'simple' ? (() => {
         // Simple mode: every table across every layout, as one numbered grid.
@@ -17371,7 +17408,7 @@ function renderTablePickerMiddle() {
       })() : `
       ${fp ? `
       <div class="tp-canvas-wrap">
-      <div class="floor-canvas" style="position:relative;width:100%;max-width:100%;aspect-ratio:900 / ${fp.height};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;">
+      <div class="floor-canvas" style="position:relative;width:100%;max-width:100%;aspect-ratio:900 / ${STD_FLOOR_H};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;">
         ${fp.tables.filter(t => t.type === 'decor').map(t => `
           <div class="floor-marker" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').map(t => {
@@ -17384,7 +17421,7 @@ function renderTablePickerMiddle() {
           return `
           <div class="floor-marker${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
             ${fx.wash}
-            ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
+            ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
             ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
             ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
           </div>`;
@@ -19036,6 +19073,43 @@ document.addEventListener('keydown', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && state.floorPlacing) { stopPlacing(); }
   else if (e.key === 'Escape' && state.selectedAdminTableIds.length) { clearTableSelection(); }
+});
+// Select a table in the layout editor and just start typing its number — the
+// first keystroke replaces the label, then it builds; Backspace deletes, Enter
+// commits. Saves shortly after you stop typing (or on Enter).
+let _numTypeBuf = null, _numTypeOrig = null, _numTypeTimer = null;
+function commitTableNumberTyping() {
+  clearTimeout(_numTypeTimer);
+  const id = state.selectedAdminTableId;
+  const fp = id && state.floorPlans.find(f => f.tables.some(t => t.id === id));
+  const t = fp && fp.tables.find(x => x.id === id);
+  if (t) {
+    if (_numTypeBuf) patchFloorObject(fp.id, id, { label: _numTypeBuf });
+    else if (_numTypeOrig != null) { t.label = _numTypeOrig; render(); } // never save an empty number
+  }
+  _numTypeBuf = null; _numTypeOrig = null;
+}
+function typeTableNumber(ch) {
+  const id = state.selectedAdminTableId; if (!id) return;
+  const fp = state.floorPlans.find(f => f.tables.some(t => t.id === id));
+  const t = fp && fp.tables.find(x => x.id === id);
+  if (!t || t.type === 'decor') return;
+  if (_numTypeBuf === null) { _numTypeBuf = ''; _numTypeOrig = t.label; }
+  if (ch === 'back') _numTypeBuf = _numTypeBuf.slice(0, -1);
+  else if (_numTypeBuf.length < 5) _numTypeBuf += ch.toUpperCase();
+  t.label = _numTypeBuf;
+  render();
+  clearTimeout(_numTypeTimer);
+  _numTypeTimer = setTimeout(commitTableNumberTyping, 650);
+}
+document.addEventListener('keydown', (e) => {
+  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField()) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!state.selectedAdminTableId) return; // one table selected → type its number
+  const k = e.key;
+  if (/^[0-9a-zA-Z]$/.test(k)) { e.preventDefault(); typeTableNumber(k); }
+  else if (k === 'Backspace') { e.preventDefault(); typeTableNumber('back'); }
+  else if (k === 'Enter') { e.preventDefault(); commitTableNumberTyping(); }
 });
 // Ctrl/Cmd+A in the layout editor: with one thing selected, select ALL of the
 // same kind (tables → every table, an object → every object).
@@ -22474,6 +22548,15 @@ function bindEvents() {
       else if (act === 'close-move-items') { state.moveItems = null; state.moveItemsPicking = false; render(); }
       else if (act === 'move-items-pick-table') { state.moveItemsPicking = true; openTablePicker(); }
       else if (act === 'goto-table-layout') { state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; state.pickFlashId = null; state.view = 'admin'; state.adminTab = 'floorplan'; render(); }
+      else if (act === 'open-manager-quick') { state.managerQuickOpen = true; render(); }
+      else if (act === 'close-manager-quick') { state.managerQuickOpen = false; render(); }
+      else if (act === 'mgr-quick-go') {
+        state.managerQuickOpen = false; state.showTablePicker = false; state.transferMode = false;
+        state.view = 'admin'; state.adminTab = el.dataset.tab;
+        if (el.dataset.tab === 'house') { state.houseSection = el.dataset.section || 'stock'; loadHouseLog(); }
+        if (el.dataset.tab === 'register') loadRegisterData();
+        render();
+      }
       else if (act === 'toggle-auto-surcharge') {
         const cur = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
         const k = el.dataset.key;
@@ -23917,13 +24000,6 @@ function bindEvents() {
     const label = e.target.value.trim();
     if (label) patchFloorObject(tableLabelInput.dataset.fp, tableLabelInput.dataset.id, { label });
   });
-  // Type the table number directly on the selected table (Enter commits too).
-  const tableNumInput = document.getElementById('table-num-input');
-  if (tableNumInput) {
-    const save = () => { const label = tableNumInput.value.trim().slice(0, 5); if (label) patchFloorObject(tableNumInput.dataset.fp, tableNumInput.dataset.id, { label }); };
-    tableNumInput.addEventListener('change', save);
-    tableNumInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { save(); tableNumInput.blur(); } });
-  }
   const decorWidthInput = document.getElementById('decor-width-input');
   if (decorWidthInput) decorWidthInput.addEventListener('change', (e) => {
     patchFloorObject(decorWidthInput.dataset.fp, decorWidthInput.dataset.id, { width: parseFloat(e.target.value) || 5 });

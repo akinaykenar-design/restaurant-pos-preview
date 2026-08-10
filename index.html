@@ -446,6 +446,7 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
    so pinning never shifts the grid. */
 .acct-tile{position:relative;}
 .acct-tile.pinned{border-color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold);}
+.acct-badge{position:absolute;top:8px;right:8px;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--red);color:#fff;font-family:var(--font-mono);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;}
 .acct-pin{position:absolute;top:-6px;right:-6px;width:19px;height:19px;display:flex;align-items:center;justify-content:center;color:#fff;background:var(--gold);border-radius:50%;box-shadow:0 1px 3px rgba(20,24,25,.4);z-index:2;pointer-events:none;}
 .acct-pin svg{width:11px;height:11px;}
 .tl-qty{flex:none;min-width:40px;height:40px;padding:0 8px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--chit-line);border-radius:var(--btn-radius);font-family:var(--font-mono);font-size:calc(15px*var(--tkt-fs,1));font-weight:700;color:var(--text-primary);cursor:pointer;transition:background-color .12s ease,border-color .12s ease,color .12s ease;}
@@ -1169,6 +1170,7 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
 .lg-venue{font-size:15px;font-weight:800;letter-spacing:5px;text-transform:uppercase;color:var(--text-primary);margin-bottom:18px;}
 .lg-clock{font-family:var(--font-mono);font-size:44px;font-weight:800;color:var(--charcoal-soft);line-height:1;}
 .lg-date{font-size:13px;font-weight:600;color:var(--charcoal-soft);margin-top:8px;}
+.lg-motd{margin-top:18px;max-width:340px;font-size:14px;font-weight:600;line-height:1.4;color:var(--text-primary);background:color-mix(in srgb, var(--gold) 13%, var(--surface));border-left:3px solid var(--gold);border-radius:8px;padding:10px 14px;text-align:left;}
 /* Belt-and-braces centring: some mobile browsers mis-size a grid inside a
    centred flex column (pad drifted ~11px right on a Samsung/Brave phone) —
    explicit auto margins keep pad and dots dead-centre even if the column
@@ -1191,7 +1193,7 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
 /* Minimal: wordmark + pad, nothing else. */
 .login-screen.pinfirst.ls-minimal{flex-direction:column;gap:0;}
 .ls-minimal .lg-left{align-items:center;border-right:0;padding-right:0;}
-.ls-minimal .lg-logo,.ls-minimal .lg-clock,.ls-minimal .lg-date{display:none;}
+.ls-minimal .lg-logo,.ls-minimal .lg-clock,.ls-minimal .lg-date,.ls-minimal .lg-motd{display:none;}
 .ls-minimal .lg-venue{font-size:12px;letter-spacing:4px;color:var(--charcoal-soft);margin-bottom:30px;}
 .pin-dots.lg{display:flex;gap:16px;margin:0 0 26px;}
 .pin-dots.lg .pin-dot{width:13px;height:13px;border-radius:50%;background:transparent;border:1.5px solid var(--steel-300);}
@@ -3958,6 +3960,7 @@ app.put('/api/settings', (req, res) => {
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
   if (req.body.venueAbn !== undefined) data.settings.venueAbn = String(req.body.venueAbn || '').trim().slice(0, 20);
+  if (req.body.messageOfTheDay !== undefined) data.settings.messageOfTheDay = String(req.body.messageOfTheDay || '').slice(0, 280);
   if (req.body.autoSurcharge && typeof req.body.autoSurcharge === 'object') {
     const a = req.body.autoSurcharge;
     const states = ['NSW', 'VIC', 'QLD', 'SA', 'WA', 'TAS', 'NT', 'ACT'];
@@ -6209,6 +6212,29 @@ app.post('/api/orders/:id/transfer', (req, res) => {
 // Reprint the full prep docket for an open order (jammed printer, docket in
 // the sink) — same routing as a round, with a REPRINT banner so the kitchen
 // doesn't read it as a new order. No stock or totals change.
+// Add a tip to a PAID order after the fact (card tips added later).
+app.post('/api/orders/:id/add-tip', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'paid') return res.status(400).json({ error: 'Only a paid order can take a tip.' });
+  const amt = Math.max(0, Math.round((parseFloat(req.body && req.body.amount) || 0) * 100) / 100);
+  if (!amt) return res.status(400).json({ error: 'Enter a tip amount.' });
+  order.tip = Math.round(((order.tip || 0) + amt) * 100) / 100;
+  order.grandTotal = Math.round(((order.total || 0) + order.tip) * 100) / 100;
+  logAudit(data, staffFromReq(req), `Added tip $${amt.toFixed(2)} to Ticket #${order.id}`);
+  writeData(data);
+  res.json(order);
+});
+// No Sale — open the cash drawer (best-effort) and log it.
+app.post('/api/no-sale', (req, res) => {
+  const data = readData();
+  let drawer = false;
+  try { drawer = printing.openCashDrawer(data); } catch (e) { drawer = false; }
+  logAudit(data, staffFromReq(req), 'No sale — cash drawer opened');
+  writeData(data);
+  res.json({ ok: true, drawer });
+});
 app.post('/api/orders/:id/reprint-docket', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
@@ -6860,6 +6886,7 @@ let state = {
   voidReasons: [],
   voidModal: null, // { orderId, reason, note }
   refundModal: null, // { orderId, amount, reason, remaining }
+  addTipModal: null, // { orderId, amount }
   confirmDialog: null, // { message, title, confirmLabel, danger, onConfirm } — styled replacement for native confirm()
 };
 
@@ -10120,6 +10147,7 @@ function render() {
     ${state.floorPlanModal ? renderFloorPlanModal() : ''}
     ${state.voidModal ? renderVoidModal() : ''}
     ${state.refundModal ? renderRefundModal() : ''}
+    ${state.addTipModal ? renderAddTipModal() : ''}
     ${state.discountPresetModal ? renderDiscountPresetModal() : ''}
     ${state.bulkEditModal ? renderBulkEditModal() : ''}
     ${state.bulkCategoryModal ? renderBulkCategoryModal() : ''}
@@ -10294,6 +10322,7 @@ function renderLoginScreen() {
       ${venue ? `<div class="lg-venue">${esc(venue)}</div>` : ''}
       <div class="lg-clock">${esc(time)}</div>
       <div class="lg-date">${esc(date)}</div>
+      ${s.messageOfTheDay ? `<div class="lg-motd">${esc(s.messageOfTheDay)}</div>` : ''}
     </div>
     <div class="lg-right">
       <div class="pin-dots lg${state.loginError === 'shake' ? ' shake' : ''}">
@@ -13951,12 +13980,31 @@ function renderDetailModal() {
       ${refundedTotal > 0 ? `<div class="detail-line" style="font-weight:700;"><span>Net total</span><span>${money(remaining)}</span></div>` : ''}
       ${state.settings.ticketFooter ? `<div class="ticket-footer-msg" style="border-top:none;padding:8px 0 0;">${esc(state.settings.ticketFooter)}</div>` : ''}
       ${state.settings.printEnabled ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="print-receipt" data-id="${o.id}">🖨️ Print receipt</button>` : ''}
+      ${isManager && o.status === 'paid' ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="open-add-tip" data-id="${o.id}">＋ Add tip</button>` : ''}
       ${isManager && o.status === 'paid' && remaining > 0.001 ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="open-refund" data-id="${o.id}">💸 Refund</button>` : ''}
       ${o.status !== 'void' ? `<button class="void-btn" data-act="void" data-id="${o.id}">Void this order</button>` : ''}
     </div>
   </div>`;
 }
 
+function renderAddTipModal() {
+  const m = state.addTipModal;
+  const o = state.orders.find(x => x.id === m.orderId);
+  return `
+  <div class="modal-bg" data-act="close-add-tip-modal">
+    <div class="modal" data-stop="1">
+      <h2>Add tip — order #${m.orderId}</h2>
+      <div class="sub">${o ? 'Total ' + money(o.total) + (o.tip ? ' · tip so far ' + money(o.tip) : '') : ''}</div>
+      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      <label>Tip amount</label>
+      <input id="add-tip-input" type="number" min="0" step="0.01" value="${m.amount}" placeholder="0.00">
+      <div class="modal-actions">
+        <button class="icon-action discard" title="Cancel" data-act="close-add-tip-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action send" data-act="confirm-add-tip">${ACT_TICK_SVG}<span class="ia-label">Add ${money(parseFloat(m.amount) || 0)}</span></button>
+      </div>
+    </div>
+  </div>`;
+}
 function renderRefundModal() {
   const m = state.refundModal;
   return `
@@ -13985,6 +14033,7 @@ const ADMIN_SECTIONS = [
     { key: 'daily', label: 'Daily' },
     { key: 'briefing', label: 'Tonight' },
     { key: 'register', label: 'Open Orders' },
+    { key: 'stale', label: 'Stale Tables' },
     { key: 'orders', label: 'Sales Summary' },
     { key: 'house', label: 'House / Wastage' },
     { key: 'kitchen', label: 'Kitchen' },
@@ -14203,6 +14252,7 @@ function renderAdminView() {
         : state.adminTab === 'kitchen' ? renderKitchenAdmin()
         : state.adminTab === 'orders' ? renderHistoryView()
         : state.adminTab === 'house' ? renderHouseAdmin()
+        : state.adminTab === 'stale' ? renderStaleAccounts()
         : state.adminTab === 'register' ? renderRegisterAdmin()
         : state.adminTab === 'reservations' ? renderReservationsAdmin()
         : state.adminTab === 'customers' ? renderCustomersAdmin()
@@ -17212,25 +17262,84 @@ async function refreshTableLocks() {
   try { state.tableLocks = await api('/api/table-locks'); } catch (e) {}
 }
 // Admin "Daily" dashboard — the manager landing (like OrderMate's Daily Tasks).
+// A tab's last activity = the most recent round it sent (fresh tables that
+// have rung nothing fall back to when they opened). Stale = nothing's moved on
+// it for a while, so a table's likely finished but never cashed out.
+function orderLastActivity(o) {
+  let last = o.createdAt || 0;
+  (o.rounds || []).forEach(rd => { if ((rd.sentAt || 0) > last) last = rd.sentAt; });
+  return last;
+}
+function staleTickets(thresholdMin) {
+  const cut = thresholdMin * 60000;
+  const now = Date.now();
+  return state.orders
+    .filter(o => o.status === 'open' && o.orderType === 'dine-in' && (now - orderLastActivity(o)) >= cut)
+    .map(o => ({ o, idle: Math.floor((now - orderLastActivity(o)) / 60000) }))
+    .sort((a, b) => b.idle - a.idle);
+}
+// Open tables that have gone quiet — a nudge to cash them out or check in.
+function renderStaleAccounts() {
+  const threshold = 30;
+  const rows = staleTickets(threshold);
+  return `
+    <div class="th" style="margin-bottom:4px;">Stale tables</div>
+    <div class="ts" style="margin-bottom:16px;">Open dine-in tabs with no new items for ${threshold}+ minutes. Tap one to jump to the table.</div>
+    ${rows.length === 0 ? `<div class="empty-hist">No stale tables — everything's moving.</div>` : `
+    <div style="max-width:640px;">
+      ${rows.map(({ o, idle }) => {
+        const t = state.tables.find(x => String(x.label) === String(o.table));
+        const total = o.items ? o.items.reduce((s, i) => s + i.price * i.qty, 0) : 0;
+        const idleLabel = idle >= 60 ? `${Math.floor(idle / 60)}h ${idle % 60}m` : `${idle}m`;
+        return `
+        <button class="order-row" data-act="stale-go" data-id="${t ? t.id : ''}" style="width:100%;text-align:left;cursor:pointer;">
+          <div class="order-info">
+            <div class="t1">Table ${esc(o.table)}${o.covers ? ` · ${o.covers} covers` : ''}${o.staffName ? ` · ${esc(o.staffName)}` : ''}</div>
+            <div class="t2">${o.items ? o.items.reduce((s, i) => s + i.qty, 0) : 0} items · ${money(total)} · opened ${fmtTime(o.createdAt)}</div>
+          </div>
+          <span class="status-chip ${idle >= 60 ? 'void' : 'course'}">idle ${idleLabel}</span>
+        </button>`;
+      }).join('')}
+    </div>`}`;
+}
+// No Sale — open the cash drawer without a transaction (make change, etc.).
+async function noSaleDrawer() {
+  try {
+    await api('/api/no-sale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+    state.toast = 'Cash drawer opened (no sale)';
+  } catch (e) { state.toast = e.message || 'Could not open the drawer.'; }
+  render();
+  armToastTimer(2500);
+}
 // Everyday tasks up front; deeper setup lives in the sidebar nav. Reached from
 // the topbar Admin tab and the floor Manager shortcut.
 function renderDailyDashboard() {
+  const staleCount = staleTickets(30).length;
+  const motd = (state.settings && state.settings.messageOfTheDay) || '';
   const tiles = [
-    ['house', 'stock', 'Stock / 86', SYS_HASH_SVG],
-    ['house', 'wastage', 'Wastage & comps', SYS_HUB_SVG],
-    ['register', '', 'Cash-up', SYS_PRINTER_SVG],
-    ['settings-tax', '', 'Surcharges', ACT_PAY_SVG],
-    ['orders', '', 'Sales', SYS_CHART_SVG],
-    ['reservations', '', 'Bookings', SYS_CALENDAR_SVG],
-    ['staff', '', 'Staff', DKT_USER_SVG],
-    ['__unlock__', '', 'Unlock tables', SYS_LOCK_SVG],
-    ['floorplan', '', 'Floor layout', SYS_MAP_SVG],
+    ['house', 'stock', 'Stock / 86', SYS_HASH_SVG, 0],
+    ['house', 'wastage', 'Wastage & comps', SYS_HUB_SVG, 0],
+    ['register', '', 'Cash-up', SYS_PRINTER_SVG, 0],
+    ['__nosale__', '', 'No sale', SYS_CASH_SVG, 0],
+    ['stale', '', 'Stale tables', SYS_HOURGLASS_SVG, staleCount],
+    ['settings-tax', '', 'Surcharges', ACT_PAY_SVG, 0],
+    ['orders', '', 'Sales', SYS_CHART_SVG, 0],
+    ['reservations', '', 'Bookings', SYS_CALENDAR_SVG, 0],
+    ['staff', '', 'Staff', DKT_USER_SVG, 0],
+    ['__unlock__', '', 'Unlock tables', SYS_LOCK_SVG, 0],
+    ['floorplan', '', 'Floor layout', SYS_MAP_SVG, 0],
   ];
   return `
     <div class="th" style="margin-bottom:4px;">Daily</div>
     <div class="ts" style="margin-bottom:16px;">Everyday manager tasks. Deeper setup is in the menu on the left.</div>
+    <div class="settings-card" style="margin-bottom:16px;max-width:640px;">
+      <div class="th" style="margin-bottom:6px;">Message of the day</div>
+      <div class="ts" style="margin-bottom:10px;">Shown to every staff member on the login screen. Leave blank to hide it.</div>
+      <textarea id="motd-input" rows="2" maxlength="280" placeholder="e.g. 86 the barramundi · push the shiraz · Jodie's last shift 🎉" style="width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);resize:vertical;font-family:inherit;">${esc(motd)}</textarea>
+      <button class="btn-send" style="width:auto;margin-top:10px;padding:8px 18px;" data-act="save-motd">Save</button>
+    </div>
     <div class="acct-grid">
-      ${tiles.map(([tab, sec, label, icon]) => `<button class="acct-tile" data-act="mgr-quick-go" data-tab="${tab}" data-section="${sec}">${icon}<span class="acct-tile-label">${label}</span></button>`).join('')}
+      ${tiles.map(([tab, sec, label, icon, badge]) => `<button class="acct-tile" data-act="mgr-quick-go" data-tab="${tab}" data-section="${sec}">${badge ? `<span class="acct-badge">${badge}</span>` : ''}${icon}<span class="acct-tile-label">${label}</span></button>`).join('')}
     </div>`;
 }
 function renderAccountMiddle() {
@@ -19907,6 +20016,29 @@ async function confirmRefundModal() {
   }
 }
 
+async function confirmAddTip() {
+  const m = state.addTipModal;
+  if (!m) return;
+  const value = parseFloat(m.amount);
+  if (isNaN(value) || value <= 0) { state.adminError = 'Enter a tip amount greater than 0.'; render(); return; }
+  try {
+    const order = await api(`/api/orders/${m.orderId}/add-tip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ amount: value, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+    });
+    await refreshOrders();
+    state.addTipModal = null;
+    state.adminError = '';
+    state.toast = `Added ${money(value)} tip to order #${order.id}`;
+    render();
+    armToastTimer(3200);
+  } catch (e) {
+    state.adminError = e.message || 'Could not add the tip.';
+    render();
+  }
+}
+
 function openAddDiscountPreset() { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: 'discount', type: 'percent', value: 10 }); state.adminError = ''; render(); }
 function openEditDiscountPreset(id) {
   const p = state.discountPresets.find(x => x.id === id);
@@ -22251,6 +22383,9 @@ function bindEvents() {
       else if (act === 'close-refund-modal') { closeRefundModal(); }
       else if (act === 'refund-modal-bg') { if (e.target === el) closeRefundModal(); }
       else if (act === 'confirm-refund-modal') { confirmRefundModal(); }
+      else if (act === 'open-add-tip') { state.addTipModal = { orderId: parseInt(el.dataset.id), amount: '' }; state.adminError = ''; render(); }
+      else if (act === 'close-add-tip-modal') { state.addTipModal = null; state.adminError = ''; render(); }
+      else if (act === 'confirm-add-tip') { confirmAddTip(); }
       else if (act === 'modal-bg') { if (e.target === el) closeCheckout(); }
       else if (act === 'pin-digit') { pressPinDigit(el.dataset.val); }
       else if (act === 'pin-back') { pressPinBackspace(); }
@@ -22551,12 +22686,20 @@ function bindEvents() {
       else if (act === 'mgr-quick-go') {
         const tab = el.dataset.tab;
         if (tab === '__unlock__') { state.view = 'order'; openTablePicker(); return; } // unlock by tapping a locked table
+        if (tab === '__nosale__') { noSaleDrawer(); return; }
         state.showTablePicker = false; state.transferMode = false;
         state.view = 'admin'; state.adminTab = tab;
         if (tab === 'house') { state.houseSection = el.dataset.section || 'stock'; loadHouseLog(); }
         if (tab === 'register') loadRegisterData();
         render();
       }
+      else if (act === 'stale-go') {
+        const t = findTableById(el.dataset.id);
+        state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false;
+        render();
+        if (t) pickTable(t.id);
+      }
+      else if (act === 'save-motd') { saveVenueSettings({ messageOfTheDay: (document.getElementById('motd-input') || {}).value || '' }); state.toast = 'Message of the day saved'; armToastTimer(2500); }
       else if (act === 'toggle-auto-surcharge') {
         const cur = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
         const k = el.dataset.key;
@@ -23375,6 +23518,17 @@ function bindEvents() {
   }
   const refundReasonInput = document.getElementById('refund-reason-input');
   if (refundReasonInput) refundReasonInput.addEventListener('input', (e) => { state.refundModal.reason = e.target.value; });
+  const addTipInput = document.getElementById('add-tip-input');
+  if (addTipInput) {
+    addTipInput.addEventListener('input', (e) => {
+      state.addTipModal.amount = e.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('add-tip-input');
+        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
+      });
+    });
+  }
   const discountPresetNameInput = document.getElementById('discount-preset-name-input');
   if (discountPresetNameInput) discountPresetNameInput.addEventListener('input', (e) => { state.discountPresetModal.name = e.target.value; });
   const discountPresetValueInput = document.getElementById('discount-preset-value-input');

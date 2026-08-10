@@ -2113,6 +2113,10 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
   position:relative; z-index:1; box-shadow:0 1px 5px rgba(20,24,25,.35);
 }
 
+/* Confirm dialog's Cancel is neutral, so it never reads as a second "danger"
+   button beside a red confirm (Take over / Unlock / Remove all shared red). */
+.icon-action.neutral{ background:var(--steel-100); border:2px solid var(--steel-300); color:var(--text-primary); }
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -3816,6 +3820,7 @@ app.put('/api/settings', (req, res) => {
     }
     data.settings.ticketPos = next;
   }
+  if (req.body.idleLogoffMinutes !== undefined) { const m = parseInt(req.body.idleLogoffMinutes, 10); data.settings.idleLogoffMinutes = (m > 0 && m <= 120) ? m : 0; }
   if (req.body.autoCourse !== undefined) data.settings.autoCourse = !!req.body.autoCourse;
   if (req.body.venueStyle !== undefined) {
     const allowed = ['classic', 'finedining', 'sushi', 'asian', 'burger', 'diner', 'steakhouse', 'seafood', 'pizzeria', 'mexican', 'cafe', 'bakery', 'cocktail', 'winebar', 'pub'];
@@ -5615,9 +5620,10 @@ app.post('/api/table-locks/claim', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/table-locks/release', (req, res) => {
-  const { tableId, device } = req.body || {};
+  const { tableId, device, force } = req.body || {};
   const cur = tableLocks.get(String(tableId));
-  if (cur && cur.device === String(device)) tableLocks.delete(String(tableId));
+  // A manager can force a release regardless of which till holds the lock.
+  if (cur && (force || cur.device === String(device))) tableLocks.delete(String(tableId));
   res.json({ ok: true });
 });
 
@@ -6526,6 +6532,7 @@ function tableWouldOverlap(fp, x, y, w, h, excludeId) {
 let state = {
   view: 'order',
   mobileCartOpen: false, // on phones the ticket panel is an off-canvas drawer
+  idleWarn: false, // idle auto-logoff countdown showing
   menu: [],
   activeCat: null,
   activeSubcat: null, // null = "All", '__none__' = items without a subcategory, or a subcategory id
@@ -8159,6 +8166,7 @@ async function toggleStaffPinView(id) {
 function finishLogin(staff) {
   state.currentStaff = staff;
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
+  resetIdleTimer(); // start the idle-logoff clock for this session
   state.loginSelectedId = null;
   state.loginPin = '';
   state.loginError = '';
@@ -8191,7 +8199,58 @@ async function pressPinDigit(d) {
 }
 function pressPinBackspace() { state.loginPin = state.loginPin.slice(0, -1); render(); }
 
+// ---------- Idle auto-logoff ----------
+// An unattended till hands itself back: after N minutes with no touch, a
+// countdown warns, and if nobody taps "Stay", it logs off (releasing the
+// table lock like any log-off). Off by default; N set in Settings.
+let _idleTimer = 0, _idleCountdown = 0, _idleLeft = 0;
+const IDLE_WARN_SECS = 20;
+function idleMinutes() {
+  const v = parseInt(state.settings.idleLogoffMinutes, 10);
+  return v > 0 ? v : 0;
+}
+function resetIdleTimer() {
+  clearTimeout(_idleTimer);
+  if (state.idleWarn) { // a real touch during the warning = "Stay"
+    clearInterval(_idleCountdown); state.idleWarn = false; render();
+  }
+  const mins = idleMinutes();
+  if (!mins || !state.currentStaff) return; // off, or nobody signed in
+  _idleTimer = setTimeout(startIdleWarn, mins * 60000);
+}
+function startIdleWarn() {
+  if (!idleMinutes() || !state.currentStaff) return;
+  state.idleWarn = true; _idleLeft = IDLE_WARN_SECS; render();
+  clearInterval(_idleCountdown);
+  _idleCountdown = setInterval(() => {
+    _idleLeft -= 1;
+    if (_idleLeft <= 0) {
+      clearInterval(_idleCountdown); state.idleWarn = false;
+      logOut(); // hands the table back
+      return;
+    }
+    const el = document.getElementById('idle-count');
+    if (el) el.textContent = _idleLeft; else render();
+  }, 1000);
+}
+function renderIdleWarn() {
+  return `
+  <div class="modal-bg" data-act="idle-stay" style="z-index:200;">
+    <div class="modal" data-stop="1" style="max-width:360px;text-align:center;">
+      <h2 style="margin:0 0 8px;">Still there?</h2>
+      <div style="font-size:14.5px;color:var(--text-secondary);margin-bottom:16px;">
+        Logging off in <b id="idle-count" style="color:var(--red);font-variant-numeric:tabular-nums;">${_idleLeft}</b> seconds.
+      </div>
+      <button class="icon-action send" data-act="idle-stay" style="width:100%;"><span class="ia-label">Stay signed in</span></button>
+    </div>
+  </div>`;
+}
+// Any interaction resets the idle clock; wired once.
+['pointerdown', 'keydown'].forEach(ev =>
+  document.addEventListener(ev, () => resetIdleTimer(), { passive: true, capture: true }));
+
 function logOut() {
+  clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
   releaseTableLock(state.table);
   try { localStorage.removeItem('pos-signed-in'); } catch (e) {}
   // A fresh login starts with the admin nav collapsed.
@@ -9116,7 +9175,9 @@ function saveAllergyModal() {
   // and notes). An enabled tick still never no-ops — with seat numbers off
   // it saves for the whole table straight away.
   if (!m.wholeTable && m.seats.length === 0) {
-    if (state.settings.seatNumbersEnabled && state.covers > 0) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
+    // One cover has no seat to choose — "All" and "Seat 1" mean the same
+    // thing, so skip the pop and save it whole-table.
+    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
     m.wholeTable = true;
   }
   const notes = m.notes.trim();
@@ -9159,7 +9220,7 @@ function saveCustomNoteDraft() {
     // Same grammar as adding an item: the centred seat pop asks which
     // cover the note applies to (All = whole table). No seats set up →
     // it's simply a whole-table note.
-    if (state.settings.seatNumbersEnabled && state.covers > 0) { state.noteSeatPop = true; state.adminError = ''; render(); return; }
+    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); return; }
     m.wholeTable = true;
   }
   const targets = m.wholeTable ? [null] : m.seats;
@@ -9357,7 +9418,7 @@ function renderConfirmDialog() {
       ${c.title ? `<h2>${esc(c.title)}</h2>` : ''}
       <div class="confirm-dialog-msg" style="white-space:pre-line;font-size:14.5px;line-height:1.45;color:var(--text-primary);margin-bottom:4px;">${esc(c.message)}</div>
       <div class="modal-actions">
-        <button class="icon-action discard" title="Cancel" data-act="confirm-dialog-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action neutral" title="Cancel" data-act="confirm-dialog-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
         <button class="icon-action ${c.danger ? 'discard' : 'send'}" data-act="confirm-dialog-yes">${ACT_TICK_SVG}<span class="ia-label">${esc(c.confirmLabel)}</span></button>
       </div>
     </div>
@@ -9869,6 +9930,7 @@ function render() {
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
+    ${state.idleWarn ? renderIdleWarn() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
@@ -15841,6 +15903,11 @@ function renderScreenAdmin() {
     <div class="pay-options">
       ${togglePill(state.settings.logoffAfterSend === true, 'set-logoff-after-send')}
     </div>
+    <div class="th" style="margin:18px 0 6px;">Idle log-off</div>
+    <div class="ts" style="margin:0 0 12px;">An unattended till logs off after this many minutes (20-second warning first). Off = never.</div>
+    <div class="pay-options">
+      ${[['0', 'Off'], ['2', '2 min'], ['3', '3 min'], ['5', '5 min'], ['10', '10 min']].map(([v, l]) => `<div class="pay-opt ${String(idleMinutes()) === v ? 'active' : ''}" data-act="set-idle-logoff" data-val="${v}">${l}</div>`).join('')}
+    </div>
   </div>
   <div class="settings-card" id="ctl-ordertypes">
     <div class="th" style="margin-bottom:10px;">Order types</div>
@@ -16656,10 +16723,20 @@ async function claimTableLock(tableId, force) {
     return true;
   } catch (e) { return false; }
 }
-function releaseTableLock(tableId) {
+function releaseTableLock(tableId, force) {
   if (tableId == null) return;
   if (state.tableLocks) delete state.tableLocks[String(tableId)];
-  api('/api/table-locks/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, device: DEVICE_ID }) }).catch(() => {});
+  api('/api/table-locks/release', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, device: DEVICE_ID, force: !!force }) }).catch(() => {});
+}
+// Manager unlock: free a table another till left locked, without taking it
+// over. The table returns to normal; anyone (including this manager) then
+// taps it to open fresh. A deliberate two-step so freeing ≠ seizing.
+async function unlockTable(tableId, staffName) {
+  releaseTableLock(tableId, true);
+  await refreshTableLocks();
+  state.toast = `Table unlocked${staffName ? ` (was ${staffName})` : ''}`;
+  render();
+  armToastTimer(2600);
 }
 async function refreshTableLocks() {
   try { state.tableLocks = await api('/api/table-locks'); } catch (e) {}
@@ -16966,7 +17043,8 @@ function pickTable(id) {
   if (lock) {
     const isManager = state.currentStaff && state.currentStaff.role === 'manager';
     if (isManager) {
-      openConfirm({ message: `Table is open on ${lock.staff}'s till. Take it over?`, confirmLabel: 'Take over', danger: true }, () => proceed(true));
+      // Unlock, don't seize: free the table, then it's tapped again to open.
+      openConfirm({ message: `Table is open on ${lock.staff}'s till. Unlock it?`, confirmLabel: 'Unlock', danger: true }, () => unlockTable(id, lock.staff));
     } else {
       state.toast = `In use — ${lock.staff}`;
       render();
@@ -21997,6 +22075,8 @@ function bindEvents() {
       else if (act === 'set-promptseatonadd-enabled') { setPromptSeatOnAddEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-qtypad-enabled') { setQtyPadEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-logoff-after-send') { saveTicketSetting({ logoffAfterSend: el.dataset.val === 'true' }); }
+      else if (act === 'idle-stay') { resetIdleTimer(); }
+      else if (act === 'set-idle-logoff') { saveTicketSetting({ idleLogoffMinutes: parseInt(el.dataset.val, 10) }).then(() => resetIdleTimer()); }
       else if (act === 'set-item-icons') { saveTicketSetting({ showItemIcons: el.dataset.val === 'true' }); }
       else if (act === 'set-cat-icons-only') { saveTicketSetting({ catIconsOnly: el.dataset.val === 'true' }); }
       else if (act === 'set-tile-colors') { saveTicketSetting({ tileColors: el.dataset.val === 'true' }); }

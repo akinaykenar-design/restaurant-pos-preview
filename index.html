@@ -428,6 +428,14 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .empty-ticket-sub{font-size:12px;color:var(--charcoal-soft);opacity:.7;}
 .ticket-line{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--chit-line);border-radius:10px;background:var(--surface);margin-bottom:calc(6px*var(--tkt-gap,1));}
 .ticket-line.editing{background:var(--docket-sel, var(--orange-dim));border-color:var(--docket-sel-b, var(--orange));opacity:1;}
+/* Floor editor: visual shape chips (replace the shape dropdown). Each previews
+   the shape in the table's current colour/finish. */
+.shape-chip-row{ display:flex; gap:6px; flex-wrap:wrap; }
+.shape-chip{ min-width:44px; height:40px; display:flex; align-items:center; justify-content:center;
+  border:1px solid var(--steel-300); border-radius:8px; background:var(--surface); cursor:pointer; padding:0 6px; }
+.shape-chip.active{ border-color:var(--orange); box-shadow:inset 0 0 0 1px var(--orange); }
+.shape-chip-preview{ display:block; border:1px solid rgba(20,24,25,.18); }
+
 /* Account tile pinned to the docket: gold outline + a corner pin, both overlay
    so pinning never shifts the grid. */
 .acct-tile{position:relative;}
@@ -15630,17 +15638,25 @@ function renderFloorPlanAdmin() {
     return `
     <div class="pp-group">
       <div class="pp-label">${selTable ? `Table ${esc(selTable.label)} · shape` : multi ? `${multi} selected · shape` : 'Place / edit table'}</div>
-      ${selTable ? `
-      <select class="pp-select pp-retype-select" data-id="${selTable.id}" data-fp="${fp.id}" title="Change this table's shape (size stays yours)">
-        ${TABLE_TEMPLATES.map(t => `<option value="table:${t.key}" ${t.shape === selTable.shape ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}
-      </select>` : multi ? `
-      <select class="pp-select pp-retype-select" data-id="multi" data-fp="${fp.id}" title="Change shape for all selected tables">
-        ${(() => { const mShape = same(selMany.map(t => t.shape)); return `${mShape ? '' : '<option value="">Mixed shapes…</option>'}${TABLE_TEMPLATES.map(t => `<option value="table:${t.key}" ${t.shape === mShape ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}`; })()}
-      </select>` : `
-      <select class="pp-select pp-place-select" title="Pick a shape, then tap the floor to place">
-        <option value="">＋ Place a table…</option>
-        ${TABLE_TEMPLATES.map(t => `<option value="table:${t.key}" ${state.floorPlacing === `table:${t.key}` ? 'selected' : ''}>${esc(t.label)}</option>`).join('')}
-      </select>`}
+      ${(() => {
+        // Visual shape chips: each shows the shape in the CURRENT colour/finish,
+        // so the picker previews what you'll get. Nothing selected → tap arms
+        // placement (then tap the floor); a table/selection selected → the tap
+        // changes its shape.
+        const pvColor = selTable ? selTable.color : multi ? mColor : state.floorTableColor;
+        const pvFinish = selTable ? (selTable.finish || 'plain') : multi ? mFinish : (state.floorTableFinish || 'plain');
+        const pvBg = pvColor || tableFinish(pvFinish).bg;
+        const placingShape = state.floorPlacing && state.floorPlacing.startsWith('table:') ? (TABLE_TEMPLATES.find(t => `table:${t.key}` === state.floorPlacing) || {}).shape : null;
+        const activeShape = selTable ? selTable.shape : multi ? same(selMany.map(t => t.shape)) : placingShape;
+        const idAttr = selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '';
+        const dims = { round: [26, 26], oval: [36, 22], square: [26, 26], rect: [36, 22], half: [30, 20] };
+        return `<div class="shape-chip-row">
+          ${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.shape] || [26, 26];
+            return `<button class="shape-chip ${t.shape === activeShape ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}">
+              <span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${tableRadius(t.shape)};background:${pvBg};"></span>
+            </button>`; }).join('')}
+        </div>`;
+      })()}
     </div>
     <div class="pp-group">
       <div class="pp-label">${selDecor ? `${esc(selDecor.label)} · type` : 'Objects'}</div>
@@ -22550,6 +22566,20 @@ function bindEvents() {
       else if (act === 'scale-selected-tables') { scaleSelectedTables(parseInt(el.dataset.dir)); }
       else if (act === 'delete-table') { deleteTableAction(el.dataset.id, el.dataset.fp); }
       else if (act === 'delete-selected-tables') { deleteSelectedTables(); }
+      else if (act === 'pick-table-shape') {
+        const tpl = TABLE_TEMPLATES.find(t => t.key === el.dataset.key); if (!tpl) return;
+        const fpId = el.dataset.fp, id = el.dataset.id;
+        const shapeFor = (t) => tpl.shape === 'round' ? { shape: 'round', height: circleHeightPct(t.width) } : { shape: tpl.shape };
+        if (!id) { // nothing selected → arm/disarm placement of this shape
+          state.floorPlacing = state.floorPlacing === `table:${tpl.key}` ? null : `table:${tpl.key}`;
+          state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
+          render();
+        } else if (id === 'multi') {
+          state.selectedAdminTableIds.forEach(tid => { const t = findTableById(tid); if (t) patchFloorObject(fpId, tid, shapeFor(t)); });
+        } else {
+          const t = findTableById(id); if (t) patchFloorObject(fpId, id, shapeFor(t));
+        }
+      }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }

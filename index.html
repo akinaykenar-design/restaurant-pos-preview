@@ -426,14 +426,14 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .empty-ticket-icon{font-size:40px;opacity:.35;margin-bottom:6px;}
 .empty-ticket-msg{font-weight:800;font-size:14px;color:var(--text-primary);opacity:.75;}
 .empty-ticket-sub{font-size:12px;color:var(--charcoal-soft);opacity:.7;}
-.ticket-line{position:relative;display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--chit-line);border-radius:10px;background:var(--surface);margin-bottom:calc(6px*var(--tkt-gap,1));}
+.ticket-line{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--chit-line);border-radius:10px;background:var(--surface);margin-bottom:calc(6px*var(--tkt-gap,1));}
 .ticket-line.editing{background:var(--docket-sel, var(--orange-dim));border-color:var(--docket-sel-b, var(--orange));opacity:1;}
-/* Pinned docket line: a gold rail + corner pin, all overlay so nothing shifts.
-   A pinned SENT line drops its dimming so the pin reads clearly. */
-.ticket-line.pinned{border-color:var(--gold);box-shadow:inset 3px 0 0 0 var(--gold);}
-.ticket-line.sent.pinned{opacity:1;}
-.tl-pin{position:absolute;top:-6px;right:-4px;width:18px;height:18px;display:flex;align-items:center;justify-content:center;color:#fff;background:var(--gold);border-radius:50%;box-shadow:0 1px 3px rgba(20,24,25,.4);z-index:2;pointer-events:none;}
-.tl-pin svg{width:11px;height:11px;}
+/* Account tile pinned to the docket: gold outline + a corner pin, both overlay
+   so pinning never shifts the grid. */
+.acct-tile{position:relative;}
+.acct-tile.pinned{border-color:var(--gold);box-shadow:inset 0 0 0 1px var(--gold);}
+.acct-pin{position:absolute;top:-6px;right:-6px;width:19px;height:19px;display:flex;align-items:center;justify-content:center;color:#fff;background:var(--gold);border-radius:50%;box-shadow:0 1px 3px rgba(20,24,25,.4);z-index:2;pointer-events:none;}
+.acct-pin svg{width:11px;height:11px;}
 .tl-qty{flex:none;min-width:40px;height:40px;padding:0 8px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--chit-line);border-radius:var(--btn-radius);font-family:var(--font-mono);font-size:calc(15px*var(--tkt-fs,1));font-weight:700;color:var(--text-primary);cursor:pointer;transition:background-color .12s ease,border-color .12s ease,color .12s ease;}
 
 .tl-sub{font-size:calc(11px*var(--tkt-fs,1));color:var(--charcoal-soft);margin-top:2px;}
@@ -3975,7 +3975,7 @@ app.put('/api/settings', (req, res) => {
   if (subcatStyle === 'bar' || subcatStyle === 'tiles') data.settings.subcatStyle = subcatStyle;
   if (req.body.docketShortcuts && typeof req.body.docketShortcuts === 'object') {
     const next = Object.assign({}, data.settings.docketShortcuts);
-    for (const k of ['table', 'notes', 'quickNote', 'callAway', 'auto']) {
+    for (const k of ['table', 'notes', 'quickNote', 'callAway', 'auto', 'customer', 'reprint', 'move']) {
       if (typeof req.body.docketShortcuts[k] === 'boolean') next[k] = req.body.docketShortcuts[k];
     }
     data.settings.docketShortcuts = next;
@@ -6622,7 +6622,6 @@ let state = {
   searchOpen: false, // menu search collapses to a magnifier until tapped
   coversEditOpen: false, // covers stepper reveals on tapping the covers chip
   coversPad: null, // { buffer } number-pad popup for entering covers
-  pinnedLines: {}, // { pinKey: true } docket lines held to the top of the panel
   totalsExpanded: false, // ticket running total expands to a breakdown on tap
   customerName: '',
   cart: [],
@@ -10721,13 +10720,26 @@ const SYS_EDIT_SVG = ACT_PENCIL_SVG.replace('<svg ', '<svg class="sys-i" ');
 const SYS_TRASH_SVG = ACT_TRASH_SVG.replace('<svg ', '<svg class="sys-i" ');
 const SYS_BOLT_SVG = DKT_BOLT_SVG.replace('act-i', 'sys-i');
 const SYS_DOLLAR_SVG = ACT_PAY_SVG.replace('<svg ', '<svg class="sys-i" ');
-// Set by a docket-line hold so the tap that follows doesn't also open the line.
+// Set by an account-tile hold so the tap that follows doesn't also fire it.
 let _suppressLineTap = false;
-function togglePinLine(key) {
-  if (state.pinnedLines[key]) delete state.pinnedLines[key];
-  else state.pinnedLines[key] = true;
-  state.toast = state.pinnedLines[key] ? 'Pinned to top' : 'Unpinned';
-  render();
+// Docket shortcut icons: most default ON, a few are opt-in. "Pinned" == shown
+// on the docket head row. Holding a tile in the table account toggles it.
+const DOCKET_DEFAULT_ON = ['table', 'notes', 'quickNote', 'callAway'];
+const ACCT_PIN_KEY = {
+  'open-table-picker': 'table', 'toggle-notes-panel': 'notes',
+  'toggle-quick-note': 'quickNote', 'toggle-callaway': 'callAway',
+  'toggle-auto-course-order': 'auto', 'open-customer-pane': 'customer',
+  'reprint-docket': 'reprint', 'open-move-items': 'move',
+};
+function docketPinned(key) {
+  const sc = state.settings.docketShortcuts || {};
+  return DOCKET_DEFAULT_ON.includes(key) ? sc[key] !== false : sc[key] === true;
+}
+function toggleDocketPin(key) {
+  const sc = state.settings.docketShortcuts || {};
+  const now = docketPinned(key);
+  saveTicketSetting({ docketShortcuts: { ...sc, [key]: !now } });
+  state.toast = !now ? 'Pinned to docket' : 'Unpinned from docket';
   armToastTimer(1400);
 }
 function renderTicketPanel() {
@@ -10774,6 +10786,9 @@ function renderTicketPanel() {
           ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active' : ''}" title="Quick note — next docket only" data-act="toggle-quick-note">${DKT_BOLT_SVG}</button>` : ''}
           ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${DKT_FLAME_SVG}</button>` : ''}
           ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}" data-act="toggle-auto-course-order">${DKT_AUTO_SVG}</button>` : ''}
+          ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.attachedCustomerId ? 'active' : ''}" title="Customer" data-act="acct-go" data-target="open-customer-pane">${DKT_USER_SVG}</button>` : ''}
+          ${sc.reprint === true ? `<button class="tkt-icon-btn lg glyph-btn" title="Reprint docket" data-act="acct-go" data-target="reprint-docket">${SYS_PRINTER_SVG}</button>` : ''}
+          ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn" title="Move items" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
         </div>`;
       })() : ''}
       ${state.orderType === 'dine-in' ? `
@@ -10852,12 +10867,9 @@ function renderTicketPanel() {
           }
         }
         const keyOf = x => `${x.name}${x.seat != null ? x.seat : ''}${x.note || ''}${x.price}${removedSig(x)}`;
-        const pinKeyOf = x => `${x.name}|${x.seat != null ? x.seat : ''}|${x.note || ''}|${x.course}`;
         const lineHtml = (e) => {
           const hasNew = e.newQty > 0, isSent = e.sentQty > 0, total = e.sentQty + e.newQty;
           const seatAttr = e.seat != null ? e.seat : '';
-          const pinKey = pinKeyOf(e);
-          const isPinned = !!state.pinnedLines[pinKey];
           // Seat numbers off ⇒ no seat text anywhere on the docket, even on lines
           // that were recorded with one while it was on. The seat stays on the
           // data; it just isn't shown.
@@ -10892,8 +10904,7 @@ function renderTicketPanel() {
             ? !!(state.editSent && state.editSent.name === e.name && String(state.editSent.course || 1) === String(e.course || 1) && String(state.editSent.price) === String(e.price))
             : !!(state.editLine && state.editLine.idx === e.cartIdx);
           return `
-            <div class="ticket-line ${hasNew ? 'new' : 'sent'}${isEditingThis ? ' editing' : ''}${isPinned ? ' pinned' : ''}" ${lineAct} data-pinkey="${esc(pinKey)}" title="Tap to edit · hold to pin">
-              ${isPinned ? `<span class="tl-pin" title="Pinned — hold to unpin">${ACT_PIN_SVG}</span>` : ''}
+            <div class="ticket-line ${hasNew ? 'new' : 'sent'}${isEditingThis ? ' editing' : ''}" ${lineAct} title="Tap to edit">
               ${qtyBtn}
               <div class="tl-body"><div class="tl-name">${esc(e.name)}</div>${sub}</div>
               ${priceHtml}
@@ -10911,13 +10922,7 @@ function renderTicketPanel() {
             if (merged.has(k)) { const en = merged.get(k); en.newQty += c.qty; en.cartIdx = c.idx; }
             else { merged.set(k, { name: c.name, seat: c.seat, note: c.note, price: c.price, course: n, menuItemId: c.menuItemId, modSelections: c.modSelections || {}, removed: c.removed || [], sentQty: 0, newQty: c.qty, cartIdx: c.idx }); freshKeys.push(k); }
           });
-          let orderedKeys = [...[...merged.keys()].filter(k => merged.get(k).sentQty > 0), ...freshKeys];
-          // Pinned lines float to the top of their course (stable within each group).
-          if (Object.keys(state.pinnedLines).length) {
-            const isPin = k => { const e = merged.get(k); return !!state.pinnedLines[pinKeyOf(e)]; };
-            const pins = orderedKeys.filter(isPin), rest = orderedKeys.filter(k => !isPin(k));
-            orderedKeys = [...pins, ...rest];
-          }
+          const orderedKeys = [...[...merged.keys()].filter(k => merged.get(k).sentQty > 0), ...freshKeys];
           return `
           <div class="course-group">
             <div class="course-group-head">
@@ -16983,13 +16988,19 @@ function renderAccountMiddle() {
   return `
   <div class="middle-view">
     <div style="padding:20px;display:flex;flex-direction:column;height:100%;">
+      <div class="ts" style="margin:0 0 10px;">Tap to open · hold to pin the icon to the docket</div>
       <div class="acct-grid">
-        ${sc.map(([act, icon, label, sub]) => `
-        <button class="acct-tile" data-act="acct-go" data-target="${act}">
+        ${sc.map(([act, icon, label, sub]) => {
+          const pinKey = ACCT_PIN_KEY[act];
+          const pinned = pinKey && docketPinned(pinKey);
+          return `
+        <button class="acct-tile${pinned ? ' pinned' : ''}" data-act="acct-go" data-target="${act}"${pinKey ? ` data-pinkey="${pinKey}"` : ''}>
+          ${pinned ? `<span class="acct-pin" title="Pinned to docket — hold to unpin">${ACT_PIN_SVG}</span>` : ''}
           ${icon}
           <span class="acct-tile-label">${label}</span>
           ${sub ? `<span class="acct-tile-sub">${esc(sub)}</span>` : ''}
-        </button>`).join('')}
+        </button>`;
+        }).join('')}
       </div>
     </div>
   </div>`;
@@ -17244,7 +17255,7 @@ function pickTable(id) {
     const t = findTableById(id);
     // Keep an unsent cart when this is the FIRST table picked (fresh login has
     // no table now) — the waiter may have rung items up before choosing.
-    if (hadTable) { state.cart = []; state.firedCourses = {}; state.pinnedLines = {}; }
+    if (hadTable) { state.cart = []; state.firedCourses = {}; }
     state.autoCourseOverride = null;
     state.covers = (t && t.covers) || 0;
     state.allergies = (t && t.allergies) || [];
@@ -21793,9 +21804,9 @@ function bindEvents() {
         state.editLine = null;
         if (idx != null) removeLine(idx); // keeps the 5s undo toast
       }
-      else if (act === 'edit-line') { if (_suppressLineTap) { _suppressLineTap = false; return; } openLineEdit(parseInt(el.dataset.idx)); }
+      else if (act === 'edit-line') { openLineEdit(parseInt(el.dataset.idx)); }
       else if (act === 'close-line-edit') { state.editLine = null; render(); }
-      else if (act === 'edit-sent') { if (_suppressLineTap) { _suppressLineTap = false; return; } openEditSent(el); }
+      else if (act === 'edit-sent') { openEditSent(el); }
       else if (act === 'serve-again') { serveAnotherFromEl(el); }
       else if (act === 'add-serving') { addAnotherServing(); }
       else if (act === 'reprice-sent') { repriceSentItem(); }
@@ -22140,6 +22151,7 @@ function bindEvents() {
       else if (act === 'open-table-picker') { openTablePicker(); }
       else if (act === 'toggle-account-menu') { state.accountMenuOpen = !state.accountMenuOpen; render(); }
       else if (act === 'acct-go') {
+        if (_suppressLineTap) { _suppressLineTap = false; return; } // a hold pinned it — don't also run it
         state.accountMenuOpen = false;
         const target = el.dataset.target;
         if (target === 'open-table-picker') openTablePicker();
@@ -23727,12 +23739,12 @@ function bindEvents() {
     el.addEventListener('touchstart', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); }, { passive: false });
   });
 
-  // HOLD a docket line to pin it to the top of the panel (or unpin). A short
-  // press still opens the line editor; the hold suppresses that one tap.
-  document.querySelectorAll('.ticket-line[data-pinkey]').forEach(el => {
+  // HOLD an account tile to pin/unpin its icon on the docket head row. A short
+  // press still runs the tile's action; the hold suppresses that one tap.
+  document.querySelectorAll('.acct-tile[data-pinkey]').forEach(el => {
     const key = el.dataset.pinkey;
     let timer = null;
-    const start = () => { timer = setTimeout(() => { timer = null; _suppressLineTap = true; togglePinLine(key); }, 450); };
+    const start = () => { timer = setTimeout(() => { timer = null; _suppressLineTap = true; toggleDocketPin(key); }, 450); };
     const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
     el.addEventListener('pointerdown', start);
     el.addEventListener('pointerup', cancel);

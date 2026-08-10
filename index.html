@@ -2122,6 +2122,12 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
    button beside a red confirm (Take over / Unlock / Remove all shared red). */
 .icon-action.neutral{ background:var(--steel-100); border:2px solid var(--steel-300); color:var(--text-primary); }
 
+/* Covers quick chips — common party sizes above the number pad, one tap = done. */
+.covers-quick{ display:flex; gap:6px; margin:2px 0 8px; }
+.covers-quick-btn{ flex:1; height:44px; border:1px solid var(--steel-300); border-radius:var(--btn-radius);
+  background:var(--steel-100); color:var(--text-primary); font-size:var(--fs-lg); font-weight:800; cursor:pointer; }
+.covers-quick-btn:active{ transform:scale(.97); background:var(--steel-200); }
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -3910,6 +3916,7 @@ app.put('/api/settings', (req, res) => {
   }
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
+  if (req.body.venueAbn !== undefined) data.settings.venueAbn = String(req.body.venueAbn || '').trim().slice(0, 20);
   if (showStaffOnTicket !== undefined) data.settings.showStaffOnTicket = !!showStaffOnTicket;
   if (showCoversOnTicket !== undefined) data.settings.showCoversOnTicket = !!showCoversOnTicket;
   if (showPrices !== undefined) data.settings.showPrices = !!showPrices;
@@ -5965,7 +5972,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { match, action, newPrice, staffName } = req.body || {};
+  const { match, action, newPrice, staffName, reason } = req.body || {};
   if (!match || !match.name) return res.status(400).json({ error: 'Missing item to modify' });
   const norm = v => (v === null || v === undefined || v === '') ? null : v;
   const matches = (i) =>
@@ -5983,7 +5990,16 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     (order.rounds || []).forEach(r => { r.items = (r.items || []).filter(i => !matches(i)); });
     adjustStockForItems(data, removed, 1);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
-    logAudit(data, staff, `Removed ${qtyRemoved}× ${match.name} from Ticket #${order.id}`);
+    const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
+    const why = reason ? ` (${reason})` : '';
+    logAudit(data, staff, `Removed ${qtyRemoved}× ${match.name} from Ticket #${order.id}${why}`);
+    // House log: every reasoned removal is a shift-level record — wastage,
+    // comps and staff meals roll up here for the manager and reports.
+    if (reason) {
+      data.houseLog = data.houseLog || [];
+      data.houseLog.push({ at: Date.now(), staff, reason, item: match.name, qty: qtyRemoved, value: Math.round(value * 100) / 100, ticket: order.id });
+      if (data.houseLog.length > 5000) data.houseLog.splice(0, data.houseLog.length - 5000);
+    }
   } else if (action === 'reprice') {
     const p = parseFloat(newPrice);
     if (isNaN(p) || p < 0) return res.status(400).json({ error: 'Enter a valid price' });
@@ -6888,7 +6904,9 @@ function buildReceiptDoc(order, edit) {
     : (coversOn ? ' · ' + order.covers + ' covers' : '')) : '';
   return `
     <div class="${printDocClasses()}">
+      <div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>
       ${edit ? `<h3>${sampleEditable('ticketHeader', s.ticketHeader, 'Add header', '')}</h3>` : (s.ticketHeader ? `<h3>${esc(s.ticketHeader)}</h3>` : '')}
+      <div class="print-sub">${s.venueAbn ? 'ABN: ' + esc(s.venueAbn) : 'ABN: ______________'}</div>
       <div class="print-sub">Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>
       <div class="print-sub">${order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType)}${coversSeg}</div>
       <hr>
@@ -6896,8 +6914,9 @@ function buildReceiptDoc(order, edit) {
       <hr>
       <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
       ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}
-      ${order.tax ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
+      ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
       <div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>
+      ${order.tax && taxLabelInclusive() ? `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>` : ''}
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>` : ''}
       ${order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`}
       ${edit
@@ -8384,6 +8403,7 @@ function taxLabel() {
   const t = taxCfg();
   return `${t.name}${t.mode === 'inclusive' ? ' incl.' : ''}`;
 }
+function taxLabelInclusive() { return taxCfg().mode === 'inclusive'; }
 function taxOn(taxable) {
   const t = taxCfg();
   const r = (parseFloat(t.ratePercent) || 0) / 100;
@@ -9468,6 +9488,10 @@ function renderCoversPop() {
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop">
         <div class="covers-pad-display qp-display ${typing ? '' : 'placeholder'}">${esc(String(shown))}</div>
+        <!-- Quick covers: the common party sizes are one tap → done. -->
+        <div class="covers-quick">
+          ${[1, 2, 3, 4, 6].map(n => `<button class="covers-quick-btn" data-act="covers-quick" data-n="${n}">${n}</button>`).join('')}
+        </div>
         <div class="covers-pad-grid qp-grid">
           ${keys.map(k => k === '' ? `<span></span>` : `<button class="covers-pad-key ${k === 'back' ? 'util' : ''}" data-act="covers-pad-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
         </div>
@@ -9936,6 +9960,7 @@ function render() {
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
     ${state.idleWarn ? renderIdleWarn() : ''}
+    ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
   `;
@@ -10466,17 +10491,50 @@ function renderPricePop() {
         </div>
       </div>`;
 }
-async function doRemoveSent(match) {
+// Removing a SAVED item is money leaving the till — a manager must say why,
+// so wastage/comps/staff meals land in the record instead of vanishing.
+// The reason pop asks first; the actual remove runs once a reason is picked.
+function doRemoveSent(match) {
+  if (!match) return;
+  state.voidItemPrompt = { match };
+  render();
+}
+// The venue's own void reasons (Settings → Voids) when they've set them, so
+// their wording wins; a sensible default set otherwise. Wastage is always an
+// option — it's the whole point of the prompt.
+function itemVoidReasons() {
+  const venue = (state.voidReasons || []).filter(Boolean);
+  const list = venue.length ? venue.slice() : ['Wastage', 'Comp', 'Staff meal', 'Wrong order', 'Returned'];
+  if (!list.some(r => /wastage/i.test(r))) list.unshift('Wastage');
+  return list;
+}
+function renderVoidReasonPop() {
+  const m = state.voidItemPrompt; if (!m) return '';
+  const it = m.match || {};
+  return `
+      <div class="pop-scrim" data-act="close-void-reason"></div>
+      <div class="qty-pop covers-pop" style="width:340px;">
+        <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${esc(it.name || 'item')}</div>
+        <div class="ts" style="text-align:center;margin-bottom:12px;">Why is it coming off? This is logged.</div>
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow-y:auto;">
+          ${itemVoidReasons().map(r => `<button class="btn-secondary" style="width:100%;" data-act="void-reason-pick" data-val="${esc(r)}">${esc(r)}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions" style="margin-top:12px;">
+          <button class="icon-action neutral" title="Cancel" data-act="close-void-reason">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        </div>
+      </div>`;
+}
+async function commitRemoveSent(match, reason) {
   const o = activeOpenOrder();
   if (!match || !o) return;
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'remove', staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'remove', reason: reason || null, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
-    state.editSent = null;
-    state.toast = 'Item removed';
+    state.editSent = null; state.voidItemPrompt = null;
+    state.toast = reason ? `Removed — ${reason}` : 'Item removed';
     render();
-    armToastTimer(2000);
+    armToastTimer(2200);
   } catch (e) { state.toast = 'Could not remove item'; render(); }
 }
 function removeSentItem() { doRemoveSent(state.editSent); }
@@ -14358,7 +14416,19 @@ function renderTaxSettingsAdmin() {
         <input id="tax-rate-input" type="number" min="0" max="40" step="0.1" value="${t.ratePercent}" style="width:90px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);" onblur="saveTaxSettings()">
       </div>
     </div>` : ''}
+    <div style="margin-top:16px;">
+      <label class="field-label" style="display:block;margin-bottom:5px;">ABN (for the tax invoice)</label>
+      <input id="venue-abn-input" type="text" value="${esc(t.mode !== 'none' ? (state.settings.venueAbn || '') : (state.settings.venueAbn || ''))}" maxlength="20" placeholder="e.g. 12 345 678 901"
+        style="width:200px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);"
+        onblur="saveVenueAbn(this.value)">
+      <div class="ts" style="margin-top:6px;">Prints on every receipt under the venue name. Blank = a write-in line.</div>
+    </div>
   </div>`;
+}
+function saveVenueAbn(v) {
+  state.settings.venueAbn = String(v || '').trim();
+  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ venueAbn: state.settings.venueAbn }) })
+    .then(s => { state.settings = s; }).catch(() => {});
 }
 
 function renderStaffAdmin() {
@@ -21470,6 +21540,8 @@ function bindEvents() {
       else if (act === 'add-serving') { addAnotherServing(); }
       else if (act === 'reprice-sent') { repriceSentItem(); }
       else if (act === 'remove-sent') { removeSentItem(); }
+      else if (act === 'void-reason-pick') { const m = state.voidItemPrompt; if (m) commitRemoveSent(m.match, el.dataset.val); }
+      else if (act === 'close-void-reason') { state.voidItemPrompt = null; render(); }
       else if (act === 'remove-sent-line') { removeSentLine(el); }
       else if (act === 'close-edit-sent') { state.editSent = null; render(); }
       else if (act === 'edit-docket-price') { openPriceEntry(el); }
@@ -22009,6 +22081,7 @@ function bindEvents() {
       else if (act === 'close-search') { state.searchOpen = false; state.search = ''; render(); }
       else if (act === 'open-covers-pad') { openCoversPad(); }
       else if (act === 'covers-pad-key') { tapCoversKey(el.dataset.key); }
+      else if (act === 'covers-quick') { if (state.coversPad) { state.coversPad.buffer = String(el.dataset.n); confirmCoversPad(); } }
       else if (act === 'confirm-covers-pad') { confirmCoversPad(); }
       else if (act === 'close-covers-pad') { state.coversPad = null; state.pickFlashId = null; render(); }
       else if (act === 'toggle-ticket-totals') { state.totalsExpanded = !state.totalsExpanded; render(); }

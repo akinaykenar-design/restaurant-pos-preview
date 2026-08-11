@@ -1473,6 +1473,31 @@ body[data-tapfx="ring"] .fxs-tile.t3{animation:fxsRing 3.2s infinite -1.6s;}
 /* Disabled = faded (keeps its own colour), never greyed out. */
 .icon-action:disabled{ opacity:0.34; cursor:not-allowed; }
 
+/* --- Press-in tap feedback (order tiles + docket Send) ---------------------
+   A tap sinks the control while the finger is down and it springs back on
+   release. On Send the same press doubles as the start of the hold-to-fire
+   gesture: a shade sweeps left→right over ~½s so the build-up is visible;
+   letting go early cancels it (the class comes off). */
+.item-card.pressing{ transform:scale(.95); transition:transform .07s ease; }
+.icon-action.send{ position:relative; overflow:hidden; }
+.icon-action.send > *{ position:relative; z-index:1; }
+.icon-action.send.pressing{ transform:scale(.965); filter:brightness(.97); }
+.icon-action.send.holding::after{
+  content:""; position:absolute; inset:0; background:rgba(0,0,0,.20);
+  transform-origin:left; transform:scaleX(0); pointer-events:none; z-index:0;
+  animation:send-hold-fill .5s linear forwards;
+}
+@keyframes send-hold-fill{ to{ transform:scaleX(1); } }
+.icon-action.send.held{ animation:send-hold-flash .4s ease-out; }
+@keyframes send-hold-flash{
+  0%{ box-shadow:0 0 0 0 rgba(255,255,255,.85); }
+  100%{ box-shadow:0 0 0 12px rgba(255,255,255,0); }
+}
+@media (prefers-reduced-motion: reduce){
+  .item-card.pressing, .icon-action.send.pressing{ transform:none; }
+  .icon-action.send.holding::after, .icon-action.send.held{ animation:none; }
+}
+
 /* Confirm/cancel footer for the order-screen middle panes — reuses the docket's
    ✓/✕ icon-action buttons so confirm looks the same everywhere. */
 .pane-actions{ display:flex; gap:10px; margin-top:auto; padding-top:16px; justify-content:flex-end;
@@ -14267,7 +14292,7 @@ const ADMIN_SECTIONS = [
     { key: 'settings-printers', label: 'Printers' },
     { key: 'settings-devices', label: 'Devices' },
     { key: 'screen', label: 'Design' },
-    { key: 'floorplan', label: 'Table Layout' },
+    { key: 'floorplan', label: 'Floor layout' },
     { key: 'settings-courses', label: 'Courses' },
     { key: 'settings-void', label: 'Void Reasons' },
     { key: 'settings-backups', label: 'Backups' },
@@ -15878,7 +15903,7 @@ function renderFloorPlanAdmin() {
   if (tableMode === 'simple') {
     return `
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;max-width:100%;">
-    <div class="th">Table setup</div>
+    <div class="th">Floor layout</div>
     <span style="flex:1;"></span>
     ${modeSeg}
   </div>
@@ -17528,7 +17553,7 @@ function renderDailyDashboard() {
     ['reservations', '', 'Bookings', SYS_CALENDAR_SVG, 0],
     ['staff', '', 'Staff', SYS_USERS_SVG, 0],
     ['__unlock__', '', 'Unlock tables', SYS_LOCK_SVG, 0],
-    ['floorplan', '', 'Table setup', SYS_MAP_SVG, 0],
+    ['floorplan', '', 'Floor layout', SYS_MAP_SVG, 0],
   ];
   return `
     <div class="acct-grid">
@@ -19363,9 +19388,13 @@ document.addEventListener('pointerdown', (e) => {
   const el = tab || send;
   if (!el || el.disabled || el.closest('.mk-wrap')) return;
   const x0 = e.clientX, y0 = e.clientY;
+  // Press-in the moment the finger lands; Send also shows the hold building
+  // (a shade sweeps across over ½s) so the fire-in-progress is visible.
+  el.classList.add('pressing');
+  if (send) send.classList.add('holding');
   // Some touch screens eat the click after a long press — the swallow flags
   // must not outlive the release, or they'd eat the NEXT honest tap too.
-  const end = () => { clearTimeout(_dktHoldTimer); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const end = () => { clearTimeout(_dktHoldTimer); el.classList.remove('pressing', 'holding'); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
   _dktHoldTimer = setTimeout(() => {
     if (tab) {
@@ -19380,16 +19409,32 @@ document.addEventListener('pointerdown', (e) => {
       } else fireCourse(n);
     } else {
       _sendHoldFired = true;
+      send.classList.add('held');
       // Nothing new on the docket → the hold is a pure handover: log off, but
       // first offer to close the table if it was set up yet never ordered.
       if (!cartSendable()) { offerCloseEmptyTable(() => logOut()); return; }
       state._logoffOnce = true;
       sendToKitchen();
     }
-  }, 450);
+  }, 500);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
+}, { passive: true });
+// Press-in feedback on order-screen tiles: the tile sinks while the finger is
+// down and springs back on release (or if the finger slides off). The tap
+// itself still adds the item — this is purely the visual.
+document.addEventListener('pointerdown', (e) => {
+  if (e.button != null && e.button !== 0) return;
+  const card = e.target.closest && e.target.closest('.item-card');
+  if (!card || card.closest('.mk-menu')) return;
+  card.classList.add('pressing');
+  const x0 = e.clientX, y0 = e.clientY;
+  const off = () => { card.classList.remove('pressing'); document.removeEventListener('pointerup', off); document.removeEventListener('pointercancel', off); document.removeEventListener('pointermove', mv); };
+  const mv = (ev) => { if (Math.hypot(ev.clientX - x0, ev.clientY - y0) > 12) off(); };
+  document.addEventListener('pointerup', off);
+  document.addEventListener('pointercancel', off);
+  document.addEventListener('pointermove', mv, { passive: true });
 }, { passive: true });
 // A till never zooms: iOS Safari ignores the viewport lock, so its own
 // gesture events are stopped too, and Ctrl+wheel page-zoom on touch PCs.

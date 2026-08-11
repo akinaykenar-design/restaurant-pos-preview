@@ -648,6 +648,22 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 /* Floor-plan click-to-place mode: crosshair + let clicks fall through markers to the canvas */
 .floor-canvas.placing{cursor:crosshair;}
 .floor-canvas.placing .floor-marker{pointer-events:none;}
+/* Floor canvas height budget: the vertical space above it (chrome + the two
+   tool rows). Tighter on wide screens for a bigger map; the admin header grows
+   taller at ≤1100px, so the budget widens there to keep the whole map on screen. */
+#admin-floor-canvas{ --floor-h-budget:215px; }
+@media (max-width: 1100px){ #admin-floor-canvas{ --floor-h-budget:285px; } }
+/* Snap grid: faint minor lines every 5% (where tables snap) + stronger major
+   lines every 10%, so the grid reads as a tidy guide, not a busy mesh. Cells
+   are kept square (900×560 canvas → vertical step = 5%×900/560 ≈ 8.036%). */
+.floor-canvas.snap-grid{
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--steel-300) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--steel-300) 55%, transparent) 1px, transparent 1px),
+    linear-gradient(to right, color-mix(in srgb, var(--steel-300) 24%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--steel-300) 24%, transparent) 1px, transparent 1px);
+  background-size:10% 16.071%, 10% 16.071%, 5% 8.036%, 5% 8.036%;
+}
 .delete-icon-btn:hover{background:var(--red);color:#fff;}
 
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--charcoal);color:#fff;padding:14px 22px;border-radius:10px;font-weight:600;font-size:14px;box-shadow:var(--shadow);z-index:60;display:flex;align-items:center;gap:10px;}
@@ -1699,6 +1715,30 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
   .fp-wrap{flex-direction:column;}
   .fp-rail{order:1;width:auto;}
   .fp-main{order:2;}
+}
+/* Floor mode: palette becomes a full-width tool bar ABOVE the bigger canvas.
+   It stays ONE row (scrolling sideways if cramped) so its height is constant
+   and the canvas height budget below never has to guess a wrap — the canvas
+   never gets clipped. Below the phone breakpoint it wraps and the canvas is
+   width-bound instead, so no vertical overflow there either. */
+.fp-wrap-top{flex-direction:column;}
+.fp-wrap-top .fp-main{order:2;}
+.fp-rail-top{order:1;width:auto;flex-direction:row;flex-wrap:nowrap;overflow-x:auto;align-items:center;gap:8px 18px;padding:10px 14px;}
+.fp-rail-top .pp-group{gap:5px;flex-shrink:0;}
+.fp-rail-top .fp-add-row{display:flex;align-items:center;flex-wrap:nowrap;gap:10px 14px;}
+.fp-rail-top .shape-chip-row,.fp-rail-top .decor-chip-row{flex-wrap:nowrap;gap:8px;}
+@media (max-width: 900px){
+  .fp-rail-top{flex-wrap:wrap;overflow-x:visible;}
+  .fp-rail-top .pp-group{flex-shrink:1;width:100%;}
+  .fp-rail-top .fp-add-row,.fp-rail-top .shape-chip-row,.fp-rail-top .decor-chip-row{flex-wrap:wrap;}
+}
+/* Layout/mode strip above the tool bar: also ONE scrolling row, so the canvas
+   sits at a constant offset and its height budget stays predictable. */
+.fp-topbar{flex-wrap:nowrap;overflow-x:auto;}
+.fp-topbar .pay-options{flex-wrap:nowrap;}
+@media (max-width: 900px){
+  .fp-topbar{flex-wrap:wrap;overflow-x:visible;}
+  .fp-topbar .pay-options{flex-wrap:wrap;}
 }
 .pp-group{display:flex;flex-direction:column;gap:6px;}
 .pp-label{font-size:var(--fs-chip);font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--charcoal-soft);}
@@ -10412,6 +10452,7 @@ function render() {
   `;
   bindEvents();
   oskMarkInputs();
+  markAdminKeyboardFocusable();
   savedScroll.forEach(({ sel, top, left }) => {
     const el = document.querySelector(sel);
     if (el) { el.scrollTop = top; el.scrollLeft = left; }
@@ -10780,6 +10821,14 @@ function renderOrderView() {
   // takeover — so on phones the docket panel stays put behind it.
   // A stale editor pointing at a removed cart line falls back to the menu
   // instead of rendering a blank panel.
+  // A dine-in order MUST have a table before anything else can happen. Whenever
+  // a non-chef sits on a dine-in order with no table picked (fresh login, a
+  // cancelled setup, a refresh), force the table picker back open — you can't
+  // ring items to nowhere. Only when there are tables to choose from.
+  if (state.orderType === 'dine-in' && !state.table && state.currentStaff
+      && state.currentStaff.role !== 'chef' && allTables().length) {
+    state.showTablePicker = true;
+  }
   if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null;
   if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null; // line gone — never blank the panel
   if (state.editLine) return shell(renderLineEditMiddle());
@@ -11483,9 +11532,20 @@ function renderAllergyTabContent() {
   ${state.settings.allergyCustomEnabled ? `
     <input id="allergy-custom-input" class="note-input-btn" type="text" placeholder="+ Other allergy…" value="${m.customAllergy}">` : ''}
   <input id="allergy-notes-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.notes)}" style="margin-top:8px;">
+  ${noteSeatChip(m, 'open-allergy-seat-pop')}
 `;
 }
 
+// Explicit "pick covers" affordance for the allergy and custom-note editors
+// (VIP stays table-level, so it gets no chip). Only shown when seats are in
+// play; opens the same seat pop the on-save prompt uses.
+function noteSeatChip(m, act) {
+  if (!(state.settings.seatNumbersEnabled && state.covers > 1)) return '';
+  const label = m.wholeTable ? (state.settings.sharedSeatLabel || 'All')
+    : (m.seats && m.seats.length) ? esc(seatText(m.seats[0]))
+    : 'Covers';
+  return `<div style="margin-top:8px;"><button type="button" class="seat-chip" data-act="${act}" title="Pick covers">${label}</button></div>`;
+}
 function renderNoteSeatPop() {
   const m = state.customNoteDraft;
   if (!m) return '';
@@ -11553,6 +11613,7 @@ function renderCustomNoteTabContent(categoryId) {
     </div>` : ''}
   <label>${cat ? esc(cat.name) : 'Note'}</label>
   <input id="custom-note-text-input" class="note-input-btn" type="text" value="${esc(m.text)}" placeholder="+ Type a note…">
+  ${noteSeatChip(m, 'open-note-seat-pop')}
 `;
 }
 
@@ -14753,11 +14814,11 @@ function renderNotePresetList(cat, selP) {
   const sorted = isListSorted(listId);
   const rows = applyListSort(listId, presets.map((p, idx) => ({ p, idx })));
   return `
-  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${selP.length > 0 ? `
+  <div class="select-all-row"><label class="sar-cb" title="Select all"><input type="checkbox" id="select-all-note-presets" ${presets.length > 0 && presets.every((_, i) => selP.includes(i)) ? 'checked' : ''}></label>${presets.length > 1 ? sortControl(listId) : ''}${selP.length > 0 ? `
       <span style="display:inline-flex;align-items:center;gap:6px;" data-stop="1">${colorDotButton('bulk-note-preset', 'x', null, { pencil: true, allowClear: true })}</span>
       <button class="icon-sq" title="Duplicate selected" data-act="duplicate-selected-note-presets">${ACT_COPY_SVG}</button>
       <button class="icon-sq" title="Delete selected" data-act="delete-selected-note-presets">${ACT_TRASH_SVG}</button>
-      <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span>${presets.length > 1 ? sortControl(listId) : ''}<button class="btn-add inline" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+ Add note</button></div>
+      <button class="icon-sq" title="Clear selection" data-act="clear-note-preset-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-note-preset" data-id="${cat.id}" title="Add note">+ Add note</button></div>
   <div style="max-width:560px;display:flex;flex-direction:column;gap:8px;">
     ${presets.length === 0 ? `<div class="empty-hist">No notes yet.</div>` : ''}
     ${rows.map(({ p, idx: pIdx }) => {
@@ -15951,7 +16012,7 @@ function renderFloorPlanAdmin() {
   // Floor mode: the map is the hero — a slim tool rail sits beside it and the
   // set-once settings live behind ⚙ Options.
   return `
-  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;max-width:100%;">
+  <div class="fp-topbar" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;max-width:100%;">
     <div class="pay-options" style="margin:0;">
       ${state.floorPlans.map(f => f.id === state.adminFloorPlanId
         ? `<button type="button" class="pay-opt active" style="flex:none;padding:9px 16px;font-size:var(--fs-md);" data-act="edit-floorplan" data-id="${f.id}" title="Tap to rename">${esc(f.name)}</button>`
@@ -15990,11 +16051,11 @@ function renderFloorPlanAdmin() {
       </div>`).join('')}
     </div>` : ''}
   </div>` : ''}
-  <div class="fp-wrap">
-    <div class="fp-rail">
+  <div class="fp-wrap fp-wrap-top">
+    <div class="fp-rail fp-rail-top">
   ${(() => {
-    // Tool rail: with nothing selected the dropdowns set up what you'll place;
-    // select something on the floor and the SAME controls edit it.
+    // Tool bar (above the canvas): with nothing selected the controls set up
+    // what you'll place; select something on the floor and they edit it.
     const selTable = selected && selected.type !== 'decor' ? selected : null;
     const selDecor = selected && selected.type === 'decor' ? selected : null;
     const multi = state.selectedAdminTableIds.length;
@@ -16041,9 +16102,9 @@ function renderFloorPlanAdmin() {
       // (all visual) + the matching chip picker.
       let cat = state.floorAddCat || 'tables';
       if (cat === 'areas') cat = 'structure'; // migrate old persisted value
-      const catSeg = `<div class="seg" style="margin-bottom:8px;width:100%;">${[['tables', 'Tables'], ['objects', 'Objects'], ['structure', 'Structure']].map(([v, l]) => `<button class="${cat === v ? 'active' : ''}" data-act="set-floor-cat" data-val="${v}" style="flex:1;padding:7px 2px;font-size:var(--fs-sm);">${l}</button>`).join('')}</div>`;
+      const catSeg = `<div class="seg" style="width:auto;">${[['tables', 'Tables'], ['objects', 'Objects'], ['structure', 'Structure']].map(([v, l]) => `<button class="${cat === v ? 'active' : ''}" data-act="set-floor-cat" data-val="${v}" style="padding:7px 12px;font-size:var(--fs-sm);">${l}</button>`).join('')}</div>`;
       const picker = cat === 'tables' ? chipsHtml('') : cat === 'objects' ? placeChips('object') : placeChips('structure');
-      return `<div class="pp-group"><div class="pp-label">Add to floor</div>${catSeg}${picker}</div>`;
+      return `<div class="pp-group fp-add-group"><div class="pp-label">Add to floor</div><div class="fp-add-row">${catSeg}${picker}</div></div>`;
     })()}
     ${(selTable || multi || (!selected && (state.floorAddCat || 'tables') !== 'tables')) ? '' : `
     <div class="pp-group">
@@ -16103,11 +16164,11 @@ function renderFloorPlanAdmin() {
     </div>` : ''}
     <div style="flex:1;"></div>
     ${state.floorPlacing ? `<span class="pp-hint"><button type="button" class="pp-cancel" data-act="stop-placing">✕</button></span>` : ``}
-    <button class="btn-secondary" style="width:100%;padding:8px 12px;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Floor colour, all-tables size & grid snap">⚙ Floor</button>`;
+    <button class="btn-secondary" style="width:auto;padding:8px 14px;${state.floorAdvancedOpen ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="toggle-floor-advanced" title="Floor colour, all-tables size & grid snap">⚙ Floor</button>`;
   })()}
     </div>
     <div class="fp-main">
-  <div class="floor-canvas${state.floorPlacing ? ' placing' : ''}" id="admin-floor-canvas" style="position:relative;width:min(100%, calc((100dvh - 250px) * 900 / ${STD_FLOOR_H}));max-width:100%;aspect-ratio:900 / ${STD_FLOOR_H};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;border:1px dashed var(--steel-300);${fp.snapToGrid ? `background-image:linear-gradient(to right, color-mix(in srgb, var(--steel-300) 45%, transparent) 1px, transparent 1px),linear-gradient(to bottom, color-mix(in srgb, var(--steel-300) 45%, transparent) 1px, transparent 1px);background-size:${FLOOR_GRID}% ${Math.round(FLOOR_GRID * 900 / STD_FLOOR_H * 10) / 10}%;` : ''}">
+  <div class="floor-canvas${state.floorPlacing ? ' placing' : ''}${fp.snapToGrid ? ' snap-grid' : ''}" id="admin-floor-canvas" style="position:relative;width:min(100%, calc((100dvh - var(--floor-h-budget, 215px)) * 900 / ${STD_FLOOR_H}));max-width:100%;aspect-ratio:900 / ${STD_FLOOR_H};background-color:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;border:1px dashed var(--steel-300);">
     ${state.floorPlacing ? (() => {
       const [kind, key] = state.floorPlacing.split(':');
       const tpl = kind === 'decor' ? DECOR_TEMPLATES.find(t => t.key === key) : TABLE_TEMPLATES.find(t => t.key === key);
@@ -19662,6 +19723,45 @@ document.addEventListener('keydown', (e) => {
     }
     return;
   }
+});
+// Keyboard access to the admin screens: many admin controls are DIVs with
+// [data-act] (pay-opt chips, sort options, toggles) that aren't in the Tab
+// order. After each admin render, put them in the Tab order and give them a
+// button role so a real keyboard can reach them. Native controls are left
+// alone; the till/order screen is never touched.
+function markAdminKeyboardFocusable() {
+  if (state.view !== 'admin') return;
+  const scope = document.querySelector('.admin-content');
+  if (!scope) return;
+  scope.querySelectorAll('[data-act]').forEach(el => {
+    const t = el.tagName;
+    if (t === 'BUTTON' || t === 'INPUT' || t === 'SELECT' || t === 'A' || t === 'TEXTAREA') return;
+    if (el.hasAttribute('tabindex')) return;
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+  });
+}
+// Enter / Space fires a focused div-control (the ones marked above), so the
+// keyboard activates them just like a tap. Native controls handle their own
+// keys; typing in a field is never hijacked.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' && e.key !== ' ' && e.key !== 'Spacebar') return;
+  if (e.metaKey || e.ctrlKey || e.altKey || typingInField()) return;
+  const el = document.activeElement;
+  if (!el || !el.matches || !el.matches('[data-act]')) return;
+  const t = el.tagName;
+  if (t === 'BUTTON' || t === 'INPUT' || t === 'SELECT' || t === 'A' || t === 'TEXTAREA') return;
+  e.preventDefault();
+  el.click();
+});
+// Esc closes the top-most open admin editor by clicking its backdrop (same
+// discard-guarded path as tapping outside). The floorplan Esc (clears the
+// table selection) is handled separately above and stays intact.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || state.view !== 'admin' || typingInField()) return;
+  const bgs = document.querySelectorAll('.modal-bg');
+  const top = bgs[bgs.length - 1];
+  if (top) { e.preventDefault(); top.click(); }
 });
 // A till with a real keyboard should be able to TYPE into any number pad
 // instead of tapping — covers, table number, price, and the login PIN.
@@ -23718,8 +23818,10 @@ function bindEvents() {
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
+      else if (act === 'open-note-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); } }
       else if (act === 'allergy-pick-seat') { pickAllergySeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-allergy-seat-pop') { state.allergySeatPop = false; render(); }
+      else if (act === 'open-allergy-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); } }
       else if (act === 'remove-note') { removeNoteEntry(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-entry') {
         // Tap a note chip -> its tab opens prefilled; saving replaces the entry.

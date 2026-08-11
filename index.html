@@ -4368,6 +4368,52 @@ app.delete('/api/floorplans/:id', (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- Saved arrangements (named snapshots of a floor's geometry) ----------
+// A "layout" here snapshots WHERE everything sits (positions/sizes/links) so the
+// venue can flip between, say, a normal and a function set-up. Snapshots key off
+// table id, so loading only moves existing tables — it never adds or deletes.
+const LAYOUT_GEOM = ['x', 'y', 'width', 'height', 'shape', 'rotation', 'color', 'finish', 'mergedInto', 'prevX', 'prevY'];
+function snapshotTables(fp) {
+  return (fp.tables || []).map(t => { const o = { id: t.id }; LAYOUT_GEOM.forEach(k => { if (t[k] !== undefined) o[k] = t[k]; }); return o; });
+}
+app.post('/api/floorplans/:id/layouts', (req, res) => {
+  const data = readData();
+  const fp = data.floorPlans.find(f => f.id === req.params.id);
+  if (!fp) return res.status(404).json({ error: 'Layout not found' });
+  const name = (req.body.name || '').trim();
+  if (!name) return res.status(400).json({ error: 'Name the layout' });
+  fp.savedLayouts = fp.savedLayouts || [];
+  const existing = fp.savedLayouts.find(l => l.name.toLowerCase() === name.toLowerCase());
+  const snap = snapshotTables(fp);
+  if (existing) { existing.tables = snap; }
+  else fp.savedLayouts.push({ id: 'lay' + Date.now(), name, tables: snap });
+  logAudit(data, staffFromReq(req), `Saved floor layout "${name}" on ${fp.name}`);
+  writeData(data);
+  res.json(fp);
+});
+app.post('/api/floorplans/:id/layouts/:layoutId/apply', (req, res) => {
+  const data = readData();
+  const fp = data.floorPlans.find(f => f.id === req.params.id);
+  if (!fp) return res.status(404).json({ error: 'Layout not found' });
+  const lay = (fp.savedLayouts || []).find(l => l.id === req.params.layoutId);
+  if (!lay) return res.status(404).json({ error: 'Saved layout not found' });
+  lay.tables.forEach(snap => {
+    const t = fp.tables.find(x => x.id === snap.id);
+    if (t) LAYOUT_GEOM.forEach(k => { if (snap[k] !== undefined) t[k] = snap[k]; });
+  });
+  logAudit(data, staffFromReq(req), `Loaded floor layout "${lay.name}" on ${fp.name}`);
+  writeData(data);
+  res.json(fp);
+});
+app.delete('/api/floorplans/:id/layouts/:layoutId', (req, res) => {
+  const data = readData();
+  const fp = data.floorPlans.find(f => f.id === req.params.id);
+  if (!fp) return res.status(404).json({ error: 'Layout not found' });
+  fp.savedLayouts = (fp.savedLayouts || []).filter(l => l.id !== req.params.layoutId);
+  writeData(data);
+  res.json(fp);
+});
+
 // ---------- Tables (each belongs to one floor plan layout) ----------
 // Table numbers must be unique across ALL layouts (Main, Outside, …), not just
 // within one (decor objects like plants aren't tables, so they're exempt).
@@ -10246,6 +10292,9 @@ function render() {
     const el = document.querySelector(sel);
     return el && (el.scrollTop || el.scrollLeft) ? { sel, top: el.scrollTop, left: el.scrollLeft } : null;
   }).filter(Boolean);
+  // Some devices scroll the WINDOW rather than an inner pane — keep that too, so
+  // a change never yanks the admin page back to the top.
+  const savedWin = (window.scrollY || window.scrollX) ? { x: window.scrollX, y: window.scrollY } : null;
 
   app.innerHTML = `
     ${renderTopbar()}
@@ -10309,6 +10358,7 @@ function render() {
     const el = document.querySelector(sel);
     if (el) { el.scrollTop = top; el.scrollLeft = left; }
   });
+  if (savedWin) window.scrollTo(savedWin.x, savedWin.y);
   setToolbarHeightVar();
   animateExpansions(_prevExp);
   fitTileNames();
@@ -15862,6 +15912,20 @@ function renderFloorPlanAdmin() {
     <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;cursor:pointer;">
       <input type="checkbox" id="floorplan-snap-input" data-fp="${fp.id}" ${fp.snapToGrid ? 'checked' : ''}> Snap to grid
     </label>
+  </div>
+  <div data-expkey="floor-layouts" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+      <label class="ts" style="margin:0;">Saved layouts</label>
+      <input id="layout-name-input" type="text" placeholder="Name a layout…" style="flex:1;min-width:130px;padding:7px 10px;border:1px solid var(--steel-300);border-radius:8px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+      <button class="btn-secondary" style="width:auto;padding:8px 14px;" data-act="save-floor-layout" data-fp="${fp.id}" title="Snapshot the current arrangement">Save current</button>
+    </div>
+    ${(fp.savedLayouts || []).length ? `<div style="display:flex;flex-direction:column;gap:6px;">
+      ${(fp.savedLayouts || []).map(l => `<div class="settings-card" style="display:flex;align-items:center;gap:10px;padding:9px 12px;">
+        <span style="flex:1;font-weight:700;font-size:var(--fs-md);overflow:hidden;text-overflow:ellipsis;">${esc(l.name)}</span>
+        <button class="btn-secondary" style="width:auto;padding:7px 14px;" data-act="load-floor-layout" data-fp="${fp.id}" data-id="${l.id}" data-name="${esc(l.name)}">Load</button>
+        <button class="delete-icon-btn" data-act="delete-floor-layout" data-fp="${fp.id}" data-id="${l.id}" title="Delete this layout">${ACT_TRASH_SVG}</button>
+      </div>`).join('')}
+    </div>` : ''}
   </div>` : ''}
   <div class="fp-wrap">
     <div class="fp-rail">
@@ -17984,7 +18048,10 @@ async function linkTables(fromId, intoId, drop, opts) {
     for (const t of joining) {
       const fp = findFloorPlanForTable(t.id);
       if (!fp) continue;
-      const patch = { mergedInto: main.id, ...(posPatch.get(t.id) || {}) };
+      const pp = posPatch.get(t.id);
+      const patch = { mergedInto: main.id, ...(pp || {}) };
+      // Remember where it sat before the weld so Unlink can send it home.
+      if (pp && t.prevX == null) { patch.prevX = t.x; patch.prevY = t.y; }
       await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -17999,12 +18066,15 @@ async function linkTables(fromId, intoId, drop, opts) {
       if (done.has(id)) continue;
       const fp = findFloorPlanForTable(id);
       if (!fp) continue;
+      const tt = findTableById(id);
+      const patch = { ...pp };
+      if (tt && tt.prevX == null) { patch.prevX = tt.x; patch.prevY = tt.y; }
       await api(`/api/floorplans/${fp.id}/tables/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(pp),
+        body: JSON.stringify(patch),
       });
-      Object.assign(findTableById(id), pp);
+      if (tt) Object.assign(tt, patch);
     }
   } catch (e) { render(); return false; }
   const n = allTables().filter(t => t.mergedInto === main.id).length;
@@ -18041,11 +18111,10 @@ async function unmergeTable(tableId) {
   const table = findTableById(tableId);
   const fp = findFloorPlanForTable(tableId);
   if (!table || !fp) return;
-  // Unlink only DEACTIVATES the link — tables stay exactly where they sit,
-  // nobody gets pushed back around the floor. (Clear any stale prevX from
-  // the old restore behaviour.)
+  // Unlink sends the table back to where it sat BEFORE it welded to its
+  // partner (prevX/prevY captured at link time), then clears that memory.
   const patch = { mergedInto: null };
-  if (table.prevX != null) { patch.prevX = null; patch.prevY = null; }
+  if (table.prevX != null) { patch.x = table.prevX; patch.y = table.prevY; patch.prevX = null; patch.prevY = null; }
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, {
       method: 'PUT',
@@ -23124,6 +23193,29 @@ function bindEvents() {
       }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
       else if (act === 'size-all-tables') { sizeAllTables(parseFloat(el.dataset.step)); }
+      else if (act === 'save-floor-layout') {
+        const inp = document.getElementById('layout-name-input');
+        const name = inp ? inp.value.trim() : '';
+        const fpId = el.dataset.fp;
+        if (!name) { state.toast = 'Name the layout first.'; render(); armToastTimer(2000); return; }
+        api(`/api/floorplans/${fpId}/layouts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
+          .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; state.toast = `Layout "${name}" saved.`; render(); armToastTimer(2000); })
+          .catch(e => { state.toast = e.message || 'Could not save.'; render(); armToastTimer(2500); });
+      }
+      else if (act === 'load-floor-layout') {
+        const fpId = el.dataset.fp, id = el.dataset.id, nm = el.dataset.name || 'this layout';
+        openConfirm({ message: `Load "${nm}"? Tables move to that saved arrangement.`, confirmLabel: 'Load', danger: false }, () => {
+          api(`/api/floorplans/${fpId}/layouts/${id}/apply`, { method: 'POST' })
+            .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; state.toast = 'Layout loaded.'; render(); armToastTimer(2000); })
+            .catch(e => { state.toast = e.message || 'Could not load.'; render(); armToastTimer(2500); });
+        });
+      }
+      else if (act === 'delete-floor-layout') {
+        const fpId = el.dataset.fp, id = el.dataset.id;
+        api(`/api/floorplans/${fpId}/layouts/${id}`, { method: 'DELETE' })
+          .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; render(); })
+          .catch(() => {});
+      }
       else if (act === 'set-table-size') { sizeSelectedTables(parseFloat(el.dataset.step)); }
       else if (act === 'cycle-table-size') {
         const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);

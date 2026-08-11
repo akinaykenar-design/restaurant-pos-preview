@@ -6810,6 +6810,7 @@ let state = {
   transferFrom: null, // Transfer step 1: the table being moved (tap source, then destination)
   pickFlashId: null, // table showing the green pick sweep (held while the covers pad asks)
   floorLinkMode: null, // Table Layout linking tool: null | 'link' | 'unlink'
+  linkTapFrom: null, // "Link to…" armed from a selected table — tap a target (drag still works)
   floorStatusView: 'sitting', // picker lens: 'sitting' time or 'course' wait
   detailOrder: null,
   toast: null,
@@ -15866,9 +15867,12 @@ function renderFloorPlanAdmin() {
     <div class="pp-group">
       <div class="pp-label">Linking</div>
       <div class="pp-row">
-        <button class="btn-secondary" style="flex:1;padding:8px 12px;${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="floor-link-mode" data-mode="link" title="Drag a table onto another to link them">${SYS_LINK_SVG} Link</button>
+        ${selTable
+          ? `<button class="btn-secondary" style="flex:1;padding:8px 12px;${state.linkTapFrom === selTable.id ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="link-tap-arm" data-id="${selTable.id}" title="Tap another table to link — or drag this one onto it">${SYS_LINK_SVG} ${state.linkTapFrom === selTable.id ? 'Tap a table…' : 'Link to…'}</button>`
+          : `<button class="btn-secondary" style="flex:1;padding:8px 12px;${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="floor-link-mode" data-mode="link" title="Drag a table onto another to link them">${SYS_LINK_SVG} Link</button>`}
         ${allTables().some(t => t.mergedInto && t.mergedInto !== t.id) ? `<button class="btn-secondary" style="flex:1;padding:8px 12px;${state.floorLinkMode === 'unlink' ? 'border-color:var(--orange);color:var(--orange);' : ''}" data-act="floor-link-mode" data-mode="unlink" title="Tap a linked table to unlink it">Unlink</button>` : ''}
       </div>
+      ${state.linkTapFrom === (selTable && selTable.id) ? `<div class="ts" style="margin-top:6px;">Tap another table — or drag this one — to link.</div>` : ''}
     </div>` : ''}
     ${multi ? `
     <div class="pp-group">
@@ -18582,7 +18586,7 @@ function toggleTableMultiSelect(tableId) {
   else state.selectedAdminTableIds.splice(i, 1);
   render();
 }
-function clearTableSelection() { state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
+function clearTableSelection() { state.selectedAdminTableId = null; state.selectedAdminTableIds = []; state.linkTapFrom = null; state.floorLinkMode = null; render(); }
 async function deleteSelectedTables() {
   const ids = [...state.selectedAdminTableIds];
   const fpId = state.adminFloorPlanId;
@@ -18768,10 +18772,21 @@ function endFloorDrag() {
   if (moved && lastX !== undefined && state.floorLinkMode === 'link' && !floorDrag.group) {
     const hit = adminLinkTarget(floorDrag);
     if (hit) {
+      state.linkTapFrom = null;
       linkTables(tableId, hit.t.id, { x: lastX, y: lastY });
       floorDrag = null;
       return;
     }
+  }
+  // "Link to…" tap flow: a table is armed — a plain tap on ANOTHER table welds
+  // them; tapping the armed table again cancels.
+  if (!moved && state.linkTapFrom && !floorDrag.holdFired) {
+    const from = state.linkTapFrom;
+    state.linkTapFrom = null; state.floorLinkMode = null;
+    if (String(from) !== String(tableId)) linkTables(from, tableId);
+    else render();
+    floorDrag = null;
+    return;
   }
   // Unlink tool: a plain tap on a table unlinks it (drag still moves).
   if (!moved && state.floorLinkMode === 'unlink' && !floorDrag.holdFired) {
@@ -22824,7 +22839,14 @@ function bindEvents() {
       else if (act === 'stop-placing') { stopPlacing(); }
       else if (act === 'toggle-floor-advanced') { state.floorAdvancedOpen = !state.floorAdvancedOpen; render(); }
       else if (act === 'toggle-floor-status-card') { state.floorStatusCardOpen = !state.floorStatusCardOpen; render(); }
-      else if (act === 'floor-link-mode') { state.floorLinkMode = state.floorLinkMode === el.dataset.mode ? null : el.dataset.mode; state.simpleLinkFirst = null; render(); }
+      else if (act === 'floor-link-mode') { state.floorLinkMode = state.floorLinkMode === el.dataset.mode ? null : el.dataset.mode; state.simpleLinkFirst = null; state.linkTapFrom = null; render(); }
+      else if (act === 'link-tap-arm') {
+        // Arm the tap flow AND the drag flow at once: tap another table to
+        // link, or just drag this one onto its partner — either welds them.
+        if (String(state.linkTapFrom) === String(el.dataset.id)) { state.linkTapFrom = null; state.floorLinkMode = null; }
+        else { state.linkTapFrom = el.dataset.id; state.floorLinkMode = 'link'; }
+        render();
+      }
       else if (act === 'open-tablenum-pad') {
         const t = findTableById(el.dataset.id);
         state.tableNumPad = { id: el.dataset.id, fp: el.dataset.fp, buf: '', current: t ? String(t.label) : '' };

@@ -6670,6 +6670,24 @@ const TABLE_SIZE_STEPS = [0.55, 0.7, 0.85];
 // screen — width:100% keeps it responsive. No per-plan height any more, so
 // tables never squish; positions stay in %.
 const STD_FLOOR_H = 560;
+const STD_FLOOR_W = 900;
+// The canvas is wider than tall, so 5% of WIDTH is a bigger on-screen step than
+// 5% of HEIGHT. Snapping X and Y both to 5% made vertical neighbours sit closer
+// than side-by-side ones. FLOOR_GRID_Y is the Y step that covers the SAME pixels
+// as one X step, so the snap grid is truly square and spacing is even every way.
+const FLOOR_GRID_Y = FLOOR_GRID * STD_FLOOR_W / STD_FLOOR_H;
+// Snap a stored table/decor position onto the square grid (x by width-%, y by
+// the matching height-%). Idempotent — already-aligned items don't move.
+function snapFloorPos(v, grid) { return Math.round(v / grid) * grid; }
+function resnapFloorPlans() {
+  (state.floorPlans || []).forEach(fp => {
+    if (!fp || !fp.snapToGrid || !Array.isArray(fp.tables)) return;
+    fp.tables.forEach(t => {
+      if (typeof t.x === 'number') t.x = Math.round(snapFloorPos(t.x, FLOOR_GRID) * 100) / 100;
+      if (typeof t.y === 'number') t.y = Math.round(snapFloorPos(t.y, FLOOR_GRID_Y) * 100) / 100;
+    });
+  });
+}
 const TABLE_SIZE_LABELS = ['S', 'M', 'L'];
 function tableBaseDims(shape) {
   const tpl = TABLE_TEMPLATES.find(x => x.shape === shape);
@@ -8454,6 +8472,7 @@ async function loadInitial() {
     state.activeCat = state.categories[0] ? state.categories[0].name : null;
     state.combos = await api('/api/combos');
     state.floorPlans = await api('/api/floorplans');
+    resnapFloorPlans(); // heal old 5%-Y layouts onto the square grid so spacing is even
     state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
     state.pickerFloorPlanId = state.adminFloorPlanId;
     if (!state.table && state.floorPlans[0] && state.floorPlans[0].tables.length) {
@@ -11184,6 +11203,13 @@ function docketPinned(key) {
   return DOCKET_DEFAULT_ON.includes(key) ? sc[key] !== false : sc[key] === true;
 }
 function toggleDocketPin(key) {
+  // Pinning/unpinning docket buttons is a manager decision — staff can see the
+  // pins but can't change them.
+  if (!(state.currentStaff && state.currentStaff.role === 'manager')) {
+    state.toast = 'Only a manager can change docket pins';
+    render(); armToastTimer(1800);
+    return;
+  }
   const now = docketPinned(key);
   if (key === 'covers') saveTicketSetting({ coversEnabled: !now });
   else { const sc = state.settings.docketShortcuts || {}; saveTicketSetting({ docketShortcuts: { ...sc, [key]: !now } }); }
@@ -15874,6 +15900,7 @@ async function applySimpleTables(countRaw) {
       state.settings.simpleTableCount = count;
       await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ simpleTableCount: count }) });
       state.floorPlans = await api('/api/floorplans');
+      resnapFloorPlans();
       state.toast = kept.length
         ? `Tables updated — kept ${kept.map(x => x.n).join(', ')} (open orders)`
         : 'Tables updated';
@@ -18592,8 +18619,8 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
   const fp = state.floorPlans.find(f => f.id === fpId);
   if (!fp || !val) return;
   if (fp.snapToGrid) {
-    xPct = Math.round(xPct / FLOOR_GRID) * FLOOR_GRID;
-    yPct = Math.round(yPct / FLOOR_GRID) * FLOOR_GRID;
+    xPct = snapFloorPos(xPct, FLOOR_GRID);
+    yPct = snapFloorPos(yPct, FLOOR_GRID_Y);
   }
   const [kind, key] = val.split(':');
   let payload;
@@ -19001,9 +19028,8 @@ function moveFloorDrag(clientX, clientY) {
   // Grid snap stays out of the Link tool's way — the weld places the table
   // exactly flush itself, and snapping could yank it out of touch range.
   if (fp && fp.snapToGrid && !(state.floorLinkMode === 'link' && !floorDrag.group)) {
-    const g = FLOOR_GRID;
-    x = Math.round(x / g) * g;
-    y = Math.round(y / g) * g;
+    x = snapFloorPos(x, FLOOR_GRID);
+    y = snapFloorPos(y, FLOOR_GRID_Y);
   }
   floorDrag.moved = true;
   const dims = (id) => { const t = fp && fp.tables.find(z => z.id === id); return t ? [t.width, t.height, t.rotation] : [0, 0, 0]; };

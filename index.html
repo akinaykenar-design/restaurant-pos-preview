@@ -435,7 +435,7 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 
 /* Floor editor: visual shape chips (replace the shape dropdown). Each previews
    the shape in the table's current colour/finish. */
-.shape-chip-row{ display:flex; gap:6px; flex-wrap:wrap; }
+.shape-chip-row{ display:flex; gap:11px; flex-wrap:wrap; }
 .shape-chip{ min-width:40px; height:40px; display:flex; align-items:center; justify-content:center;
   border:1px solid var(--steel-300); border-radius:8px; background:var(--surface); cursor:pointer; padding:0 6px; }
 .shape-chip.active{ border-color:var(--orange); box-shadow:inset 0 0 0 1px var(--orange); }
@@ -1643,6 +1643,8 @@ body[data-icon-style="ink"] .ico-g,body[data-icon-style="ink"] .item-tile-icon{f
 
 .covers-pad-key.util{ background:var(--steel-100); font-size:19px; color:var(--text-secondary); }
 .covers-pad-key.util:hover{ background:var(--steel-200); }
+/* Multi-cover select (hold a cover to arm): chosen covers glow the app blue. */
+.covers-pad-key.sel{ border-color:var(--blue); background:color-mix(in srgb, var(--blue) 14%, var(--surface)); color:var(--blue); box-shadow:inset 0 0 0 1px var(--blue); }
 
 /* Running total above the actions — tap to expand the breakdown */
 .ticket-running{padding:8px 18px;border-top:1px solid var(--chit-line);flex-shrink:0;cursor:pointer;user-select:none;}
@@ -9890,17 +9892,21 @@ function renderSeatPop() {
   if (!item) return '';
   const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
   const assigned = new Set([...(io.assignedSeats || []), ...state.cart.filter(c => c.menuItemId === io.itemId).map(c => c.seat)]);
+  // Multi-cover mode: hold a cover to arm it, then tap more; ✓ adds the item to
+  // every selected cover in one go (a dish shared by several people).
+  const multi = io.multiSeats && io.multiSeats.length ? io.multiSeats : null;
   return `
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop seat-pop">
         <div class="sp-item">${esc(item.name)}${Number.isInteger(io.qty) && io.qty > 1 ? ` · ${(io.assigned || 0) + 1} of ${io.qty}` : ''}</div>
-        <div class="covers-pad-display qp-display" style="font-size:17px;">${esc(prefix)}</div>
+        <div class="covers-pad-display qp-display" style="font-size:17px;">${multi ? `${multi.length} cover${multi.length > 1 ? 's' : ''}` : esc(prefix)}</div>
         <div class="covers-pad-grid qp-grid">
           <button class="covers-pad-key util" data-act="io-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${assigned.has(n) ? ' assigned' : ''}" data-act="io-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${assigned.has(n) ? ' assigned' : ''}${multi && multi.includes(n) ? ' sel' : ''}" data-act="io-pick-seat" data-seat="${n}">${n}</button>`).join('')}
         </div>
         <div class="qp-row qp-actions">
           <button class="icon-action discard" title="Cancel" data-act="close-item-options">${ACT_CROSS_SVG}</button>
+          ${multi ? `<button class="icon-action send" title="Add to ${multi.length} cover${multi.length > 1 ? 's' : ''}" data-act="io-multi-confirm">${ACT_TICK_SVG}</button>` : ''}
         </div>
       </div>`;
 }
@@ -18275,6 +18281,15 @@ function ioModifierObjects(io, item) {
 }
 function pickIoSeat(seat) {
   const io = state.itemOptions;
+  if (!io) return;
+  if (_seatHoldFired) { _seatHoldFired = false; return; } // a hold armed multi-select — swallow this click
+  if (io.multiSeats) { // multi-cover mode: tap toggles covers, ✓ confirms
+    if (seat === 'all') return;
+    io.multiSeats = io.multiSeats.includes(seat) ? io.multiSeats.filter(s => s !== seat) : [...io.multiSeats, seat];
+    if (!io.multiSeats.length) io.multiSeats = null;
+    render();
+    return;
+  }
   // Per-serving seat assignment: a typed qty > 1 with a seat prompt places ONE
   // serving per tap. (Disabled when a choice button is present — then the seat
   // is a single pick and the button adds all the servings to it.)
@@ -18296,6 +18311,20 @@ function pickIoSeat(seat) {
   }
   io.seat = seat;
   if (!ioMaybeAutoAdd()) render();
+}
+// One item → several covers at once (armed by holding a cover). One cart line
+// per cover so each person's docket/split is right.
+function confirmIoMultiSeats() {
+  const io = state.itemOptions;
+  if (!io || !io.multiSeats || !io.multiSeats.length) return;
+  const item = state.menu.find(m => m.id === io.itemId);
+  if (!item) { state.itemOptions = null; render(); return; }
+  const variant = item.variants.find(v => v.id === io.variantId);
+  const mods = ioModifierObjects(io, item);
+  const note = ioCustomNote(io);
+  io.multiSeats.slice().sort((a, b) => a - b).forEach(seat => pushCartLine(item, variant, mods, seat, 1, note));
+  state.itemOptions = null;
+  render();
 }
 // Typed Other… entries join into the line's note (prints with the dish).
 function ioCustomNote(io) {
@@ -19293,6 +19322,32 @@ document.addEventListener('pointerdown', (e) => {
   const end = () => { clearTimeout(_peekHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
   _peekHoldTimer = setTimeout(() => { _peekHoldFired = true; state.tablePeek = t.id; render(); }, 450);
+  document.addEventListener('pointermove', mv, { passive: true });
+  document.addEventListener('pointerup', end);
+  document.addEventListener('pointercancel', end);
+}, { passive: true });
+// Hold a cover in the item's seat pop to start multi-select — arm several
+// covers, then ✓ adds the dish to each. Only in the seat-only pop; 'All' is
+// already everyone so it's skipped.
+let _seatHoldTimer = 0, _seatHoldFired = false;
+document.addEventListener('pointerdown', (e) => {
+  const io = state.itemOptions;
+  if (!io || !io.seatOnly) return;
+  const btn = e.target.closest && e.target.closest('[data-act="io-pick-seat"]');
+  if (!btn || btn.dataset.seat === 'all') return;
+  const seat = parseInt(btn.dataset.seat, 10);
+  if (!Number.isFinite(seat)) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  _seatHoldFired = false;
+  const end = () => { clearTimeout(_seatHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
+  _seatHoldTimer = setTimeout(() => {
+    _seatHoldFired = true;
+    const cur = state.itemOptions; if (!cur) return;
+    const set = cur.multiSeats && cur.multiSeats.length ? cur.multiSeats : [];
+    cur.multiSeats = set.includes(seat) ? set : [...set, seat];
+    render();
+  }, 450);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -22777,6 +22832,7 @@ function bindEvents() {
         if (inp) inp.focus();
       }
       else if (act === 'io-pick-seat') { pickIoSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
+      else if (act === 'io-multi-confirm') { confirmIoMultiSeats(); }
       else if (act === 'io-next-step') { state.itemOptions.step = (state.itemOptions.step || 0) + 1; render(); }
       else if (act === 'io-go-step') { state.itemOptions.step = parseInt(el.dataset.idx); render(); }
       else if (act === 'confirm-item-options') { if (ioSelectionComplete()) confirmItemOptions(); }

@@ -559,8 +559,7 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .color-swatch:hover{border-color:var(--charcoal-soft);}
 .icon-swatch{width:32px;height:32px;border-radius:6px;border:1px solid var(--steel-300);background:var(--surface);cursor:pointer;font-size:16px;padding:0;display:flex;align-items:center;justify-content:center;}
 .icon-swatch:hover{border-color:var(--orange);background:var(--orange-dim);}
-.color-dot-btn{border-radius:6px;cursor:pointer;padding:0;border:2px solid var(--surface);box-shadow:0 0 0 1px var(--steel-300);flex-shrink:0;transition:transform 0.1s;}
-.color-dot-btn:hover{box-shadow:0 0 0 1px var(--charcoal-soft);}
+.color-dot-btn{border-radius:6px;cursor:pointer;padding:0;border:2px solid var(--surface);box-shadow:0 0 0 1px var(--steel-300);flex-shrink:0;}
 /* Empty (no colour set) swatch keeps the same rounded-square shape, dashed — so it
    never reads as a second checkbox next to the row's selection box. */
 .color-dot-btn.empty{box-shadow:none;border:1.5px dashed var(--steel-300);background-image:none;}
@@ -715,12 +714,8 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 }
 .color-dot-btn {
   cursor: pointer;
-  transition: transform 150ms ease;
 }
-.color-dot-btn:hover {
-  transform: scale(1.15);
-  box-shadow: 0 0 0 2px var(--charcoal-soft);
-}
+/* No hover pop — touch-first till, hover must never scale or lift anything. */
 
 /* Phones: rows stay slim single-liners (the full-screen editor handles
    detail); only touch-target sizing survives from the old stacked layout. */
@@ -1421,7 +1416,7 @@ body[data-tapfx="ring"] .fxs-tile.t3{animation:fxsRing 3.2s infinite -1.6s;}
 }
 .btn-add.inline{ margin-bottom:0; }
 .btn-add:disabled{ background:var(--steel-300); cursor:not-allowed; }
-.btn-add:not(:disabled):hover{ background:var(--green-hover); box-shadow:0 6px 18px rgba(92,151,32,.30); }
+.btn-add:not(:disabled):hover{ background:var(--green-hover); }
 
 
 /* Secondary action button (Restore defaults, Export, Bulk edit…). Was a
@@ -2199,6 +2194,21 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 .covers-quick-btn{ flex:1; height:44px; border:1px solid var(--steel-300); border-radius:var(--btn-radius);
   background:var(--steel-200); color:var(--text-secondary); font-size:var(--fs-lg); font-weight:800; cursor:pointer; }
 .covers-quick-btn:active{ transform:scale(.97); background:var(--steel-300); }
+
+/* ============================================================================
+   Touch-first till: hover NEVER animates. No scale, no lift, no pop on any
+   control — hover is meaningless on a touch screen and the owner doesn't want
+   it on the PC/tablet either. Flat colour/border state changes are fine; this
+   only kills motion. Base transforms (rotated markers etc.) are preserved by
+   only neutralising the hover *delta* on interactive chrome, not every element.
+   ========================================================================== */
+.btn-add:hover, .btn-secondary:hover, .btn-confirm:hover, .btn-danger:hover,
+.icon-sq:hover, .color-dot-btn:hover, .shape-chip:hover,
+.staff-tile:hover, .item-card:hover, .acct-tile:hover, .pay-opt:hover,
+.switch:hover, .dup-icon-btn:hover,
+.pin-pad button:hover, .simple-table-btn:hover, .sort-btn:hover{
+  transform: none !important;
+}
 
 </style>
 <div id="app">Loading…</div>
@@ -8554,6 +8564,21 @@ function renderIdleWarn() {
 ['pointerdown', 'keydown'].forEach(ev =>
   document.addEventListener(ev, () => resetIdleTimer(), { passive: true, capture: true }));
 
+// Hold-Send handover for one person on the floor: finish this table and go
+// straight back to table select, still signed in (no PIN re-entry).
+function backToTableSelect() {
+  releaseTableLock(state.table);
+  state.table = null;
+  state.covers = 0;
+  state.openOrderId = null;
+  state.cart = [];
+  state.attachedCustomerId = null;
+  state.transferMode = false; state.transferFrom = null;
+  state.callAway = false; state.notesPanel = null; state.quickNotePad = false;
+  state.activeCourse = firstEnabledCourseNumber();
+  state.showTablePicker = true;
+  render();
+}
 function logOut() {
   clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
   releaseTableLock(state.table);
@@ -10072,6 +10097,14 @@ async function sendToKitchen() {
     if (state.settings.logoffAfterSend || state._logoffOnce) {
       state._logoffOnce = false;
       logOut();
+      return;
+    }
+    // Hold-Send handover: sent — now drop back to table select, still logged in.
+    if (state._backToTableOnce) {
+      state._backToTableOnce = false;
+      await refreshOrders();
+      state.menu = await api('/api/menu');
+      backToTableSelect();
       return;
     }
     state.toast = sentItemCount ? 'Items sent to the kitchen' : 'Notes sent to the kitchen';
@@ -17509,7 +17542,7 @@ function renderStaleAccounts() {
     ${rows.length === 0 ? `<div class="empty-hist">No stale tables.</div>` : `
     <div style="max-width:640px;">
       ${rows.map(({ o, idle }) => {
-        const t = state.tables.find(x => String(x.label) === String(o.table));
+        const t = allTables().find(x => String(x.label) === String(o.table));
         const total = o.items ? o.items.reduce((s, i) => s + i.price * i.qty, 0) : 0;
         const idleLabel = idle >= 60 ? `${Math.floor(idle / 60)}h ${idle % 60}m` : `${idle}m`;
         return `
@@ -19414,10 +19447,11 @@ document.addEventListener('pointerdown', (e) => {
       } else fireCourse(n);
     } else {
       _sendHoldFired = true;
-      // Nothing new on the docket → the hold is a pure handover: log off, but
-      // first offer to close the table if it was set up yet never ordered.
-      if (!cartSendable()) { offerCloseEmptyTable(() => logOut()); return; }
-      state._logoffOnce = true;
+      // Hold = send this round, then hand the till back to table select (still
+      // logged in). Nothing new on the docket → just go back (offer to close an
+      // empty table that was set up but never ordered).
+      if (!cartSendable()) { offerCloseEmptyTable(() => backToTableSelect()); return; }
+      state._backToTableOnce = true;
       sendToKitchen();
     }
   }, 500);
@@ -19567,6 +19601,51 @@ document.addEventListener('keydown', (e) => {
     state.selectedAdminTableIds = fp.tables.filter(t => (t.type === 'decor') === wantDecor).map(t => t.id);
     state.selectedAdminTableId = null;
     render();
+  }
+});
+// Keyboard navigation in the layout editor: Tab / Shift+Tab step the selection
+// through the tables, Esc clears it, the arrow keys nudge the selected table(s)
+// (Shift = a bigger step), and Ctrl/⌘+D duplicates.
+document.addEventListener('keydown', (e) => {
+  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField()) return;
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  if (!fp || !fp.tables.length) return;
+  const k = e.key;
+  if (k === 'Tab') {
+    e.preventDefault();
+    const list = fp.tables;
+    const curId = state.selectedAdminTableId || state.selectedAdminTableIds[0];
+    let i = list.findIndex(t => t.id === curId);
+    i = e.shiftKey ? (i <= 0 ? list.length - 1 : i - 1) : (i >= list.length - 1 ? 0 : i + 1);
+    state.selectedAdminTableId = list[i].id;
+    state.selectedAdminTableIds = [];
+    state.linkTapFrom = null; state.floorLinkMode = null;
+    render();
+    return;
+  }
+  if (k === 'Escape' && (state.selectedAdminTableId || state.selectedAdminTableIds.length)) {
+    e.preventDefault();
+    clearTableSelection();
+    return;
+  }
+  if ((k === 'd' || k === 'D') && (e.ctrlKey || e.metaKey) && (state.selectedAdminTableId || state.selectedAdminTableIds.length)) {
+    e.preventDefault();
+    duplicateSelectedTables();
+    return;
+  }
+  if (k.indexOf('Arrow') === 0) {
+    const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : state.selectedAdminTableIds;
+    if (!ids.length) return;
+    e.preventDefault();
+    const step = e.shiftKey ? 5 : 1;
+    const dx = k === 'ArrowLeft' ? -step : k === 'ArrowRight' ? step : 0;
+    const dy = k === 'ArrowUp' ? -step : k === 'ArrowDown' ? step : 0;
+    for (const id of ids) {
+      const t = fp.tables.find(x => x.id === id);
+      if (!t) continue;
+      patchFloorObject(fp.id, id, { x: Math.max(0, Math.min(100, (t.x || 0) + dx)), y: Math.max(0, Math.min(100, (t.y || 0) + dy)) });
+    }
+    return;
   }
 });
 // A till with a real keyboard should be able to TYPE into any number pad

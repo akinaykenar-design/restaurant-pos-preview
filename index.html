@@ -9286,6 +9286,31 @@ function dropMobileDrawer() {
   state.coversPad = null; // the covers page never traps another pane's opening
   if (state.mobileCartOpen && window.matchMedia('(max-width: 768px)').matches) state.mobileCartOpen = false;
 }
+// Open/close the phone docket drawer with its slide animation. Shared by the
+// "View order" bar, the ✕, and the right-swipe gesture so all three animate the
+// same way. On a fresh mount the sheet starts closed for one frame (unpainted
+// elements skip transitions), then flips .open on the live node.
+function openMobileCart() {
+  if (state.mobileCartOpen) return;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (window.innerWidth <= 768 && !reduce) {
+    state.mobileCartOpen = true; state._sheetEntering = true; render();
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      state._sheetEntering = false;
+      const live = document.querySelector('.ticket-panel');
+      if (live && state.mobileCartOpen) live.classList.add('open');
+    }));
+  } else { state.mobileCartOpen = true; render(); }
+}
+function closeMobileCart() {
+  if (!state.mobileCartOpen) return;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const sheet = document.querySelector('.ticket-panel.open');
+  if (sheet && window.innerWidth <= 768 && !reduce) {
+    sheet.classList.remove('open');
+    setTimeout(() => { state.mobileCartOpen = false; render(); }, 290);
+  } else { state.mobileCartOpen = false; render(); }
+}
 
 function openLineEdit(idx) {
   if (isNaN(idx) || !state.cart[idx]) return;
@@ -19783,6 +19808,31 @@ document.addEventListener('pointerdown', (e) => {
 // gesture events are stopped too, and Ctrl+wheel page-zoom on touch PCs.
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
+// Phone: swipe right-to-left over the menu to pull the docket in, left-to-right
+// to push it back. Read from the content (not the raw screen edge), so it never
+// fights the phone's own edge panel/back gesture. Horizontal-dominant only, so
+// vertical scrolling and the sideways category rail are untouched.
+(function () {
+  let sx = 0, sy = 0, armed = false;
+  document.addEventListener('touchstart', (e) => {
+    armed = false;
+    if (window.innerWidth > 768 || !e.touches[0]) return;
+    if (!state.currentStaff || state.view !== 'order') return;
+    const t = e.target;
+    if (t && t.closest && t.closest('.catrail, input, textarea, select, .floor-canvas, .tp-canvas-wrap, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk')) return;
+    // Leave a thin strip on the far left to the OS back gesture.
+    if (e.touches[0].clientX < 18) return;
+    sx = e.touches[0].clientX; sy = e.touches[0].clientY; armed = true;
+  }, { passive: true });
+  document.addEventListener('touchend', (e) => {
+    if (!armed) return; armed = false;
+    const tch = e.changedTouches && e.changedTouches[0]; if (!tch) return;
+    const dx = tch.clientX - sx, dy = tch.clientY - sy;
+    if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return; // not a clear sideways swipe
+    if (dx < 0 && !state.mobileCartOpen) openMobileCart();
+    else if (dx > 0 && state.mobileCartOpen) closeMobileCart();
+  }, { passive: true });
+})();
 
 // SAFETY NET — render() is a no-op while a drag is in progress (so a sort/mock
 // drag isn't yanked out from under the pointer). Rows are also native
@@ -23009,27 +23059,7 @@ function bindEvents() {
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return; state.view = 'order'; render(); }
       else if (act === 'toggle-mobile-cart') {
-        const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        const sheet = document.querySelector('.ticket-panel.open');
-        if (state.mobileCartOpen && sheet && window.innerWidth <= 768 && !reduce) {
-          // Slide the sheet down first, THEN re-render — closing has motion too.
-          sheet.classList.remove('open');
-          setTimeout(() => { state.mobileCartOpen = false; render(); }, 290);
-        } else if (!state.mobileCartOpen && window.innerWidth <= 768 && !reduce) {
-          // Open with the slide-up: mount one frame closed (a fresh, unpainted
-          // element skips CSS transitions), then flip the class on the live node.
-          state.mobileCartOpen = true;
-          state._sheetEntering = true;
-          render();
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            state._sheetEntering = false;
-            const live = document.querySelector('.ticket-panel');
-            if (live && state.mobileCartOpen) live.classList.add('open');
-          }));
-        } else {
-          state.mobileCartOpen = !state.mobileCartOpen;
-          render();
-        }
+        if (state.mobileCartOpen) closeMobileCart(); else openMobileCart();
       }
       else if (act === 'cat') {
         const switchCat = () => {

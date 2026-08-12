@@ -175,7 +175,11 @@ input[type="checkbox"],input[type="radio"]{accent-color:var(--orange);}
    matches the design instead of falling back to the browser default. */
 select{padding:9px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-weight:600;}
 html,body{margin:0;height:100%;background:var(--steel-100);color:var(--text-primary);font-family:var(--font-body);}
-#app{display:flex;flex-direction:column;height:100vh;}
+/* dvh (not vh): on phones the browser's URL/nav bars shrink the visible area,
+   but 100vh is the TALLER large-viewport height — so the app ran off the bottom
+   behind the chrome and the inner scrollers saw no overflow (e.g. the admin
+   Dashboard tiles couldn't be scrolled to). dvh tracks the real visible height. */
+#app{display:flex;flex-direction:column;height:100vh;height:100dvh;}
 
 .topbar{display:flex;align-items:center;gap:14px;padding:8px 16px;background:var(--surface);color:var(--text-primary);border-bottom:1px solid var(--steel-200);flex-shrink:0;}
 /* App bar docking (dragged in Design > mockup): bottom flips the border;
@@ -655,6 +659,18 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    taller at ≤1100px, so the budget widens there to keep the whole map on screen. */
 #admin-floor-canvas{ --floor-h-budget:215px; }
 @media (max-width: 1100px){ #admin-floor-canvas{ --floor-h-budget:285px; } }
+/* Editor markers let the browser pan the page vertically (native scroll past
+   the floor); only a horizontal/diagonal drag or a hold grabs the table —
+   see startFloorDrag's touch gate. */
+.admin-floor-marker{ touch-action:pan-y; }
+/* Phone: 30+ tables shrunk into a ~360px width collapse to 18px specks with
+   unreadable numbers. Instead the map keeps a legible size and pans sideways
+   inside its frame (drag empty floor to pan; a table still drags/​holds to move
+   — see .admin-floor-marker touch-action). */
+@media (max-width: 768px){
+  .fp-main{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  #admin-floor-canvas{ width:760px !important; max-width:none !important; }
+}
 /* Snap grid: faint minor lines every 5% (where tables snap) + stronger major
    lines every 10%, so the grid reads as a tidy guide, not a busy mesh. Cells
    are kept square (900×560 canvas → vertical step = 5%×900/560 ≈ 8.036%). */
@@ -1521,7 +1537,7 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
    finger — markers render finger-sized instead of shrinking with the
    viewport width. Desktop keeps the fit-to-width map. */
 @media (max-width:768px){
-  .tp-canvas-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; touch-action:pan-x; }
+  .tp-canvas-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; touch-action:pan-x pan-y; }
   .tp-canvas-wrap .floor-canvas{ height:56vh; width:auto !important; max-width:none !important; min-width:100%; }
 }
 
@@ -19043,6 +19059,8 @@ async function deleteFloorPlanAction(id) {
 // Dragging updates the marker's on-screen position directly (no full re-render
 // mid-drag, which would interrupt the drag) and commits the final position on release.
 let floorDrag = null; // { tableId, canvasEl, markerEl, moved }
+let _floorTouchAt = 0; // suppresses the compat mouse events a touch tap emits
+const FLOOR_DRAG_SLOP = 8; // px a finger must travel before a drag/scroll is judged
 
 function startFloorDrag(e, tableId) {
   // Ctrl/⌘-click toggles a table in the multi-select set instead of dragging.
@@ -19054,6 +19072,15 @@ function startFloorDrag(e, tableId) {
   const markerEl = e.currentTarget;
   const canvasEl = markerEl.closest('.floor-canvas');
   floorDrag = { tableId, canvasEl, markerEl, moved: false };
+  // Touch drag-vs-scroll: a finger down on a table doesn't commit to a drag
+  // yet — moveFloorDrag decides once it moves. A vertical-dominant move means
+  // the user is scrolling PAST the floor, so we let the page scroll instead of
+  // dragging the table (markers are touch-action:pan-y). Mouse drags commit
+  // immediately, as before.
+  const isTouch = e.type === 'touchstart' && e.touches && e.touches[0];
+  floorDrag.pending = !!isTouch;
+  floorDrag.startClientX = isTouch ? e.touches[0].clientX : e.clientX;
+  floorDrag.startClientY = isTouch ? e.touches[0].clientY : e.clientY;
   // HOLD a marker = toggle it into the multi-selection (touch ctrl+click).
   floorDrag.holdTimer = setTimeout(() => {
     if (floorDrag && !floorDrag.moved) { floorDrag.holdFired = true; toggleTableMultiSelect(tableId); floorDrag = null; }
@@ -19085,7 +19112,11 @@ function startFloorDrag(e, tableId) {
       }
     }
   }
-  e.preventDefault();
+  // Touch: do NOT preventDefault here — that would kill the browser's native
+  // vertical scroll. touch-action:pan-y + the pending gate keep scrolling
+  // smooth while still allowing a deliberate drag. Mouse keeps its
+  // preventDefault (blocks text selection / native image drag).
+  if (!floorDrag.pending) e.preventDefault();
 }
 function toggleTableMultiSelect(tableId) {
   state.selectedAdminTableId = null;
@@ -19233,6 +19264,19 @@ function adminLinkTarget(d) {
 }
 function moveFloorDrag(clientX, clientY) {
   if (!floorDrag) return;
+  // Touch gate: judge drag-vs-scroll on the first real movement.
+  if (floorDrag.pending) {
+    const dx = clientX - floorDrag.startClientX, dy = clientY - floorDrag.startClientY;
+    if (Math.abs(dx) < FLOOR_DRAG_SLOP && Math.abs(dy) < FLOOR_DRAG_SLOP) return; // too small to tell yet
+    if (Math.abs(dy) > Math.abs(dx)) {
+      // Vertical-dominant = a scroll past the floor. Abandon the drag so the
+      // page scrolls (we never preventDefaulted, and the marker is pan-y).
+      if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer);
+      floorDrag = null;
+      return;
+    }
+    floorDrag.pending = false; // horizontal/diagonal = a deliberate table drag
+  }
   if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const rect = floorDrag.canvasEl.getBoundingClientRect();
   let x = ((clientX - rect.left) / rect.width) * 100;
@@ -19500,6 +19544,13 @@ document.addEventListener('touchmove', (e) => {
   moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
 document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); });
+// Browser took the gesture for a native scroll: drop a still-pending drag so it
+// never lands as a stray tap/select; commit a drag that had already started.
+document.addEventListener('touchcancel', () => {
+  if (floorDrag && floorDrag.pending) { if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer); floorDrag = null; }
+  else endFloorDrag();
+  endRotateDrag(); endResizeDrag();
+});
 // Long-press an item tile → quantity popover (½ ×2 ×3 ×4 ×5). No hidden mode:
 // hold the tile, pick a quantity, done. The pick funnels through the same
 // qtyPadBuffer path the 123 pad uses, so items with options inherit the
@@ -25055,8 +25106,11 @@ function bindEvents() {
   if (quickNoteInput) quickNoteInput.addEventListener('input', (e) => { state.quickNote = e.target.value; refreshPaneTick(); });
 
   document.querySelectorAll('.admin-floor-marker').forEach(el => {
-    el.addEventListener('mousedown', (e) => startFloorDrag(e, el.dataset.id));
-    el.addEventListener('touchstart', (e) => startFloorDrag(e, el.dataset.id), { passive: false });
+    // A touch tap emits compat mouse events ~after touchend; ignore them so a
+    // tap-to-select doesn't also fire the mouse path and toggle right back off.
+    el.addEventListener('mousedown', (e) => { if (Date.now() - _floorTouchAt < 700) return; startFloorDrag(e, el.dataset.id); });
+    el.addEventListener('touchstart', (e) => { _floorTouchAt = Date.now(); startFloorDrag(e, el.dataset.id); }, { passive: false });
+    el.addEventListener('touchend', () => { _floorTouchAt = Date.now(); }, { passive: true });
   });
   document.querySelectorAll('.rotate-handle').forEach(el => {
     el.addEventListener('mousedown', (e) => { e.stopPropagation(); startRotateDrag(e, el.dataset.id); });

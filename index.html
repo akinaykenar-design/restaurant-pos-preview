@@ -6655,7 +6655,7 @@ const CATEGORY_ICONS = {
 // and coarse enough that snapping feels decisive on a touchscreen.
 const FLOOR_GRID = 4;
 const TABLE_TEMPLATES = [
-  { key: 'barstool', label: 'Barstool', shape: 'round', width: 4, height: 6, seats: 1 },
+  { key: 'barstool', label: 'Barstool', shape: 'stool', width: 4, height: 6, seats: 1 },
   { key: 'round', label: 'Circle', shape: 'round', width: 8, height: 13, seats: 4 },
   { key: 'oval', label: 'Oval', shape: 'oval', width: 14, height: 11, seats: 6 },
   { key: 'square', label: 'Square', shape: 'square', width: 9, height: 15, seats: 4 },
@@ -6721,15 +6721,18 @@ function clampToFloor(x, y, w, h, rot, fpHeight) {
 // Corner rounding per shape — 'oval' is a stretched circle, 'half' a booth
 // dome (flat bottom edge you can rotate against a wall).
 function tableRadius(shape) {
-  return shape === 'round' || shape === 'oval' ? '50%'
+  return shape === 'round' || shape === 'oval' || shape === 'stool' ? '50%'
     : shape === 'half' ? '50% 50% 10px 10px / 90% 90% 10px 10px'
     : '10px';
 }
+// A barstool: a circle with the bottom third sliced flat (keeps two-thirds), so
+// it reads as a seat, distinct from a round table.
+const STOOL_CLIP = 'clip-path:inset(0 0 33% 0);';
 // Corner radius for a PLACED table — proportional to the table's smaller side so
 // every square/rect rounds the same amount at any size. A fixed px radius reads
 // sharp on big tables and round on small ones (the "two different snaps" bug).
 function tableRadiusFor(t) {
-  if (!t || t.shape === 'round' || t.shape === 'oval') return '50%';
+  if (!t || t.shape === 'round' || t.shape === 'oval' || t.shape === 'stool') return '50%';
   if (t.shape === 'half') return '50% 50% 10px 10px / 90% 90% 10px 10px';
   const wpx = (t.width || 10) * 9, hpx = (t.height || 10) * (STD_FLOOR_H / 100);
   const r = 0.16 * Math.min(wpx, hpx);
@@ -6746,14 +6749,12 @@ const DECOR_TEMPLATES = [
   { key: 'plant', label: 'Plant', icon: '🪴', width: 5, height: 5, group: 'object' },
   // Structure — plain coloured shapes for sketching the room (walls, dividers,
   // pillars, zones). No icon; recolour like a table.
-  { key: 'wall', label: 'Wall', icon: '', width: 22, height: 2, shape: 'rect', color: '#5b5f66', group: 'structure' },
-  { key: 'divider', label: 'Divider', icon: '', width: 12, height: 1.5, shape: 'rect', color: '#8a8f97', group: 'structure' },
-  { key: 'pillar', label: 'Pillar', icon: '', width: 5, height: 5, shape: 'square', color: '#7a7f86', group: 'structure' },
-  { key: 'pillar-round', label: 'Round pillar', icon: '', width: 5, height: 5, shape: 'round', color: '#7a7f86', group: 'structure' },
-  { key: 'stage', label: 'Stage', icon: '', width: 20, height: 12, shape: 'rect', color: '#6f6a62', group: 'structure' },
-  { key: 'dancefloor', label: 'Dance floor', icon: '', width: 20, height: 18, shape: 'square', color: '#D9CFC0', group: 'structure' },
-  { key: 'banquette', label: 'Banquette', icon: '', width: 18, height: 4, shape: 'rect', color: '#8a7f72', group: 'structure' },
-  { key: 'zone-rect', label: 'Zone', icon: '', width: 24, height: 20, shape: 'square', color: '#E4E0D6', group: 'structure' },
+  // Structures are plain SHAPES (no words) — place, then resize/recolour into
+  // whatever it needs to be (wall, bar, stage, pillar, zone…).
+  { key: 'rectangle', label: 'Rectangle', icon: '', width: 20, height: 12, shape: 'rect', color: '#7a7f86', group: 'structure' },
+  { key: 'square', label: 'Square', icon: '', width: 12, height: 12, shape: 'square', color: '#7a7f86', group: 'structure' },
+  { key: 'circle', label: 'Circle', icon: '', width: 8, height: 8, shape: 'round', color: '#7a7f86', group: 'structure' },
+  { key: 'line', label: 'Line', icon: '', width: 22, height: 2, shape: 'rect', color: '#5b5f66', group: 'structure' },
 ];
 // Hand-drawn, colourful "emoji-style" art for the objects — each reads as the
 // real thing (a bar with stools, actual stairs, a lectern). Keyed by decor key;
@@ -9337,6 +9338,7 @@ function editLineToggleComponent(invId) {
 function removeLine(idx) {
   const line = state.cart[idx];
   state.cart.splice(idx, 1);
+  _undoAction = null; // this row owns the undo toast now
   state.lastRemoved = { line, idx };
   state.toast = 'Item removed';
   state.toastAction = { label: 'Undo', act: 'undo-remove' };
@@ -9350,9 +9352,25 @@ function removeLine(idx) {
 // (even ones set without a timer) auto-dismisses via ensureToastTimer(),
 // which render() calls on every pass.
 function armToastTimer(ms) {
+  _undoAction = null; // a fresh non-undo toast supersedes any pending Undo
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
   state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; render(); }, ms);
+}
+// Gmail-style "· Undo" toast. Captures the reverse of a destructive action as a
+// closure; tapping Undo (act: 'undo-last') runs it. The toast holds ~6s.
+let _undoAction = null;
+function offerUndo(message, undoFn) {
+  _undoAction = undoFn || null;
+  state.lastRemoved = null; // don't leave the sibling undo path armed
+  state.toast = message;
+  state.toastAction = { act: 'undo-last', label: 'Undo' };
+  clearTimeout(state._toastTimer);
+  state._toastFor = state.toast;
+  state._toastTimer = setTimeout(() => {
+    state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; _undoAction = null; render();
+  }, 6000);
+  render();
 }
 function ensureToastTimer() {
   if (!state.toast) {
@@ -9392,6 +9410,26 @@ function clearCart() {
   state.callAway = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   render();
+}
+// Discard the unsent cart but keep a one-tap Undo: snapshot everything clearCart
+// wipes, clear, then offer to put it all back.
+function discardCartUndoable() {
+  const snap = {
+    cart: state.cart.map(c => ({ ...c, modSelections: c.modSelections ? { ...c.modSelections } : c.modSelections, removed: c.removed ? [...c.removed] : c.removed })),
+    activeSeat: state.activeSeat, covers: state.covers, allergies: state.allergies,
+    notes: state.notes, vipType: state.vipType, discount: state.discount,
+    activeCourse: state.activeCourse, courseCount: state.courseCount, firedCourses: state.firedCourses,
+    callAway: state.callAway,
+  };
+  clearCart();
+  offerUndo('Discarded', () => {
+    state.cart = snap.cart;
+    state.activeSeat = snap.activeSeat; state.covers = snap.covers;
+    state.allergies = snap.allergies; state.notes = snap.notes;
+    state.vipType = snap.vipType; state.discount = snap.discount;
+    state.activeCourse = snap.activeCourse; state.courseCount = snap.courseCount;
+    state.firedCourses = snap.firedCourses; state.callAway = snap.callAway;
+  });
 }
 
 function setActiveCourse(n) { state.activeCourse = n; render(); }
@@ -11044,15 +11082,32 @@ function renderVoidReasonPop() {
 async function commitRemoveSent(match, reason) {
   const o = activeOpenOrder();
   if (!match || !o) return;
+  // Grab the exact lines coming off so Undo can re-send them.
+  const removed = (o.items || []).filter(i => sentItemMatches(i, match)).map(i => ({
+    id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: i.qty,
+    course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
+    variantId: i.variantId, modSelections: i.modSelections,
+  }));
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ match, action: 'remove', reason: reason || null, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     state.editSent = null; state.voidItemPrompt = null;
-    state.toast = reason ? `Removed — ${reason}` : 'Item removed';
     render();
-    armToastTimer(2200);
+    if (removed.length) offerUndo('Removed', () => reAddSentLine(o.id, removed));
+    else { state.toast = reason ? `Removed — ${reason}` : 'Item removed'; render(); armToastTimer(2200); }
   } catch (e) { state.toast = 'Could not remove item'; render(); }
+}
+// Undo of a sent-line removal: re-send the captured lines as a fresh round
+// (the same API a normal send uses).
+async function reAddSentLine(orderId, items) {
+  if (!items || !items.length) return;
+  try {
+    await api(`/api/orders/${orderId}/rounds`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+    await refreshOrders();
+    state.toast = 'Restored'; render(); armToastTimer(2000);
+  } catch (e) { state.toast = 'Could not restore item'; render(); armToastTimer(2500); }
 }
 function removeSentItem() { doRemoveSent(state.editSent); }
 // The inline ✕ on a sent line (managers only) — removes without opening the pane.
@@ -16104,16 +16159,28 @@ function renderFloorPlanAdmin() {
         const isActive = (t) => idAttr ? (t.shape === activeShape) : (t.key === placingKey);
         // Swatch corner radius mirrors a REAL placed table (~16% of the short side),
         // not a fat fixed 10px that made every square swatch look pill-rounded.
-        const chipRadius = (shape, w, h) => shape === 'round' || shape === 'oval' ? '50%'
+        const chipRadius = (shape, w, h) => shape === 'round' || shape === 'oval' || shape === 'stool' ? '50%'
           : shape === 'half' ? '50% 50% 14% 14% / 90% 90% 14% 14%'
           : `${Math.max(2, Math.round(Math.min(w, h) * 0.16))}px`;
         return `<div class="shape-chip-row">${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.key] || dims[t.shape] || [26, 26];
-          return `<button class="shape-chip ${isActive(t) ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${chipRadius(t.shape, w, h)};background:${pvBg};"></span></button>`; }).join('')}</div>`;
+          const clip = t.shape === 'stool' ? STOOL_CLIP : '';
+          return `<button class="shape-chip ${isActive(t) ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" title="${esc(t.label)}${idAttr ? '' : ' — tap, then tap the floor'}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${chipRadius(t.shape, w, h)};background:${pvBg};${clip}"></span></button>`; }).join('')}</div>`;
       };
       // Objects/areas as a visual chip grid (matches the table shape chips) —
       // tap to arm, then tap the floor. Areas show a colour block, objects an icon.
       const placeChips = (grp) => {
         const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
+        // Structures are pure shapes — NO words. A little block shaped like the
+        // primitive (wide rect, square, circle, thin line) is the whole chip.
+        if (grp === 'structure') {
+          return `<div class="decor-chip-row">${list.map(t => {
+            const val = `decor:${t.key}`;
+            const thin = t.height <= 3;
+            const [sw, sh] = t.shape === 'round' ? [24, 24] : t.shape === 'square' ? [24, 24] : thin ? [42, 6] : [42, 24];
+            const rad = t.shape === 'round' ? '50%' : thin ? '3px' : '3px';
+            return `<button class="decor-chip shape-only${state.floorPlacing === val ? ' active' : ''}" data-act="palette-place" data-val="${val}" title="${esc(t.label)} — tap, then tap the floor"><span class="decor-chip-block" style="width:${sw}px;height:${sh}px;border-radius:${rad};background:${t.color || 'var(--steel-300)'};"></span></button>`;
+          }).join('')}</div>`;
+        }
         return `<div class="decor-chip-row">${list.map(t => {
           const val = `decor:${t.key}`;
           const face = DECOR_ART[t.key] ? `<span class="decor-chip-ic decor-chip-art">${DECOR_ART[t.key]}</span>` : t.icon ? `<span class="decor-chip-ic">${t.icon}</span>` : `<span class="decor-chip-block" style="background:${t.color || 'var(--steel-300)'};"></span>`;
@@ -17306,7 +17373,8 @@ function shapeStyle(t, selected) {
   // A table linked into another fades whole — the main (lowest) table of the
   // group stays lit and carries the order.
   const faded = (!isDecor && t.mergedInto && t.mergedInto !== t.id) ? 'opacity:0.45;' : '';
-  return `position:absolute;left:${t.x}%;top:${t.y}%;width:${t.width}%;height:${t.height}%;transform:translate(-50%,-50%) rotate(${rot}deg);border-radius:${radius};border:${border};background:${bg};display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;cursor:pointer;color:${textColor};${ring}${faded}${container}`;
+  const clip = (!isDecor && t.shape === 'stool') ? STOOL_CLIP : '';
+  return `position:absolute;left:${t.x}%;top:${t.y}%;width:${t.width}%;height:${t.height}%;transform:translate(-50%,-50%) rotate(${rot}deg);border-radius:${radius};border:${border};background:${bg};display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;cursor:pointer;color:${textColor};${ring}${faded}${clip}${container}`;
 }
 
 // For an occupied table, the latest course sent and how long ago (uses the
@@ -18894,7 +18962,7 @@ async function deleteTableAction(id, fpId) {
     const fp = state.floorPlans.find(f => f.id === fpId);
     if (fp) fp.tables = fp.tables.filter(t => t.id !== id);
     state.selectedAdminTableId = null;
-    render();
+    offerUndo('Deleted', () => floorUndo());
   } catch (e) {
     state.toast = 'Could not remove that table.';
     render();
@@ -19024,8 +19092,7 @@ async function deleteSelectedTables() {
     if (fp) fp.tables = fp.tables.filter(t => !ids.includes(t.id));
     state.selectedAdminTableIds = [];
     state.selectedAdminTableId = null;
-    state.toast = `Deleted ${ids.length} object${ids.length > 1 ? 's' : ''}`;
-    render();
+    offerUndo('Deleted', () => floorUndo());
   } catch (e) { state.toast = 'Could not delete the selected objects.'; render(); }
 }
 // Duplicate the selected table(s)/object(s): each copy lands just off its
@@ -22977,9 +23044,16 @@ function bindEvents() {
       else if (act === 'edit-line-seat') { editLineSetSeat(el.dataset.seat === 'all' ? 'all' : (el.dataset.seat ? parseInt(el.dataset.seat) : null)); }
       else if (act === 'edit-line-remove-comp') { editLineToggleComponent(el.dataset.inv); }
       else if (act === 'undo-remove') { undoRemoveLine(); }
+      else if (act === 'undo-last') {
+        const f = _undoAction; _undoAction = null;
+        state.toast = null; state.toastAction = null;
+        clearTimeout(state._toastTimer); state._toastTimer = null; state._toastFor = null;
+        if (f) f();
+        render();
+      }
       else if (act === 'clear') {
         // Discarding wipes the unsent items — confirm first (mirrors log-off).
-        if (state.cart.length) openConfirm({ message: 'Discard the unsent items on this ticket?', confirmLabel: 'Discard', danger: true }, () => clearCart());
+        if (state.cart.length) openConfirm({ message: 'Discard the unsent items on this ticket?', confirmLabel: 'Discard', danger: true }, () => discardCartUndoable());
         else clearCart();
       }
       else if (act === 'checkout') { openCheckout(); }

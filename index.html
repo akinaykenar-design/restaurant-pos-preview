@@ -684,6 +684,14 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 }
 .delete-icon-btn:hover{background:var(--red);color:#fff;}
 
+/* Full-screen "working…" overlay (login menu load, etc.) — a spinning ring so
+   staff can see the till is busy, not frozen. Lives outside #app so render()
+   never wipes it. */
+.app-spinner{position:fixed;inset:0;z-index:9000;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:15px;background:color-mix(in srgb,var(--steel-100) 82%,transparent);backdrop-filter:blur(2px);-webkit-backdrop-filter:blur(2px);pointer-events:none;}
+.app-spinner .spin-ring{width:46px;height:46px;border-radius:50%;border:4px solid var(--steel-300);border-top-color:var(--orange);animation:app-spin .8s linear infinite;}
+.app-spinner .spin-msg{font-weight:800;color:var(--text-primary);font-size:14.5px;font-family:var(--font-display);}
+@keyframes app-spin{to{transform:rotate(360deg);}}
+@media (prefers-reduced-motion:reduce){.app-spinner .spin-ring{animation-duration:1.8s;}}
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--charcoal);color:#fff;padding:14px 22px;border-radius:10px;font-weight:600;font-size:14px;box-shadow:var(--shadow);z-index:60;display:flex;align-items:center;gap:10px;}
 .toast-btn{background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;font:inherit;font-size:12.5px;font-weight:700;padding:4px 12px;border-radius:7px;cursor:pointer;margin-left:4px;}
 .toast-btn:hover{background:rgba(255,255,255,0.15);}
@@ -2667,14 +2675,28 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 // db.js
 // This is the "database" for the restaurant system.
 // Instead of requiring you to install and manage a separate database program,
-// everything is stored in one plain file: data/store.json
-// This keeps setup simple - there's nothing extra to install.
+// everything is stored in plain files. This keeps setup simple - there's
+// nothing extra to install.
+//
+// Two files, one job each:
+//   - data/store.json       = the shipped SEED/TEMPLATE. Tracked in git.
+//                             It is only ever read to seed a brand-new venue.
+//   - data/store.local.json = this venue's LIVE data. NOT tracked in git.
+//                             The app reads and writes ONLY this file at
+//                             runtime (plus its .bak/.tmp siblings).
+// On first run, store.local.json is seeded once by copying store.json (or
+// the built-in defaults if the template is missing/invalid). After that it
+// belongs to the venue: code updates (git pull / hard reset) replace
+// store.json but never touch store.local.json, so venue data always survives.
 
 const fs = require('fs');
 const path = require('path');
 
 const DATA_DIR = path.join(__dirname, 'data');
-const DB_FILE = path.join(DATA_DIR, 'store.json');
+// Live data the app reads/writes at runtime (gitignored, per-venue).
+const DB_FILE = path.join(DATA_DIR, 'store.local.json');
+// Shipped template used only to seed a fresh venue's live file.
+const SEED_FILE = path.join(DATA_DIR, 'store.json');
 
 const DEFAULT_MENU = [
   { id: 's1', category: 'Starters', name: 'Crispy Calamari', price: 11.5, out: false, variants: [] },
@@ -2882,8 +2904,19 @@ function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) {
     fs.mkdirSync(DATA_DIR, { recursive: true });
   }
+  // First run: seed this venue's LIVE file (store.local.json) once. Prefer the
+  // shipped template (store.json); fall back to built-in defaults if the
+  // template is missing or not valid JSON. After this, the live file is never
+  // reseeded - updates that replace store.json leave store.local.json alone.
   if (!fs.existsSync(DB_FILE)) {
-    fs.writeFileSync(DB_FILE, JSON.stringify(DEFAULT_DATA, null, 2));
+    let seed;
+    try {
+      seed = fs.readFileSync(SEED_FILE, 'utf-8');
+      JSON.parse(seed); // validate the template before trusting it
+    } catch (e) {
+      seed = JSON.stringify(DEFAULT_DATA, null, 2);
+    }
+    fs.writeFileSync(DB_FILE, seed);
   }
 }
 
@@ -8525,7 +8558,10 @@ async function loadInitial() {
       // No table is auto-assigned on login — the till opens on the table
       // picker and the waiter chooses where they are working.
       await refreshTableLocks();
-      if (state.view === 'order' && state.orderType === 'dine-in') state.showTablePicker = true;
+      // Re-check state.table AFTER the await: on a slow load the waiter may have
+      // already picked a table while the rest of the data was still coming in —
+      // don't bounce them back to the picker.
+      if (!state.table && state.view === 'order' && state.orderType === 'dine-in') state.showTablePicker = true;
     }
     await refreshOrders();
     await refreshSummary();
@@ -8562,7 +8598,36 @@ async function toggleStaffPinView(id) {
   }
 }
 
+// A full-screen "working…" overlay that lives OUTSIDE #app, so render() (which
+// replaces #app's innards) never wipes it — used for the slow moments (loading
+// the whole menu on login) so staff can see the till is busy, not frozen.
+function showSpinner(msg) {
+  let el = document.getElementById('app-spinner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'app-spinner';
+    el.className = 'app-spinner';
+    el.innerHTML = '<div class="spin-ring"></div><div class="spin-msg"></div>';
+    document.body.appendChild(el);
+  }
+  el.querySelector('.spin-msg').textContent = msg || 'Working…';
+  el.style.display = 'flex';
+}
+function hideSpinner() {
+  const el = document.getElementById('app-spinner');
+  if (el) el.style.display = 'none';
+}
 function finishLogin(staff) {
+  // Read who was last signed in (and where) BEFORE we overwrite it — used only
+  // to resume the SAME person's interrupted session after an accidental
+  // refresh. A different person, or a genuine re-open, always starts fresh.
+  let prevId = null, savedView = null, savedTable = null;
+  try {
+    prevId = localStorage.getItem('pos-signed-in');
+    savedView = localStorage.getItem('pos-view');
+    savedTable = localStorage.getItem('pos-table');
+  } catch (e) {}
+  const resume = staff.role !== 'chef' && prevId && String(prevId) === String(staff.id);
   state.currentStaff = staff;
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
   resetIdleTimer(); // start the idle-logoff clock for this session
@@ -8570,9 +8635,36 @@ function finishLogin(staff) {
   state.loginPin = '';
   state.loginError = '';
   state.loginDupMatches = null;
-  state.view = staff.role === 'chef' ? 'kitchen' : 'order';
+  if (staff.role === 'chef') state.view = 'kitchen';
+  else if (resume && savedView === 'admin' && staff.role === 'manager') state.view = 'admin';
+  else if (resume && savedView === 'kitchen') state.view = 'kitchen';
+  else state.view = 'order';
+  if (resume && state.view === 'order' && savedTable) state.table = savedTable;
   render();
-  loadInitial().then(() => { if (staff.role === 'chef') loadKdsData(); });
+  showSpinner('Signing in…'); // the menu can be big — show it's loading, not stuck
+  const done = () => hideSpinner();
+  loadInitial().then(() => {
+    if (staff.role === 'chef') { loadKdsData(); done(); return; }
+    // ONLY the resumed table needs validating — and only when we actually
+    // resumed one. On a fresh login we must not touch state.table, or we'd
+    // clobber a table the user picked while the menu was still loading.
+    if (resume && state.table) {
+      // Table may have been cleared/deleted since; if it's gone, drop it (picker
+      // shows). Otherwise re-hydrate its covers/notes so the order reads right.
+      if (!findTableById(state.table)) { state.table = null; }
+      else {
+        const t = findTableById(state.table);
+        state.covers = (t && t.covers) || 0;
+        state.allergies = (t && t.allergies) || [];
+        state.notes = (t && t.notes) || [];
+        state.vipType = (t && t.vipType) || '';
+        state.showTablePicker = false;
+        render();
+      }
+    }
+    if (state.view === 'admin' && state.adminTab === 'register') loadRegisterData();
+    done();
+  }).catch(() => { done(); });
 }
 // PIN-first: the PIN alone names the person. A shared PIN (legacy data)
 // surfaces just the matching faces to pick from.
@@ -25230,41 +25322,12 @@ setInterval(() => {
   // Venue name + logo show on the lock screen, so settings load before login.
   try { state.settings = { ...state.settings, ...(await api('/api/settings')) }; } catch (e) {}
   await loadStaffList();
-  let savedId = null;
-  try { savedId = localStorage.getItem('pos-signed-in'); } catch (e) {}
-  const staff = savedId && state.staffList.find(s => String(s.id) === savedId);
-  if (staff) {
-    state.currentStaff = staff;
-    // Land back on whatever screen was showing before the refresh —
-    // a reload shouldn't yank you off the page you were working on.
-    let savedView = null;
-    try { savedView = localStorage.getItem('pos-view'); } catch (e) {}
-    if (staff.role === 'chef') state.view = 'kitchen';
-    else if (savedView === 'admin' && staff.role === 'manager') state.view = 'admin';
-    else if (savedView === 'kitchen') state.view = 'kitchen';
-    else state.view = 'order';
-    // Restore the open dine-in table so a refresh stays on that order instead
-    // of bouncing to the table picker.
-    let savedTable = null;
-    try { savedTable = localStorage.getItem('pos-table'); } catch (e) {}
-    if (state.view === 'order' && savedTable) state.table = savedTable;
-    render();
-    await loadInitial();
-    // The table may have been deleted since; if it's gone, drop it (the picker
-    // shows). Otherwise re-hydrate its covers/notes so the order reads right.
-    if (state.table && !findTableById(state.table)) { state.table = null; }
-    else if (state.table) {
-      const t = findTableById(state.table);
-      state.covers = (t && t.covers) || 0;
-      state.allergies = (t && t.allergies) || [];
-      state.notes = (t && t.notes) || [];
-      state.vipType = (t && t.vipType) || '';
-      state.showTablePicker = false;
-      render();
-    }
-    if (state.view === 'kitchen') loadKdsData();
-    if (state.view === 'admin' && state.adminTab === 'register') loadRegisterData();
-  }
+  // ALWAYS require a PIN on load — never silently restore the last person's
+  // session. A reopened or refreshed till (or a device handed to the next
+  // person) must land on the login screen, not walk straight into the last
+  // user's order. The same person re-entering THEIR PIN resumes their table
+  // (see finishLogin); a different person starts fresh.
+  render();
 })();
 loadInventoryData();
 

@@ -6678,62 +6678,9 @@ const STD_FLOOR_W = 900;
 // than side-by-side ones. FLOOR_GRID_Y is the Y step that covers the SAME pixels
 // as one X step, so the snap grid is truly square and spacing is even every way.
 const FLOOR_GRID_Y = FLOOR_GRID * STD_FLOOR_W / STD_FLOOR_H;
-// Built-in gap between tables: neighbours can never touch. One even pixel gutter
-// (2% of the 900-wide canvas ≈ 18px) expressed in each axis' own %-units — the
-// X gutter is % of width, the Y gutter the matching % of height, so a row and a
-// column end up with the SAME visible gap. Same width/height split as the grid.
-const FLOOR_GUTTER = 4;
-const FLOOR_GUTTER_Y = FLOOR_GUTTER * STD_FLOOR_W / STD_FLOOR_H;
 // Snap a stored table/decor position onto the square grid (x by width-%, y by
 // the matching height-%). Idempotent — already-aligned items don't move.
 function snapFloorPos(v, grid) { return Math.round(v / grid) * grid; }
-// Push tables apart so every non-linked pair keeps at least FLOOR_GUTTER of
-// clear space edge-to-edge — adjacent tables can never touch, and a stacked
-// column (or a row) ends up with equal gaps. Gauss-Seidel relaxation: sweep the
-// pairs in a stable top-left order over a few passes, and for each too-close
-// pair shove them apart on whichever axis they overlap by the fewest PIXELS
-// (the natural way out), splitting the push so the group stays centred. Linked
-// (welded) tables stay flush and are skipped; decor is left where it is.
-function separateFloorTables(fp) {
-  if (!fp || !Array.isArray(fp.tables)) return false;
-  const ts = fp.tables.filter(t =>
-    t && t.type === 'table' && typeof t.x === 'number' && typeof t.y === 'number'
-    && !(t.mergedInto && t.mergedInto !== t.id));
-  if (ts.length < 2) return false;
-  ts.sort((a, b) => (a.y - b.y) || (a.x - b.x));
-  const kx = STD_FLOOR_W / 100, ky = STD_FLOOR_H / 100; // axis-% → pixels
-  for (let pass = 0; pass < 24; pass++) {
-    let moved = false;
-    for (let i = 0; i < ts.length; i++) {
-      for (let j = i + 1; j < ts.length; j++) {
-        const a = ts[i], b = ts[j];
-        const needX = (a.width + b.width) / 2 + FLOOR_GUTTER;     // centre gap to clear on X
-        const needY = (a.height + b.height) / 2 + FLOOR_GUTTER_Y; // centre gap to clear on Y
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const gapX = needX - Math.abs(dx); // >0: too close on X
-        const gapY = needY - Math.abs(dy); // >0: too close on Y
-        if (gapX <= 0 || gapY <= 0) continue; // already clear on one axis — no touch
-        if (gapX * kx <= gapY * ky) { // less to travel sideways → separate on X
-          const push = gapX / 2, dir = dx < 0 ? -1 : 1;
-          a.x -= dir * push; b.x += dir * push;
-        } else {                      // separate on Y
-          const push = gapY / 2, dir = dy < 0 ? -1 : 1;
-          a.y -= dir * push; b.y += dir * push;
-        }
-        moved = true;
-      }
-    }
-    if (!moved) break;
-  }
-  let changed = false;
-  ts.forEach(t => {
-    const c = clampToFloor(t.x, t.y, t.width, t.height, t.rotation, fp.height);
-    const nx = Math.round(c.x * 100) / 100, ny = Math.round(c.y * 100) / 100;
-    if (nx !== t.x || ny !== t.y) changed = true;
-    t.x = nx; t.y = ny;
-  });
-  return changed;
-}
 function resnapFloorPlans() {
   (state.floorPlans || []).forEach(fp => {
     if (!fp || !fp.snapToGrid || !Array.isArray(fp.tables)) return;
@@ -6741,26 +6688,7 @@ function resnapFloorPlans() {
       if (typeof t.x === 'number') t.x = Math.round(snapFloorPos(t.x, FLOOR_GRID) * 100) / 100;
       if (typeof t.y === 'number') t.y = Math.round(snapFloorPos(t.y, FLOOR_GRID_Y) * 100) / 100;
     });
-    // Even the gaps out so snapped neighbours never sit flush against each other.
-    separateFloorTables(fp);
   });
-}
-// Run the gutter pass over a plan and PERSIST every table the shove nudged, so a
-// placement or drag leaves a consistent gap that survives reload. Returns true
-// if anything moved (caller re-renders to show neighbours that sprang apart).
-function applyFloorGutter(fp) {
-  if (!fp || !Array.isArray(fp.tables)) return false;
-  const before = new Map(fp.tables.map(t => [t.id, { x: t.x, y: t.y }]));
-  separateFloorTables(fp);
-  let changed = false;
-  fp.tables.forEach(t => {
-    const b = before.get(t.id);
-    if (b && (Math.abs(b.x - t.x) > 0.01 || Math.abs(b.y - t.y) > 0.01)) {
-      changed = true;
-      api(`/api/floorplans/${fp.id}/tables/${t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x: t.x, y: t.y }) }).catch(() => {});
-    }
-  });
-  return changed;
 }
 const TABLE_SIZE_LABELS = ['S', 'M', 'L'];
 function tableBaseDims(shape) {
@@ -18723,7 +18651,6 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
   try {
     const obj = await api(`/api/floorplans/${fpId}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     fp.tables.push(obj);
-    if (obj.type === 'table') applyFloorGutter(fp); // hold the built-in gap to neighbours
     render(); // keep placing
   } catch (e) { state.toast = 'Could not place that.'; render(); }
 }
@@ -19181,8 +19108,6 @@ function endFloorDrag() {
     for (const g of floorDrag.group) {
       if (g.lastX !== undefined) saveTablePosition(g.id, Math.round(g.lastX * 10) / 10, Math.round(g.lastY * 10) / 10);
     }
-    const gfp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-    if (applyFloorGutter(gfp)) render(); // keep the gutter to tables outside the group
     floorDrag = null;
     return;
   }
@@ -19196,9 +19121,6 @@ function endFloorDrag() {
       return;
     }
     saveTablePosition(tableId, Math.round(lastX * 10) / 10, Math.round(lastY * 10) / 10);
-    // Re-assert the built-in gap: nudge this table and any neighbour it landed
-    // against back to the gutter, then repaint the ones that sprang apart.
-    if (applyFloorGutter(fp)) render();
   } else if (state.selectedAdminTableIds.length) {
     // A hold started a multi-selection — while it exists, taps toggle tables
     // in and out of it (✕ Done or emptying the selection ends the mode).

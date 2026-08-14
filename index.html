@@ -8368,13 +8368,6 @@ function applyTheme() {
   // auto-adapts to light/dark (pale in light mode, a dark tint in dark mode).
   root.style.removeProperty('--orange-dim');
   document.body.setAttribute('data-theme', state.theme.mode);
-  // Tell the browser/kiosk WebView which scheme is live so it never
-  // "force-darks" our light theme (the bug where both modes look identical in
-  // Fully Kiosk). Also keep the status-bar/theme-color meta in step.
-  const isDark = state.theme.mode === 'dark';
-  root.style.colorScheme = isDark ? 'dark' : 'light';
-  const tc = document.querySelector('meta[name="theme-color"]');
-  if (tc) tc.setAttribute('content', isDark ? '#1B1D1A' : '#F5F1E8');
   const dev = activeLayoutDevice();
   Object.entries(THEME_SIZE_ATTRS).forEach(([field, attr]) => document.body.setAttribute(attr, themeSizeFor(field, dev)));
   root.style.setProperty('--ticket-w', (state.theme.tktWidth || 360) + 'px');
@@ -10954,7 +10947,6 @@ function renderTopbar() {
     ${state.view === 'order' ? renderOrderTypeSeg() : ''}
     <div class="staff-badge" style="margin-left:auto;">
       ${!state.online ? `<span title="Cannot reach server" style="display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;color:var(--red);"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);"></span>Offline</span>` : ''}
-      ${isManager && state.view !== 'admin' ? `<button data-act="jump-daily" title="Daily — tonight at a glance">${SYS_DAILY_SVG}</button>` : ''}
       ${state.view === 'order' && !isChef && state.orderType === 'dine-in' && state.table && !state.showTablePicker ? (() => {
         const t = findTableById(state.table);
         return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}</button></span>`;
@@ -14880,13 +14872,16 @@ const ADMIN_GROUP_ICON = {
 function renderAdminNavBody() {
   return ADMIN_SECTIONS.map(s => {
     const groupKey = s.group.split('.')[0].replace(/\s/g, '-').toLowerCase();
-    // Single-child groups (Daily) and the Menu hub jump straight to their page —
-    // no sub-list drops under them. The group tile lights "current" instead.
-    const flat = s.children.length === 1 || groupKey === 'menu';
-    const open = flat ? (groupKey === 'menu' ? state.adminTab === 'menu-hub' : state.adminTab === s.children[0].key) : state.adminOpenGroups.includes(groupKey);
+    // Every group is now a tile hub: single-child groups (Daily) jump straight
+    // to their one page; multi-child groups land on a tile hub. No sub-list
+    // drops under the rail — the tiles ARE the sub-navigation. The rail item
+    // lights "current" while you're on the hub or any of its pages.
+    const childKeys = s.children.map(c => c.key);
+    const open = s.children.length === 1
+      ? state.adminTab === s.children[0].key
+      : (state.adminTab === `${groupKey}-hub` || childKeys.includes(state.adminTab));
     return `
-      <button class="admin-nav-group-btn admin-nav-btn admin-nav-group${open ? ' current' : ''}" data-act="toggle-menu-group" data-val="${groupKey}">${ADMIN_GROUP_ICON[groupKey] ? `<svg viewBox="0 0 24 24" class="ang-ic">${ADMIN_GROUP_ICON[groupKey]}</svg>` : ''}${s.group}</button>
-      ${open && !flat ? `<div class="exp-body" data-expkey="nav:${groupKey}">${s.children.map(c => `<button class="admin-nav-btn admin-nav-sub ${state.adminTab === c.key ? 'active' : ''}" data-act="admin-tab" data-val="${c.key}" style="padding-left:22px;">${esc(c.label)}${c.key === 'stock-ledger' && lowStockItems().length > 0 ? ` <span class="status-chip void" style="margin-left:4px;">${lowStockItems().length}</span>` : ''}</button>`).join('')}</div>` : ''}`;
+      <button class="admin-nav-group-btn admin-nav-btn admin-nav-group${open ? ' current' : ''}" data-act="toggle-menu-group" data-val="${groupKey}">${ADMIN_GROUP_ICON[groupKey] ? `<svg viewBox="0 0 24 24" class="ang-ic">${ADMIN_GROUP_ICON[groupKey]}</svg>` : ''}${s.group}</button>`;
   }).join('');
 }
 
@@ -14951,7 +14946,7 @@ function renderAdminView() {
         : state.adminTab === 'reservations' ? renderReservationsAdmin()
         : state.adminTab === 'customers' ? renderCustomersAdmin()
         : state.adminTab === 'expenses' ? renderExpensesAdmin()
-        : state.adminTab === 'menu-hub' ? renderMenuHub()
+        : (typeof state.adminTab === 'string' && state.adminTab.endsWith('-hub')) ? renderAdminGroupHub(state.adminTab.slice(0, -4))
         : state.adminTab === 'menu' ? renderMenuAdmin()
         : state.adminTab === 'categories' ? renderCategoriesAdmin()
         : state.adminTab === 'menu-variants' ? renderMenuVariantsAdmin()
@@ -16025,12 +16020,18 @@ const MENU_HUB_ICON = {
   'combos': '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
   'settings-notes': '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 9h6"/><path d="M9 14h4"/>',
 };
-function renderMenuHub() {
-  const grp = ADMIN_SECTIONS.find(s => s.group === 'Menu');
+// Every admin group lands on a tile hub (same component as the Daily dashboard
+// and Menu). Menu carries its chosen 1.5-stroke icons; the other groups are
+// label-only for now — icons drop in once the owner picks them, no layout
+// change needed (the tile already reserves the row).
+function renderAdminGroupHub(groupKey) {
+  const grp = ADMIN_SECTIONS.find(s => s.group.split('.')[0].replace(/\s/g, '-').toLowerCase() === groupKey);
   if (!grp) return '';
-  const ic = k => `<svg viewBox="0 0 24 24" style="stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;">${MENU_HUB_ICON[k] || ''}</svg>`;
-  return `<div class="acct-grid">${grp.children.map(c => `<button class="acct-tile" data-act="admin-tab" data-val="${c.key}">${ic(c.key)}<span class="acct-tile-label">${esc(c.label)}</span></button>`).join('')}</div>`;
+  const withIcons = groupKey === 'menu';
+  const ic = k => withIcons ? `<svg viewBox="0 0 24 24" style="stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;">${MENU_HUB_ICON[k] || ''}</svg>` : '';
+  return `<div class="acct-grid">${grp.children.map(c => `<button class="acct-tile${withIcons ? '' : ' no-ic'}" data-act="admin-tab" data-val="${c.key}">${ic(c.key)}<span class="acct-tile-label">${esc(c.label)}${c.key === 'stock-ledger' && lowStockItems().length > 0 ? ` <span class="status-chip void" style="margin-left:4px;">${lowStockItems().length}</span>` : ''}</span></button>`).join('')}</div>`;
 }
+function renderMenuHub() { return renderAdminGroupHub('menu'); }
 function renderMenuAdmin() {
   const items = visibleMenuItemsForAdmin();
   const filterCatObj = state.menuAdminCategoryFilter ? state.categories.find(c => c.name === state.menuAdminCategoryFilter) : null;
@@ -23481,8 +23482,7 @@ function bindEvents() {
       }
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }
-      else if (act === 'view-admin') { state.view = 'admin'; state.adminTab = 'daily'; render(); }
-      else if (act === 'jump-daily') { if (!(state.currentStaff && state.currentStaff.role === 'manager')) return; state.view = 'admin'; state.adminTab = 'daily'; state.adminOpenGroups = ['daily']; rememberAdminTab('daily'); render(); loadAdminTabData('daily'); }
+      else if (act === 'view-admin') { state.view = 'admin'; state.adminTab = 'daily'; state.adminOpenGroups = ['daily']; render(); }
       else if (act === 'view-kitchen') { const r = state.currentStaff && state.currentStaff.role; if (r !== 'chef' && r !== 'manager') return; state.view = 'kitchen'; render(); loadKdsData(); }
       else if (act === 'admin-tab') {
         const val = el.dataset.val;
@@ -23513,17 +23513,15 @@ function bindEvents() {
         // Accordion (owner, 2026-08-08): opening a group collapses the
         // previous one, so the sidebar never grows taller than one open
         // group. Tapping the open group's title closes it.
-        const wasOpen = state.adminOpenGroups.includes(key);
         const grp = ADMIN_SECTIONS.find(s => s.group.split('.')[0].replace(/\s/g, '-').toLowerCase() === key);
-        // Menu has no dropdown — tapping it always lands on its tile hub (and
-        // stays open); the tiles are the sub-navigation. Single-child groups
-        // (Daily) jump straight to their one page. Everything else accordions.
-        if (key === 'menu') { state.adminOpenGroups = ['menu']; state.adminTab = 'menu-hub'; rememberAdminTab('menu-hub'); }
-        else if (grp && grp.children.length === 1) { state.adminOpenGroups = [key]; state.adminTab = grp.children[0].key; rememberAdminTab(grp.children[0].key); loadAdminTabData(grp.children[0].key); }
-        else state.adminOpenGroups = wasOpen ? [] : [key];
+        // No dropdowns any more — every group is a tile hub. Single-child groups
+        // (Daily) jump straight to their one page; every other group lands on
+        // its tile hub, whose tiles ARE the sub-navigation.
+        if (grp && grp.children.length === 1) { state.adminOpenGroups = [key]; state.adminTab = grp.children[0].key; rememberAdminTab(grp.children[0].key); loadAdminTabData(grp.children[0].key); }
+        else { state.adminOpenGroups = [key]; state.adminTab = `${key}-hub`; rememberAdminTab(`${key}-hub`); }
         try { localStorage.setItem('pos-admin-group', state.adminOpenGroups.join(',')); } catch (err) {}
         render();
-        if (!wasOpen) snapAdminGroupLeft(key);
+        snapAdminGroupLeft(key);
       }
       else if (act === 'search-open-staff') { state.adminTab = 'staff'; state.adminSearch = ''; openEditStaff(el.dataset.id); jumpToAdminRow(el.dataset.id); }
       else if (act === 'search-open-menu-item') {

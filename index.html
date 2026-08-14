@@ -7395,12 +7395,35 @@ function printReceipt(order) {
 function stationForCategory(categoryName) {
   return (state.printerStations || []).find(s => s.categories.includes(categoryName));
 }
-function stationTag(line) {
+function stationForLine(line) {
   const mi = line.menuItemId ? state.menu.find(x => x.id === line.menuItemId) : null;
   // The item's own "Prints at" beats its section's station.
-  const st = mi && mi.station ? (state.printerStations || []).find(s => s.id === mi.station)
+  return mi && mi.station ? (state.printerStations || []).find(s => s.id === mi.station)
     : (mi ? stationForCategory(mi.category) : null);
+}
+function stationTag(line) {
+  const st = stationForLine(line);
   return st ? ` <b>[${esc(st.name)}]</b>` : '';
+}
+// A human-readable "sent to …" label for a set of cart lines: the distinct
+// station names the items route to (plus "kitchen" for any that fall back to
+// the default printer). Empty string when no stations are configured at all,
+// so the caller keeps its generic wording.
+function stationsForLines(lines) {
+  const names = [];
+  let hasDefault = false;
+  for (const l of lines) {
+    const st = stationForLine(l);
+    if (st) { if (!names.includes(st.name)) names.push(st.name); }
+    else hasDefault = true;
+  }
+  if (hasDefault) {
+    if (!(state.printerStations || []).length) return '';           // no stations → generic toast
+    if (!names.includes('kitchen') && !names.some(n => /kitchen/i.test(n))) names.push('kitchen');
+  }
+  if (!names.length) return '';
+  if (names.length === 1) return names[0];
+  return names.slice(0, -1).join(', ') + ' & ' + names[names.length - 1];
 }
 
 // Kitchen docket body — shared by live fire and the Settings preview so what you
@@ -10409,6 +10432,9 @@ async function sendToKitchen() {
   render();
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
   const sentItemCount = state.cart.length;
+  // Which printer(s) this round routes to — so the send toast can say
+  // "Items sent to Bar" instead of a generic "…to the kitchen".
+  const sentStationLabel = stationsForLines(state.cart);
   try {
     let order;
     if (state.openOrderId) {
@@ -10460,7 +10486,9 @@ async function sendToKitchen() {
       backToTableSelect();
       return;
     }
-    state.toast = sentItemCount ? 'Items sent to the kitchen' : 'Notes sent to the kitchen';
+    state.toast = sentItemCount
+      ? (sentStationLabel ? `Items sent to ${sentStationLabel}` : 'Items sent to the kitchen')
+      : 'Notes sent to the kitchen';
     await refreshOrders();
     state.menu = await api('/api/menu');
     render();

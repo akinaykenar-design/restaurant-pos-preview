@@ -16080,9 +16080,15 @@ function renderMenuAdminRows() {
   const items = visibleMenuItemsForAdmin();
   return `
     ${items.length === 0 ? `<div class="empty-hist">No items match.</div>` : ''}
-    ${(() => {
-      // Flat list — the section/subsection dropdowns above provide the context.
-      const rowHtml = (m) => `
+    ${items.map(menuItemRowHtml).join('')}
+`;
+}
+
+// One Items-admin row (collapsed, or expanded with its inline edit panel).
+// Top-level so a single row can be swapped in place on expand/collapse instead
+// of rebuilding all ~700 rows — that full rebuild was the admin expand lag.
+function menuItemRowHtml(m) {
+  return `
       <div class="menu-item-expandable${state.selectedMenuItemIds.includes(m.id) ? ' selected' : ''}${state.expandedMenuItemIds.includes(m.id) ? ' open' : ''}" data-id="${m.id}" draggable="${isListSorted('menu-items') ? 'false' : 'true'}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;${m.disabled ? 'opacity:0.55;' : ''}">
         <div class="menu-item-header" data-id="${m.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
           <input type="checkbox" class="menu-item-select-cb" ${state.selectedMenuItemIds.includes(m.id) ? 'checked' : ''} onclick="event.stopPropagation();toggleMenuItemSelection('${m.id}');" title="Select for bulk actions">
@@ -16235,9 +16241,6 @@ function renderMenuAdminRows() {
             </div>
           </div>` : ''}
       </div>`;
-      return items.map(rowHtml).join('');
-    })()}
-`;
 }
 
 async function setTableMode(mode) {
@@ -22027,10 +22030,11 @@ async function deleteMenuItemAction(id) {
   }
 }
 
-// Row-header click/select wiring for the Items admin list. Split out so a
-// scoped rows-only refresh can re-bind it without a whole-app render.
-function bindMenuItemHeaders() {
-  document.querySelectorAll('#menu-admin-list .menu-item-header').forEach(header => {
+// Wire ONE Items-admin row: header click (expand/select) + drag-to-reorder.
+// Per-row so a single swapped row can be re-armed without touching the rest.
+function armMenuItemRow(row) {
+  const header = row.querySelector('.menu-item-header');
+  if (header) {
     header.addEventListener('mousedown', (e) => {
       if (e.shiftKey && !e.target.closest('input, textarea')) e.preventDefault();
     });
@@ -22059,23 +22063,55 @@ function bindMenuItemHeaders() {
       state._lastMenuSelectId = id;
       toggleMenuItemExpand(id);
     });
+  }
+  // Drag reorder — collapsed rows only (same rule as makeSortable's open guard).
+  row.style.touchAction = 'pan-y';
+  row.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button,input,select,textarea,a,[contenteditable]')) return;
+    if (row.classList.contains('open')) return;
+    if (isListSorted('menu-items')) return;
+    if (!(state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length))) return;
+    beginSortDrag(row.parentElement, '.menu-item-expandable', row, (from, to, els) => reorderMenuItems(els[from].dataset.id, els[to].dataset.id), e, {});
   });
 }
 
-// Rebuild ONLY the Items list, not the whole app. Expanding a row used to
-// re-render everything (~700 rows + every admin binding) — the lag the owner
-// felt. Here we swap just #menu-admin-list's HTML and re-arm its handlers.
+// Arm every row after a full render or a scoped rows-only refresh.
+function armMenuItemRows() {
+  document.querySelectorAll('#menu-admin-list .menu-item-expandable').forEach(armMenuItemRow);
+}
+
+// Rebuild ONLY the Items list (used by the item search box), then re-arm rows.
 function refreshMenuAdminList() {
   const list = document.getElementById('menu-admin-list');
   if (!list) { render(); return; }
   list.innerHTML = renderMenuAdminRows();
-  bindMenuItemHeaders();
-  makeSortable('menu-item-expandable', (from, to, els) => reorderMenuItems(els[from].dataset.id, els[to].dataset.id), { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+  armMenuItemRows();
 }
 
+// Expand/collapse WITHOUT rebuilding the whole list: only one row is ever open,
+// so we swap the (at most) two affected rows in place — the previously-open row
+// collapses, the tapped row opens. ~700 untouched rows stay in the DOM, so
+// there is no rebuild lag even with all sections/items showing.
 function toggleMenuItemExpand(itemId) {
-  state.expandedMenuItemIds = state.expandedMenuItemIds.includes(itemId) ? [] : [itemId];
-  refreshMenuAdminList();
+  const list = document.getElementById('menu-admin-list');
+  const prevId = state.expandedMenuItemIds[0];
+  const willOpen = !state.expandedMenuItemIds.includes(itemId);
+  state.expandedMenuItemIds = willOpen ? [itemId] : [];
+  if (!list) { render(); return; }
+  const swap = (id) => {
+    const item = state.menu.find(m => m.id === id);
+    const row = list.querySelector(`.menu-item-expandable[data-id="${id}"]`);
+    if (!item || !row) return;
+    row.insertAdjacentHTML('beforebegin', menuItemRowHtml(item));
+    const fresh = row.previousElementSibling;
+    row.remove();
+    armMenuItemRow(fresh);
+  };
+  if (prevId && prevId !== itemId) swap(prevId); // collapse the previously-open row
+  swap(itemId);                                   // open (or collapse if it was open)
+  const opened = willOpen && list.querySelector(`.menu-item-expandable[data-id="${itemId}"]`);
+  if (opened) opened.scrollIntoView({ block: 'nearest' });
 }
 
 async function saveMenuItemQuickEdit(itemId, field, value) {
@@ -25179,7 +25215,8 @@ function bindEvents() {
   // `to` is the dragged row's FINAL index; the reorder fns remove the dragged
   // entry then insert at the target's pre-removal index, so els[to] is the
   // right target row whichever direction the drag went.
-  makeSortable('menu-item-expandable', (from, to, els) => reorderMenuItems(els[from].dataset.id, els[to].dataset.id), { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+  // Items rows arm their own drag + header wiring per-row (armMenuItemRows below),
+  // so a single expanded/collapsed row can be re-armed without a full rebuild.
   makeSortable('sales-cat-row', (from, to, els) => reorderSalesCategories(els[from].dataset.id, els[to].dataset.id));
   makeSortable('combo-row', (from, to, els) => reorderCombos(els[from].dataset.id, els[to].dataset.id), { canStart: () => !(state.comboModal && state.comboModal.mode === 'edit') });
   makeSortable('modifier-row', (from, to, els) => reorderModifierGroups(els[from].dataset.id, els[to].dataset.id), { canStart: () => !isListSorted('modifiers') && !state.expandedModifierId });
@@ -25245,9 +25282,9 @@ function bindEvents() {
   document.querySelectorAll('.menu-item-name-quick-input').forEach(el => {
     el.addEventListener('change', (e) => { renameMenuItemInline(el.dataset.id, e.target.value); });
   });
-  // Expandable menu item rows — bound here on full render, and re-bound by
-  // refreshMenuAdminList() after a scoped rows-only refresh.
-  bindMenuItemHeaders();
+  // Expandable menu item rows — per-row header + drag wiring. Re-armed one row
+  // at a time on expand/collapse, and wholesale after the search refresh.
+  armMenuItemRows();
   // Input listeners for inline editing
   document.querySelectorAll('.menu-item-name-edit, .menu-item-category-edit, .menu-item-price-edit').forEach(el => {
     el.addEventListener('input', (e) => { /* inputs auto-save on blur in save handler */ });

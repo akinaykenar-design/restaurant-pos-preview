@@ -22027,9 +22027,55 @@ async function deleteMenuItemAction(id) {
   }
 }
 
+// Row-header click/select wiring for the Items admin list. Split out so a
+// scoped rows-only refresh can re-bind it without a whole-app render.
+function bindMenuItemHeaders() {
+  document.querySelectorAll('#menu-admin-list .menu-item-header').forEach(header => {
+    header.addEventListener('mousedown', (e) => {
+      if (e.shiftKey && !e.target.closest('input, textarea')) e.preventDefault();
+    });
+    header.addEventListener('click', (e) => {
+      if (e.target.closest('input, button, select')) return;
+      const id = header.getAttribute('data-id');
+      if (!id) return;
+      if (e.shiftKey && state._lastMenuSelectId != null) {
+        const ordered = visibleMenuItemsForAdmin().map(m => m.id);
+        const lastIdx = ordered.indexOf(state._lastMenuSelectId), idx = ordered.indexOf(id);
+        if (lastIdx !== -1 && idx !== -1) {
+          const [a, b] = lastIdx < idx ? [lastIdx, idx] : [idx, lastIdx];
+          const set = new Set(state.selectedMenuItemIds);
+          for (let i = a; i <= b; i++) set.add(ordered[i]);
+          state.selectedMenuItemIds = [...set];
+        }
+        state._lastMenuSelectId = id;
+        render();
+        return;
+      }
+      if (e.ctrlKey || e.metaKey) {
+        state._lastMenuSelectId = id;
+        toggleMenuItemSelection(id);
+        return;
+      }
+      state._lastMenuSelectId = id;
+      toggleMenuItemExpand(id);
+    });
+  });
+}
+
+// Rebuild ONLY the Items list, not the whole app. Expanding a row used to
+// re-render everything (~700 rows + every admin binding) — the lag the owner
+// felt. Here we swap just #menu-admin-list's HTML and re-arm its handlers.
+function refreshMenuAdminList() {
+  const list = document.getElementById('menu-admin-list');
+  if (!list) { render(); return; }
+  list.innerHTML = renderMenuAdminRows();
+  bindMenuItemHeaders();
+  makeSortable('menu-item-expandable', (from, to, els) => reorderMenuItems(els[from].dataset.id, els[to].dataset.id), { canStart: () => state.adminTab === 'menu' && !(state.expandedMenuItemIds && state.expandedMenuItemIds.length) });
+}
+
 function toggleMenuItemExpand(itemId) {
   state.expandedMenuItemIds = state.expandedMenuItemIds.includes(itemId) ? [] : [itemId];
-  render();
+  refreshMenuAdminList();
 }
 
 async function saveMenuItemQuickEdit(itemId, field, value) {
@@ -24792,11 +24838,7 @@ function bindEvents() {
       // Refresh only the rows, not the input — keeps the mobile keyboard up.
       // Debounced so fast typing costs one rebuild, not one per key.
       clearTimeout(window._menuAdminSearchTimer);
-      window._menuAdminSearchTimer = setTimeout(() => {
-        const list = document.getElementById('menu-admin-list');
-        if (list) list.innerHTML = renderMenuAdminRows();
-        else render();
-      }, 120);
+      window._menuAdminSearchTimer = setTimeout(() => { refreshMenuAdminList(); }, 120);
     });
   }
   const bulkCategoryInput = document.getElementById('bulk-category-input');
@@ -25203,43 +25245,9 @@ function bindEvents() {
   document.querySelectorAll('.menu-item-name-quick-input').forEach(el => {
     el.addEventListener('change', (e) => { renameMenuItemInline(el.dataset.id, e.target.value); });
   });
-  // Expandable menu item rows
-  // Click the row to open it; the checkbox (or ctrl/cmd-click) selects,
-  // shift-click selects the run.
-  document.querySelectorAll('#menu-admin-list .menu-item-header').forEach(header => {
-    // Shift-clicking to range-select would otherwise sweep a browser text selection
-    // across the admin — block the text-selection default (not on the inline inputs).
-    header.addEventListener('mousedown', (e) => {
-      if (e.shiftKey && !e.target.closest('input, textarea')) e.preventDefault();
-    });
-    header.addEventListener('click', (e) => {
-      if (e.target.closest('input, button, select')) return;
-      const id = header.getAttribute('data-id');
-      if (!id) return;
-      // Plain click opens the row (the everyday action). Selection is the
-      // checkbox, or ctrl/cmd-click; shift-click still selects the run.
-      if (e.shiftKey && state._lastMenuSelectId != null) {
-        const ordered = visibleMenuItemsForAdmin().map(m => m.id);
-        const lastIdx = ordered.indexOf(state._lastMenuSelectId), idx = ordered.indexOf(id);
-        if (lastIdx !== -1 && idx !== -1) {
-          const [a, b] = lastIdx < idx ? [lastIdx, idx] : [idx, lastIdx];
-          const set = new Set(state.selectedMenuItemIds);
-          for (let i = a; i <= b; i++) set.add(ordered[i]);
-          state.selectedMenuItemIds = [...set];
-        }
-        state._lastMenuSelectId = id;
-        render();
-        return;
-      }
-      if (e.ctrlKey || e.metaKey) {
-        state._lastMenuSelectId = id;
-        toggleMenuItemSelection(id);
-        return;
-      }
-      state._lastMenuSelectId = id;
-      toggleMenuItemExpand(id);
-    });
-  });
+  // Expandable menu item rows — bound here on full render, and re-bound by
+  // refreshMenuAdminList() after a scoped rows-only refresh.
+  bindMenuItemHeaders();
   // Input listeners for inline editing
   document.querySelectorAll('.menu-item-name-edit, .menu-item-category-edit, .menu-item-price-edit').forEach(el => {
     el.addEventListener('input', (e) => { /* inputs auto-save on blur in save handler */ });

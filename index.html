@@ -609,6 +609,9 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
    display/margin inline so flex-gap layouts keep their spacing). */
 .field-label{font-size:var(--fs-chip);font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:0.5px;}
 .empty-hist{text-align:center;color:var(--charcoal-soft);padding:60px 0;}
+/* Date divider between days in Table History (accounts grouped by paid day). */
+.hist-day-head{font-size:var(--fs-sm);font-weight:700;color:var(--charcoal-soft);margin:18px 0 8px;}
+.hist-day-head:first-child{margin-top:0;}
 
 .modal-bg{position:fixed;inset:0;background:rgba(20,24,25,0.55);display:flex;align-items:center;justify-content:center;z-index:50;padding:20px;}
 .modal{background:var(--surface);border-radius:14px;width:100%;max-width:420px;padding:26px;box-shadow:0 20px 50px rgba(0,0,0,0.3);max-height:88vh;overflow-y:auto;}
@@ -12532,8 +12535,24 @@ function renderHistoryView() {
 // Table History: the account/receipt lookup. Filter by table, tap a row to open
 // the full receipt and reprint / add tip / refund / void. Kept separate from
 // Sales (which is the totals + analytics) so each screen does one job.
+// Paid/closed time for an account (open tabs fall back to when they started).
+function histTime(o) { return o.closedAt || o.calledAwayAt || o.createdAt || 0; }
+
 function renderTableHistoryView() {
+  const period = state.histPeriod || 'all';
+  const PERIODS = [['today', 'Today'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year'], ['all', 'All']];
+  // Period thresholds off calendar boundaries (today / this month / this year),
+  // week = the last 7 days. Everything is filtered on PAID time.
+  const d = new Date(); d.setHours(0, 0, 0, 0);
+  const startToday = d.getTime();
+  const startWeek = startToday - 6 * 86400000;
+  const dm = new Date(); dm.setDate(1); dm.setHours(0, 0, 0, 0);
+  const dy = new Date(); dy.setMonth(0, 1); dy.setHours(0, 0, 0, 0);
+  const threshold = period === 'today' ? startToday : period === 'week' ? startWeek : period === 'month' ? dm.getTime() : period === 'year' ? dy.getTime() : 0;
   return `
+    <div class="seg" style="margin:0 0 12px;display:inline-flex;">
+      ${PERIODS.map(([k, lbl]) => `<button class="${period === k ? 'active' : ''}" data-act="hist-period" data-val="${k}">${lbl}</button>`).join('')}
+    </div>
     <div style="display:flex;gap:8px;align-items:center;margin:0 0 14px;">
       <label class="ts" style="margin:0;">Table</label>
       <input id="hist-table-filter" type="text" value="${esc(state.histTableFilter || '')}" placeholder="all tables" style="width:120px;padding:7px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);">
@@ -12541,18 +12560,29 @@ function renderTableHistoryView() {
     </div>
     ${(() => {
       const f = (state.histTableFilter || '').trim().toLowerCase();
-      const rows = f ? state.orders.filter(o => String(o.table || '').toLowerCase() === f) : state.orders;
-      if (rows.length === 0) return `<div class="empty-hist">${f ? 'No past accounts for table ' + esc(state.histTableFilter) + '.' : 'No orders yet.'}</div>`;
-      return rows.map(o => `
+      let rows = state.orders.filter(o => histTime(o) >= threshold);
+      if (f) rows = rows.filter(o => String(o.table || '').toLowerCase() === f);
+      // Newest paid first.
+      rows = rows.slice().sort((a, b) => histTime(b) - histTime(a));
+      if (rows.length === 0) return `<div class="empty-hist">No accounts${f ? ' for table ' + esc(state.histTableFilter) : ''}${period !== 'all' ? ' in this period' : ''}.</div>`;
+      // Group under a date header per day so it reads as a diary of paid tables.
+      let lastDay = '';
+      return rows.map(o => {
+        const t = histTime(o);
+        const dayKey = new Date(t).toDateString();
+        const header = dayKey !== lastDay ? (lastDay = dayKey, `<div class="hist-day-head">${fmtDate(t)}</div>`) : '';
+        const paidLabel = o.closedAt ? fmtTime(o.closedAt) : (o.status === 'open' ? 'open' : fmtTime(t));
+        return `${header}
         <div class="order-row" data-act="detail" data-id="${o.id}">
           <div class="order-badge">#${o.id}</div>
           <div class="order-info">
             <div class="t1">${o.orderType === 'dine-in' ? 'Table ' + esc(o.table) : esc(o.customerName || o.orderType)}${o.discount ? ` <span class="status-chip course">${o.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span>` : ''}</div>
-            <div class="t2">${fmtDate(o.createdAt)} · ${fmtTime(o.createdAt)} · ${o.items.reduce((s, i) => s + i.qty, 0)} items${o.covers ? ' · ' + o.covers + ' covers' : ''} · ${o.paymentMethod || 'unpaid'} · ${esc(o.staffName || 'Unknown')}</div>
+            <div class="t2">${paidLabel} · ${o.items.reduce((s, i) => s + i.qty, 0)} items${o.covers ? ' · ' + o.covers + ' covers' : ''} · ${o.paymentMethod || 'unpaid'} · ${esc(o.staffName || 'Unknown')}</div>
           </div>
           <span class="status-chip ${o.status === 'void' ? 'void' : o.status === 'open' ? 'course' : 'paid'}">${o.status === 'open' ? 'open tab' : o.status}</span>
           <div class="order-total">${money(o.grandTotal !== undefined ? o.grandTotal : o.total)}${o.tip ? `<div class="ts" style="font-size:var(--fs-sm);">+${money(o.tip)} tip</div>` : ''}</div>
-        </div>`).join('');
+        </div>`;
+      }).join('');
     })()}
   `;
 }
@@ -23675,6 +23705,7 @@ function bindEvents() {
       else if (act === 'house-log-add') { addHouseLogEntry(); }
       else if (act === 'stock-clear') { saveMenuItemCountdown(el.dataset.id, ''); }
       else if (act === 'hist-table-clear') { state.histTableFilter = ''; render(); }
+      else if (act === 'hist-period') { state.histPeriod = el.dataset.val; render(); }
       else if (act === 'close-void-reason') { state.voidItemPrompt = null; render(); }
       else if (act === 'remove-sent-line') { removeSentLine(el); }
       else if (act === 'remove-new-line') { const i = parseInt(el.dataset.idx); if (!isNaN(i)) removeLine(i); }

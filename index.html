@@ -3023,19 +3023,102 @@ function ensureStore() {
 // single stat() + return.
 let _cache = null;
 let _cacheMtime = -1;
+let _cacheOrdersDirMtime = -1;
+
+// ── Orders live in monthly shards, NOT in the main store file ────────────────
+// The order history is the only collection that grows without bound, and every
+// write used to re-serialise the WHOLE store (orders included) — so a settings
+// tweak fsynced hundreds of KB of old sales, and each new order rewrote the
+// entire growing history (the OrderMate "slower as the night goes on" write
+// pattern). Orders now sit in data/orders/orders-YYYY-MM.json, one file per
+// month. readData ASSEMBLES the complete `data.orders` array from every shard,
+// so every caller — reports, /api/orders, the data-file export/import — sees
+// exactly what it always did (safe by contract). writeData only rewrites the
+// shard whose contents actually changed, so a settings save touches no order
+// files at all, and mid-service only the current month's small shard is
+// rewritten. Old months are never touched again.
+const ORDERS_DIR = path.join(DATA_DIR, 'orders');
+// Per-shard serialised snapshot of what we last wrote, so writeData can skip
+// shards that didn't change. Rebuilt on every full (re)load.
+let _shardCache = null;
+
+function ensureOrdersDir() { try { fs.mkdirSync(ORDERS_DIR, { recursive: true }); } catch (e) {} }
+function statMs(p) { try { return fs.statSync(p).mtimeMs; } catch (e) { return -1; } }
+function monthKey(ts) {
+  const d = new Date(typeof ts === 'number' ? ts : 0);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function shardPath(key) { return path.join(ORDERS_DIR, `orders-${key}.json`); }
+function atomicWrite(file, str) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, str);
+  fs.renameSync(tmp, file);
+  try { fs.writeFileSync(file + '.bak.tmp', str); fs.renameSync(file + '.bak.tmp', file + '.bak'); } catch (e) {}
+}
+
+// Load every monthly shard into { 'YYYY-MM': orders[] }, with the same torn-read
+// resilience the main store has (retry, then fall back to the .bak sibling).
+function loadShards() {
+  const map = {};
+  let files;
+  try { files = fs.readdirSync(ORDERS_DIR); } catch (e) { return map; }
+  for (const f of files) {
+    const m = f.match(/^orders-(\d{4}-\d{2})\.json$/);
+    if (!m) continue;
+    const p = path.join(ORDERS_DIR, f);
+    let arr = null;
+    for (let a = 0; a < 3 && arr === null; a++) {
+      try { arr = JSON.parse(fs.readFileSync(p, 'utf-8')); }
+      catch (e) { const until = Date.now() + 40; while (Date.now() < until); }
+    }
+    if (arr === null) { try { arr = JSON.parse(fs.readFileSync(p + '.bak', 'utf-8')); } catch (e) { arr = []; } }
+    map[m[1]] = Array.isArray(arr) ? arr : [];
+  }
+  return map;
+}
+
+// Replace data.orders with the full order history.
+//
+// Order ids are NOT unique in practice (demo/seed rows reuse ids, and the model
+// treats orders as a positional list, not a keyed map), so we must NEVER dedupe
+// by id — that would silently delete real sales. The rule instead keys off WHERE
+// the orders are:
+//   • Store file still carries embedded orders  → this is a pre-migration file
+//     or a crash mid-migration. In BOTH cases the store's array is the COMPLETE
+//     authoritative set (writeData only empties the store AFTER all shards are
+//     safely written), so we rebuild the shards from it, losslessly, then empty
+//     the store. Idempotent and safe to interrupt.
+//   • Store file has no embedded orders          → steady state: the shards ARE
+//     the whole history; concatenate them in month order.
+function assembleOrders(data) {
+  const shardMap = loadShards();
+  _shardCache = {};
+  for (const k of Object.keys(shardMap)) _shardCache[k] = JSON.stringify(shardMap[k]);
+  const legacy = Array.isArray(data.orders) ? data.orders : [];
+  if (legacy.length > 0) {
+    data.orders = legacy;      // authoritative — keep every row, duplicates and all
+    writeData(data);           // (re)build shards from it, then empty the store file
+    return;
+  }
+  const all = [];
+  for (const k of Object.keys(shardMap).sort()) for (const o of shardMap[k]) all.push(o);
+  data.orders = all;
+}
 
 function readData() {
   ensureStore();
-  // Fast path: the file hasn't changed since we last parsed it — hand back the
-  // in-memory copy. statSync is microseconds; a full JSON.parse of the store
-  // is milliseconds and climbs with every order added.
+  // Fast path: neither the store file nor the orders directory has changed since
+  // we last assembled — hand back the in-memory copy. Two stat() calls beat a
+  // full parse + shard read, and the cost no longer climbs with order count.
   try {
     const st = fs.statSync(DB_FILE);
-    if (_cache !== null && st.mtimeMs === _cacheMtime) return _cache;
+    if (_cache !== null && st.mtimeMs === _cacheMtime && statMs(ORDERS_DIR) === _cacheOrdersDirMtime) return _cache;
   } catch (e) { /* stat failed — fall through to a full read */ }
   const data = loadAndMigrate();
+  assembleOrders(data);
   _cache = data;
-  try { _cacheMtime = fs.statSync(DB_FILE).mtimeMs; } catch (e) { _cacheMtime = -1; }
+  _cacheMtime = statMs(DB_FILE);
+  _cacheOrdersDirMtime = statMs(ORDERS_DIR);
   return data;
 }
 
@@ -3483,19 +3566,46 @@ function loadAndMigrate() {
 
 function writeData(data) {
   ensureStore();
-  // Write to a temp file first, then rename - avoids a corrupted file
-  // if the program is interrupted mid-write (e.g. power blip).
+  ensureOrdersDir();
+  if (_shardCache === null) _shardCache = {};
+  // 1. Group the orders by month and rewrite ONLY the shards that changed.
+  const orders = Array.isArray(data.orders) ? data.orders : [];
+  const byMonth = {};
+  for (const o of orders) { const k = monthKey(o.createdAt); (byMonth[k] || (byMonth[k] = [])).push(o); }
+  for (const k of Object.keys(byMonth)) {
+    const s = JSON.stringify(byMonth[k]);
+    if (_shardCache[k] !== s) { atomicWrite(shardPath(k), s); _shardCache[k] = s; }
+  }
+  // Delete any shard file on disk whose month is no longer represented — this is
+  // what lets a data-file IMPORT (which replaces the whole order set) drop the
+  // months it didn't include, even months this process never had cached. Read
+  // from disk, not just _shardCache, so a fresh-start import still reconciles.
+  let existing = [];
+  try { existing = fs.readdirSync(ORDERS_DIR).filter(f => /^orders-\d{4}-\d{2}\.json$/.test(f)); } catch (e) {}
+  for (const f of existing) {
+    const k = f.slice('orders-'.length, -'.json'.length);
+    if (!byMonth[k]) {
+      try { fs.unlinkSync(path.join(ORDERS_DIR, f)); } catch (e) {}
+      try { fs.unlinkSync(path.join(ORDERS_DIR, f + '.bak')); } catch (e) {}
+      delete _shardCache[k];
+    }
+  }
+  // 2. Write the main store WITHOUT the orders (they live in the shards now).
+  // Keep the key present as [] so any code inspecting a raw store file still
+  // finds the expected shape — every real read goes through readData, which
+  // re-attaches the full array. This is what keeps a settings save from
+  // fsyncing the whole order history.
+  const main = Object.assign({}, data, { orders: [] });
+  const json = JSON.stringify(main, null, 2);
   const tmpFile = DB_FILE + '.tmp';
-  const json = JSON.stringify(data, null, 2);
   fs.writeFileSync(tmpFile, json);
   fs.renameSync(tmpFile, DB_FILE);
-  // Refresh the in-memory cache in lock-step so the very next read serves this
-  // exact object without re-parsing, and the mtime guard matches the file we
-  // just wrote.
-  _cache = data;
-  try { _cacheMtime = fs.statSync(DB_FILE).mtimeMs; } catch (e) { _cacheMtime = -1; }
-  // Keep a same-generation backup for readData's torn-read recovery.
   try { fs.writeFileSync(DB_FILE + '.bak.tmp', json); fs.renameSync(DB_FILE + '.bak.tmp', DB_FILE + '.bak'); } catch (e) {}
+  // 3. Refresh the in-memory cache in lock-step (data still carries the full
+  // orders array in memory, so the next read serves it without touching disk).
+  _cache = data;
+  _cacheMtime = statMs(DB_FILE);
+  _cacheOrdersDirMtime = statMs(ORDERS_DIR);
 }
 
 module.exports = { readData, writeData, STAFF_ROLE_OPTIONS };
@@ -12416,7 +12526,15 @@ function renderHistoryView() {
       ${renderSalesByCategory()}
       ${renderTopSellers()}
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin:16px 0 10px;">
+  `;
+}
+
+// Table History: the account/receipt lookup. Filter by table, tap a row to open
+// the full receipt and reprint / add tip / refund / void. Kept separate from
+// Sales (which is the totals + analytics) so each screen does one job.
+function renderTableHistoryView() {
+  return `
+    <div style="display:flex;gap:8px;align-items:center;margin:0 0 14px;">
       <label class="ts" style="margin:0;">Table</label>
       <input id="hist-table-filter" type="text" value="${esc(state.histTableFilter || '')}" placeholder="all tables" style="width:120px;padding:7px 10px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);">
       ${state.histTableFilter ? `<button class="icon-sq" title="Clear filter" data-act="hist-table-clear">${ACT_X_SVG}</button>` : ''}
@@ -14808,7 +14926,8 @@ const ADMIN_SECTIONS = [
     { key: 'briefing', label: 'Tonight' },
     { key: 'register', label: 'Open Orders' },
     { key: 'stale', label: 'Stale Tables' },
-    { key: 'orders', label: 'Sales Summary' },
+    { key: 'orders', label: 'Sales' },
+    { key: 'table-history', label: 'Table History' },
     { key: 'house', label: 'House / Wastage' },
     { key: 'kitchen', label: 'Kitchen' },
     { key: 'reservations', label: 'Bookings' },
@@ -14901,7 +15020,8 @@ const SETTINGS_INDEX = [
   { page: 'hours', label: 'Shifts & clock in/out', terms: 'shifts clock hours roster' },
   { page: 'customers', label: 'Customers & loyalty points', terms: 'customers loyalty points phone membership' },
   { page: 'register', label: 'Register close & Z-report', terms: 'register close z report cash count end of day takings' },
-  { page: 'orders', label: 'Sales summary & history', terms: 'sales summary history totals analytics category refund' },
+  { page: 'orders', label: 'Sales totals & analytics', terms: 'sales summary totals analytics category top sellers export csv' },
+  { page: 'table-history', label: 'Table history & receipts', terms: 'table history receipts reprint old account order past refund void tip' },
   { page: 'sales-categories', label: 'Categories (reporting groups)', terms: 'sales groups categories reporting revenue' },
   { page: 'audit', label: 'Audit log', terms: 'audit log history who changed' },
 ];
@@ -15041,6 +15161,7 @@ function renderAdminView() {
         : state.adminTab === 'hours' ? renderHoursAdmin()
         : state.adminTab === 'kitchen' ? renderKitchenAdmin()
         : state.adminTab === 'orders' ? renderHistoryView()
+        : state.adminTab === 'table-history' ? renderTableHistoryView()
         : state.adminTab === 'house' ? renderHouseAdmin()
         : state.adminTab === 'stale' ? renderStaleAccounts()
         : state.adminTab === 'register' ? renderRegisterAdmin()

@@ -1947,6 +1947,18 @@ body[data-theme="dark"] .allergy-item-card.assigned{ filter:brightness(1.2); }
      sizing lives here. */
   .admin-sidebar .admin-nav-btn{ flex:0 0 auto; width:auto; padding:8px 12px; white-space:nowrap; }
   .admin-sidebar .admin-nav-sub{ padding-left:12px !important; }
+  /* The group buttons are square icon-tiles on the desktop rail. On phones the
+     admin nav must read like the MAIN app nav (Order/Kitchen/Admin): a
+     horizontal strip of text pills, the current group a charcoal pill — same
+     tokens as .tab-btn, so the two nav bars look identical. */
+  .admin-sidebar .admin-nav-group{
+    aspect-ratio:auto; flex-direction:row; width:auto; flex:0 0 auto;
+    padding:7px 11px !important; gap:0; font-size:12.5px; font-weight:600;
+    border-radius:var(--btn-radius); white-space:nowrap;
+    background:none; color:var(--charcoal-soft);
+  }
+  .admin-sidebar .admin-nav-group .ang-ic{ display:none; }
+  .admin-sidebar .admin-nav-group.current{ background:var(--charcoal); color:#fff; }
 }
 
 /* Phone portrait: the toolbar (+ / filters / search) pins to the top of the
@@ -2998,8 +3010,36 @@ function ensureStore() {
   }
 }
 
+// In-memory cache of the parsed store. The app is a single Node process, so
+// this one process is the ONLY writer of the live file (store.local.json is
+// gitignored — git pull/checkout never touch it). Re-reading and re-parsing
+// the whole store on EVERY request was the login/order lag that grew as
+// orders accumulated (the OrderMate "gets slower all night" pattern): a login
+// only needs one staff PIN, but paid the cost of parsing the entire file.
+// We now keep the parsed object in memory and only re-read from disk when the
+// file's mtime changes (covers the rare external edit — a restored backup, a
+// hand-edit). Every write refreshes the cache in lock-step, so tablets always
+// see current data. This turns each read from "parse hundreds of KB" into a
+// single stat() + return.
+let _cache = null;
+let _cacheMtime = -1;
+
 function readData() {
   ensureStore();
+  // Fast path: the file hasn't changed since we last parsed it — hand back the
+  // in-memory copy. statSync is microseconds; a full JSON.parse of the store
+  // is milliseconds and climbs with every order added.
+  try {
+    const st = fs.statSync(DB_FILE);
+    if (_cache !== null && st.mtimeMs === _cacheMtime) return _cache;
+  } catch (e) { /* stat failed — fall through to a full read */ }
+  const data = loadAndMigrate();
+  _cache = data;
+  try { _cacheMtime = fs.statSync(DB_FILE).mtimeMs; } catch (e) { _cacheMtime = -1; }
+  return data;
+}
+
+function loadAndMigrate() {
   // NEVER silently reset live venue data. A torn read happens when something
   // rewrites store.json non-atomically while we read it (git pull / checkout
   // on a running till) — retry briefly, then fall back to the .bak copy from
@@ -3449,6 +3489,11 @@ function writeData(data) {
   const json = JSON.stringify(data, null, 2);
   fs.writeFileSync(tmpFile, json);
   fs.renameSync(tmpFile, DB_FILE);
+  // Refresh the in-memory cache in lock-step so the very next read serves this
+  // exact object without re-parsing, and the mtime guard matches the file we
+  // just wrote.
+  _cache = data;
+  try { _cacheMtime = fs.statSync(DB_FILE).mtimeMs; } catch (e) { _cacheMtime = -1; }
   // Keep a same-generation backup for readData's torn-read recovery.
   try { fs.writeFileSync(DB_FILE + '.bak.tmp', json); fs.renameSync(DB_FILE + '.bak.tmp', DB_FILE + '.bak'); } catch (e) {}
 }
@@ -15618,7 +15663,7 @@ function renderStaffAdmin() {
               <div style="display:flex;flex-direction:column;gap:6px;">
                 <label class="field-label">PIN</label>
                 <div style="display:flex;gap:6px;align-items:center;">
-                  <input type="password" maxlength="8" class="staff-pin-quick-edit" data-id="${s.id}" placeholder="PIN" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:160px;">
+                  <input type="password" inputmode="numeric" maxlength="6" class="staff-pin-quick-edit" data-id="${s.id}" placeholder="PIN" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:160px;">
                   <button class="icon-sq ${state.pinRevealId === s.id ? 'active' : ''}" data-act="toggle-staff-pin-view" data-id="${s.id}" title="${state.pinRevealId === s.id ? 'Hide PIN' : 'Show PIN'}">
                     ${state.pinRevealId === s.id
                       ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
@@ -24847,7 +24892,7 @@ function bindEvents() {
   const staffNameInput = document.getElementById('staff-name-input');
   if (staffNameInput) staffNameInput.addEventListener('input', (e) => { state.staffModal.name = e.target.value; });
   const staffPinInput = document.getElementById('staff-pin-input');
-  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 4); });
+  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 6); });
   const staffRoleInput = document.getElementById('staff-role-input');
   if (staffRoleInput) staffRoleInput.addEventListener('change', (e) => { state.staffModal.role = e.target.value; });
   const menuNameInput = document.getElementById('menu-name-input');

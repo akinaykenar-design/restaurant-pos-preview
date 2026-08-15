@@ -4344,7 +4344,7 @@ app.put('/api/settings', (req, res) => {
     const allowed = ['classic', 'finedining', 'sushi', 'asian', 'burger', 'diner', 'steakhouse', 'seafood', 'pizzeria', 'mexican', 'cafe', 'bakery', 'cocktail', 'winebar', 'pub'];
     data.settings.venueStyle = allowed.includes(req.body.venueStyle) ? req.body.venueStyle : 'classic';
   }
-  if (paperWidth !== undefined) data.settings.paperWidth = paperWidth === '58' ? '58' : '80';
+  if (paperWidth !== undefined) data.settings.paperWidth = paperWidth === '58' ? '58' : paperWidth === '76' ? '76' : '80';
   if (printColorMode !== undefined) data.settings.printColorMode = printColorMode === 'color' ? 'color' : 'thermal';
   if (printFontScale !== undefined) data.settings.printFontScale = printFontScale === 'large' ? 'large' : 'normal';
   if (req.body.docket !== undefined && typeof req.body.docket === 'object' && req.body.docket) {
@@ -5574,11 +5574,29 @@ app.post('/api/printers/test', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
   if (!/^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
   try {
-    await printing.sendToPrinter(ip, printing.testPage(readData().settings));
+    let buf = printing.testPage(readData().settings);
+    if (req.body && req.body.kind === 'impact') buf = printing.impactify(buf);
+    await printing.sendToPrinter(ip, buf);
     res.json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: e.message || 'Could not reach the printer' });
   }
+});
+
+// Ask the printer what it is (model name via GS I). Impact TM-U models get
+// ink/76mm suggested automatically; anything unrecognised stays manual.
+app.post('/api/printers/probe', async (req, res) => {
+  const ip = String((req.body && req.body.ip) || '').trim();
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address' });
+  const info = await printing.probePrinter(ip);
+  if (!info) return res.status(502).json({ error: 'Could not reach the printer' });
+  const model = info.model || '';
+  const impact = /U\d{3}/i.test(model);
+  res.json({
+    model: model || null,
+    kind: model ? (impact ? 'impact' : 'thermal') : null,
+    paperWidth: !model ? null : impact ? '76' : (/(^|\D)58(\D|$)/.test(model) ? '58' : '80'),
+  });
 });
 
 // Per-station docket overrides: { layout?, fontScale?, density? } — each field
@@ -5602,8 +5620,8 @@ app.post('/api/printer-stations', (req, res) => {
   if (cleanIps.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
   const cleanBackup = String(backupIp || '').trim();
   if (cleanBackup && !IP_RE.test(cleanBackup)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
-  const pw = req.body.paperWidth === '58' ? '58' : '80';
-  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null, docket: cleanStationDocket(req.body.docket) };
+  const pw = req.body.paperWidth === '58' ? '58' : req.body.paperWidth === '76' ? '76' : '80';
+  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, kind: req.body.kind === 'impact' ? 'impact' : 'thermal', receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null, docket: cleanStationDocket(req.body.docket) };
   data.printerStations = [...(data.printerStations || []), station];
   logAudit(data, staffFromReq(req), `Added printer station: ${station.name}`);
   writeData(data);
@@ -5634,7 +5652,8 @@ app.put('/api/printer-stations/:id', (req, res) => {
     if (clean && !IP_RE.test(clean)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
     station.backupIp = clean || null;
   }
-  if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : '80';
+  if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : req.body.paperWidth === '76' ? '76' : '80';
+  if (req.body.kind !== undefined) station.kind = req.body.kind === 'impact' ? 'impact' : 'thermal';
   if (req.body.docket !== undefined) station.docket = cleanStationDocket(req.body.docket);
   if (receipts !== undefined) station.receipts = !!receipts;
   if (labels !== undefined) station.labels = !!labels;
@@ -14228,14 +14247,14 @@ async function loadPrinterStations() {
   render();
 }
 function openAddPrinterStation() {
-  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, labels: false, fallbackId: null, docket: null });
+  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), kind: 'thermal', receipts: false, labels: false, fallbackId: null, docket: null });
   state.adminError = '';
   render();
 }
 function openEditPrinterStation(id) {
   const s = state.printerStations.find(x => x.id === id);
   const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
-  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) });
+  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), kind: s.kind === 'impact' ? 'impact' : 'thermal', receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) });
   state.adminError = '';
   render();
 }
@@ -14256,7 +14275,8 @@ async function savePrinterStationModal() {
     name: m.name, categories: m.categories,
     ips: ipInputs.length ? ipInputs.map(el => el.value.trim()).filter(Boolean) : m.ips.filter(Boolean),
     backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
-    paperWidth: m.paperWidth === '58' ? '58' : '80',
+    paperWidth: m.paperWidth === '58' ? '58' : m.paperWidth === '76' ? '76' : '80',
+    kind: m.kind === 'impact' ? 'impact' : 'thermal',
     receipts: !!m.receipts, labels: !!m.labels, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
     docket: m.docket || null,
   };
@@ -14293,13 +14313,41 @@ async function testPrinterIp(ip) {
   state.toast = `Sending a test page to ${ip}…`;
   render();
   try {
-    await api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) });
+    // The modal's Printer type rides along so an ink printer's test page is
+    // built in the bytes it actually understands.
+    const kind = state.printerStationModal ? state.printerStationModal.kind : undefined;
+    await api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, kind }) });
     state.toast = `Test page sent to ${ip} — check the printer.`;
   } catch (e) {
     state.toast = e.message || `Could not reach ${ip}.`;
   }
   render();
   armToastTimer(3500);
+}
+// "Detect": ask the printer its model over the wire, then fill in printer
+// type + paper size. Unknown or silent printers leave the choices alone.
+async function detectPrinterIp(ip) {
+  const m = state.printerStationModal;
+  if (!ip) { state.toast = 'Enter or pick a printer IP first.'; render(); return; }
+  state.toast = `Asking ${ip} what it is…`;
+  render();
+  try {
+    const r = await api('/api/printers/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) });
+    if (r && r.kind && m) {
+      [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; });
+      const bk = document.getElementById('printer-station-backup-input');
+      if (bk) m.backupIp = bk.value;
+      m.kind = r.kind;
+      if (r.paperWidth) m.paperWidth = r.paperWidth;
+      state.toast = `${r.model} — set to ${r.kind === 'impact' ? 'Ink · red+black' : 'Thermal'}${r.paperWidth ? `, ${r.paperWidth}mm` : ''}.`;
+    } else {
+      state.toast = r && r.model ? `Found ${r.model} — pick type and paper by hand.` : 'No answer — pick type and paper by hand.';
+    }
+  } catch (e) {
+    state.toast = e.message || `Could not reach ${ip}.`;
+  }
+  render();
+  armToastTimer(4000);
 }
 async function toggleStationPaused(stationId) {
   const s = state.printerStations.find(x => x.id === stationId);
@@ -14872,6 +14920,7 @@ function renderPrinterStationModal() {
       <div style="display:flex;gap:8px;margin-bottom:6px;">
         <input class="ps-ip-input" data-idx="${idx}" type="text" list="discovered-printer-ips" value="${esc(ip)}" placeholder="IP (192.168.1.87) or COM3" style="flex:1;">
         <button type="button" class="btn-secondary" style="flex:none;" data-act="test-station-ip-row" data-idx="${idx}">Test</button>
+        <button type="button" class="btn-secondary" style="flex:none;" data-act="detect-station-ip" data-idx="${idx}" title="Ask the printer its model">Detect</button>
         ${m.ips.length > 1 ? `<button type="button" class="btn-secondary" style="flex:none;padding:9px 12px;" data-act="remove-station-ip" data-idx="${idx}">✕</button>` : ''}
       </div>`).join('')}
       <div style="display:flex;justify-content:flex-end;margin-bottom:4px;"><button type="button" class="btn-add inline" data-act="add-station-ip" title="Add printer">+ Add printer</button></div>
@@ -14885,8 +14934,14 @@ function renderPrinterStationModal() {
       </div>
       <label>Paper size</label>
       <div class="pay-options" style="margin-bottom:6px;">
-        <div class="pay-opt ${m.paperWidth !== '58' ? 'active' : ''}" data-act="set-station-paper" data-val="80">80mm</div>
+        <div class="pay-opt ${m.paperWidth !== '58' && m.paperWidth !== '76' ? 'active' : ''}" data-act="set-station-paper" data-val="80">80mm</div>
+        <div class="pay-opt ${m.paperWidth === '76' ? 'active' : ''}" data-act="set-station-paper" data-val="76">76mm</div>
         <div class="pay-opt ${m.paperWidth === '58' ? 'active' : ''}" data-act="set-station-paper" data-val="58">58mm</div>
+      </div>
+      <label>Printer type</label>
+      <div class="pay-options" style="margin-bottom:6px;">
+        <div class="pay-opt ${m.kind !== 'impact' ? 'active' : ''}" data-act="set-station-kind" data-val="thermal">Thermal</div>
+        <div class="pay-opt ${m.kind === 'impact' ? 'active' : ''}" data-act="set-station-kind" data-val="impact">Ink · red+black</div>
       </div>
       <label>If nothing here prints, send to station</label>
       <select id="printer-station-fallback">
@@ -19334,14 +19389,18 @@ function renderItemOptionsPop() {
   };
   const stepHtml = (s) => {
     if (!s) return '';
-    if (s.kind === 'variant') return `
-        <label>Size</label>
+    if (s.kind === 'variant') {
+      // No "Size" heading — the tiles say it. They wear the item's own tile
+      // colour so the popup reads as part of the item that opened it.
+      const tstyle = item.color && state.settings.tileColors !== false ? `background:${item.color};color:${contrastTextColor(item.color)};` : '';
+      return `
         <div class="grid io-size-grid" style="margin-bottom:14px;">
           ${item.variants.map(v => `
-            <button class="item-card allergy-item-card ${io.variantId === v.id ? 'selected' : ''}" data-act="io-pick-variant" data-variant="${v.id}">
-              <div class="item-name">${esc(v.label)}</div><div class="item-price">${money(v.price)}</div>
+            <button class="item-card allergy-item-card ${io.variantId === v.id ? 'selected' : ''}" ${tstyle ? `style="${tstyle}"` : ''} data-act="io-pick-variant" data-variant="${v.id}">
+              <div class="item-name">${esc(v.label)}</div><div class="item-price"${tstyle ? ' style="color:inherit;opacity:.85;"' : ''}>${money(v.price)}</div>
             </button>`).join('')}
         </div>`;
+    }
     if (s.kind === 'mods') {
       const g = s.g;
       const sel = modSel(io.modSelections, g.id);
@@ -25732,6 +25791,7 @@ function handleActClick(el, e) {
       else if (act === 'terminal-test-charge') { terminalTestCharge(); }
       else if (act === 'test-printer-ip') { testPrinterIp(el.dataset.ip); }
       else if (act === 'test-station-ip-row') { const inp = document.querySelector(`.ps-ip-input[data-idx="${el.dataset.idx}"]`); testPrinterIp(inp ? inp.value.trim() : ''); }
+      else if (act === 'detect-station-ip') { const inp = document.querySelector(`.ps-ip-input[data-idx="${el.dataset.idx}"]`); detectPrinterIp(inp ? inp.value.trim() : ''); }
       else if (act === 'test-station-backup') { const inp = document.getElementById('printer-station-backup-input'); testPrinterIp(inp ? inp.value.trim() : ''); }
       else if (act === 'add-station-ip' || act === 'remove-station-ip') {
         const m = state.printerStationModal;
@@ -26001,6 +26061,7 @@ function handleActClick(el, e) {
       else if (act === 'set-print-font-scale') { saveTicketSetting({ printFontScale: el.dataset.val }); }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
       else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); } }
+      else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); } }
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }

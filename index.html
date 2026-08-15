@@ -4342,6 +4342,17 @@ app.put('/api/settings', (req, res) => {
         if (dk.red === undefined && cur.red === undefined) out.callaway = true; // sensible default
         return out;
       })(),
+      // Per-part print size overrides: 1/2/3 per part; a missing part = Auto
+      // (follow the layout's own tier).
+      sizes: (() => {
+        const src = dk.sizes !== undefined ? dk.sizes : (cur.sizes || {});
+        const out = {};
+        ['table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies'].forEach(k => {
+          const v = src && src[k];
+          if (v === 1 || v === 2 || v === 3) out[k] = v;
+        });
+        return out;
+      })(),
     };
   }
   if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
@@ -7592,7 +7603,7 @@ const DOCKET_DEFAULTS = {
   showSeats: true, showNotes: true, showBuild: true, showStationTag: true,
   showOrderNo: false, showTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
-  font: 'A', red: { callaway: true }, roundPrint: 'added',
+  font: 'A', red: { callaway: true }, sizes: {}, roundPrint: 'added',
 };
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 function docketDocClasses() {
@@ -7701,6 +7712,9 @@ function stationsForLines(lines) {
 function buildDocketDoc(ctx, edit) {
   const d = docketCfg();
   const rc = k => (d.red && d.red[k]) ? ' dk-red' : '';
+  // Per-part size override → inline scale on the paper preview, so the
+  // designer shows what the printer will do (Auto = no style).
+  const szs = k => { const n = (d.sizes || {})[k]; return n ? ` style="font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;"` : ''; };
   // Tap-to-toggle wrappers: in edit mode every element is tappable (off = dimmed
   // but still there so you can switch it back on); in print mode off = gone.
   const tog = (on, key, inner, label) => edit
@@ -7710,35 +7724,35 @@ function buildDocketDoc(ctx, edit) {
     ? `<div class="pp-toggle ${on ? '' : 'pp-off'}" data-act="set-docket-opt" data-key="${key}" data-val="${!on}" title="Tap to ${on ? 'hide' : 'show'} ${label}">${inner}</div>`
     : (on ? inner : '');
 
-  const coversSeg = ctx.covers ? tog(d.showCovers, 'showCovers', `<div class="print-sub print-covers">${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}</div>`, 'covers') : '';
+  const coversSeg = ctx.covers ? tog(d.showCovers, 'showCovers', `<div class="print-sub print-covers"${szs('covers')}>${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}</div>`, 'covers') : '';
   const meta = [];
   if (ctx.orderNo != null) meta.push(tog(d.showOrderNo, 'showOrderNo', `#${esc(String(ctx.orderNo))}`, 'order number'));
   if (ctx.timeLabel) meta.push(tog(d.showTime, 'showTime', esc(ctx.timeLabel), 'time'));
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
   const vipHtml = ctx.vip ? btog(d.showVip, 'showVip', `<div class="print-flag">🌟 VIP — ${esc(ctx.vip)}</div>`, 'the VIP flag') : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
-    ? btog(d.showAllergies, 'showAllergies', `<div class="print-flag-block${rc('allergies')}">${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, 'allergy flags')
+    ? btog(d.showAllergies, 'showAllergies', `<div class="print-flag-block${rc('allergies')}"${szs('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, 'allergy flags')
     : '';
 
   return `
     <div class="${docketDocClasses()}">
       ${edit || d.headerText ? `<div class="print-dockmini${rc('header')}">${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
-      <h3 class="print-dockhead${rc('table')}">${esc(ctx.subLabel)}${coversSeg}</h3>
+      <h3 class="print-dockhead${rc('table')}"${szs('table')}>${esc(ctx.subLabel)}${coversSeg}</h3>
       ${metaHtml}
       ${vipHtml}
       ${allergyHtml}
       <hr>
       ${ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
-          ${btog(d.showCourseName, 'showCourseName', `<div class="print-sub print-coursename${rc('course')}">${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, 'course names')}
+          ${btog(d.showCourseName, 'showCourseName', `<div class="print-sub print-coursename${rc('course')}"${szs('course')}>${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, 'course names')}
           ${c.lines.map(l => {
             const seat = l.seat ? tog(d.showSeats, 'showSeats', ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`, 'seat numbers') : '';
             const tag = l.tag ? tog(d.showStationTag, 'showStationTag', l.tag, 'station tags') : '';
             const note = l.note ? tog(d.showNotes, 'showNotes', ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`, 'item notes') : '';
             const build = (l.build && (l.build.kept.length || l.build.removed.length))
-              ? btog(d.showBuild, 'showBuild', `<div class="print-build">${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, 'the build lines')
+              ? btog(d.showBuild, 'showBuild', `<div class="print-build"${szs('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, 'the build lines')
               : '';
-            return `<div class="print-line${rc('items')}"><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+            return `<div class="print-line${rc('items')}"${szs('items')}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
           }).join('')}
         </div>`).join('')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
@@ -14565,6 +14579,14 @@ function renderPrintersDocketTab() {
           ${[['table', 'Table'], ['course', 'Courses'], ['items', 'Items'], ['notes', 'Notes'], ['allergies', 'Allergies'], ['callaway', 'Call away'], ['header', 'Header']].map(([k, l]) =>
             `<button type="button" class="pay-opt dk-red-pill ${(d.red || {})[k] ? 'active' : ''}" style="flex:none;padding:7px 12px;" data-act="toggle-docket-red" data-key="${k}">${l}</button>`).join('')}
         </div></div>
+        ${[['table', 'Table size'], ['covers', 'Covers size'], ['course', 'Course size'], ['items', 'Item size'], ['subs', 'Sub-line size'], ['notes', 'Note size'], ['allergies', 'Allergy size']].map(([k, l]) => `
+        <div class="dk-fmt-row"><span class="dk-fmt-lbl">${l}</span><div class="seg">
+          ${[['auto', 'Auto'], ['1', 'S'], ['2', 'L'], ['3', 'H']].map(([v, vl]) => {
+            const cur = (d.sizes || {})[k];
+            const active = v === 'auto' ? cur === undefined : cur === parseInt(v);
+            return `<button class="${active ? 'active' : ''}" data-act="set-docket-size" data-key="${k}" data-val="${v}">${vl}</button>`;
+          }).join('')}
+        </div></div>`).join('')}
       </div>
       <div class="print-preview-grid" style="margin-top:16px;">
         <div>
@@ -24813,6 +24835,12 @@ function bindEvents() {
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }
+      else if (act === 'set-docket-size') {
+        const k = el.dataset.key, v = el.dataset.val;
+        const next = Object.assign({}, docketCfg().sizes || {});
+        if (v === 'auto') delete next[k]; else next[k] = parseInt(v, 10);
+        setDocketOpt('sizes', next);
+      }
       else if (act === 'test-print') { sendTestPrint(); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }
       else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) printReceipt(o); }

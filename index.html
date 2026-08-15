@@ -24086,7 +24086,903 @@ function wireListSelect() {
 function bindEvents() {
   const app = document.getElementById('app');
   app.querySelectorAll('[data-act]').forEach(el => {
-    el.addEventListener('click', (e) => {
+    el._actBound = true;
+    el.addEventListener('click', (e) => handleActClick(el, e));
+  });
+  const searchInput = document.getElementById('search-input');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      state.search = e.target.value;
+      // Refresh only the results container, not the whole panel — keeps the
+      // search input (and the mobile keyboard) alive on every keystroke.
+      // DEBOUNCED: the grid rebuild + tile measuring is the expensive part on
+      // cheap tablets, so it waits for a typing pause instead of every key.
+      clearTimeout(window._menuSearchTimer);
+      window._menuSearchTimer = setTimeout(() => {
+        const body = document.querySelector('.menu-scroll');
+        if (body) { body.innerHTML = renderMenuScrollBody(); fitTileNames(); placeTileCounts(); }
+        else render();
+      }, 120);
+    });
+  }
+  const exportFromInput = document.getElementById('export-from-input');
+  if (exportFromInput) exportFromInput.addEventListener('change', (e) => { state.analyticsFrom = e.target.value; render(); });
+  const exportToInput = document.getElementById('export-to-input');
+  if (exportToInput) exportToInput.addEventListener('change', (e) => { state.analyticsTo = e.target.value; render(); });
+  const histTableFilter = document.getElementById('hist-table-filter');
+  if (histTableFilter) histTableFilter.addEventListener('input', (e) => { state.histTableFilter = e.target.value; const rows = document.querySelector('.hist-summary'); if (rows) { const sel = histTableFilter.selectionStart; render(); const el = document.getElementById('hist-table-filter'); if (el) { el.focus(); try { el.setSelectionRange(sel, sel); } catch (_) {} } } });
+  const adminSearchInput = document.getElementById('admin-search-input');
+  if (adminSearchInput) {
+    adminSearchInput.addEventListener('input', (e) => {
+      state.adminSearch = e.target.value;
+      // Refresh only the results list, not the input — keeps the mobile
+      // keyboard up instead of tearing it down on every keystroke. Debounced
+      // so fast typing costs one rebuild, not one per key.
+      clearTimeout(window._adminSearchTimer);
+      window._adminSearchTimer = setTimeout(() => {
+        const r = document.getElementById('admin-search-results');
+        if (r) { r.innerHTML = state.adminSearch.trim() ? renderAdminSearchResults() : ''; const router = document.getElementById('admin-router'); if (router) router.hidden = !!state.adminSearch.trim(); }
+        else render();
+      }, 120);
+    });
+  }
+  const inventorySearchInput = document.getElementById('inventory-search');
+  if (inventorySearchInput) inventorySearchInput.addEventListener('input', (e) => {
+    state.inventorySearch = e.target.value;
+    const list = document.getElementById('inventory-list');
+    if (list) list.innerHTML = renderInventoryRows(); else render();
+  });
+  const adjustInventoryChangeInput = document.getElementById('adjust-inventory-change');
+  if (adjustInventoryChangeInput) adjustInventoryChangeInput.addEventListener('input', (e) => { state.adjustInventoryModal.change = e.target.value; });
+  const adjustInventoryReasonInput = document.getElementById('adjust-inventory-reason');
+  if (adjustInventoryReasonInput) adjustInventoryReasonInput.addEventListener('input', (e) => { state.adjustInventoryModal.reason = e.target.value; });
+  const inventoryItemNameInput = document.getElementById('inventory-item-name');
+  if (inventoryItemNameInput) inventoryItemNameInput.addEventListener('input', (e) => { state.inventoryItemModal.name = e.target.value; });
+  const inventoryItemCategoryInput = document.getElementById('inventory-item-category');
+  if (inventoryItemCategoryInput) inventoryItemCategoryInput.addEventListener('input', (e) => { state.inventoryItemModal.category = e.target.value; });
+  const inventoryItemSkuInput = document.getElementById('inventory-item-sku');
+  if (inventoryItemSkuInput) inventoryItemSkuInput.addEventListener('input', (e) => { state.inventoryItemModal.sku = e.target.value; });
+  const inventoryItemUnitInput = document.getElementById('inventory-item-unit');
+  if (inventoryItemUnitInput) inventoryItemUnitInput.addEventListener('input', (e) => { state.inventoryItemModal.unit = e.target.value; });
+  const inventoryItemCostInput = document.getElementById('inventory-item-cost');
+  if (inventoryItemCostInput) inventoryItemCostInput.addEventListener('input', (e) => { state.inventoryItemModal.costPerUnit = parseFloat(e.target.value) || 0; });
+  const inventoryItemMinInput = document.getElementById('inventory-item-min');
+  if (inventoryItemMinInput) inventoryItemMinInput.addEventListener('input', (e) => { state.inventoryItemModal.minStock = parseInt(e.target.value) || 10; });
+  const inventoryItemMaxInput = document.getElementById('inventory-item-max');
+  if (inventoryItemMaxInput) inventoryItemMaxInput.addEventListener('input', (e) => { state.inventoryItemModal.maxStock = parseInt(e.target.value) || 50; });
+  const inventoryItemSupplierSelect = document.getElementById('inventory-item-supplier');
+  if (inventoryItemSupplierSelect) inventoryItemSupplierSelect.addEventListener('change', (e) => { state.inventoryItemModal.supplierId = e.target.value || null; });
+  const supplierNameInput = document.getElementById('supplier-name');
+  if (supplierNameInput) supplierNameInput.addEventListener('input', (e) => { state.supplierModal.name = e.target.value; });
+  const supplierContactInput = document.getElementById('supplier-contact');
+  if (supplierContactInput) supplierContactInput.addEventListener('input', (e) => { state.supplierModal.contact = e.target.value; });
+  const supplierPhoneInput = document.getElementById('supplier-phone');
+  if (supplierPhoneInput) supplierPhoneInput.addEventListener('input', (e) => { state.supplierModal.phone = e.target.value; });
+  const supplierAddressInput = document.getElementById('supplier-address');
+  if (supplierAddressInput) supplierAddressInput.addEventListener('input', (e) => { state.supplierModal.address = e.target.value; });
+  const supplierTermsInput = document.getElementById('supplier-terms');
+  if (supplierTermsInput) supplierTermsInput.addEventListener('input', (e) => { state.supplierModal.paymentTerms = e.target.value; });
+
+  document.querySelectorAll('[data-recipe-item]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = parseInt(el.dataset.idx);
+      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
+        const r = state.recipeEditor.recipes[idx];
+        r.inventoryItemId = e.target.value;
+        const inv = (state.inventoryItems || []).find(i => i.id === e.target.value);
+        r.label = inv ? inv.name : '';
+        if (!e.target.value) r.docket = false;
+        loadRecipeCosts(state.recipeEditor.menuItemId);
+        render();
+      }
+    });
+  });
+  document.querySelectorAll('[data-recipe-qty]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = parseInt(el.dataset.idx);
+      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
+        state.recipeEditor.recipes[idx].quantity = parseFloat(e.target.value) || 0;
+        loadRecipeCosts(state.recipeEditor.menuItemId);
+      }
+    });
+  });
+  document.querySelectorAll('[data-recipe-unit]').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const idx = parseInt(el.dataset.idx);
+      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
+        state.recipeEditor.recipes[idx].unit = e.target.value;
+      }
+    });
+  });
+  const custName = document.getElementById('customer-name');
+  if (custName) custName.addEventListener('input', (e) => { state.customerName = e.target.value; });
+  const allergyCustomInput = document.getElementById('allergy-custom-input');
+  if (allergyCustomInput) allergyCustomInput.addEventListener('input', (e) => { state.allergyModal.customAllergy = e.target.value; refreshPaneTick(); });
+  const allergyNotesInput = document.getElementById('allergy-notes-input');
+  if (allergyNotesInput) allergyNotesInput.addEventListener('input', (e) => { state.allergyModal.notes = e.target.value; });
+  const vipTypeInput = document.getElementById('vip-type-input');
+  if (vipTypeInput) vipTypeInput.addEventListener('input', (e) => { state.vipModal.type = e.target.value; refreshPaneTick(); });
+  const customNoteTextInput = document.getElementById('custom-note-text-input');
+  if (customNoteTextInput) customNoteTextInput.addEventListener('input', (e) => { state.customNoteDraft.text = e.target.value; refreshPaneTick(); });
+  document.querySelectorAll('.size-label-input').forEach(el => {
+    el.addEventListener('input', (e) => { updateSizeRowField(el.dataset.id, parseInt(el.dataset.idx), 'label', e.target.value); });
+    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
+  });
+  document.querySelectorAll('.size-price-input').forEach(el => {
+    el.addEventListener('input', (e) => { updateSizeRowField(el.dataset.id, parseInt(el.dataset.idx), 'price', e.target.value); });
+    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
+  });
+  const voidNoteInput = document.getElementById('void-note-input');
+  if (voidNoteInput) voidNoteInput.addEventListener('input', (e) => { state.voidModal.note = e.target.value; });
+  const voidManagerPinInput = document.getElementById('void-manager-pin-input');
+  if (voidManagerPinInput) {
+    voidManagerPinInput.addEventListener('input', (e) => {
+      state.voidModal.managerPin = e.target.value;
+      state.voidModal.pinError = '';
+      render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('void-manager-pin-input');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    });
+  }
+  const refundAmountInput = document.getElementById('refund-amount-input');
+  if (refundAmountInput) {
+    refundAmountInput.addEventListener('input', (e) => {
+      state.refundModal.amount = e.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('refund-amount-input');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    });
+  }
+  const registerCashCountedInput = document.getElementById('register-cash-counted-input');
+  if (registerCashCountedInput) {
+    registerCashCountedInput.addEventListener('input', (e) => {
+      state.registerCashCounted = e.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('register-cash-counted-input');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    });
+  }
+  const refundReasonInput = document.getElementById('refund-reason-input');
+  if (refundReasonInput) refundReasonInput.addEventListener('input', (e) => { state.refundModal.reason = e.target.value; });
+  const motdInput = document.getElementById('motd-input');
+  if (motdInput && state.motdModal) motdInput.addEventListener('input', (e) => { state.motdModal.text = e.target.value; });
+  const addTipInput = document.getElementById('add-tip-input');
+  if (addTipInput) {
+    addTipInput.addEventListener('input', (e) => {
+      state.addTipModal.amount = e.target.value;
+      render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('add-tip-input');
+        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
+      });
+    });
+  }
+  const discountPresetNameInput = document.getElementById('discount-preset-name-input');
+  if (discountPresetNameInput) discountPresetNameInput.addEventListener('input', (e) => { state.discountPresetModal.name = e.target.value; });
+  const discountPresetValueInput = document.getElementById('discount-preset-value-input');
+  if (discountPresetValueInput) discountPresetValueInput.addEventListener('input', (e) => { state.discountPresetModal.value = e.target.value; });
+  const cashInput = document.getElementById('cash-input');
+  if (cashInput) {
+    cashInput.addEventListener('input', (e) => {
+      state.cashGiven = e.target.value; render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('cash-input');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    });
+  }
+  const tipCustomInput = document.getElementById('tip-custom-input');
+  if (tipCustomInput) {
+    tipCustomInput.addEventListener('input', (e) => {
+      state.tipCustomAmount = e.target.value; render();
+      requestAnimationFrame(() => {
+        const el = document.getElementById('tip-custom-input');
+        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+      });
+    });
+  }
+  document.querySelectorAll('.split-tender-amount-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateSplitTenderAmount(parseInt(el.dataset.idx), e.target.value); });
+  });
+  const staffNameInput = document.getElementById('staff-name-input');
+  if (staffNameInput) staffNameInput.addEventListener('input', (e) => { state.staffModal.name = e.target.value; });
+  const staffPinInput = document.getElementById('staff-pin-input');
+  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 4); });
+  const staffRoleInput = document.getElementById('staff-role-input');
+  if (staffRoleInput) staffRoleInput.addEventListener('change', (e) => { state.staffModal.role = e.target.value; });
+  const menuNameInput = document.getElementById('menu-name-input');
+  if (menuNameInput) menuNameInput.addEventListener('input', (e) => { state.menuModal.name = e.target.value; });
+  const menuCategoryInput = document.getElementById('menu-category-input');
+  if (menuCategoryInput) menuCategoryInput.addEventListener('change', (e) => { state.menuModal.category = e.target.value; state.menuModal.subcategoryId = ''; render(); });
+  const menuSubcategoryInput = document.getElementById('menu-subcategory-input');
+  if (menuSubcategoryInput) menuSubcategoryInput.addEventListener('change', (e) => { state.menuModal.subcategoryId = e.target.value; });
+  const menuSalesCategoryInput = document.getElementById('menu-sales-category-input');
+  if (menuSalesCategoryInput) menuSalesCategoryInput.addEventListener('change', (e) => { state.menuModal.salesCategoryId = e.target.value; });
+  const menuImageInput = document.getElementById('menu-image-input');
+  if (menuImageInput) menuImageInput.addEventListener('input', (e) => { state.menuModal.image = e.target.value; });
+  const menuCourseInput = document.getElementById('menu-course-input');
+  if (menuCourseInput) menuCourseInput.addEventListener('change', (e) => { state.menuModal.defaultCourse = e.target.value; });
+  document.querySelectorAll('.menu-modifier-check').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const gid = el.dataset.group;
+      if (e.target.checked) {
+        if (!state.menuModal.modifierGroupIds.includes(gid)) state.menuModal.modifierGroupIds.push(gid);
+      } else {
+        state.menuModal.modifierGroupIds = state.menuModal.modifierGroupIds.filter(id => id !== gid);
+      }
+    });
+  });
+  const selectAllMenuItems = document.getElementById('select-all-menu-items');
+  if (selectAllMenuItems) selectAllMenuItems.addEventListener('change', (e) => { toggleSelectAllMenuItems(e.target.checked); });
+  const selectAllCategories = document.getElementById('select-all-categories');
+  if (selectAllCategories) selectAllCategories.addEventListener('change', () => { toggleSelectAllCategories(); });
+  const selectAllModifiers = document.getElementById('select-all-modifiers');
+  if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
+  const selectAllCombos = document.getElementById('select-all-combos');
+  if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
+  const selectAllVips = document.getElementById('select-all-vips');
+  if (selectAllVips) selectAllVips.addEventListener('change', () => {
+    const all = (state.selectedVipIdxs || []).length === state.vipPresets.length;
+    state.selectedVipIdxs = all ? [] : state.vipPresets.map((_, i) => i);
+    render();
+  });
+  const selectAllNoteTypes = document.getElementById('select-all-note-types');
+  if (selectAllNoteTypes) selectAllNoteTypes.addEventListener('change', () => {
+    const hidden = state.settings.hiddenNoteTypes || [];
+    const ids = [...(!hidden.includes('vip') ? ['vip'] : []), ...(!hidden.includes('allergy') ? ['allergy'] : []), ...state.noteCategories.map(c => c.id)];
+    const all = ids.every(id => (state.selectedNoteTypeIds || []).includes(id));
+    state.selectedNoteTypeIds = all ? [] : ids;
+    render();
+  });
+  const selectAllNotePresets = document.getElementById('select-all-note-presets');
+  if (selectAllNotePresets) selectAllNotePresets.addEventListener('change', () => {
+    const cat = state.noteCategories.find(c => c.id === state.notesAdminSection);
+    const n = ((cat && cat.presets) || []).length;
+    const all = (state.selectedNotePresetIdxs || []).length === n;
+    state.selectedNotePresetIdxs = all ? [] : Array.from({ length: n }, (_, i) => i);
+    render();
+  });
+  const selectAllStaff = document.getElementById('select-all-staff');
+  if (selectAllStaff) selectAllStaff.addEventListener('change', () => { const all = state.staffList.every(s => state.selectedStaffIds.includes(s.id)); state.selectedStaffIds = all ? [] : state.staffList.map(s => s.id); render(); });
+  const selectAllSalesCats = document.getElementById('select-all-sales-categories');
+  if (selectAllSalesCats) selectAllSalesCats.addEventListener('change', () => toggleSelectAllSalesCategories());
+  const selectAllSizes = document.getElementById('select-all-sizes');
+  if (selectAllSizes) selectAllSizes.addEventListener('change', () => toggleSelectAllSizes());
+  wireListSelect(); // click-to-select for all .sel-head admin rows (no checkboxes)
+  document.querySelectorAll('.modifier-opt-label').forEach(el => {
+    el.addEventListener('change', () => updateModifierOptionInline(el.dataset.id, parseInt(el.dataset.oidx), 'label', el.value));
+  });
+  document.querySelectorAll('.modifier-opt-price').forEach(el => {
+    el.addEventListener('change', () => updateModifierOptionInline(el.dataset.id, parseInt(el.dataset.oidx), 'priceDelta', el.value));
+  });
+  document.querySelectorAll('.modifier-min').forEach(el => {
+    el.addEventListener('change', () => saveModifierGroupInline(el.dataset.id, { min: Math.max(0, parseInt(el.value) || 0) }));
+  });
+  document.querySelectorAll('.modifier-max').forEach(el => {
+    el.addEventListener('change', () => saveModifierGroupInline(el.dataset.id, { max: Math.max(1, parseInt(el.value) || 1) }));
+  });
+  const menuAdminCategoryFilter = document.getElementById('menu-admin-category-filter');
+  if (menuAdminCategoryFilter) menuAdminCategoryFilter.addEventListener('change', (e) => { state.menuAdminCategoryFilter = e.target.value; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; render(); });
+  const menuAdminSubcategoryFilter = document.getElementById('menu-admin-subcategory-filter');
+  if (menuAdminSubcategoryFilter) menuAdminSubcategoryFilter.addEventListener('change', (e) => { state.menuAdminSubcategoryFilter = e.target.value; state.menuAdminSubsubFilter = ''; render(); });
+  const menuAdminSubsubFilter = document.getElementById('menu-admin-subsub-filter');
+  if (menuAdminSubsubFilter) menuAdminSubsubFilter.addEventListener('change', (e) => { state.menuAdminSubsubFilter = e.target.value; render(); });
+  const menuAdminSearchInput = document.getElementById('menu-admin-search-input');
+  if (menuAdminSearchInput) {
+    menuAdminSearchInput.addEventListener('input', (e) => {
+      state.menuAdminSearch = e.target.value;
+      // Refresh only the rows, not the input — keeps the mobile keyboard up.
+      // Debounced so fast typing costs one rebuild, not one per key.
+      clearTimeout(window._menuAdminSearchTimer);
+      window._menuAdminSearchTimer = setTimeout(() => { refreshMenuAdminList(); }, 120);
+    });
+  }
+  const bulkCategoryInput = document.getElementById('bulk-category-input');
+  if (bulkCategoryInput) bulkCategoryInput.addEventListener('change', (e) => { state.bulkEditModal.category = e.target.value; });
+  const bulkPriceValueInput = document.getElementById('bulk-price-value-input');
+  if (bulkPriceValueInput) bulkPriceValueInput.addEventListener('input', (e) => { state.bulkEditModal.priceValue = e.target.value; });
+  const bulkCourseInput = document.getElementById('bulk-course-input');
+  if (bulkCourseInput) bulkCourseInput.addEventListener('change', (e) => { state.bulkEditModal.defaultCourse = e.target.value; });
+  const bulkSalesCategoryInput = document.getElementById('bulk-sales-category-input');
+  if (bulkSalesCategoryInput) bulkSalesCategoryInput.addEventListener('change', (e) => { state.bulkEditModal.salesCategoryId = e.target.value; });
+  const bulkStockCountInput = document.getElementById('bulk-stockcount-input');
+  if (bulkStockCountInput) bulkStockCountInput.addEventListener('input', (e) => { state.bulkEditModal.stockCount = e.target.value; });
+  const bulkLowStockInput = document.getElementById('bulk-lowstock-input');
+  if (bulkLowStockInput) bulkLowStockInput.addEventListener('input', (e) => { state.bulkEditModal.lowStockThreshold = e.target.value; });
+  const menuPriceInput = document.getElementById('menu-price-input');
+  if (menuPriceInput) menuPriceInput.addEventListener('input', (e) => { state.menuModal.price = e.target.value; });
+  const menuStockCountInput = document.getElementById('menu-stockcount-input');
+  if (menuStockCountInput) menuStockCountInput.addEventListener('input', (e) => { state.menuModal.stockCount = parseInt(e.target.value) || 0; });
+  const menuLowStockInput = document.getElementById('menu-lowstock-input');
+  if (menuLowStockInput) menuLowStockInput.addEventListener('input', (e) => { state.menuModal.lowStockThreshold = parseInt(e.target.value) || 0; });
+  const menuSequenceInput = document.getElementById('menu-sequence-input');
+  if (menuSequenceInput) menuSequenceInput.addEventListener('input', (e) => { state.menuModal.sequence = e.target.value === '' ? null : parseInt(e.target.value); });
+  const categoryIconInput = document.getElementById('category-icon-input');
+  if (categoryIconInput) categoryIconInput.addEventListener('input', (e) => { state.categoryModal.icon = e.target.value; });
+  const subcategoryIconInput = document.getElementById('subcategory-icon-input');
+  if (subcategoryIconInput) subcategoryIconInput.addEventListener('input', (e) => { state.subcategoryModal.icon = e.target.value; });
+  document.querySelectorAll('.combo-group-label').forEach(el => {
+    el.addEventListener('input', (e) => { state.comboModal.groups[parseInt(el.dataset.gidx)].label = e.target.value; });
+    el.addEventListener('change', () => autosaveCombo());
+  });
+  document.querySelectorAll('.combo-group-course').forEach(el => {
+    el.addEventListener('change', (e) => { setComboGroupCourse(parseInt(el.dataset.gidx), e.target.value); autosaveCombo(); });
+  });
+  document.querySelectorAll('.combo-add-item-select').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const itemId = e.target.value;
+      if (itemId) addComboItem(parseInt(el.dataset.gidx), itemId);
+    });
+  });
+  document.querySelectorAll('.combo-item-search').forEach(el => {
+    el.addEventListener('input', (e) => {
+      const gi = parseInt(el.dataset.gidx);
+      state.comboModal.groups[gi]._search = e.target.value;
+      const res = document.getElementById('combo-search-results-' + gi);
+      if (res) { res.innerHTML = renderComboSearchHits(gi); res.style.marginTop = e.target.value.trim() ? '8px' : '0'; }
+      else render();
+    });
+  });
+  document.querySelectorAll('.combo-category-select').forEach(el => {
+    el.addEventListener('change', (e) => { if (state.comboModal) state.comboModal.category = e.target.value; autosaveCombo(); render(); });
+  });
+  // Typed min/max picks per choice; each keeps the other consistent on blur.
+  document.querySelectorAll('.combo-group-min').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const g = state.comboModal.groups[parseInt(el.dataset.gidx)];
+      g.min = Math.max(0, parseInt(e.target.value) || 0);
+      if ((g.max || 1) < Math.max(1, g.min)) g.max = Math.max(1, g.min);
+      render();
+      autosaveCombo();
+    });
+  });
+  document.querySelectorAll('.combo-group-max').forEach(el => {
+    el.addEventListener('change', (e) => {
+      const g = state.comboModal.groups[parseInt(el.dataset.gidx)];
+      g.max = Math.max(1, parseInt(e.target.value) || 1);
+      if ((g.min || 0) > g.max) g.min = g.max;
+      render();
+      autosaveCombo();
+    });
+  });
+
+  document.querySelectorAll('.variant-label-input').forEach(el => {
+    el.addEventListener('input', (e) => { state.menuModal.variants[parseInt(el.dataset.vidx)].label = e.target.value; });
+  });
+  document.querySelectorAll('.variant-price-input').forEach(el => {
+    el.addEventListener('input', (e) => { state.menuModal.variants[parseInt(el.dataset.vidx)].price = e.target.value; });
+  });
+  const categoryNameInput = document.getElementById('category-name-input');
+  if (categoryNameInput) categoryNameInput.addEventListener('input', (e) => { state.categoryModal.name = e.target.value; });
+  document.querySelectorAll('.course-template-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameCourseTemplateInline(parseInt(el.dataset.idx), e.target.value); });
+  });
+  const floorPlanNameInput = document.getElementById('floorplan-name-input');
+  if (floorPlanNameInput) floorPlanNameInput.addEventListener('input', (e) => { state.floorPlanModal.name = e.target.value; });
+  const discountValueInput = document.getElementById('discount-value-input');
+  if (discountValueInput) discountValueInput.addEventListener('input', (e) => { state.discountModal.value = e.target.value; refreshPaneTick(); });
+  const discountReasonInput = document.getElementById('discount-reason-input');
+  if (discountReasonInput) discountReasonInput.addEventListener('input', (e) => { state.discountModal.reason = e.target.value; });
+  const floorplanSnapInput = document.getElementById('floorplan-snap-input');
+  if (floorplanSnapInput) floorplanSnapInput.addEventListener('change', (e) => { saveFloorPlanGrid(floorplanSnapInput.dataset.fp, { snapToGrid: e.target.checked }); });
+  // Click-to-place mode: the picked template ghosts under the cursor; each click drops one.
+  const placeSelect = document.getElementById('add-object-template-select');
+  if (placeSelect) placeSelect.addEventListener('change', (e) => { state.floorPlacing = e.target.value || null; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); });
+  if (state.floorPlacing) {
+    const canvas = document.getElementById('admin-floor-canvas');
+    const ghost = document.getElementById('floor-place-ghost');
+    if (canvas) {
+      if (ghost) {
+        canvas.addEventListener('mousemove', (e) => {
+          const rect = canvas.getBoundingClientRect();
+          ghost.style.left = (e.clientX - rect.left) + 'px';
+          ghost.style.top = (e.clientY - rect.top) + 'px';
+        });
+        canvas.addEventListener('mouseleave', () => { ghost.style.left = '-9999px'; });
+      }
+      canvas.addEventListener('click', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+        const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+        placeFloorItemAt(state.adminFloorPlanId, state.floorPlacing, xPct, yPct);
+      }, true);
+    }
+  } else {
+    // Not placing: drag a box on the empty canvas to marquee-select tables.
+    const adminCanvas = document.getElementById('admin-floor-canvas');
+    if (adminCanvas) {
+      adminCanvas.addEventListener('mousedown', startMarquee);
+      // Touch (and any) tap on the bare canvas deselects — mouse drags go through
+      // the marquee, but a plain tap on empty floor should clear the selection.
+      adminCanvas.addEventListener('click', (e) => { if (e.target === adminCanvas) deselectOnEmptyCanvas(); });
+    }
+  }
+  document.querySelectorAll('.allergy-preset-name-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateAllergyPreset(parseInt(el.dataset.idx), { name: e.target.value }); });
+  });
+  const selectAllAllergies = document.getElementById('select-all-allergies');
+  if (selectAllAllergies) selectAllAllergies.addEventListener('change', () => toggleSelectAllAllergies());
+  const popoverCustomIconInput = document.getElementById('icon-popover-custom-input');
+  if (popoverCustomIconInput) popoverCustomIconInput.addEventListener('change', (e) => { pickPopoverIcon(e.target.value.trim()); });
+  document.querySelectorAll('.tip-preset-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateTipPreset(parseInt(el.dataset.idx), e.target.value); });
+  });
+  document.querySelectorAll('.io-custom-input').forEach(el => {
+    el.addEventListener('input', (e) => {
+      const io = state.itemOptions; if (!io) return;
+      io.customText = io.customText || {};
+      io.customText[el.dataset.group] = e.target.value;
+    });
+  });
+  const editLineNoteInput = document.getElementById('edit-line-note-input');
+  if (editLineNoteInput) {
+    editLineNoteInput.addEventListener('change', (e) => { if (state.editLine) updateLineNote(state.editLine.idx, e.target.value); });
+  }
+  document.querySelectorAll('.allergy-subtype-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
+  });
+  document.querySelectorAll('.allergy-subtype-preset').forEach(el => {
+    el.addEventListener('change', () => { addAllergySubTypeValue(parseInt(el.dataset.idx), el.value); });
+  });
+  document.querySelectorAll('.menu-item-price-quick-edit').forEach(el => {
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.blur(); });
+  });
+  // Design size sliders: dragging previews live (body attrs + the mockup's
+  // own attrs, no full render); releasing saves for the device the mockup
+  // is showing.
+  document.querySelectorAll('.size-slider').forEach(el => {
+    el.addEventListener('input', (e) => {
+      const val = SIZE_STEPS[parseInt(e.target.value, 10)] || 'md';
+      const field = el.dataset.field;
+      const lab = el.parentElement.querySelector('.size-slider-val');
+      if (lab) lab.textContent = SIZE_LABELS[val];
+      state.theme = { ...state.theme, [field]: themeSizePatch(field, val) };
+      applyTheme();
+      const wrap = document.querySelector('.mk-wrap');
+      if (wrap) wrap.setAttribute(THEME_SIZE_ATTRS[field], val);
+    });
+    el.addEventListener('change', () => { render(); saveAppearance(); });
+  });
+  // Pointer-drag sortable for the admin reorder lists.
+  makeSortable('size-preset-row', reorderSizePresets, { canStart: () => !isListSorted('sizes') });
+  makeSortable('vip-preset-drag', reorderVipPresets);
+  makeSortable('void-reason-row', reorderVoidReasons);
+  makeSortable('allergy-preset-row', reorderAllergyPresets);
+  makeSortable('note-preset-drag', reorderNotePresets);
+  makeSortable('course-template-row', reorderCourseTemplates);
+  // The Design mockup IS the layout editor: drag a panel of the carbon copy
+  // sideways to rearrange the screen; drag the Categories rail UP to dock the
+  // menu bar on top (PC/tablet). A plain tap still jumps to the settings card.
+  makeSortable('mk-panel', (from, to, els) => {
+    const dev = state.mockDevice || 'pc';
+    if (dev === 'mobile') return;
+    if (['top', 'bottom'].includes((state.settings.railPositions || {})[dev])) {
+      // Rail is docked on an edge — only menu + docket are in the row.
+      const cur = panelOrderFor(dev);
+      const row = cur.filter(id => id !== 'catrail');
+      const [m] = row.splice(from, 1);
+      row.splice(to, 0, m);
+      row.splice(cur.indexOf('catrail'), 0, 'catrail');
+      savePanelOrders(dev, row);
+    } else reorderPanels(from, to);
+  }, { crossAxis: (from, cross, els) => {
+    const dev = state.mockDevice || 'pc';
+    if (els[from] && els[from].dataset.panel === 'catrail' && dev !== 'mobile') saveRailPosition(cross < 0 ? 'top' : 'bottom');
+    else render();
+  }, onDragMove: (from, dx, dy, els) => {
+    // Any panel drag: spread the panels apart and fill every landing area so
+    // the drop targets are obvious (body.mk-drag rules).
+    document.body.classList.add('mk-drag');
+    // Dragging the Categories rail vertically can dock it top or bottom —
+    // light the candidate edge up while the drag is live.
+    const dev = state.mockDevice || 'pc';
+    if (!els[from] || els[from].dataset.panel !== 'catrail' || dev === 'mobile') return;
+    if (!document.querySelector('.mk-dockzones')) {
+      const wrap = document.querySelector('.mk-wrap');
+      if (!wrap) return;
+      const ov = document.createElement('div');
+      ov.className = 'mk-dockzones';
+      ['top', 'bottom'].forEach(s => {
+        const z = document.createElement('div');
+        z.className = 'mk-dockzone ' + s;
+        z.dataset.side = s;
+        ov.appendChild(z);
+      });
+      wrap.appendChild(ov);
+    }
+    const cross = Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx);
+    document.querySelectorAll('.mk-dockzone').forEach(z => z.classList.toggle('armed', cross && z.dataset.side === (dy < 0 ? 'top' : 'bottom')));
+  }, onDragEnd: () => {
+    document.body.classList.remove('mk-drag');
+    const ov = document.querySelector('.mk-dockzones');
+    if (ov) ov.remove();
+  } });
+  // Dashed edge zones show every place a dragged element can dock; the zone
+  // the drag is currently voting for lights up.
+  const showDockZones = (sides) => {
+    hideDockZones();
+    const wrap = document.querySelector('.mk-wrap');
+    if (!wrap) return;
+    const ov = document.createElement('div');
+    ov.className = 'mk-dockzones';
+    sides.forEach(s => {
+      const z = document.createElement('div');
+      z.className = 'mk-dockzone ' + s;
+      z.dataset.side = s;
+      ov.appendChild(z);
+    });
+    wrap.appendChild(ov);
+  };
+  const armDockZone = (side) => document.querySelectorAll('.mk-dockzone').forEach(z => z.classList.toggle('armed', z.dataset.side === side));
+  const hideDockZones = () => { const ov = document.querySelector('.mk-dockzones'); if (ov) ov.remove(); };
+  // Docked strips drag back out vertically: the docked menu bar (PC/tablet)
+  // drags toward the centre to return to the side; the phone chip row drags
+  // between top and bottom (thumb reach). A drag past the threshold swallows
+  // the tap-jump click.
+  const dockStrip = (el, dir, onCross, zoneSide) => {
+    if (!el) return;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const sy = e.clientY;
+      // The strip lives inside the scaled mockup: divide pointer deltas by the
+      // scale or the strip trails the pointer at ~half speed.
+      const vs = el.offsetWidth ? Math.max(0.05, el.getBoundingClientRect().width / el.offsetWidth) : 1;
+      if (zoneSide) showDockZones([zoneSide]);
+      const mv = (ev) => {
+        const dy = dir > 0 ? Math.max(0, ev.clientY - sy) : Math.min(0, ev.clientY - sy);
+        el.style.transform = dy ? `translateY(${dy / vs}px)` : '';
+        if (zoneSide) armDockZone(Math.abs(dy) > 34 ? zoneSide : null);
+      };
+      const done = (ev) => {
+        document.removeEventListener('pointermove', mv);
+        document.removeEventListener('pointerup', done);
+        document.removeEventListener('pointercancel', done);
+        el.style.transform = '';
+        hideDockZones();
+        if (dir > 0 ? ev.clientY - sy > 34 : sy - ev.clientY > 34) {
+          const kill = (ce) => { ce.stopPropagation(); ce.preventDefault(); };
+          document.addEventListener('click', kill, true);
+          setTimeout(() => document.removeEventListener('click', kill, true), 350);
+          onCross();
+        }
+      };
+      document.addEventListener('pointermove', mv);
+      document.addEventListener('pointerup', done);
+      document.addEventListener('pointercancel', done);
+    });
+  };
+  {
+    const dev = state.mockDevice || 'pc';
+    const railDockV = dev !== 'mobile' ? (state.settings.railPositions || {})[dev] : null;
+    // Docked rail returns to whichever side the panel order puts it on.
+    const ord = panelOrderFor(dev === 'tablet' ? 'tablet' : 'pc');
+    const railSideZone = ord.indexOf('catrail') <= ord.indexOf('menu') ? 'left' : 'right';
+    dockStrip(document.querySelector('.mk-toprail'), railDockV === 'bottom' ? -1 : 1, () => saveRailPosition('side'), railSideZone);
+    const mkMobRail = document.querySelector('.mk-mobrail');
+    if (mkMobRail) {
+      const atBottom = (state.settings.railPositions || {}).mobile === 'bottom';
+      dockStrip(mkMobRail, atBottom ? -1 : 1, () => saveRailPosition(atBottom ? 'top' : 'bottom'), atBottom ? 'top' : 'bottom');
+    }
+  }
+  // App bar: free drag — release direction picks the dock (top/bottom/left/
+  // right on PC & tablet, top/bottom on phone); the candidate zone lights up
+  // while dragging.
+  const mkAb = document.querySelector('.mk-appbar');
+  if (mkAb) mkAb.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY;
+    const dev = state.mockDevice || 'pc';
+    const vs = mkAb.offsetWidth ? Math.max(0.05, mkAb.getBoundingClientRect().width / mkAb.offsetWidth) : 1;
+    const candidate = (dx, dy) => {
+      if (Math.hypot(dx, dy) < 34) return null;
+      let pos = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : (dy < 0 ? 'top' : 'bottom');
+      if (dev === 'mobile' && (pos === 'left' || pos === 'right')) pos = dy < 0 ? 'top' : 'bottom';
+      return pos;
+    };
+    showDockZones(dev === 'mobile' ? ['top', 'bottom'] : ['top', 'bottom', 'left', 'right']);
+    let raf = 0, lx = sx, ly = sy;
+    const mv = (ev) => {
+      lx = ev.clientX; ly = ev.clientY;
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        mkAb.style.transform = `translate(${(lx - sx) / vs}px, ${(ly - sy) / vs}px)`;
+        mkAb.style.opacity = '.75';
+        armDockZone(candidate(lx - sx, ly - sy));
+      });
+    };
+    const done = (ev) => {
+      if (raf) cancelAnimationFrame(raf);
+      document.removeEventListener('pointermove', mv);
+      document.removeEventListener('pointerup', done);
+      document.removeEventListener('pointercancel', done);
+      mkAb.style.transform = '';
+      mkAb.style.opacity = '';
+      hideDockZones();
+      const pos = candidate(ev.clientX - sx, ev.clientY - sy);
+      if (!pos) return;
+      const kill = (ce) => { ce.stopPropagation(); ce.preventDefault(); };
+      document.addEventListener('click', kill, true);
+      setTimeout(() => document.removeEventListener('click', kill, true), 350);
+      saveAppBarPos(pos);
+    };
+    document.addEventListener('pointermove', mv);
+    document.addEventListener('pointerup', done);
+    document.addEventListener('pointercancel', done);
+  });
+  // `to` is the dragged row's FINAL index; the reorder fns remove the dragged
+  // entry then insert at the target's pre-removal index, so els[to] is the
+  // right target row whichever direction the drag went.
+  // Items rows arm their own drag + header wiring per-row (armMenuItemRows below),
+  // so a single expanded/collapsed row can be re-armed without a full rebuild.
+  makeSortable('sales-cat-row', (from, to, els) => reorderSalesCategories(els[from].dataset.id, els[to].dataset.id));
+  makeSortable('combo-row', (from, to, els) => reorderCombos(els[from].dataset.id, els[to].dataset.id), { canStart: () => !(state.comboModal && state.comboModal.mode === 'edit') });
+  makeSortable('modifier-row', (from, to, els) => reorderModifierGroups(els[from].dataset.id, els[to].dataset.id), { canStart: () => !isListSorted('modifiers') && !state.expandedModifierId });
+  makeSortable('discount-preset-row', (from, to, els) => reorderDiscountPresets(els[from].dataset.id, els[to].dataset.id));
+  makeSortable('tip-preset-row', reorderTipPresets);
+  // Order Notes: custom note TYPES reorder among themselves (built-ins pinned);
+  // a type only drags while collapsed so it never fights its content.
+  makeSortable('note-type-row', (from, to) => {
+    const cats = state.noteCategories.slice();
+    const [moved] = cats.splice(from, 1);
+    cats.splice(to, 0, moved);
+    saveNoteCategories(cats);
+  }, { canStart: (el) => state.notesOpenId !== el.dataset.typeid });
+  // Notes inside the open type reorder freely.
+  makeSortable('note-preset-drag', (from, to) => {
+    const catId = state.notesOpenId;
+    const cats = state.noteCategories.map(c => {
+      if (c.id !== catId) return c;
+      const presets = (c.presets || []).slice();
+      const [moved] = presets.splice(from, 1);
+      presets.splice(to, 0, moved);
+      return { ...c, presets };
+    });
+    saveNoteCategories(cats);
+  });
+  // Choices inside the set-menu editor: drag to set the on-screen and
+  // print sequence (saved with the set menu).
+  // Collapsed choices drag to reorder; an open choice stays put so dragging
+  // its item pills never fights the card drag.
+  makeSortable('combo-choice-card', (from, to) => {
+    if (!state.comboModal) return;
+    const gs = state.comboModal.groups;
+    const [moved] = gs.splice(from, 1);
+    gs.splice(to, 0, moved);
+    render();
+    autosaveCombo();
+  }, { canStart: (item) => !(state.comboModal && state.comboModal.groups[parseInt(item.dataset.gidx)] && state.comboModal.groups[parseInt(item.dataset.gidx)]._open) });
+  // Item pills inside each choice drag to set the serving/print sequence.
+  // One sortable per choice (per-group class) so pills can't cross choices.
+  if (state.comboModal) {
+    state.comboModal.groups.forEach((g, i) => makeSortable('combo-pill-g' + i, (from, to) => {
+      const ids = state.comboModal.groups[i].itemIds;
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      render();
+      autosaveCombo();
+    }));
+  }
+  makeSortable('category-row', (from, to, els) => reorderCategories(els[from].dataset.id, els[to].dataset.id));
+  makeSortable('subcategory-row', (from, to, els) => reorderSubcategories(els[from].dataset.id, els[to].dataset.id));
+  document.querySelectorAll('.category-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameCategoryInline(el.dataset.id, e.target.value); });
+  });
+  document.querySelectorAll('.subcategory-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameSubcategoryInline(el.dataset.id, e.target.value); });
+  });
+  document.querySelectorAll('.sales-category-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameSalesCategoryInline(el.dataset.id, e.target.value); });
+  });
+  document.querySelectorAll('.staff-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameStaffInline(el.dataset.id, e.target.value); });
+  });
+  document.querySelectorAll('.menu-item-name-quick-input').forEach(el => {
+    el.addEventListener('change', (e) => { renameMenuItemInline(el.dataset.id, e.target.value); });
+  });
+  // Expandable menu item rows — per-row header + drag wiring. Re-armed one row
+  // at a time on expand/collapse, and wholesale after the search refresh.
+  armMenuItemRows();
+  // Input listeners for inline editing
+  document.querySelectorAll('.menu-item-name-edit, .menu-item-category-edit, .menu-item-price-edit').forEach(el => {
+    el.addEventListener('input', (e) => { /* inputs auto-save on blur in save handler */ });
+  });
+  document.querySelectorAll('.vip-preset-name-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateVipPreset(parseInt(el.dataset.idx), e.target.value); });
+  });
+  document.querySelectorAll('.note-section-name-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateNoteCategory(parseInt(el.dataset.idx), 'name', e.target.value); saveNoteCategories(state.noteCategories); });
+  });
+  document.querySelectorAll('.note-preset-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateNotePreset(el.dataset.id, parseInt(el.dataset.idx), e.target.value); });
+  });
+  document.querySelectorAll('.note-builtin-name-input').forEach(el => {
+    el.addEventListener('change', async (e) => {
+      const key = el.dataset.id === 'vip' ? 'vipLabel' : 'allergyLabel';
+      const val = e.target.value.trim();
+      state.settings[key] = val || null;
+      try { state.settings = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: val }) }); } catch (err) {}
+      render();
+    });
+  });
+  document.querySelectorAll('.allergy-subtype-select').forEach(el => {
+    el.addEventListener('change', () => { if (state.allergyModal) state.allergyModal.subTypeChoices[el.dataset.allergy] = el.value; });
+  });
+  document.querySelectorAll('.size-preset-name-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateSizePreset(parseInt(el.dataset.idx), e.target.value); });
+  });
+  document.querySelectorAll('.item-size-price-input').forEach(el => {
+    el.addEventListener('input', (e) => { updateItemSizePrice(el.dataset.id, el.dataset.preset, e.target.value); });
+    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
+  });
+  document.querySelectorAll('.void-reason-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateVoidReason(parseInt(el.dataset.idx), e.target.value); });
+  });
+  document.querySelectorAll('.item-mod-pills').forEach(c => makePillSortable(c, '.item-mod-pill', '.item-mod-pill', commitItemModifierOrder));
+  document.querySelectorAll('.item-size-pills').forEach(c => makePillSortable(c, '.item-size-unit.on', '.item-size-pill', commitItemSizeOrder));
+  // Inline editing right on the print sample (Printers → dockets/receipts):
+  // Enter or tapping away saves; Escape cancels.
+  const sampleEditInput = document.getElementById('print-sample-edit-input');
+  if (sampleEditInput) {
+    sampleEditInput.focus();
+    sampleEditInput.select();
+    sampleEditInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sampleEditInput.blur();
+      if (e.key === 'Escape') { state.printEdit = null; render(); }
+    });
+    sampleEditInput.addEventListener('blur', () => {
+      const f = sampleEditInput.dataset.field;
+      if (state.printEdit !== f) return;
+      state.printEdit = null;
+      if (f === 'docketHeader') setDocketOpt('headerText', sampleEditInput.value.trim());
+      else if (f === 'docketFooter') setDocketOpt('footerText', sampleEditInput.value.trim());
+      else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
+    });
+  }
+  const seatPrefixInput = document.getElementById('seat-prefix-input');
+  if (seatPrefixInput) seatPrefixInput.addEventListener('change', (e) => { saveTicketSetting({ seatPrefix: e.target.value.trim() }); });
+  const sharedSeatInput = document.getElementById('shared-seat-input');
+  if (sharedSeatInput) sharedSeatInput.addEventListener('change', (e) => { saveTicketSetting({ sharedSeatLabel: e.target.value.trim() || 'All' }); });
+  const subcategoryParentInput = document.getElementById('subcategory-parent-input');
+  if (subcategoryParentInput) subcategoryParentInput.addEventListener('change', (e) => { state.subcategoryModal.categoryId = e.target.value; });
+  const subcategoryNameInput = document.getElementById('subcategory-name-input');
+  if (subcategoryNameInput) subcategoryNameInput.addEventListener('input', (e) => { state.subcategoryModal.name = e.target.value; });
+  const modifierGroupNameInput = document.getElementById('modifier-group-name-input');
+  if (modifierGroupNameInput) modifierGroupNameInput.addEventListener('input', (e) => { state.modifierGroupModal.name = e.target.value; });
+  document.querySelectorAll('.mod-option-label-input').forEach(el => {
+    el.addEventListener('input', (e) => { state.modifierGroupModal.options[parseInt(el.dataset.oidx)].label = e.target.value; });
+  });
+  document.querySelectorAll('.mod-option-price-input').forEach(el => {
+    el.addEventListener('input', (e) => { state.modifierGroupModal.options[parseInt(el.dataset.oidx)].priceDelta = e.target.value; });
+  });
+
+  const reservationNameInput = document.getElementById('reservation-name-input');
+  if (reservationNameInput) reservationNameInput.addEventListener('input', (e) => { state.reservationModal.name = e.target.value; });
+  const reservationPhoneInput = document.getElementById('reservation-phone-input');
+  if (reservationPhoneInput) reservationPhoneInput.addEventListener('input', (e) => { state.reservationModal.phone = e.target.value; });
+  const reservationPartyInput = document.getElementById('reservation-party-input');
+  if (reservationPartyInput) reservationPartyInput.addEventListener('input', (e) => { state.reservationModal.partySize = parseInt(e.target.value) || 1; });
+  const reservationTimeInput = document.getElementById('reservation-time-input');
+  if (reservationTimeInput) reservationTimeInput.addEventListener('input', (e) => { state.reservationModal.time = e.target.value; });
+  const reservationTableInput = document.getElementById('reservation-table-input');
+  if (reservationTableInput) reservationTableInput.addEventListener('change', (e) => { state.reservationModal.tableId = e.target.value; });
+  const reservationNotesInput = document.getElementById('reservation-notes-input');
+  if (reservationNotesInput) reservationNotesInput.addEventListener('input', (e) => { state.reservationModal.notes = e.target.value; });
+
+  const customerNameInput = document.getElementById('customer-name-input');
+  if (customerNameInput) customerNameInput.addEventListener('input', (e) => { state.customerModal.name = e.target.value; });
+  const customerPhoneInput = document.getElementById('customer-phone-input');
+  if (customerPhoneInput) customerPhoneInput.addEventListener('input', (e) => { state.customerModal.phone = e.target.value; });
+  const customerEmailInput = document.getElementById('customer-email-input');
+  if (customerEmailInput) customerEmailInput.addEventListener('input', (e) => { state.customerModal.email = e.target.value; });
+  const customerSearchInput = document.getElementById('customer-search-input');
+  if (customerSearchInput) customerSearchInput.addEventListener('input', (e) => {
+    searchCustomers(e.target.value);
+    requestAnimationFrame(() => {
+      const el = document.getElementById('customer-search-input');
+      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+    });
+  });
+
+  const expenseDateInput = document.getElementById('expense-date-input');
+  if (expenseDateInput) expenseDateInput.addEventListener('input', (e) => { state.expenseForm.date = e.target.value; });
+  const expenseCategoryInput = document.getElementById('expense-category-input');
+  if (expenseCategoryInput) expenseCategoryInput.addEventListener('input', (e) => { state.expenseForm.category = e.target.value; });
+  const expenseAmountInput = document.getElementById('expense-amount-input');
+  if (expenseAmountInput) expenseAmountInput.addEventListener('input', (e) => { state.expenseForm.amount = e.target.value; });
+  const expenseNoteInput = document.getElementById('expense-note-input');
+  if (expenseNoteInput) expenseNoteInput.addEventListener('input', (e) => { state.expenseForm.note = e.target.value; });
+
+  const adjustStockChangeInput = document.getElementById('adjust-stock-change-input');
+  if (adjustStockChangeInput) adjustStockChangeInput.addEventListener('input', (e) => { state.adjustStockModal.change = e.target.value; });
+  const adjustStockReasonInput = document.getElementById('adjust-stock-reason-input');
+  if (adjustStockReasonInput) adjustStockReasonInput.addEventListener('input', (e) => { state.adjustStockModal.reason = e.target.value; });
+
+  const printerStationNameInput = document.getElementById('printer-station-name-input');
+  if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
+  // Keep typed printer addresses in state so a background re-render can never
+  // wipe them mid-keystroke.
+  document.querySelectorAll('.ps-ip-input').forEach(el => {
+    el.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.ips[parseInt(e.target.dataset.idx)] = e.target.value; });
+  });
+  const printerStationBackupInput = document.getElementById('printer-station-backup-input');
+  if (printerStationBackupInput) printerStationBackupInput.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.backupIp = e.target.value; });
+
+  const happyHourNameInput = document.getElementById('happy-hour-name-input');
+  if (happyHourNameInput) happyHourNameInput.addEventListener('input', (e) => { state.happyHourModal.name = e.target.value; });
+  const happyHourStartInput = document.getElementById('happy-hour-start-input');
+  if (happyHourStartInput) happyHourStartInput.addEventListener('input', (e) => { state.happyHourModal.startTime = e.target.value; });
+  const happyHourEndInput = document.getElementById('happy-hour-end-input');
+  if (happyHourEndInput) happyHourEndInput.addEventListener('input', (e) => { state.happyHourModal.endTime = e.target.value; });
+  const happyHourDiscountInput = document.getElementById('happy-hour-discount-input');
+  if (happyHourDiscountInput) happyHourDiscountInput.addEventListener('input', (e) => { state.happyHourModal.discountPercent = parseFloat(e.target.value) || 0; });
+
+  const giftCardCodeInput = document.getElementById('gift-card-code-input');
+  if (giftCardCodeInput) giftCardCodeInput.addEventListener('input', (e) => { state.giftCardModal.code = e.target.value; });
+  const giftCardValueInput = document.getElementById('gift-card-value-input');
+  if (giftCardValueInput) giftCardValueInput.addEventListener('input', (e) => { state.giftCardModal.initialValue = e.target.value; });
+  const voucherCodeInput = document.getElementById('voucher-code-input');
+  if (voucherCodeInput) voucherCodeInput.addEventListener('input', (e) => { state.voucherModal.code = e.target.value; });
+  const voucherValueInput = document.getElementById('voucher-value-input');
+  if (voucherValueInput) voucherValueInput.addEventListener('input', (e) => { state.voucherModal.value = e.target.value; });
+
+  const checkoutGiftcardInput = document.getElementById('checkout-giftcard-input');
+  if (checkoutGiftcardInput) checkoutGiftcardInput.addEventListener('input', (e) => { state.checkoutGiftCardCode = e.target.value; });
+  const checkoutVoucherInput = document.getElementById('checkout-voucher-input');
+  if (checkoutVoucherInput) checkoutVoucherInput.addEventListener('input', (e) => { state.checkoutVoucherCode = e.target.value; });
+
+  const quickNoteInput = document.getElementById('quick-note-input');
+  if (quickNoteInput) quickNoteInput.addEventListener('input', (e) => { state.quickNote = e.target.value; refreshPaneTick(); });
+
+  document.querySelectorAll('.admin-floor-marker').forEach(el => {
+    // A touch tap emits compat mouse events ~after touchend; ignore them so a
+    // tap-to-select doesn't also fire the mouse path and toggle right back off.
+    el.addEventListener('mousedown', (e) => { if (Date.now() - _floorTouchAt < 700) return; startFloorDrag(e, el.dataset.id); });
+    el.addEventListener('touchstart', (e) => { _floorTouchAt = Date.now(); startFloorDrag(e, el.dataset.id); }, { passive: false });
+    el.addEventListener('touchend', () => { _floorTouchAt = Date.now(); }, { passive: true });
+  });
+  document.querySelectorAll('.rotate-handle').forEach(el => {
+    el.addEventListener('mousedown', (e) => { e.stopPropagation(); startRotateDrag(e, el.dataset.id); });
+    el.addEventListener('touchstart', (e) => { e.stopPropagation(); startRotateDrag(e, el.dataset.id); }, { passive: false });
+  });
+  document.querySelectorAll('.resize-handle').forEach(el => {
+    el.addEventListener('mousedown', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); });
+    el.addEventListener('touchstart', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); }, { passive: false });
+  });
+
+  // HOLD an account tile to pin/unpin its icon on the docket head row. A short
+  // press still runs the tile's action; the hold suppresses that one tap.
+  document.querySelectorAll('.acct-tile[data-pinkey]').forEach(el => {
+    const key = el.dataset.pinkey;
+    let timer = null, sx = 0, sy = 0;
+    const start = (e) => { sx = e.clientX; sy = e.clientY; timer = setTimeout(() => { timer = null; _suppressLineTap = true; toggleDocketPin(key); }, 400); };
+    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    // Only a real drag cancels the hold — a small finger jitter must not.
+    const move = (e) => { if (timer && (Math.abs(e.clientX - sx) > 12 || Math.abs(e.clientY - sy) > 12)) cancel(); };
+    el.addEventListener('pointerdown', start);
+    el.addEventListener('pointerup', cancel);
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointercancel', cancel);
+  });
+
+  document.querySelectorAll('[data-stop]').forEach(el => el.addEventListener('click', e => e.stopPropagation()));
+  positionIconPopover();
+}
+
+// One shared handler for every [data-act] tap. bindEvents wires it per
+// element on full renders; the document-level fallback below catches taps
+// on elements born from partial innerHTML refreshes (menu search results,
+// admin search rows, item-list refreshes) that were never re-bound —
+// those tiles used to be DEAF until the next full render.
+function handleActClick(el, e) {
       const act = el.dataset.act;
       // The account panel needs no Close: tapping anything that isn't one of
       // its own tiles drops it and the tap does its normal job — BUT while one
@@ -25351,895 +26247,11 @@ function bindEvents() {
       else if (act === 'remove-recipe-ingredient') { removeRecipeIngredient(parseInt(el.dataset.idx)); }
       else if (act === 'toggle-recipe-docket') { toggleRecipeDocket(parseInt(el.dataset.idx)); }
       else if (act === 'save-recipe') { saveRecipe(); }
-    });
-  });
-  const searchInput = document.getElementById('search-input');
-  if (searchInput) {
-    searchInput.addEventListener('input', (e) => {
-      state.search = e.target.value;
-      // Refresh only the results container, not the whole panel — keeps the
-      // search input (and the mobile keyboard) alive on every keystroke.
-      // DEBOUNCED: the grid rebuild + tile measuring is the expensive part on
-      // cheap tablets, so it waits for a typing pause instead of every key.
-      clearTimeout(window._menuSearchTimer);
-      window._menuSearchTimer = setTimeout(() => {
-        const body = document.querySelector('.menu-scroll');
-        if (body) { body.innerHTML = renderMenuScrollBody(); fitTileNames(); placeTileCounts(); }
-        else render();
-      }, 120);
-    });
-  }
-  const exportFromInput = document.getElementById('export-from-input');
-  if (exportFromInput) exportFromInput.addEventListener('change', (e) => { state.analyticsFrom = e.target.value; render(); });
-  const exportToInput = document.getElementById('export-to-input');
-  if (exportToInput) exportToInput.addEventListener('change', (e) => { state.analyticsTo = e.target.value; render(); });
-  const histTableFilter = document.getElementById('hist-table-filter');
-  if (histTableFilter) histTableFilter.addEventListener('input', (e) => { state.histTableFilter = e.target.value; const rows = document.querySelector('.hist-summary'); if (rows) { const sel = histTableFilter.selectionStart; render(); const el = document.getElementById('hist-table-filter'); if (el) { el.focus(); try { el.setSelectionRange(sel, sel); } catch (_) {} } } });
-  const adminSearchInput = document.getElementById('admin-search-input');
-  if (adminSearchInput) {
-    adminSearchInput.addEventListener('input', (e) => {
-      state.adminSearch = e.target.value;
-      // Refresh only the results list, not the input — keeps the mobile
-      // keyboard up instead of tearing it down on every keystroke. Debounced
-      // so fast typing costs one rebuild, not one per key.
-      clearTimeout(window._adminSearchTimer);
-      window._adminSearchTimer = setTimeout(() => {
-        const r = document.getElementById('admin-search-results');
-        if (r) { r.innerHTML = state.adminSearch.trim() ? renderAdminSearchResults() : ''; const router = document.getElementById('admin-router'); if (router) router.hidden = !!state.adminSearch.trim(); }
-        else render();
-      }, 120);
-    });
-  }
-  const inventorySearchInput = document.getElementById('inventory-search');
-  if (inventorySearchInput) inventorySearchInput.addEventListener('input', (e) => {
-    state.inventorySearch = e.target.value;
-    const list = document.getElementById('inventory-list');
-    if (list) list.innerHTML = renderInventoryRows(); else render();
-  });
-  const adjustInventoryChangeInput = document.getElementById('adjust-inventory-change');
-  if (adjustInventoryChangeInput) adjustInventoryChangeInput.addEventListener('input', (e) => { state.adjustInventoryModal.change = e.target.value; });
-  const adjustInventoryReasonInput = document.getElementById('adjust-inventory-reason');
-  if (adjustInventoryReasonInput) adjustInventoryReasonInput.addEventListener('input', (e) => { state.adjustInventoryModal.reason = e.target.value; });
-  const inventoryItemNameInput = document.getElementById('inventory-item-name');
-  if (inventoryItemNameInput) inventoryItemNameInput.addEventListener('input', (e) => { state.inventoryItemModal.name = e.target.value; });
-  const inventoryItemCategoryInput = document.getElementById('inventory-item-category');
-  if (inventoryItemCategoryInput) inventoryItemCategoryInput.addEventListener('input', (e) => { state.inventoryItemModal.category = e.target.value; });
-  const inventoryItemSkuInput = document.getElementById('inventory-item-sku');
-  if (inventoryItemSkuInput) inventoryItemSkuInput.addEventListener('input', (e) => { state.inventoryItemModal.sku = e.target.value; });
-  const inventoryItemUnitInput = document.getElementById('inventory-item-unit');
-  if (inventoryItemUnitInput) inventoryItemUnitInput.addEventListener('input', (e) => { state.inventoryItemModal.unit = e.target.value; });
-  const inventoryItemCostInput = document.getElementById('inventory-item-cost');
-  if (inventoryItemCostInput) inventoryItemCostInput.addEventListener('input', (e) => { state.inventoryItemModal.costPerUnit = parseFloat(e.target.value) || 0; });
-  const inventoryItemMinInput = document.getElementById('inventory-item-min');
-  if (inventoryItemMinInput) inventoryItemMinInput.addEventListener('input', (e) => { state.inventoryItemModal.minStock = parseInt(e.target.value) || 10; });
-  const inventoryItemMaxInput = document.getElementById('inventory-item-max');
-  if (inventoryItemMaxInput) inventoryItemMaxInput.addEventListener('input', (e) => { state.inventoryItemModal.maxStock = parseInt(e.target.value) || 50; });
-  const inventoryItemSupplierSelect = document.getElementById('inventory-item-supplier');
-  if (inventoryItemSupplierSelect) inventoryItemSupplierSelect.addEventListener('change', (e) => { state.inventoryItemModal.supplierId = e.target.value || null; });
-  const supplierNameInput = document.getElementById('supplier-name');
-  if (supplierNameInput) supplierNameInput.addEventListener('input', (e) => { state.supplierModal.name = e.target.value; });
-  const supplierContactInput = document.getElementById('supplier-contact');
-  if (supplierContactInput) supplierContactInput.addEventListener('input', (e) => { state.supplierModal.contact = e.target.value; });
-  const supplierPhoneInput = document.getElementById('supplier-phone');
-  if (supplierPhoneInput) supplierPhoneInput.addEventListener('input', (e) => { state.supplierModal.phone = e.target.value; });
-  const supplierAddressInput = document.getElementById('supplier-address');
-  if (supplierAddressInput) supplierAddressInput.addEventListener('input', (e) => { state.supplierModal.address = e.target.value; });
-  const supplierTermsInput = document.getElementById('supplier-terms');
-  if (supplierTermsInput) supplierTermsInput.addEventListener('input', (e) => { state.supplierModal.paymentTerms = e.target.value; });
-
-  document.querySelectorAll('[data-recipe-item]').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const idx = parseInt(el.dataset.idx);
-      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
-        const r = state.recipeEditor.recipes[idx];
-        r.inventoryItemId = e.target.value;
-        const inv = (state.inventoryItems || []).find(i => i.id === e.target.value);
-        r.label = inv ? inv.name : '';
-        if (!e.target.value) r.docket = false;
-        loadRecipeCosts(state.recipeEditor.menuItemId);
-        render();
-      }
-    });
-  });
-  document.querySelectorAll('[data-recipe-qty]').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const idx = parseInt(el.dataset.idx);
-      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
-        state.recipeEditor.recipes[idx].quantity = parseFloat(e.target.value) || 0;
-        loadRecipeCosts(state.recipeEditor.menuItemId);
-      }
-    });
-  });
-  document.querySelectorAll('[data-recipe-unit]').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const idx = parseInt(el.dataset.idx);
-      if (state.recipeEditor && state.recipeEditor.recipes[idx]) {
-        state.recipeEditor.recipes[idx].unit = e.target.value;
-      }
-    });
-  });
-  const custName = document.getElementById('customer-name');
-  if (custName) custName.addEventListener('input', (e) => { state.customerName = e.target.value; });
-  const allergyCustomInput = document.getElementById('allergy-custom-input');
-  if (allergyCustomInput) allergyCustomInput.addEventListener('input', (e) => { state.allergyModal.customAllergy = e.target.value; refreshPaneTick(); });
-  const allergyNotesInput = document.getElementById('allergy-notes-input');
-  if (allergyNotesInput) allergyNotesInput.addEventListener('input', (e) => { state.allergyModal.notes = e.target.value; });
-  const vipTypeInput = document.getElementById('vip-type-input');
-  if (vipTypeInput) vipTypeInput.addEventListener('input', (e) => { state.vipModal.type = e.target.value; refreshPaneTick(); });
-  const customNoteTextInput = document.getElementById('custom-note-text-input');
-  if (customNoteTextInput) customNoteTextInput.addEventListener('input', (e) => { state.customNoteDraft.text = e.target.value; refreshPaneTick(); });
-  document.querySelectorAll('.size-label-input').forEach(el => {
-    el.addEventListener('input', (e) => { updateSizeRowField(el.dataset.id, parseInt(el.dataset.idx), 'label', e.target.value); });
-    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
-  });
-  document.querySelectorAll('.size-price-input').forEach(el => {
-    el.addEventListener('input', (e) => { updateSizeRowField(el.dataset.id, parseInt(el.dataset.idx), 'price', e.target.value); });
-    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
-  });
-  const voidNoteInput = document.getElementById('void-note-input');
-  if (voidNoteInput) voidNoteInput.addEventListener('input', (e) => { state.voidModal.note = e.target.value; });
-  const voidManagerPinInput = document.getElementById('void-manager-pin-input');
-  if (voidManagerPinInput) {
-    voidManagerPinInput.addEventListener('input', (e) => {
-      state.voidModal.managerPin = e.target.value;
-      state.voidModal.pinError = '';
-      render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('void-manager-pin-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
-  const refundAmountInput = document.getElementById('refund-amount-input');
-  if (refundAmountInput) {
-    refundAmountInput.addEventListener('input', (e) => {
-      state.refundModal.amount = e.target.value;
-      render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('refund-amount-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
-  const registerCashCountedInput = document.getElementById('register-cash-counted-input');
-  if (registerCashCountedInput) {
-    registerCashCountedInput.addEventListener('input', (e) => {
-      state.registerCashCounted = e.target.value;
-      render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('register-cash-counted-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
-  const refundReasonInput = document.getElementById('refund-reason-input');
-  if (refundReasonInput) refundReasonInput.addEventListener('input', (e) => { state.refundModal.reason = e.target.value; });
-  const motdInput = document.getElementById('motd-input');
-  if (motdInput && state.motdModal) motdInput.addEventListener('input', (e) => { state.motdModal.text = e.target.value; });
-  const addTipInput = document.getElementById('add-tip-input');
-  if (addTipInput) {
-    addTipInput.addEventListener('input', (e) => {
-      state.addTipModal.amount = e.target.value;
-      render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('add-tip-input');
-        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
-      });
-    });
-  }
-  const discountPresetNameInput = document.getElementById('discount-preset-name-input');
-  if (discountPresetNameInput) discountPresetNameInput.addEventListener('input', (e) => { state.discountPresetModal.name = e.target.value; });
-  const discountPresetValueInput = document.getElementById('discount-preset-value-input');
-  if (discountPresetValueInput) discountPresetValueInput.addEventListener('input', (e) => { state.discountPresetModal.value = e.target.value; });
-  const cashInput = document.getElementById('cash-input');
-  if (cashInput) {
-    cashInput.addEventListener('input', (e) => {
-      state.cashGiven = e.target.value; render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('cash-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
-  const tipCustomInput = document.getElementById('tip-custom-input');
-  if (tipCustomInput) {
-    tipCustomInput.addEventListener('input', (e) => {
-      state.tipCustomAmount = e.target.value; render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('tip-custom-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
-  document.querySelectorAll('.split-tender-amount-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateSplitTenderAmount(parseInt(el.dataset.idx), e.target.value); });
-  });
-  const staffNameInput = document.getElementById('staff-name-input');
-  if (staffNameInput) staffNameInput.addEventListener('input', (e) => { state.staffModal.name = e.target.value; });
-  const staffPinInput = document.getElementById('staff-pin-input');
-  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 4); });
-  const staffRoleInput = document.getElementById('staff-role-input');
-  if (staffRoleInput) staffRoleInput.addEventListener('change', (e) => { state.staffModal.role = e.target.value; });
-  const menuNameInput = document.getElementById('menu-name-input');
-  if (menuNameInput) menuNameInput.addEventListener('input', (e) => { state.menuModal.name = e.target.value; });
-  const menuCategoryInput = document.getElementById('menu-category-input');
-  if (menuCategoryInput) menuCategoryInput.addEventListener('change', (e) => { state.menuModal.category = e.target.value; state.menuModal.subcategoryId = ''; render(); });
-  const menuSubcategoryInput = document.getElementById('menu-subcategory-input');
-  if (menuSubcategoryInput) menuSubcategoryInput.addEventListener('change', (e) => { state.menuModal.subcategoryId = e.target.value; });
-  const menuSalesCategoryInput = document.getElementById('menu-sales-category-input');
-  if (menuSalesCategoryInput) menuSalesCategoryInput.addEventListener('change', (e) => { state.menuModal.salesCategoryId = e.target.value; });
-  const menuImageInput = document.getElementById('menu-image-input');
-  if (menuImageInput) menuImageInput.addEventListener('input', (e) => { state.menuModal.image = e.target.value; });
-  const menuCourseInput = document.getElementById('menu-course-input');
-  if (menuCourseInput) menuCourseInput.addEventListener('change', (e) => { state.menuModal.defaultCourse = e.target.value; });
-  document.querySelectorAll('.menu-modifier-check').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const gid = el.dataset.group;
-      if (e.target.checked) {
-        if (!state.menuModal.modifierGroupIds.includes(gid)) state.menuModal.modifierGroupIds.push(gid);
-      } else {
-        state.menuModal.modifierGroupIds = state.menuModal.modifierGroupIds.filter(id => id !== gid);
-      }
-    });
-  });
-  const selectAllMenuItems = document.getElementById('select-all-menu-items');
-  if (selectAllMenuItems) selectAllMenuItems.addEventListener('change', (e) => { toggleSelectAllMenuItems(e.target.checked); });
-  const selectAllCategories = document.getElementById('select-all-categories');
-  if (selectAllCategories) selectAllCategories.addEventListener('change', () => { toggleSelectAllCategories(); });
-  const selectAllModifiers = document.getElementById('select-all-modifiers');
-  if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
-  const selectAllCombos = document.getElementById('select-all-combos');
-  if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
-  const selectAllVips = document.getElementById('select-all-vips');
-  if (selectAllVips) selectAllVips.addEventListener('change', () => {
-    const all = (state.selectedVipIdxs || []).length === state.vipPresets.length;
-    state.selectedVipIdxs = all ? [] : state.vipPresets.map((_, i) => i);
-    render();
-  });
-  const selectAllNoteTypes = document.getElementById('select-all-note-types');
-  if (selectAllNoteTypes) selectAllNoteTypes.addEventListener('change', () => {
-    const hidden = state.settings.hiddenNoteTypes || [];
-    const ids = [...(!hidden.includes('vip') ? ['vip'] : []), ...(!hidden.includes('allergy') ? ['allergy'] : []), ...state.noteCategories.map(c => c.id)];
-    const all = ids.every(id => (state.selectedNoteTypeIds || []).includes(id));
-    state.selectedNoteTypeIds = all ? [] : ids;
-    render();
-  });
-  const selectAllNotePresets = document.getElementById('select-all-note-presets');
-  if (selectAllNotePresets) selectAllNotePresets.addEventListener('change', () => {
-    const cat = state.noteCategories.find(c => c.id === state.notesAdminSection);
-    const n = ((cat && cat.presets) || []).length;
-    const all = (state.selectedNotePresetIdxs || []).length === n;
-    state.selectedNotePresetIdxs = all ? [] : Array.from({ length: n }, (_, i) => i);
-    render();
-  });
-  const selectAllStaff = document.getElementById('select-all-staff');
-  if (selectAllStaff) selectAllStaff.addEventListener('change', () => { const all = state.staffList.every(s => state.selectedStaffIds.includes(s.id)); state.selectedStaffIds = all ? [] : state.staffList.map(s => s.id); render(); });
-  const selectAllSalesCats = document.getElementById('select-all-sales-categories');
-  if (selectAllSalesCats) selectAllSalesCats.addEventListener('change', () => toggleSelectAllSalesCategories());
-  const selectAllSizes = document.getElementById('select-all-sizes');
-  if (selectAllSizes) selectAllSizes.addEventListener('change', () => toggleSelectAllSizes());
-  wireListSelect(); // click-to-select for all .sel-head admin rows (no checkboxes)
-  document.querySelectorAll('.modifier-opt-label').forEach(el => {
-    el.addEventListener('change', () => updateModifierOptionInline(el.dataset.id, parseInt(el.dataset.oidx), 'label', el.value));
-  });
-  document.querySelectorAll('.modifier-opt-price').forEach(el => {
-    el.addEventListener('change', () => updateModifierOptionInline(el.dataset.id, parseInt(el.dataset.oidx), 'priceDelta', el.value));
-  });
-  document.querySelectorAll('.modifier-min').forEach(el => {
-    el.addEventListener('change', () => saveModifierGroupInline(el.dataset.id, { min: Math.max(0, parseInt(el.value) || 0) }));
-  });
-  document.querySelectorAll('.modifier-max').forEach(el => {
-    el.addEventListener('change', () => saveModifierGroupInline(el.dataset.id, { max: Math.max(1, parseInt(el.value) || 1) }));
-  });
-  const menuAdminCategoryFilter = document.getElementById('menu-admin-category-filter');
-  if (menuAdminCategoryFilter) menuAdminCategoryFilter.addEventListener('change', (e) => { state.menuAdminCategoryFilter = e.target.value; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; render(); });
-  const menuAdminSubcategoryFilter = document.getElementById('menu-admin-subcategory-filter');
-  if (menuAdminSubcategoryFilter) menuAdminSubcategoryFilter.addEventListener('change', (e) => { state.menuAdminSubcategoryFilter = e.target.value; state.menuAdminSubsubFilter = ''; render(); });
-  const menuAdminSubsubFilter = document.getElementById('menu-admin-subsub-filter');
-  if (menuAdminSubsubFilter) menuAdminSubsubFilter.addEventListener('change', (e) => { state.menuAdminSubsubFilter = e.target.value; render(); });
-  const menuAdminSearchInput = document.getElementById('menu-admin-search-input');
-  if (menuAdminSearchInput) {
-    menuAdminSearchInput.addEventListener('input', (e) => {
-      state.menuAdminSearch = e.target.value;
-      // Refresh only the rows, not the input — keeps the mobile keyboard up.
-      // Debounced so fast typing costs one rebuild, not one per key.
-      clearTimeout(window._menuAdminSearchTimer);
-      window._menuAdminSearchTimer = setTimeout(() => { refreshMenuAdminList(); }, 120);
-    });
-  }
-  const bulkCategoryInput = document.getElementById('bulk-category-input');
-  if (bulkCategoryInput) bulkCategoryInput.addEventListener('change', (e) => { state.bulkEditModal.category = e.target.value; });
-  const bulkPriceValueInput = document.getElementById('bulk-price-value-input');
-  if (bulkPriceValueInput) bulkPriceValueInput.addEventListener('input', (e) => { state.bulkEditModal.priceValue = e.target.value; });
-  const bulkCourseInput = document.getElementById('bulk-course-input');
-  if (bulkCourseInput) bulkCourseInput.addEventListener('change', (e) => { state.bulkEditModal.defaultCourse = e.target.value; });
-  const bulkSalesCategoryInput = document.getElementById('bulk-sales-category-input');
-  if (bulkSalesCategoryInput) bulkSalesCategoryInput.addEventListener('change', (e) => { state.bulkEditModal.salesCategoryId = e.target.value; });
-  const bulkStockCountInput = document.getElementById('bulk-stockcount-input');
-  if (bulkStockCountInput) bulkStockCountInput.addEventListener('input', (e) => { state.bulkEditModal.stockCount = e.target.value; });
-  const bulkLowStockInput = document.getElementById('bulk-lowstock-input');
-  if (bulkLowStockInput) bulkLowStockInput.addEventListener('input', (e) => { state.bulkEditModal.lowStockThreshold = e.target.value; });
-  const menuPriceInput = document.getElementById('menu-price-input');
-  if (menuPriceInput) menuPriceInput.addEventListener('input', (e) => { state.menuModal.price = e.target.value; });
-  const menuStockCountInput = document.getElementById('menu-stockcount-input');
-  if (menuStockCountInput) menuStockCountInput.addEventListener('input', (e) => { state.menuModal.stockCount = parseInt(e.target.value) || 0; });
-  const menuLowStockInput = document.getElementById('menu-lowstock-input');
-  if (menuLowStockInput) menuLowStockInput.addEventListener('input', (e) => { state.menuModal.lowStockThreshold = parseInt(e.target.value) || 0; });
-  const menuSequenceInput = document.getElementById('menu-sequence-input');
-  if (menuSequenceInput) menuSequenceInput.addEventListener('input', (e) => { state.menuModal.sequence = e.target.value === '' ? null : parseInt(e.target.value); });
-  const categoryIconInput = document.getElementById('category-icon-input');
-  if (categoryIconInput) categoryIconInput.addEventListener('input', (e) => { state.categoryModal.icon = e.target.value; });
-  const subcategoryIconInput = document.getElementById('subcategory-icon-input');
-  if (subcategoryIconInput) subcategoryIconInput.addEventListener('input', (e) => { state.subcategoryModal.icon = e.target.value; });
-  document.querySelectorAll('.combo-group-label').forEach(el => {
-    el.addEventListener('input', (e) => { state.comboModal.groups[parseInt(el.dataset.gidx)].label = e.target.value; });
-    el.addEventListener('change', () => autosaveCombo());
-  });
-  document.querySelectorAll('.combo-group-course').forEach(el => {
-    el.addEventListener('change', (e) => { setComboGroupCourse(parseInt(el.dataset.gidx), e.target.value); autosaveCombo(); });
-  });
-  document.querySelectorAll('.combo-add-item-select').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const itemId = e.target.value;
-      if (itemId) addComboItem(parseInt(el.dataset.gidx), itemId);
-    });
-  });
-  document.querySelectorAll('.combo-item-search').forEach(el => {
-    el.addEventListener('input', (e) => {
-      const gi = parseInt(el.dataset.gidx);
-      state.comboModal.groups[gi]._search = e.target.value;
-      const res = document.getElementById('combo-search-results-' + gi);
-      if (res) { res.innerHTML = renderComboSearchHits(gi); res.style.marginTop = e.target.value.trim() ? '8px' : '0'; }
-      else render();
-    });
-  });
-  document.querySelectorAll('.combo-category-select').forEach(el => {
-    el.addEventListener('change', (e) => { if (state.comboModal) state.comboModal.category = e.target.value; autosaveCombo(); render(); });
-  });
-  // Typed min/max picks per choice; each keeps the other consistent on blur.
-  document.querySelectorAll('.combo-group-min').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const g = state.comboModal.groups[parseInt(el.dataset.gidx)];
-      g.min = Math.max(0, parseInt(e.target.value) || 0);
-      if ((g.max || 1) < Math.max(1, g.min)) g.max = Math.max(1, g.min);
-      render();
-      autosaveCombo();
-    });
-  });
-  document.querySelectorAll('.combo-group-max').forEach(el => {
-    el.addEventListener('change', (e) => {
-      const g = state.comboModal.groups[parseInt(el.dataset.gidx)];
-      g.max = Math.max(1, parseInt(e.target.value) || 1);
-      if ((g.min || 0) > g.max) g.min = g.max;
-      render();
-      autosaveCombo();
-    });
-  });
-
-  document.querySelectorAll('.variant-label-input').forEach(el => {
-    el.addEventListener('input', (e) => { state.menuModal.variants[parseInt(el.dataset.vidx)].label = e.target.value; });
-  });
-  document.querySelectorAll('.variant-price-input').forEach(el => {
-    el.addEventListener('input', (e) => { state.menuModal.variants[parseInt(el.dataset.vidx)].price = e.target.value; });
-  });
-  const categoryNameInput = document.getElementById('category-name-input');
-  if (categoryNameInput) categoryNameInput.addEventListener('input', (e) => { state.categoryModal.name = e.target.value; });
-  document.querySelectorAll('.course-template-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameCourseTemplateInline(parseInt(el.dataset.idx), e.target.value); });
-  });
-  const floorPlanNameInput = document.getElementById('floorplan-name-input');
-  if (floorPlanNameInput) floorPlanNameInput.addEventListener('input', (e) => { state.floorPlanModal.name = e.target.value; });
-  const discountValueInput = document.getElementById('discount-value-input');
-  if (discountValueInput) discountValueInput.addEventListener('input', (e) => { state.discountModal.value = e.target.value; refreshPaneTick(); });
-  const discountReasonInput = document.getElementById('discount-reason-input');
-  if (discountReasonInput) discountReasonInput.addEventListener('input', (e) => { state.discountModal.reason = e.target.value; });
-  const floorplanSnapInput = document.getElementById('floorplan-snap-input');
-  if (floorplanSnapInput) floorplanSnapInput.addEventListener('change', (e) => { saveFloorPlanGrid(floorplanSnapInput.dataset.fp, { snapToGrid: e.target.checked }); });
-  // Click-to-place mode: the picked template ghosts under the cursor; each click drops one.
-  const placeSelect = document.getElementById('add-object-template-select');
-  if (placeSelect) placeSelect.addEventListener('change', (e) => { state.floorPlacing = e.target.value || null; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); });
-  if (state.floorPlacing) {
-    const canvas = document.getElementById('admin-floor-canvas');
-    const ghost = document.getElementById('floor-place-ghost');
-    if (canvas) {
-      if (ghost) {
-        canvas.addEventListener('mousemove', (e) => {
-          const rect = canvas.getBoundingClientRect();
-          ghost.style.left = (e.clientX - rect.left) + 'px';
-          ghost.style.top = (e.clientY - rect.top) + 'px';
-        });
-        canvas.addEventListener('mouseleave', () => { ghost.style.left = '-9999px'; });
-      }
-      canvas.addEventListener('click', (e) => {
-        const rect = canvas.getBoundingClientRect();
-        const xPct = ((e.clientX - rect.left) / rect.width) * 100;
-        const yPct = ((e.clientY - rect.top) / rect.height) * 100;
-        placeFloorItemAt(state.adminFloorPlanId, state.floorPlacing, xPct, yPct);
-      }, true);
-    }
-  } else {
-    // Not placing: drag a box on the empty canvas to marquee-select tables.
-    const adminCanvas = document.getElementById('admin-floor-canvas');
-    if (adminCanvas) {
-      adminCanvas.addEventListener('mousedown', startMarquee);
-      // Touch (and any) tap on the bare canvas deselects — mouse drags go through
-      // the marquee, but a plain tap on empty floor should clear the selection.
-      adminCanvas.addEventListener('click', (e) => { if (e.target === adminCanvas) deselectOnEmptyCanvas(); });
-    }
-  }
-  document.querySelectorAll('.allergy-preset-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateAllergyPreset(parseInt(el.dataset.idx), { name: e.target.value }); });
-  });
-  const selectAllAllergies = document.getElementById('select-all-allergies');
-  if (selectAllAllergies) selectAllAllergies.addEventListener('change', () => toggleSelectAllAllergies());
-  const popoverCustomIconInput = document.getElementById('icon-popover-custom-input');
-  if (popoverCustomIconInput) popoverCustomIconInput.addEventListener('change', (e) => { pickPopoverIcon(e.target.value.trim()); });
-  document.querySelectorAll('.tip-preset-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateTipPreset(parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.io-custom-input').forEach(el => {
-    el.addEventListener('input', (e) => {
-      const io = state.itemOptions; if (!io) return;
-      io.customText = io.customText || {};
-      io.customText[el.dataset.group] = e.target.value;
-    });
-  });
-  const editLineNoteInput = document.getElementById('edit-line-note-input');
-  if (editLineNoteInput) {
-    editLineNoteInput.addEventListener('change', (e) => { if (state.editLine) updateLineNote(state.editLine.idx, e.target.value); });
-  }
-  document.querySelectorAll('.allergy-subtype-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
-  });
-  document.querySelectorAll('.allergy-subtype-preset').forEach(el => {
-    el.addEventListener('change', () => { addAllergySubTypeValue(parseInt(el.dataset.idx), el.value); });
-  });
-  document.querySelectorAll('.menu-item-price-quick-edit').forEach(el => {
-    el.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.blur(); });
-  });
-  // Design size sliders: dragging previews live (body attrs + the mockup's
-  // own attrs, no full render); releasing saves for the device the mockup
-  // is showing.
-  document.querySelectorAll('.size-slider').forEach(el => {
-    el.addEventListener('input', (e) => {
-      const val = SIZE_STEPS[parseInt(e.target.value, 10)] || 'md';
-      const field = el.dataset.field;
-      const lab = el.parentElement.querySelector('.size-slider-val');
-      if (lab) lab.textContent = SIZE_LABELS[val];
-      state.theme = { ...state.theme, [field]: themeSizePatch(field, val) };
-      applyTheme();
-      const wrap = document.querySelector('.mk-wrap');
-      if (wrap) wrap.setAttribute(THEME_SIZE_ATTRS[field], val);
-    });
-    el.addEventListener('change', () => { render(); saveAppearance(); });
-  });
-  // Pointer-drag sortable for the admin reorder lists.
-  makeSortable('size-preset-row', reorderSizePresets, { canStart: () => !isListSorted('sizes') });
-  makeSortable('vip-preset-drag', reorderVipPresets);
-  makeSortable('void-reason-row', reorderVoidReasons);
-  makeSortable('allergy-preset-row', reorderAllergyPresets);
-  makeSortable('note-preset-drag', reorderNotePresets);
-  makeSortable('course-template-row', reorderCourseTemplates);
-  // The Design mockup IS the layout editor: drag a panel of the carbon copy
-  // sideways to rearrange the screen; drag the Categories rail UP to dock the
-  // menu bar on top (PC/tablet). A plain tap still jumps to the settings card.
-  makeSortable('mk-panel', (from, to, els) => {
-    const dev = state.mockDevice || 'pc';
-    if (dev === 'mobile') return;
-    if (['top', 'bottom'].includes((state.settings.railPositions || {})[dev])) {
-      // Rail is docked on an edge — only menu + docket are in the row.
-      const cur = panelOrderFor(dev);
-      const row = cur.filter(id => id !== 'catrail');
-      const [m] = row.splice(from, 1);
-      row.splice(to, 0, m);
-      row.splice(cur.indexOf('catrail'), 0, 'catrail');
-      savePanelOrders(dev, row);
-    } else reorderPanels(from, to);
-  }, { crossAxis: (from, cross, els) => {
-    const dev = state.mockDevice || 'pc';
-    if (els[from] && els[from].dataset.panel === 'catrail' && dev !== 'mobile') saveRailPosition(cross < 0 ? 'top' : 'bottom');
-    else render();
-  }, onDragMove: (from, dx, dy, els) => {
-    // Any panel drag: spread the panels apart and fill every landing area so
-    // the drop targets are obvious (body.mk-drag rules).
-    document.body.classList.add('mk-drag');
-    // Dragging the Categories rail vertically can dock it top or bottom —
-    // light the candidate edge up while the drag is live.
-    const dev = state.mockDevice || 'pc';
-    if (!els[from] || els[from].dataset.panel !== 'catrail' || dev === 'mobile') return;
-    if (!document.querySelector('.mk-dockzones')) {
-      const wrap = document.querySelector('.mk-wrap');
-      if (!wrap) return;
-      const ov = document.createElement('div');
-      ov.className = 'mk-dockzones';
-      ['top', 'bottom'].forEach(s => {
-        const z = document.createElement('div');
-        z.className = 'mk-dockzone ' + s;
-        z.dataset.side = s;
-        ov.appendChild(z);
-      });
-      wrap.appendChild(ov);
-    }
-    const cross = Math.abs(dy) > 40 && Math.abs(dy) > Math.abs(dx);
-    document.querySelectorAll('.mk-dockzone').forEach(z => z.classList.toggle('armed', cross && z.dataset.side === (dy < 0 ? 'top' : 'bottom')));
-  }, onDragEnd: () => {
-    document.body.classList.remove('mk-drag');
-    const ov = document.querySelector('.mk-dockzones');
-    if (ov) ov.remove();
-  } });
-  // Dashed edge zones show every place a dragged element can dock; the zone
-  // the drag is currently voting for lights up.
-  const showDockZones = (sides) => {
-    hideDockZones();
-    const wrap = document.querySelector('.mk-wrap');
-    if (!wrap) return;
-    const ov = document.createElement('div');
-    ov.className = 'mk-dockzones';
-    sides.forEach(s => {
-      const z = document.createElement('div');
-      z.className = 'mk-dockzone ' + s;
-      z.dataset.side = s;
-      ov.appendChild(z);
-    });
-    wrap.appendChild(ov);
-  };
-  const armDockZone = (side) => document.querySelectorAll('.mk-dockzone').forEach(z => z.classList.toggle('armed', z.dataset.side === side));
-  const hideDockZones = () => { const ov = document.querySelector('.mk-dockzones'); if (ov) ov.remove(); };
-  // Docked strips drag back out vertically: the docked menu bar (PC/tablet)
-  // drags toward the centre to return to the side; the phone chip row drags
-  // between top and bottom (thumb reach). A drag past the threshold swallows
-  // the tap-jump click.
-  const dockStrip = (el, dir, onCross, zoneSide) => {
-    if (!el) return;
-    el.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      const sy = e.clientY;
-      // The strip lives inside the scaled mockup: divide pointer deltas by the
-      // scale or the strip trails the pointer at ~half speed.
-      const vs = el.offsetWidth ? Math.max(0.05, el.getBoundingClientRect().width / el.offsetWidth) : 1;
-      if (zoneSide) showDockZones([zoneSide]);
-      const mv = (ev) => {
-        const dy = dir > 0 ? Math.max(0, ev.clientY - sy) : Math.min(0, ev.clientY - sy);
-        el.style.transform = dy ? `translateY(${dy / vs}px)` : '';
-        if (zoneSide) armDockZone(Math.abs(dy) > 34 ? zoneSide : null);
-      };
-      const done = (ev) => {
-        document.removeEventListener('pointermove', mv);
-        document.removeEventListener('pointerup', done);
-        document.removeEventListener('pointercancel', done);
-        el.style.transform = '';
-        hideDockZones();
-        if (dir > 0 ? ev.clientY - sy > 34 : sy - ev.clientY > 34) {
-          const kill = (ce) => { ce.stopPropagation(); ce.preventDefault(); };
-          document.addEventListener('click', kill, true);
-          setTimeout(() => document.removeEventListener('click', kill, true), 350);
-          onCross();
-        }
-      };
-      document.addEventListener('pointermove', mv);
-      document.addEventListener('pointerup', done);
-      document.addEventListener('pointercancel', done);
-    });
-  };
-  {
-    const dev = state.mockDevice || 'pc';
-    const railDockV = dev !== 'mobile' ? (state.settings.railPositions || {})[dev] : null;
-    // Docked rail returns to whichever side the panel order puts it on.
-    const ord = panelOrderFor(dev === 'tablet' ? 'tablet' : 'pc');
-    const railSideZone = ord.indexOf('catrail') <= ord.indexOf('menu') ? 'left' : 'right';
-    dockStrip(document.querySelector('.mk-toprail'), railDockV === 'bottom' ? -1 : 1, () => saveRailPosition('side'), railSideZone);
-    const mkMobRail = document.querySelector('.mk-mobrail');
-    if (mkMobRail) {
-      const atBottom = (state.settings.railPositions || {}).mobile === 'bottom';
-      dockStrip(mkMobRail, atBottom ? -1 : 1, () => saveRailPosition(atBottom ? 'top' : 'bottom'), atBottom ? 'top' : 'bottom');
-    }
-  }
-  // App bar: free drag — release direction picks the dock (top/bottom/left/
-  // right on PC & tablet, top/bottom on phone); the candidate zone lights up
-  // while dragging.
-  const mkAb = document.querySelector('.mk-appbar');
-  if (mkAb) mkAb.addEventListener('pointerdown', (e) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const sx = e.clientX, sy = e.clientY;
-    const dev = state.mockDevice || 'pc';
-    const vs = mkAb.offsetWidth ? Math.max(0.05, mkAb.getBoundingClientRect().width / mkAb.offsetWidth) : 1;
-    const candidate = (dx, dy) => {
-      if (Math.hypot(dx, dy) < 34) return null;
-      let pos = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? 'left' : 'right') : (dy < 0 ? 'top' : 'bottom');
-      if (dev === 'mobile' && (pos === 'left' || pos === 'right')) pos = dy < 0 ? 'top' : 'bottom';
-      return pos;
-    };
-    showDockZones(dev === 'mobile' ? ['top', 'bottom'] : ['top', 'bottom', 'left', 'right']);
-    let raf = 0, lx = sx, ly = sy;
-    const mv = (ev) => {
-      lx = ev.clientX; ly = ev.clientY;
-      if (raf) return;
-      raf = requestAnimationFrame(() => {
-        raf = 0;
-        mkAb.style.transform = `translate(${(lx - sx) / vs}px, ${(ly - sy) / vs}px)`;
-        mkAb.style.opacity = '.75';
-        armDockZone(candidate(lx - sx, ly - sy));
-      });
-    };
-    const done = (ev) => {
-      if (raf) cancelAnimationFrame(raf);
-      document.removeEventListener('pointermove', mv);
-      document.removeEventListener('pointerup', done);
-      document.removeEventListener('pointercancel', done);
-      mkAb.style.transform = '';
-      mkAb.style.opacity = '';
-      hideDockZones();
-      const pos = candidate(ev.clientX - sx, ev.clientY - sy);
-      if (!pos) return;
-      const kill = (ce) => { ce.stopPropagation(); ce.preventDefault(); };
-      document.addEventListener('click', kill, true);
-      setTimeout(() => document.removeEventListener('click', kill, true), 350);
-      saveAppBarPos(pos);
-    };
-    document.addEventListener('pointermove', mv);
-    document.addEventListener('pointerup', done);
-    document.addEventListener('pointercancel', done);
-  });
-  // `to` is the dragged row's FINAL index; the reorder fns remove the dragged
-  // entry then insert at the target's pre-removal index, so els[to] is the
-  // right target row whichever direction the drag went.
-  // Items rows arm their own drag + header wiring per-row (armMenuItemRows below),
-  // so a single expanded/collapsed row can be re-armed without a full rebuild.
-  makeSortable('sales-cat-row', (from, to, els) => reorderSalesCategories(els[from].dataset.id, els[to].dataset.id));
-  makeSortable('combo-row', (from, to, els) => reorderCombos(els[from].dataset.id, els[to].dataset.id), { canStart: () => !(state.comboModal && state.comboModal.mode === 'edit') });
-  makeSortable('modifier-row', (from, to, els) => reorderModifierGroups(els[from].dataset.id, els[to].dataset.id), { canStart: () => !isListSorted('modifiers') && !state.expandedModifierId });
-  makeSortable('discount-preset-row', (from, to, els) => reorderDiscountPresets(els[from].dataset.id, els[to].dataset.id));
-  makeSortable('tip-preset-row', reorderTipPresets);
-  // Order Notes: custom note TYPES reorder among themselves (built-ins pinned);
-  // a type only drags while collapsed so it never fights its content.
-  makeSortable('note-type-row', (from, to) => {
-    const cats = state.noteCategories.slice();
-    const [moved] = cats.splice(from, 1);
-    cats.splice(to, 0, moved);
-    saveNoteCategories(cats);
-  }, { canStart: (el) => state.notesOpenId !== el.dataset.typeid });
-  // Notes inside the open type reorder freely.
-  makeSortable('note-preset-drag', (from, to) => {
-    const catId = state.notesOpenId;
-    const cats = state.noteCategories.map(c => {
-      if (c.id !== catId) return c;
-      const presets = (c.presets || []).slice();
-      const [moved] = presets.splice(from, 1);
-      presets.splice(to, 0, moved);
-      return { ...c, presets };
-    });
-    saveNoteCategories(cats);
-  });
-  // Choices inside the set-menu editor: drag to set the on-screen and
-  // print sequence (saved with the set menu).
-  // Collapsed choices drag to reorder; an open choice stays put so dragging
-  // its item pills never fights the card drag.
-  makeSortable('combo-choice-card', (from, to) => {
-    if (!state.comboModal) return;
-    const gs = state.comboModal.groups;
-    const [moved] = gs.splice(from, 1);
-    gs.splice(to, 0, moved);
-    render();
-    autosaveCombo();
-  }, { canStart: (item) => !(state.comboModal && state.comboModal.groups[parseInt(item.dataset.gidx)] && state.comboModal.groups[parseInt(item.dataset.gidx)]._open) });
-  // Item pills inside each choice drag to set the serving/print sequence.
-  // One sortable per choice (per-group class) so pills can't cross choices.
-  if (state.comboModal) {
-    state.comboModal.groups.forEach((g, i) => makeSortable('combo-pill-g' + i, (from, to) => {
-      const ids = state.comboModal.groups[i].itemIds;
-      const [moved] = ids.splice(from, 1);
-      ids.splice(to, 0, moved);
-      render();
-      autosaveCombo();
-    }));
-  }
-  makeSortable('category-row', (from, to, els) => reorderCategories(els[from].dataset.id, els[to].dataset.id));
-  makeSortable('subcategory-row', (from, to, els) => reorderSubcategories(els[from].dataset.id, els[to].dataset.id));
-  document.querySelectorAll('.category-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameCategoryInline(el.dataset.id, e.target.value); });
-  });
-  document.querySelectorAll('.subcategory-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameSubcategoryInline(el.dataset.id, e.target.value); });
-  });
-  document.querySelectorAll('.sales-category-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameSalesCategoryInline(el.dataset.id, e.target.value); });
-  });
-  document.querySelectorAll('.staff-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameStaffInline(el.dataset.id, e.target.value); });
-  });
-  document.querySelectorAll('.menu-item-name-quick-input').forEach(el => {
-    el.addEventListener('change', (e) => { renameMenuItemInline(el.dataset.id, e.target.value); });
-  });
-  // Expandable menu item rows — per-row header + drag wiring. Re-armed one row
-  // at a time on expand/collapse, and wholesale after the search refresh.
-  armMenuItemRows();
-  // Input listeners for inline editing
-  document.querySelectorAll('.menu-item-name-edit, .menu-item-category-edit, .menu-item-price-edit').forEach(el => {
-    el.addEventListener('input', (e) => { /* inputs auto-save on blur in save handler */ });
-  });
-  document.querySelectorAll('.vip-preset-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateVipPreset(parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.note-section-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateNoteCategory(parseInt(el.dataset.idx), 'name', e.target.value); saveNoteCategories(state.noteCategories); });
-  });
-  document.querySelectorAll('.note-preset-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateNotePreset(el.dataset.id, parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.note-builtin-name-input').forEach(el => {
-    el.addEventListener('change', async (e) => {
-      const key = el.dataset.id === 'vip' ? 'vipLabel' : 'allergyLabel';
-      const val = e.target.value.trim();
-      state.settings[key] = val || null;
-      try { state.settings = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: val }) }); } catch (err) {}
-      render();
-    });
-  });
-  document.querySelectorAll('.allergy-subtype-select').forEach(el => {
-    el.addEventListener('change', () => { if (state.allergyModal) state.allergyModal.subTypeChoices[el.dataset.allergy] = el.value; });
-  });
-  document.querySelectorAll('.size-preset-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateSizePreset(parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.item-size-price-input').forEach(el => {
-    el.addEventListener('input', (e) => { updateItemSizePrice(el.dataset.id, el.dataset.preset, e.target.value); });
-    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
-  });
-  document.querySelectorAll('.void-reason-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateVoidReason(parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.item-mod-pills').forEach(c => makePillSortable(c, '.item-mod-pill', '.item-mod-pill', commitItemModifierOrder));
-  document.querySelectorAll('.item-size-pills').forEach(c => makePillSortable(c, '.item-size-unit.on', '.item-size-pill', commitItemSizeOrder));
-  // Inline editing right on the print sample (Printers → dockets/receipts):
-  // Enter or tapping away saves; Escape cancels.
-  const sampleEditInput = document.getElementById('print-sample-edit-input');
-  if (sampleEditInput) {
-    sampleEditInput.focus();
-    sampleEditInput.select();
-    sampleEditInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sampleEditInput.blur();
-      if (e.key === 'Escape') { state.printEdit = null; render(); }
-    });
-    sampleEditInput.addEventListener('blur', () => {
-      const f = sampleEditInput.dataset.field;
-      if (state.printEdit !== f) return;
-      state.printEdit = null;
-      if (f === 'docketHeader') setDocketOpt('headerText', sampleEditInput.value.trim());
-      else if (f === 'docketFooter') setDocketOpt('footerText', sampleEditInput.value.trim());
-      else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
-    });
-  }
-  const seatPrefixInput = document.getElementById('seat-prefix-input');
-  if (seatPrefixInput) seatPrefixInput.addEventListener('change', (e) => { saveTicketSetting({ seatPrefix: e.target.value.trim() }); });
-  const sharedSeatInput = document.getElementById('shared-seat-input');
-  if (sharedSeatInput) sharedSeatInput.addEventListener('change', (e) => { saveTicketSetting({ sharedSeatLabel: e.target.value.trim() || 'All' }); });
-  const subcategoryParentInput = document.getElementById('subcategory-parent-input');
-  if (subcategoryParentInput) subcategoryParentInput.addEventListener('change', (e) => { state.subcategoryModal.categoryId = e.target.value; });
-  const subcategoryNameInput = document.getElementById('subcategory-name-input');
-  if (subcategoryNameInput) subcategoryNameInput.addEventListener('input', (e) => { state.subcategoryModal.name = e.target.value; });
-  const modifierGroupNameInput = document.getElementById('modifier-group-name-input');
-  if (modifierGroupNameInput) modifierGroupNameInput.addEventListener('input', (e) => { state.modifierGroupModal.name = e.target.value; });
-  document.querySelectorAll('.mod-option-label-input').forEach(el => {
-    el.addEventListener('input', (e) => { state.modifierGroupModal.options[parseInt(el.dataset.oidx)].label = e.target.value; });
-  });
-  document.querySelectorAll('.mod-option-price-input').forEach(el => {
-    el.addEventListener('input', (e) => { state.modifierGroupModal.options[parseInt(el.dataset.oidx)].priceDelta = e.target.value; });
-  });
-
-  const reservationNameInput = document.getElementById('reservation-name-input');
-  if (reservationNameInput) reservationNameInput.addEventListener('input', (e) => { state.reservationModal.name = e.target.value; });
-  const reservationPhoneInput = document.getElementById('reservation-phone-input');
-  if (reservationPhoneInput) reservationPhoneInput.addEventListener('input', (e) => { state.reservationModal.phone = e.target.value; });
-  const reservationPartyInput = document.getElementById('reservation-party-input');
-  if (reservationPartyInput) reservationPartyInput.addEventListener('input', (e) => { state.reservationModal.partySize = parseInt(e.target.value) || 1; });
-  const reservationTimeInput = document.getElementById('reservation-time-input');
-  if (reservationTimeInput) reservationTimeInput.addEventListener('input', (e) => { state.reservationModal.time = e.target.value; });
-  const reservationTableInput = document.getElementById('reservation-table-input');
-  if (reservationTableInput) reservationTableInput.addEventListener('change', (e) => { state.reservationModal.tableId = e.target.value; });
-  const reservationNotesInput = document.getElementById('reservation-notes-input');
-  if (reservationNotesInput) reservationNotesInput.addEventListener('input', (e) => { state.reservationModal.notes = e.target.value; });
-
-  const customerNameInput = document.getElementById('customer-name-input');
-  if (customerNameInput) customerNameInput.addEventListener('input', (e) => { state.customerModal.name = e.target.value; });
-  const customerPhoneInput = document.getElementById('customer-phone-input');
-  if (customerPhoneInput) customerPhoneInput.addEventListener('input', (e) => { state.customerModal.phone = e.target.value; });
-  const customerEmailInput = document.getElementById('customer-email-input');
-  if (customerEmailInput) customerEmailInput.addEventListener('input', (e) => { state.customerModal.email = e.target.value; });
-  const customerSearchInput = document.getElementById('customer-search-input');
-  if (customerSearchInput) customerSearchInput.addEventListener('input', (e) => {
-    searchCustomers(e.target.value);
-    requestAnimationFrame(() => {
-      const el = document.getElementById('customer-search-input');
-      if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-    });
-  });
-
-  const expenseDateInput = document.getElementById('expense-date-input');
-  if (expenseDateInput) expenseDateInput.addEventListener('input', (e) => { state.expenseForm.date = e.target.value; });
-  const expenseCategoryInput = document.getElementById('expense-category-input');
-  if (expenseCategoryInput) expenseCategoryInput.addEventListener('input', (e) => { state.expenseForm.category = e.target.value; });
-  const expenseAmountInput = document.getElementById('expense-amount-input');
-  if (expenseAmountInput) expenseAmountInput.addEventListener('input', (e) => { state.expenseForm.amount = e.target.value; });
-  const expenseNoteInput = document.getElementById('expense-note-input');
-  if (expenseNoteInput) expenseNoteInput.addEventListener('input', (e) => { state.expenseForm.note = e.target.value; });
-
-  const adjustStockChangeInput = document.getElementById('adjust-stock-change-input');
-  if (adjustStockChangeInput) adjustStockChangeInput.addEventListener('input', (e) => { state.adjustStockModal.change = e.target.value; });
-  const adjustStockReasonInput = document.getElementById('adjust-stock-reason-input');
-  if (adjustStockReasonInput) adjustStockReasonInput.addEventListener('input', (e) => { state.adjustStockModal.reason = e.target.value; });
-
-  const printerStationNameInput = document.getElementById('printer-station-name-input');
-  if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
-  // Keep typed printer addresses in state so a background re-render can never
-  // wipe them mid-keystroke.
-  document.querySelectorAll('.ps-ip-input').forEach(el => {
-    el.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.ips[parseInt(e.target.dataset.idx)] = e.target.value; });
-  });
-  const printerStationBackupInput = document.getElementById('printer-station-backup-input');
-  if (printerStationBackupInput) printerStationBackupInput.addEventListener('input', (e) => { if (state.printerStationModal) state.printerStationModal.backupIp = e.target.value; });
-
-  const happyHourNameInput = document.getElementById('happy-hour-name-input');
-  if (happyHourNameInput) happyHourNameInput.addEventListener('input', (e) => { state.happyHourModal.name = e.target.value; });
-  const happyHourStartInput = document.getElementById('happy-hour-start-input');
-  if (happyHourStartInput) happyHourStartInput.addEventListener('input', (e) => { state.happyHourModal.startTime = e.target.value; });
-  const happyHourEndInput = document.getElementById('happy-hour-end-input');
-  if (happyHourEndInput) happyHourEndInput.addEventListener('input', (e) => { state.happyHourModal.endTime = e.target.value; });
-  const happyHourDiscountInput = document.getElementById('happy-hour-discount-input');
-  if (happyHourDiscountInput) happyHourDiscountInput.addEventListener('input', (e) => { state.happyHourModal.discountPercent = parseFloat(e.target.value) || 0; });
-
-  const giftCardCodeInput = document.getElementById('gift-card-code-input');
-  if (giftCardCodeInput) giftCardCodeInput.addEventListener('input', (e) => { state.giftCardModal.code = e.target.value; });
-  const giftCardValueInput = document.getElementById('gift-card-value-input');
-  if (giftCardValueInput) giftCardValueInput.addEventListener('input', (e) => { state.giftCardModal.initialValue = e.target.value; });
-  const voucherCodeInput = document.getElementById('voucher-code-input');
-  if (voucherCodeInput) voucherCodeInput.addEventListener('input', (e) => { state.voucherModal.code = e.target.value; });
-  const voucherValueInput = document.getElementById('voucher-value-input');
-  if (voucherValueInput) voucherValueInput.addEventListener('input', (e) => { state.voucherModal.value = e.target.value; });
-
-  const checkoutGiftcardInput = document.getElementById('checkout-giftcard-input');
-  if (checkoutGiftcardInput) checkoutGiftcardInput.addEventListener('input', (e) => { state.checkoutGiftCardCode = e.target.value; });
-  const checkoutVoucherInput = document.getElementById('checkout-voucher-input');
-  if (checkoutVoucherInput) checkoutVoucherInput.addEventListener('input', (e) => { state.checkoutVoucherCode = e.target.value; });
-
-  const quickNoteInput = document.getElementById('quick-note-input');
-  if (quickNoteInput) quickNoteInput.addEventListener('input', (e) => { state.quickNote = e.target.value; refreshPaneTick(); });
-
-  document.querySelectorAll('.admin-floor-marker').forEach(el => {
-    // A touch tap emits compat mouse events ~after touchend; ignore them so a
-    // tap-to-select doesn't also fire the mouse path and toggle right back off.
-    el.addEventListener('mousedown', (e) => { if (Date.now() - _floorTouchAt < 700) return; startFloorDrag(e, el.dataset.id); });
-    el.addEventListener('touchstart', (e) => { _floorTouchAt = Date.now(); startFloorDrag(e, el.dataset.id); }, { passive: false });
-    el.addEventListener('touchend', () => { _floorTouchAt = Date.now(); }, { passive: true });
-  });
-  document.querySelectorAll('.rotate-handle').forEach(el => {
-    el.addEventListener('mousedown', (e) => { e.stopPropagation(); startRotateDrag(e, el.dataset.id); });
-    el.addEventListener('touchstart', (e) => { e.stopPropagation(); startRotateDrag(e, el.dataset.id); }, { passive: false });
-  });
-  document.querySelectorAll('.resize-handle').forEach(el => {
-    el.addEventListener('mousedown', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); });
-    el.addEventListener('touchstart', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); }, { passive: false });
-  });
-
-  // HOLD an account tile to pin/unpin its icon on the docket head row. A short
-  // press still runs the tile's action; the hold suppresses that one tap.
-  document.querySelectorAll('.acct-tile[data-pinkey]').forEach(el => {
-    const key = el.dataset.pinkey;
-    let timer = null, sx = 0, sy = 0;
-    const start = (e) => { sx = e.clientX; sy = e.clientY; timer = setTimeout(() => { timer = null; _suppressLineTap = true; toggleDocketPin(key); }, 400); };
-    const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
-    // Only a real drag cancels the hold — a small finger jitter must not.
-    const move = (e) => { if (timer && (Math.abs(e.clientX - sx) > 12 || Math.abs(e.clientY - sy) > 12)) cancel(); };
-    el.addEventListener('pointerdown', start);
-    el.addEventListener('pointerup', cancel);
-    el.addEventListener('pointermove', move);
-    el.addEventListener('pointercancel', cancel);
-  });
-
-  document.querySelectorAll('[data-stop]').forEach(el => el.addEventListener('click', e => e.stopPropagation()));
-  positionIconPopover();
 }
+document.addEventListener('click', (e) => {
+  const el = e.target.closest && e.target.closest('[data-act]');
+  if (el && !el._actBound) handleActClick(el, e);
+});
 
 // Refresh orders/summary quietly every 15s so other terminals' activity shows up
 setInterval(() => {

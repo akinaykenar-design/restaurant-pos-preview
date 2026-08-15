@@ -895,7 +895,10 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .print-doc.pw58{width:58mm;}
 .print-doc.fs-large{font-size:15px;}
 .print-doc.fs-large .print-sub{font-size:12.5px;}
-.print-doc h3{font-family:'Archivo Black',sans-serif;font-size:15px;text-align:center;margin:0 0 4px;text-transform:uppercase;}
+/* One font on paper. The printer owns a single mono face — the preview must
+   never dress headers in app fonts the paper can't reproduce. */
+.print-doc, .print-doc *{font-family:'IBM Plex Mono',monospace;}
+.print-doc h3{font-size:15px;font-weight:700;text-align:center;margin:0 0 4px;text-transform:uppercase;}
 /* Kitchen docket header: table + covers only — no restaurant name (the kitchen
    knows where it is). Big and centred so the station reads it at a glance. */
 .print-doc h3.print-dockhead{font-size:19px;margin:0 0 8px;}
@@ -7847,9 +7850,11 @@ function buildDocketDoc(ctx, edit) {
   if (ctx.orderNo != null) meta.push(partW('orderno', d.showOrderNo, `#${esc(String(ctx.orderNo))}`));
   if (ctx.timeLabel) meta.push(partW('time', d.showTime, esc(ctx.timeLabel)));
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
-  const vipHtml = ctx.vip ? partW('vip', d.showVip, `<div class="print-flag">🌟 VIP — ${esc(ctx.vip)}</div>`, true) : '';
+  // Printable characters only — the printer has no emoji, so the preview
+  // doesn't either (its star/warning glyphs never reached paper).
+  const vipHtml = ctx.vip ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
-    ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
+    ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
 
   return `
@@ -7862,7 +7867,7 @@ function buildDocketDoc(ctx, edit) {
       <hr>
       ${ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
-          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, true)}
+          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${c.isNew ? '* NEW — ' : ''}${esc(c.name)}</div>`, true)}
           ${c.lines.map(l => {
             const seat = l.seat ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
             const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
@@ -7941,6 +7946,45 @@ function sampleLabelPreview() {
   </div>`;
 }
 function sampleDocketCtx() {
+  // The designer previews a REAL docket: the venue's latest order, its own
+  // course names, dishes, seats and notes. VIP/allergy rows come from the
+  // live table when it has them, else the venue's first preset — those parts
+  // must stay visible so they can be styled. Demo data only before any
+  // order history exists.
+  if (!(state.orders || []).length && !state._ordersFetchedForSample) {
+    state._ordersFetchedForSample = true; // one shot — no fetch loop
+    refreshOrders().then(render).catch(() => {});
+  }
+  const real = (state.orders || [])
+    .filter(o => o.items && o.items.length)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+  if (real) {
+    const nums = [...new Set(real.items.map(i => i.course || 1))].sort((a, b) => a - b);
+    const latest = nums[nums.length - 1];
+    const table = real.orderType === 'dine-in' ? findTableById(real.table) : null;
+    return {
+      headerText: state.settings.ticketHeader || '',
+      subLabel: real.orderType === 'dine-in'
+        ? (tableDisplayLabel(real.table) === 'Table —' ? 'Table ' + real.table : tableDisplayLabel(real.table))
+        : (real.customerName || real.orderType || 'Takeaway'),
+      covers: real.covers || null,
+      orderNo: real.id,
+      timeLabel: fmtTime(real.createdAt),
+      vip: (table && table.vipType) || (((state.vipPresets || [])[0] || {}).name || 'VIP'),
+      allergies: (table && table.allergies && table.allergies.length) ? table.allergies
+        : [{ seat: 2, allergy: (((state.allergyPresets || [])[0] || {}).name || 'Shellfish'), notes: '' }],
+      courses: nums.map(n => {
+        const info = courseInfo(n);
+        return {
+          name: info.name, color: info.color || '#fffbcc', isNew: n === latest,
+          lines: real.items.filter(i => (i.course || 1) === n).map(l => ({
+            qty: l.qty, name: l.name, seat: l.seat, note: l.note,
+            tag: stationTag(l), build: l.menuItemId ? lineBuild(l) : null,
+          })),
+        };
+      }),
+    };
+  }
   return {
     headerText: state.settings.ticketHeader || '',
     subLabel: 'Table 12',

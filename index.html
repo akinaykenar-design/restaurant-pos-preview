@@ -7960,27 +7960,17 @@ function sampleDocketCtx() {
     ],
   };
 }
-async function sendTestPrint() {
-  if ((state.settings.printColorMode || 'thermal') !== 'color') {
-    const ips = [...new Set((state.printerStations || []).flatMap(s => (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : []))))];
-    if (!ips.length) { state.toast = 'Add a printer station first (with an IP).'; render(); armToastTimer(3000); return; }
-    state.toast = `Sending test page to ${ips.length} printer${ips.length === 1 ? '' : 's'}…`; render();
-    const results = await Promise.allSettled(ips.map(ip => api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) })));
-    const failed = ips.filter((ip, i) => results[i].status === 'rejected');
-    state.toast = failed.length ? `Test failed on ${failed.join(', ')}` : `Test page sent to ${ips.length} printer${ips.length === 1 ? '' : 's'} ✓`;
-    render(); armToastTimer(3500);
-    return;
-  }
-  const html = `
-    <div class="print-doc">
-      <h3>${state.settings.ticketHeader || 'LINE POS'}</h3>
-      <div class="print-sub">Test print · ${new Date().toLocaleString()}</div>
-      <hr>
-      <div class="print-line"><span>If you can read this, your printer</span></div>
-      <div class="print-line"><span>is set up correctly.</span></div>
-      ${state.settings.ticketFooter ? `<div class="print-footer">${esc(state.settings.ticketFooter)}</div>` : ''}
-    </div>`;
-  openPrintArea(html);
+// Test every printer a station owns, in the byte dialect that station speaks.
+async function testStation(id) {
+  const s = (state.printerStations || []).find(x => String(x.id) === String(id));
+  if (!s) return;
+  const ips = [...new Set((s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])))];
+  if (!ips.length) { state.toast = 'This station has no printer IP yet.'; render(); armToastTimer(3000); return; }
+  state.toast = `Sending test page to ${esc(s.name)}…`; render();
+  const results = await Promise.allSettled(ips.map(ip => api('/api/printers/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, kind: s.kind }) })));
+  const failed = ips.filter((ip, i) => results[i].status === 'rejected');
+  state.toast = failed.length ? `Test failed on ${failed.join(', ')}` : `Test page sent to ${esc(s.name)} ✓`;
+  render(); armToastTimer(3500);
 }
 
 async function api(path, opts) {
@@ -14694,7 +14684,6 @@ function renderPrintersSetupTab() {
     <div class="th" style="margin:6px 0 8px;">Printer stations</div>
     <div class="admin-toolbar">
       <button class="btn-secondary" data-act="find-printers" ${state.findingPrinters ? 'disabled' : ''}>${state.findingPrinters ? 'Scanning the wifi…' : '🔍 Find printers'}</button>
-      <button class="btn-secondary" data-act="test-print">${SYS_PRINTER_SVG} Send test print</button>
       <button class="btn-add inline" data-act="add-printer-station" title="Add printer station" style="margin-left:auto;">+ Add printer station</button>
     </div>
     ${found ? `
@@ -14722,7 +14711,7 @@ function renderPrintersSetupTab() {
           <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
-        ${s.ip ? `<button class="btn-secondary sm" data-act="test-printer-ip" data-ip="${esc(s.ip)}">Test print</button>` : ''}
+        ${(s.ips && s.ips.length) || s.ip ? `<button class="btn-secondary sm" data-act="test-station" data-id="${s.id}">Test print</button>` : ''}
       </div>
     `).join('')}
   `;
@@ -26140,7 +26129,7 @@ function handleActClick(el, e) {
         // Red extras are checkable toggles — the menu stays open like Word's.
         else if (m === 'red') { const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [v]: !cur[v] })); }
       }
-      else if (act === 'test-print') { sendTestPrint(); }
+      else if (act === 'test-station') { testStation(el.dataset.id); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }
       else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) printReceipt(o); }
       else if (act === 'export-csv') {

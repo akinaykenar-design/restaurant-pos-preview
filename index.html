@@ -1298,7 +1298,9 @@ button:not(:disabled):active,
    selection is made. Same darken as .pressed + a ring — overlays only, the
    layout never moves. (.prompting = the item tile whose options/seat popup
    is open; .held-open = any launcher button whose pane is open.) */
-.item-card.prompting{ filter:brightness(0.88) saturate(1.06); box-shadow:inset 0 0 0 2.5px var(--orange); }
+/* No ring, no glow — just the tile visibly PRESSED, sitting above the popup
+   scrim so the dim can't wash the held look out. */
+.item-card.prompting{ position:relative; z-index:80; filter:brightness(0.82) saturate(1.06); }
 .held-open{ filter:brightness(0.88); }
 .tkt-icon-btn.held-open{ background:var(--orange-dim); border-color:var(--orange); }
 /* A tile whose long-press opened the quantity pad stays HELD (orange ring +
@@ -5529,11 +5531,21 @@ app.get('/api/print-alerts', (req, res) => {
   res.json(printing.getAlerts(parseInt(req.query.since, 10) || 0));
 });
 
-// Scan the local wifi for thermal printers (anything answering on port 9100).
+// Scan the local wifi for printers (anything answering on port 9100), then
+// ask each one its model so the list can suggest printer type + paper size.
 app.get('/api/printers/discover', async (req, res) => {
   try {
-    const ips = await printing.discoverPrinters();
-    res.json({ ips });
+    const data = readData();
+    const known = (data.printerStations || [])
+      .flatMap(s => [...(Array.isArray(s.ips) ? s.ips : []), s.ip, s.backupIp])
+      .filter(Boolean);
+    const ips = await printing.discoverPrinters(known);
+    const printers = await Promise.all(ips.map(async (ip) => {
+      const p = await printing.probePrinter(ip).catch(() => null);
+      const model = p && p.model ? p.model : null;
+      return { ip, model, ...printing.classifyPrinter(model) };
+    }));
+    res.json({ ips, printers });
   } catch (e) {
     res.status(500).json({ error: 'Could not scan the network.' });
   }
@@ -14302,6 +14314,9 @@ async function findPrinters() {
   try {
     const result = await api('/api/printers/discover');
     state.discoveredPrinters = result.ips || [];
+    // ip → { model, kind, paperWidth } from the scan's model probe.
+    state.discoveredPrinterInfo = {};
+    (result.printers || []).forEach(p => { state.discoveredPrinterInfo[p.ip] = p; });
   } catch (e) {
     state.toast = e.message || 'Could not scan the network.';
   }
@@ -14384,10 +14399,15 @@ setInterval(pollPrintAlerts, 12000);
 
 async function assignPrinterIp(stationId, ip) {
   try {
-    await api(`/api/printer-stations/${stationId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) });
+    // The scan already asked this printer its model — assigning it carries
+    // the detected printer type and paper size onto the station.
+    const info = (state.discoveredPrinterInfo || {})[ip];
+    const patch = { ip };
+    if (info && info.kind) { patch.kind = info.kind; if (info.paperWidth) patch.paperWidth = info.paperWidth; }
+    await api(`/api/printer-stations/${stationId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     state.printerStations = await api('/api/printer-stations');
     const s = state.printerStations.find(x => x.id === stationId);
-    state.toast = `${ip} assigned to ${s ? s.name : 'station'}.`;
+    state.toast = `${ip} assigned to ${s ? s.name : 'station'}${info && info.kind ? ` — ${info.kind === 'impact' ? 'Ink' : 'Thermal'}${info.paperWidth ? `, ${info.paperWidth}mm` : ''}` : ''}.`;
     render();
     armToastTimer(3000);
   } catch (e) { state.toast = e.message; render(); }
@@ -14681,15 +14701,19 @@ function renderPrintersSetupTab() {
     <div class="settings-card wide" style="max-width:600px;">
       <div class="th" style="margin-bottom:4px;">Printers found on this wifi</div>
       <div style="font-size:var(--fs-sm);color:var(--charcoal-soft);margin-bottom:10px;">${found.length === 0 ? 'None found. Check the printer is on and connected to the same wifi/router as this computer, then scan again.' : 'Tap Test to make one print a test page, then assign it to a station.'}</div>
-      ${found.map(ip => `
+      ${found.map(ip => {
+        const info = (state.discoveredPrinterInfo || {})[ip];
+        const what = info && info.model ? `${esc(info.model)} · ${info.kind === 'impact' ? 'Ink' : 'Thermal'}${info.paperWidth ? ` · ${info.paperWidth}mm` : ''} · ` : '';
+        return `
         <div class="order-row" style="cursor:default;">
           <div class="order-info">
             <div class="t1" style="font-family:var(--font-mono);">${SYS_PRINTER_SVG} ${esc(ip)}</div>
-            <div class="t2">${assignedIps.has(ip) ? 'Assigned to ' + esc((state.printerStations.find(s => s.ip === ip) || {}).name || '') : 'Not assigned yet'}</div>
+            <div class="t2">${what}${assignedIps.has(ip) ? 'Assigned to ' + esc((state.printerStations.find(s => s.ip === ip) || {}).name || '') : 'Not assigned yet'}</div>
           </div>
           <button class="btn-secondary sm" data-act="test-printer-ip" data-ip="${esc(ip)}">Test</button>
           ${state.printerStations.filter(s => s.ip !== ip).map(s => `<button class="btn-secondary sm" data-act="assign-printer-ip" data-ip="${esc(ip)}" data-id="${s.id}">→ ${esc(s.name)}</button>`).join('')}
-        </div>`).join('')}
+        </div>`;
+      }).join('')}
     </div>` : ''}
     ${state.printerStations.length === 0 ? `<div class="empty-hist">No printer stations yet.</div>` : state.printerStations.map(s => `
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
@@ -14702,17 +14726,17 @@ function renderPrintersSetupTab() {
       </div>
     `).join('')}
     <div class="settings-card wide" style="max-width:640px;">
-      <div class="th" style="margin-bottom:6px;">Print type & font size</div>
-      <label class="print-opt-label">Print type</label>
+      <div class="th" style="margin-bottom:6px;">Prints from</div>
       <div class="pay-options" style="margin-bottom:6px;">
-        <div class="pay-opt ${mode === 'thermal' ? 'active' : ''}" data-act="set-print-color-mode" data-val="thermal">Thermal · mono</div>
-        <div class="pay-opt ${mode === 'color' ? 'active' : ''}" data-act="set-print-color-mode" data-val="color">Plain paper · colour</div>
+        <div class="pay-opt ${mode === 'thermal' ? 'active' : ''}" data-act="set-print-color-mode" data-val="thermal">Kitchen printers</div>
+        <div class="pay-opt ${mode === 'color' ? 'active' : ''}" data-act="set-print-color-mode" data-val="color">Browser · colour</div>
       </div>
+      ${mode === 'color' ? `
       <label class="print-opt-label">Font size</label>
       <div class="pay-options">
         <div class="pay-opt ${scale === 'normal' ? 'active' : ''}" data-act="set-print-font-scale" data-val="normal">Normal</div>
         <div class="pay-opt ${scale === 'large' ? 'active' : ''}" data-act="set-print-font-scale" data-val="large">Large</div>
-      </div>
+      </div>` : ''}
     </div>
   `;
 }

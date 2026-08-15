@@ -3067,6 +3067,13 @@ let _cacheOrdersDirMtime = -1;
 // files at all, and mid-service only the current month's small shard is
 // rewritten. Old months are never touched again.
 const ORDERS_DIR = path.join(DATA_DIR, 'orders');
+// Sharding needs directory listing + stat, which the gh-pages preview's
+// in-browser fs shim doesn't provide (it emulates just read/write/rename on a
+// flat file map). Without them a shard written can never be found again — the
+// entire order history would read back empty. So: no full fs, no sharding —
+// fall back to the classic everything-in-one-file store, which the shim
+// handles fine.
+const CAN_SHARD = typeof fs.readdirSync === 'function' && typeof fs.statSync === 'function' && typeof fs.unlinkSync === 'function';
 // Per-shard serialised snapshot of what we last wrote, so writeData can skip
 // shards that didn't change. Rebuilt on every full (re)load.
 let _shardCache = null;
@@ -3144,7 +3151,7 @@ function readData() {
     if (_cache !== null && st.mtimeMs === _cacheMtime && statMs(ORDERS_DIR) === _cacheOrdersDirMtime) return _cache;
   } catch (e) { /* stat failed — fall through to a full read */ }
   const data = loadAndMigrate();
-  assembleOrders(data);
+  if (CAN_SHARD) assembleOrders(data);
   _cache = data;
   _cacheMtime = statMs(DB_FILE);
   _cacheOrdersDirMtime = statMs(ORDERS_DIR);
@@ -3595,6 +3602,18 @@ function loadAndMigrate() {
 
 function writeData(data) {
   ensureStore();
+  if (!CAN_SHARD) {
+    // Single-file mode (preview shim): the whole store, orders included,
+    // exactly as it always worked before sharding.
+    const jsonAll = JSON.stringify(data, null, 2);
+    const tmpAll = DB_FILE + '.tmp';
+    fs.writeFileSync(tmpAll, jsonAll);
+    fs.renameSync(tmpAll, DB_FILE);
+    try { fs.writeFileSync(DB_FILE + '.bak.tmp', jsonAll); fs.renameSync(DB_FILE + '.bak.tmp', DB_FILE + '.bak'); } catch (e) {}
+    _cache = data;
+    _cacheMtime = statMs(DB_FILE);
+    return;
+  }
   ensureOrdersDir();
   if (_shardCache === null) _shardCache = {};
   // 1. Group the orders by month and rewrite ONLY the shards that changed.
@@ -9671,9 +9690,11 @@ function itemDefaultCourse(item) {
 }
 function pushCartLine(item, variant, modifiers, seat, qty, note) {
   const course = itemDefaultCourse(item) || state.activeCourse;
-  // Under Auto the highlighted tab (and the docket page, when paged) FOLLOWS
-  // the dish just added, so what you rang up is always the course on screen.
-  if (autoCourseOn()) state.activeCourse = course;
+  // The highlighted tab (and the docket page, when paged) FOLLOWS the dish
+  // just added, so what you rang up is always the course on screen. With
+  // course pages this is not optional: the paged docket shows ONLY the active
+  // course, so an item landing on another course would vanish on add.
+  if (autoCourseOn() || state.settings.coursePagedDocket === true) state.activeCourse = course;
   if (course > state.courseCount) state.courseCount = course;
   const modList = modifiers || [];
   const variantId = variant ? variant.id : null;
@@ -10672,11 +10693,14 @@ async function sendToKitchen() {
       });
       state.openOrderId = order.id;
     }
+    // FOLLOW the round just sent: land the visible course tab on a course that
+    // actually holds sent items. Resetting to the first course (the old
+    // behaviour) — or staying on a tab the round wasn't for — made the sent
+    // items vanish from a course-paged docket the moment they went out.
+    const sentCourses = [...new Set(state.cart.map(c => c.course || 1))];
+    if (sentCourses.length && !sentCourses.includes(state.activeCourse)) state.activeCourse = sentCourses[0];
     state.cart = [];
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
-    // STAY on the course being worked — resetting to the first course after a
-    // send made the just-sent items vanish from a course-paged docket (the view
-    // jumped to an empty first course: "items sent now disappear").
     state.courseCount = state.settings.courses.length || 1;
     // Keep any called-away courses (and their timers) — sending a round must not
     // wipe fire state, so the "send the order, fire mains later" flow works.

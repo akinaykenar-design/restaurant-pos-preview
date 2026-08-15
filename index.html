@@ -4390,6 +4390,11 @@ app.put('/api/settings', (req, res) => {
       })(),
     };
   }
+  // Topbar admin pins: page keys pinned by holding an admin tile.
+  if (req.body.adminPins !== undefined) {
+    const src = Array.isArray(req.body.adminPins) ? req.body.adminPins : [];
+    data.settings.adminPins = [...new Set(src.filter(k => typeof k === 'string' && k.length <= 32))].slice(0, 8);
+  }
   if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
     const allowed = ['express', 'grouped', 'classic', 'bigtotal'];
     const cur = data.settings.receipt || {};
@@ -7661,8 +7666,10 @@ const DK_PARTS = {
   callaway: { label: 'Call away', show: null, red: true, align: false, size: false },
 };
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
-function docketDocClasses() {
-  const s = state.settings || {}, d = docketCfg();
+// `ov` = designer station overrides, so the sample paper tracks the station
+// being designed; real prints pass nothing.
+function docketDocClasses(ov) {
+  const s = state.settings || {}, d = Object.assign({}, docketCfg(), ov || {});
   return 'print-doc dk'
     + (s.paperWidth === '58' ? ' pw58' : ' pw80')
     + (s.printColorMode === 'color' ? ' mode-color' : ' mode-thermal')
@@ -7765,7 +7772,12 @@ function stationsForLines(lines) {
 // label + a bordered block (inverse black on thermal) — no course colours print
 // on the docket, though colours are kept everywhere else in the app.
 function buildDocketDoc(ctx, edit) {
-  const d = docketCfg();
+  // In the designer with a station picked, the paper wears that station's
+  // overrides; parts stop being tappable there (station scope edits the
+  // whole docket, not elements).
+  const stOv = edit ? dkStationOv() : null;
+  const d = Object.assign({}, docketCfg(), stOv || {});
+  const selectable = edit && !state.dkStation;
   const rc = k => (d.red && d.red[k]) ? ' dk-red' : '';
   // Per-part size override → inline scale on the paper preview, so the
   // designer shows what the printer will do (Auto = no style).
@@ -7778,7 +7790,7 @@ function buildDocketDoc(ctx, edit) {
   // designer toolbar (its visibility moved to the toolbar's eye); a part
   // that's turned off stays visible but dimmed so it can still be picked.
   const partW = (k, on, inner, block) => edit
-    ? `<${block ? 'div' : 'span'} class="dk-part ${on ? '' : 'pp-off'}${state.dkPart === k ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" title="Tap to edit ${DK_PARTS[k].label.toLowerCase()}">${inner}</${block ? 'div' : 'span'}>`
+    ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${on ? '' : 'pp-off'}${selectable && state.dkPart === k ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}" title="Tap to edit ${DK_PARTS[k].label.toLowerCase()}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
     : (on ? inner : '');
 
   // Covers gets its part attributes ON the line itself — an inline wrapper
@@ -7786,7 +7798,7 @@ function buildDocketDoc(ctx, edit) {
   // table header behind it.
   const coversInner = `${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}`;
   const coversSeg = ctx.covers ? (edit
-    ? `<div class="print-sub print-covers dk-part ${d.showCovers ? '' : 'pp-off'}${state.dkPart === 'covers' ? ' dk-sel' : ''}"${stl('covers')} data-act="dk-pick-part" data-part="covers" title="Tap to edit covers">${coversInner}</div>`
+    ? `<div class="print-sub print-covers${selectable ? ' dk-part' : ''} ${d.showCovers ? '' : 'pp-off'}${selectable && state.dkPart === 'covers' ? ' dk-sel' : ''}"${stl('covers')}${selectable ? ' data-act="dk-pick-part" data-part="covers" title="Tap to edit covers"' : ''}>${coversInner}</div>`
     : (d.showCovers ? `<div class="print-sub print-covers"${stl('covers')}>${coversInner}</div>` : '')) : '';
   const meta = [];
   if (ctx.orderNo != null) meta.push(partW('orderno', d.showOrderNo, `#${esc(String(ctx.orderNo))}`));
@@ -7798,9 +7810,9 @@ function buildDocketDoc(ctx, edit) {
     : '';
 
   return `
-    <div class="${docketDocClasses()}">
+    <div class="${docketDocClasses(stOv)}">
       ${edit || d.headerText ? `<div class="print-dockmini${rc('header')}">${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
-      <h3 class="print-dockhead${rc('table')}${edit ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${edit ? ' data-act="dk-pick-part" data-part="table" title="Tap to edit table"' : ''}>${esc(ctx.subLabel)}${coversSeg}</h3>
+      <h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table" title="Tap to edit table"' : ''}>${esc(ctx.subLabel)}${coversSeg}</h3>
       ${metaHtml}
       ${vipHtml}
       ${allergyHtml}
@@ -7815,7 +7827,7 @@ function buildDocketDoc(ctx, edit) {
             const build = (l.build && (l.build.kept.length || l.build.removed.length))
               ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
               : '';
-            return `<div class="print-line${rc('items')}${edit ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${edit ? ' data-act="dk-pick-part" data-part="items" title="Tap to edit items"' : ''}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+            return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items" title="Tap to edit items"' : ''}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
           }).join('')}
         </div>`).join('')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
@@ -11377,6 +11389,10 @@ function renderTopbar() {
       })() : ''}
       ${state.view === 'order' && !isChef && state.settings.searchEnabled !== false && !state.showTablePicker && (state.orderType !== 'dine-in' || state.table) ? `<button class="${(state.searchOpen || state.search) ? 'active' : ''}" data-act="${(state.searchOpen || state.search) ? 'close-search' : 'open-search'}" title="Search the menu">${SYS_SEARCH_SVG}</button>` : ''}
       ${state.view === 'admin' ? `<button class="${state.adminSearchOpen ? 'active' : ''}" data-act="admin-search-toggle" title="Search admin">${SYS_SEARCH_SVG}</button>` : ''}
+      ${isManager ? (state.settings.adminPins || []).map(k => {
+        const pm = adminPageMeta(k);
+        return pm ? `<button class="${state.view === 'admin' && state.adminTab === k ? 'active' : ''}" data-act="open-admin-pin" data-val="${k}" title="${esc(pm.label)} — hold its admin tile to unpin">${adminPinIcon(k)}</button>` : '';
+      }).join('') : ''}
       <button data-act="logout" title="Log out">${ACT_POWER_SVG}</button>
     </div>
   </div>`;
@@ -14649,8 +14665,28 @@ function renderPrintersDocketTab() {
 // part on the paper and the same bar edits just that part, with whatever
 // doesn't apply greyed out — exactly Word's ribbon behaviour. Every choice
 // lands in settings.docket, so the printer honours it too.
+// Designer station scope: 'All stations' edits the venue design; picking a
+// station edits ITS overrides ({layout, fontScale, density} — Inherit follows
+// the venue) on the same paper. The station modal no longer carries these.
+function dkStationOv() {
+  const st = (state.printerStations || []).find(s => s.id === state.dkStation);
+  return (st && pickStationDocket(st.docket)) || {};
+}
+async function setDkStationOpt(key, val) {
+  const st = (state.printerStations || []).find(s => s.id === state.dkStation);
+  if (!st) return;
+  const dk = Object.assign({}, pickStationDocket(st.docket) || {});
+  if (val === 'inherit') delete dk[key]; else dk[key] = val;
+  st.docket = Object.keys(dk).length ? dk : null;
+  render();
+  try {
+    await api(`/api/printer-stations/${st.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: st.docket }) });
+  } catch (e) { state.toast = 'Could not save the station design.'; render(); armToastTimer(2600); }
+}
 function dkToolbar(d) {
-  const p = state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
+  const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
+  const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
+  const p = !station && state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
   const meta = p ? DK_PARTS[p] : null;
   const shown = meta && meta.show ? d[meta.show] !== false : true;
   const menu = state.dkMenu || null;
@@ -14677,28 +14713,45 @@ function dkToolbar(d) {
 
   const partSize = (d.sizes || {})[p];
   const sizeOn = !p || meta.size;
-  const sizeLabel = p
-    ? (meta.size ? (partSize === undefined ? 'Auto' : { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize]) : 'Auto')
-    : ({ normal: 'Normal', large: 'Large', xlarge: 'Huge' }[d.fontScale] || 'Normal');
-  const sizeItems = p
-    ? [['auto', 'Auto'], ['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
-        ({ v, l, on: v === 'auto' ? partSize === undefined : partSize === parseInt(v) }))
-    : [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) => ({ v, l, on: d.fontScale === v }));
+  const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
+  const sizeLabel = station
+    ? (stOv.fontScale ? SCALE_L[stOv.fontScale] : 'Inherit')
+    : p
+      ? (meta.size ? (partSize === undefined ? 'Auto' : { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize]) : 'Auto')
+      : (SCALE_L[d.fontScale] || 'Normal');
+  const sizeItems = station
+    ? [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) =>
+        ({ v, l, on: v === 'inherit' ? stOv.fontScale === undefined : stOv.fontScale === v }))
+    : p
+      ? [['auto', 'Auto'], ['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
+          ({ v, l, on: v === 'auto' ? partSize === undefined : partSize === parseInt(v) }))
+      : [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) => ({ v, l, on: d.fontScale === v }));
+  const spacingItems = station
+    ? [['inherit', 'Inherit'], ['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']].map(([v, l]) =>
+        ({ v, l, on: v === 'inherit' ? stOv.density === undefined : stOv.density === v }))
+    : [['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']].map(([v, l]) => ({ v, l, on: d.density === v }));
+  const FMT_L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef' };
 
   return `
     <div class="dk-toolbar">
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
-      ${dd('element', meta ? esc(meta.label) : 'Whole docket', true, [
+      ${(state.printerStations || []).length ? dd('station', station ? esc(station.name) : 'All stations', true, [
+        { v: 'all', l: 'All stations', on: !station },
+        ...(state.printerStations || []).map(s => ({ v: s.id, l: esc(s.name), on: state.dkStation === s.id })),
+      ], 'Design for which station') : ''}
+      ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
+        ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef'],
+      ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
+      ${dd('element', meta ? esc(meta.label) : 'Whole docket', !station, [
         { v: 'whole', l: 'Whole docket', on: !p },
         ...Object.entries(DK_PARTS).map(([k, m]) => ({ v: k, l: m.label, on: p === k })),
       ], 'Element to edit')}
-      ${dd('font', `Font ${d.font === 'B' ? 'B' : 'A'}`, !p, [
+      ${dd('font', `Font ${d.font === 'B' ? 'B' : 'A'}`, !p && !station, [
         { v: 'A', l: 'Font A', on: (d.font || 'A') === 'A' },
         { v: 'B', l: 'Font B', on: d.font === 'B' },
       ], 'Printer font')}
       ${dd('size', sizeLabel, sizeOn, sizeItems, 'Text size')}
-      ${dd('spacing', svgSpacing, !p, [['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']].map(([v, l]) =>
-        ({ v, l, on: d.density === v })), 'Line spacing')}
+      ${dd('spacing', svgSpacing, !p, spacingItems, 'Line spacing')}
       <span class="dk-tb-group${meta && meta.align ? '' : ' dk-tb-off'}">
         ${['left', 'center', 'right'].map(v =>
           `<button type="button" class="dk-tb-btn${meta && meta.align && (d.align || {})[p] === v ? ' active' : ''}" title="Align ${v}"${meta && meta.align ? ` data-act="set-docket-align" data-key="${p}" data-val="${v}"` : ''}>${svgAlign(v)}</button>`).join('')}
@@ -14799,15 +14852,6 @@ function renderPrinterStationModal() {
         <div class="pay-opt ${m.paperWidth !== '58' ? 'active' : ''}" data-act="set-station-paper" data-val="80">80mm</div>
         <div class="pay-opt ${m.paperWidth === '58' ? 'active' : ''}" data-act="set-station-paper" data-val="58">58mm</div>
       </div>
-      ${[
-        ['layout', 'Format', [['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef']]],
-        ['fontScale', 'Font', [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'XL']]],
-        ['density', 'Spacing', [['inherit', 'Inherit'], ['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']]],
-      ].map(([key, label, opts]) => `
-      <label>Docket ${label.toLowerCase()}</label>
-      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
-        ${opts.map(([v, l]) => `<button type="button" class="pay-opt ${((m.docket || {})[key] || 'inherit') === v ? 'active' : ''}" style="flex:none;padding:8px 14px;" data-act="set-station-docket" data-key="${key}" data-val="${v}">${l}</button>`).join('')}
-      </div>`).join('')}
       <label>If nothing here prints, send to station</label>
       <select id="printer-station-fallback">
         <option value="">— nowhere (alert only) —</option>
@@ -15381,6 +15425,30 @@ function adminPageMeta(key) {
     if (c) return { ...c, group: s.group };
   }
   return null;
+}
+// Topbar admin pins: hold an admin tile to pin that page next to the power
+// button; hold again to unpin. No pin glyphs anywhere — the shortcut wears
+// the page's own icon (its Menu-hub icon, else its group's rail icon).
+function adminPinIcon(key) {
+  const pm = adminPageMeta(key);
+  if (!pm) return '';
+  const gk = pm.group.split('.')[0].replace(/\s/g, '-').toLowerCase();
+  const path = MENU_HUB_ICON[key] || ADMIN_GROUP_ICON[gk] || '';
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
+}
+function toggleAdminPin(key) {
+  if (!adminPageMeta(key)) return;
+  const pins = (state.settings.adminPins || []).slice();
+  const i = pins.indexOf(key);
+  if (i === -1) {
+    if (pins.length >= 8) { state.toast = 'Top bar is full — unpin one first.'; render(); armToastTimer(2600); return; }
+    pins.push(key);
+  } else pins.splice(i, 1);
+  state.settings.adminPins = pins;
+  state.toast = i === -1 ? 'Pinned to the top bar.' : 'Unpinned from the top bar.';
+  render();
+  armToastTimer(2200);
+  saveTicketSetting({ adminPins: pins });
 }
 // One place loads whatever data an admin page needs when it opens.
 function loadAdminTabData(key) {
@@ -20705,7 +20773,39 @@ window.addEventListener('blur', _clearStuckDragState);
 document.addEventListener('visibilitychange', () => { if (document.hidden) _clearStuckDragState(); });
 
 // Long-press must not summon the browser context menu on the tiles.
-document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send')) e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send, .acct-tile[data-act="admin-tab"], .admin-nav-group-btn')) e.preventDefault(); });
+// HOLD an admin tile → pin/unpin its page in the topbar (next to power).
+// Works on hub tiles and single-page rail groups (Daily). The hold both
+// fires the toggle and arms _adminPinFired so the release's click doesn't
+// also navigate.
+let _adminPinFired = false, _adminPinTimer = 0;
+document.addEventListener('pointerdown', (e) => {
+  if (state.view !== 'admin') return;
+  const el = e.target.closest && e.target.closest('.acct-tile[data-act="admin-tab"], .admin-nav-group-btn');
+  if (!el) return;
+  let key = null;
+  if (el.dataset.act === 'admin-tab') key = el.dataset.val;
+  else {
+    const grp = ADMIN_SECTIONS.find(s => s.group.split('.')[0].replace(/\s/g, '-').toLowerCase() === el.dataset.val);
+    if (grp && grp.children.length === 1) key = grp.children[0].key;
+  }
+  if (!key) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  _adminPinFired = false;
+  clearTimeout(_adminPinTimer);
+  const stop = () => {
+    clearTimeout(_adminPinTimer);
+    document.removeEventListener('pointermove', mv);
+    document.removeEventListener('pointerup', up);
+    document.removeEventListener('pointercancel', up);
+  };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 10 || Math.abs(ev.clientY - y0) > 10) stop(); };
+  const up = () => stop();
+  _adminPinTimer = setTimeout(() => { _adminPinFired = true; stop(); toggleAdminPin(key); }, 550);
+  document.addEventListener('pointermove', mv, { passive: true });
+  document.addEventListener('pointerup', up);
+  document.addEventListener('pointercancel', up);
+}, { passive: true });
 // Some touch screens eat the click after a LONG press (the browser treats
 // it as a long-press gesture, not a tap). For controls whose hold has no
 // other meaning — rail categories and subsection folder tiles — fire the
@@ -24162,7 +24262,18 @@ function bindEvents() {
       else if (act === 'clock-out') { clockOut(); }
       else if (act === 'view-admin') { state.view = 'admin'; state.adminTab = 'daily'; state.adminOpenGroups = ['daily']; render(); }
       else if (act === 'view-kitchen') { const r = state.currentStaff && state.currentStaff.role; if (r !== 'chef' && r !== 'manager') return; state.view = 'kitchen'; render(); loadKdsData(); }
+      else if (act === 'open-admin-pin') {
+        const key = el.dataset.val;
+        state.view = 'admin';
+        state.adminTab = key;
+        openAdminGroupFor(key);
+        rememberAdminTab(key);
+        render();
+        loadAdminTabData(key);
+      }
       else if (act === 'admin-tab') {
+        // A hold that just pinned the tile must not also open the page.
+        if (_adminPinFired) { _adminPinFired = false; return; }
         const val = el.dataset.val;
         // Tapping the open page again closes it — the panel goes blank.
         if (state.adminTab === val) {
@@ -24187,6 +24298,8 @@ function bindEvents() {
         loadAdminTabData(key);
       }
       else if (act === 'toggle-menu-group') {
+        // A hold that just pinned the group's page must not also open it.
+        if (_adminPinFired) { _adminPinFired = false; return; }
         const key = el.dataset.val;
         // Accordion (owner, 2026-08-08): opening a group collapses the
         // previous one, so the sidebar never grows taller than one open
@@ -24964,6 +25077,7 @@ function bindEvents() {
         // Parts nest (covers sits inside the table header, notes inside the
         // item line) and every [data-act] has its own listener, so the tap
         // bubbles to outer parts too — only the innermost one may handle it.
+        if (state.dkStation) return; // station scope: paper parts aren't editable
         if (e.target.closest('[data-act]') !== el) return;
         state.dkPart = state.dkPart === el.dataset.part ? null : el.dataset.part;
         state.dkMenu = null;
@@ -24974,13 +25088,16 @@ function bindEvents() {
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; render(); }
+        else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
+        else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
-        else if (m === 'spacing') { state.dkMenu = null; setDocketOpt('density', v); }
+        else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
         else if (m === 'style') { state.dkMenu = null; setDocketOpt('newCourseStyle', v); }
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;
-          if (pk && DK_PARTS[pk]) {
+          if (state.dkStation) setDkStationOpt('fontScale', v);
+          else if (pk && DK_PARTS[pk]) {
             const next = Object.assign({}, docketCfg().sizes || {});
             if (v === 'auto') delete next[pk]; else next[pk] = parseInt(v, 10);
             setDocketOpt('sizes', next);

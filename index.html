@@ -716,14 +716,19 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .menu-item-expandable.selected,.category-row.selected,.order-row.selected,.sales-cat-row.selected,.subcategory-row.selected{border-color:var(--orange)!important;box-shadow:0 0 0 1px var(--orange);background:var(--orange-dim)!important;}
 .menu-item-expandable.selected .menu-item-header,.category-row.selected>div:first-child,.sales-cat-row.selected .sel-head,.sel-head.selected{background:var(--orange-dim);}
 
-/* Uniform admin list-row card height across every menu-list admin */
-.menu-item-header{min-height:46px;box-sizing:border-box;align-items:center;}
-.category-row>div:first-child{min-height:46px;box-sizing:border-box;}
+/* Uniform admin list-row card height across every menu-list admin.
+   Owner-approved bump: 56px rows with 15px text so the venue tablet reads
+   at arm's length; dots 26px and the On/Off chip a real 48×28 button. */
+.menu-item-header{min-height:56px;box-sizing:border-box;align-items:center;font-size:15px;}
+.menu-item-header .t1,.menu-item-header .t2{font-size:15px;}
+.menu-item-header .color-dot-btn{width:26px!important;height:26px!important;}
+.menu-item-header .status-chip{min-width:48px;height:28px;box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;font-size:12.5px;}
+.category-row>div:first-child{min-height:56px;box-sizing:border-box;font-size:15px;}
 .menu-item-expandable .t2{white-space:nowrap!important;overflow:hidden;text-overflow:ellipsis;line-height:1.3;}
 /* Admin preset lists (Sizes/VIP/Void/Courses) match the item-card box style/size */
-/* Admin preset rows share the standard 46px row height (min-height so
+/* Admin preset rows share the standard 56px row height (min-height so
    content can never overflow), matching .menu-item-header. */
-.order-row.size-preset-row,.order-row.vip-preset-drag,.order-row.void-reason-row,.order-row.course-template-row,.order-row.note-preset-drag{min-height:46px;height:auto;}
+.order-row.size-preset-row,.order-row.vip-preset-drag,.order-row.void-reason-row,.order-row.course-template-row,.order-row.note-preset-drag{min-height:56px;height:auto;}
 /* Floor-plan click-to-place mode: crosshair + let clicks fall through markers to the canvas */
 .floor-canvas.placing{cursor:crosshair;}
 .floor-canvas.placing .floor-marker{pointer-events:none;}
@@ -11211,6 +11216,10 @@ function animateExpansions(prev) {
   });
 }
 
+// The touch press-feedback element currently held down (see the pointerdown
+// handler near the qty-pop code). render() re-applies its .pressed class to
+// the rebuilt node so a poll mid-hold can't visually "release" the button.
+let _pressState = null;
 function render() {
   // NEVER rebuild the DOM while a drag-to-reorder is live — doing so destroys the
   // element under the pointer, which drops the drag "on its own". Background
@@ -11330,6 +11339,11 @@ function render() {
     !state.itemOptions && !state.editLine && !state.editSent && !state.priceEntry;
   document.body.toggleAttribute('data-fs-picker', !!fsPicker);
   // In Link mode a finger on a table must DRAG the table, never scroll the page.
+  // A finger still holding a button keeps its sunk look on the rebuilt node.
+  if (_pressState && _pressState.sel) {
+    const held = document.querySelector(_pressState.sel);
+    if (held) { held.classList.add('pressed'); _pressState.el = held; }
+  }
 }
 
 // Popup tile grids (order notes, size/seat pickers) mirror the ORDER PANEL
@@ -20730,6 +20744,11 @@ function removeQtyFromCart(menuItemId, amount) {
 function openQtyPop(card) {
   closeQtyPop();
   const id = card.dataset.id;
+  // A poll can re-render DURING the 450ms hold — the node captured at
+  // pointerdown is then detached, and painting qp-held on it lights nothing.
+  // Always mark the LIVE tile for this id.
+  const live = document.querySelector(`.item-card[data-act="add"][data-id="${id}"]`);
+  if (live) card = live;
   const item0 = state.menu.find(m => m.id === id);
   const el = document.createElement('div');
   el.className = 'qty-pop';
@@ -21093,21 +21112,40 @@ document.addEventListener('pointerdown', (e) => {
   if (!el) return;
   const x0 = e.clientX, y0 = e.clientY;
   el.classList.add('pressed');
+  // Survive re-renders: polls rebuild the DOM mid-hold, and a class painted
+  // only on this node vanished with it — the tile visibly popped back up
+  // DURING a long-press, before the pad's qp-held state took over. render()
+  // re-applies .pressed from this selector (see its tail).
+  _pressState = {
+    el,
+    sel: el.dataset && el.dataset.act
+      ? `[data-act="${el.dataset.act}"]${el.dataset.id ? `[data-id="${el.dataset.id}"]` : ''}`
+      : null,
+  };
   const stop = (immediate) => {
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
-    if (immediate === true) { el.classList.remove('pressed'); return; }
+    const dropPressed = () => {
+      const cur = _pressState && _pressState.el;
+      if (cur && cur !== el) cur.classList.remove('pressed');
+      el.classList.remove('pressed');
+      _pressState = null;
+    };
+    if (immediate === true) { dropPressed(); return; }
     // Hold the press until the tap's CLICK has actually been handled — a
     // fixed timer raced slow tablets and the tile visibly popped back up in
     // the gap before the held/popup state took over.
     let cleared = false;
-    const clear = () => { if (cleared) return; cleared = true; document.removeEventListener('click', onClick, true); el.classList.remove('pressed'); };
+    const clear = () => { if (cleared) return; cleared = true; document.removeEventListener('click', onClick, true); dropPressed(); };
     const onClick = () => setTimeout(clear, 80);
     document.addEventListener('click', onClick, true);
     setTimeout(clear, 600); // gesture produced no click — release anyway
   };
-  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) stop(true); };
+  // Same drift budget as the qty hold (16px) — an 8px cutoff dropped the
+  // sunk look on natural finger drift while the hold itself kept arming.
+  const slack = el.classList.contains('item-card') ? 16 : 8;
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > slack || Math.abs(ev.clientY - y0) > slack) stop(true); };
   const up = () => stop(false);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', up);

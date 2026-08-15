@@ -4268,6 +4268,7 @@ app.put('/api/settings', (req, res) => {
     data.settings.terminal = { provider, linkly: existing };
   }
   if (req.body.venueName !== undefined) data.settings.venueName = String(req.body.venueName || '').trim().slice(0, 40);
+  if (req.body.venueAddress !== undefined) data.settings.venueAddress = String(req.body.venueAddress || '').trim().slice(0, 80);
   if (req.body.venueLogo !== undefined) {
     const v = req.body.venueLogo;
     // '' = none, otherwise a small uploaded data URI.
@@ -4341,6 +4342,14 @@ app.put('/api/settings', (req, res) => {
         if (dk.red === undefined && cur.red === undefined) out.callaway = true; // sensible default
         return out;
       })(),
+    };
+  }
+  if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
+    const allowed = ['express', 'grouped', 'classic', 'bigtotal'];
+    const cur = data.settings.receipt || {};
+    data.settings.receipt = {
+      layout: allowed.includes(req.body.receipt.layout) ? req.body.receipt.layout
+        : allowed.includes(cur.layout) ? cur.layout : 'classic',
     };
   }
   if (qtyPadEnabled !== undefined) data.settings.qtyPadEnabled = !!qtyPadEnabled;
@@ -5512,6 +5521,18 @@ app.post('/api/printers/test', async (req, res) => {
   }
 });
 
+// Per-station docket overrides: { layout?, fontScale?, density? } — each field
+// optional; an absent field inherits the global docket design. All-inherit
+// stores null.
+const cleanStationDocket = (dk) => {
+  if (!dk || typeof dk !== 'object') return null;
+  const out = {};
+  if (['standard', 'byseat', 'waitermate'].includes(dk.layout)) out.layout = dk.layout;
+  if (['normal', 'large', 'xlarge'].includes(dk.fontScale)) out.fontScale = dk.fontScale;
+  if (['tight', 'normal', 'roomy'].includes(dk.density)) out.density = dk.density;
+  return Object.keys(out).length ? out : null;
+};
+
 app.post('/api/printer-stations', (req, res) => {
   const data = readData();
   const { name, categories, ip, ips, backupIp, receipts, labels } = req.body;
@@ -5522,7 +5543,7 @@ app.post('/api/printer-stations', (req, res) => {
   const cleanBackup = String(backupIp || '').trim();
   if (cleanBackup && !IP_RE.test(cleanBackup)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
   const pw = req.body.paperWidth === '58' ? '58' : '80';
-  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null };
+  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null, docket: cleanStationDocket(req.body.docket) };
   data.printerStations = [...(data.printerStations || []), station];
   logAudit(data, staffFromReq(req), `Added printer station: ${station.name}`);
   writeData(data);
@@ -5554,6 +5575,7 @@ app.put('/api/printer-stations/:id', (req, res) => {
     station.backupIp = clean || null;
   }
   if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : '80';
+  if (req.body.docket !== undefined) station.docket = cleanStationDocket(req.body.docket);
   if (receipts !== undefined) station.receipts = !!receipts;
   if (labels !== undefined) station.labels = !!labels;
   if (paused !== undefined) {
@@ -14063,19 +14085,28 @@ function renderAdjustStockModal() {
 }
 
 // ---------- Printer stations ----------
+// Per-station docket overrides: { layout?, fontScale?, density? } — absent
+// field = inherit the global docket designer value; all-inherit = null.
+const STATION_DOCKET_OPTS = { layout: ['standard', 'byseat', 'waitermate'], fontScale: ['normal', 'large', 'xlarge'], density: ['tight', 'normal', 'roomy'] };
+function pickStationDocket(dk) {
+  if (!dk || typeof dk !== 'object') return null;
+  const out = {};
+  for (const k of Object.keys(STATION_DOCKET_OPTS)) if (STATION_DOCKET_OPTS[k].includes(dk[k])) out[k] = dk[k];
+  return Object.keys(out).length ? out : null;
+}
 async function loadPrinterStations() {
   try { state.printerStations = await api('/api/printer-stations'); } catch (e) {}
   render();
 }
 function openAddPrinterStation() {
-  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, labels: false, fallbackId: null });
+  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), receipts: false, labels: false, fallbackId: null, docket: null });
   state.adminError = '';
   render();
 }
 function openEditPrinterStation(id) {
   const s = state.printerStations.find(x => x.id === id);
   const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
-  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null });
+  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) });
   state.adminError = '';
   render();
 }
@@ -14098,6 +14129,7 @@ async function savePrinterStationModal() {
     backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
     paperWidth: m.paperWidth === '58' ? '58' : '80',
     receipts: !!m.receipts, labels: !!m.labels, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
+    docket: m.docket || null,
   };
   try {
     if (m.mode === 'add') await api('/api/printer-stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -14486,7 +14518,7 @@ function renderPrintersSetupTab() {
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
         <div class="order-info">
           <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.labels ? `<span class="status-chip paid">labels</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
-          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'WaiterMate', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
         ${s.ip ? `<button class="btn-secondary sm" data-act="test-printer-ip" data-ip="${esc(s.ip)}">Test print</button>` : ''}
@@ -14544,8 +14576,30 @@ function renderPrintersDocketTab() {
   `;
 }
 
+// Tiny mono paper sketch of one receipt layout for the picker below.
+function receiptMini(v) {
+  const row = (l, r, x) => `<div style="display:flex;justify-content:space-between;gap:4px;${x || ''}"><span>${l}</span><span>${r}</span></div>`;
+  const rule = `<div style="border-top:1px dashed #000;margin:3px 0;"></div>`;
+  const head = (t) => `<div style="text-align:center;font-weight:700;">${t}</div>`;
+  const body =
+    v === 'express' ? row('2 Burger', '24.00') + row('1 Fries', '4.50') + row('1 Cola', '3.50') + rule + row('TOTAL', '32.00', 'font-weight:700;')
+    : v === 'grouped' ? head('FOOD') + row('2 Burger', '24.00') + row('1 Fries', '4.50') + head('DRINKS') + row('1 Cola', '3.50') + rule + row('TOTAL', '32.00', 'font-weight:700;')
+    : v === 'bigtotal' ? row('2 Burger', '24.00') + row('1 Cola', '3.50') + rule + `<div style="text-align:center;font-size:15px;font-weight:800;">27.50</div>`
+    : head('THE VENUE') + rule + row('2 Burger', '24.00') + row('1 Cola', '3.50') + rule + row('TOTAL', '27.50', 'font-weight:700;') + `<div style="text-align:center;font-style:italic;">thank you</div>`;
+  return `<div class="paper-preview" style="width:118px;padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:7px;line-height:1.6;text-align:left;box-shadow:0 1px 4px rgba(0,0,0,0.25);">${body}</div>`;
+}
+
+// Saves settings.receipt = { layout } through the normal settings PUT.
+async function setReceiptLayout(layout) {
+  await saveTicketSetting({ receipt: { layout } });
+  state.toast = 'Receipt layout saved.';
+  render();
+  armToastTimer(2000);
+}
+
 function renderPrintersReceiptTab() {
   const s = state.settings;
+  const rl = (s.receipt && ['express', 'grouped', 'classic', 'bigtotal'].includes(s.receipt.layout)) ? s.receipt.layout : 'classic';
   return `
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:14px;">Customer receipts</div>
@@ -14554,6 +14608,16 @@ function renderPrintersReceiptTab() {
       <div class="pay-options">
         ${togglePill(s.autoPrintReceipt, 'set-auto-print-receipt')}
       </div>` : `<div class="ts">Printing is off.</div>`}
+    </div>
+    <div class="settings-card wide" style="max-width:640px;">
+      <div class="th" style="margin-bottom:8px;">Receipt</div>
+      <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
+        ${[['express', 'Express'], ['grouped', 'Grouped'], ['classic', 'Classic'], ['bigtotal', 'Big total']].map(([v, l]) => `
+        <div class="pay-opt ${rl === v ? 'active' : ''}" style="flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 12px;" data-act="set-receipt-layout" data-val="${v}">
+          ${receiptMini(v)}
+          <span>${l}</span>
+        </div>`).join('')}
+      </div>
     </div>
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:6px;">Layout</div>
@@ -14601,6 +14665,15 @@ function renderPrinterStationModal() {
         <div class="pay-opt ${m.paperWidth !== '58' ? 'active' : ''}" data-act="set-station-paper" data-val="80">80mm</div>
         <div class="pay-opt ${m.paperWidth === '58' ? 'active' : ''}" data-act="set-station-paper" data-val="58">58mm</div>
       </div>
+      ${[
+        ['layout', 'Format', [['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'WaiterMate']]],
+        ['fontScale', 'Font', [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'XL']]],
+        ['density', 'Spacing', [['inherit', 'Inherit'], ['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']]],
+      ].map(([key, label, opts]) => `
+      <label>Docket ${label.toLowerCase()}</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
+        ${opts.map(([v, l]) => `<button type="button" class="pay-opt ${((m.docket || {})[key] || 'inherit') === v ? 'active' : ''}" style="flex:none;padding:8px 14px;" data-act="set-station-docket" data-key="${key}" data-val="${v}">${l}</button>`).join('')}
+      </div>`).join('')}
       <label>If nothing here prints, send to station</label>
       <select id="printer-station-fallback">
         <option value="">— nowhere (alert only) —</option>
@@ -15766,6 +15839,10 @@ function renderVenueSettingsAdmin() {
       <input id="venue-name-input" type="text" value="${esc(s.venueName || '')}" maxlength="40" style="width:240px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);" onblur="saveVenueName()">
     </div>
     <div style="margin-top:18px;">
+      <label class="field-label" style="display:block;margin-bottom:5px;">Address</label>
+      <input id="venue-address-input" type="text" value="${esc(s.venueAddress || '')}" maxlength="80" placeholder="Prints on receipts" style="width:320px;max-width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);" onblur="saveVenueAddress()">
+    </div>
+    <div style="margin-top:18px;">
       <label class="field-label" style="display:block;margin-bottom:5px;">Logo</label>
       <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
         ${logo ? `<div class="venue-logo-thumb"><img src="${esc(logo)}" alt=""></div>` : ''}
@@ -15788,6 +15865,11 @@ async function saveVenueSettings(patch) {
 function saveVenueName() {
   const inp = document.getElementById('venue-name-input');
   if (inp) saveVenueSettings({ venueName: inp.value.trim() });
+}
+
+function saveVenueAddress() {
+  const inp = document.getElementById('venue-address-input');
+  if (inp) saveVenueSettings({ venueAddress: inp.value.trim() });
 }
 
 function pickVenueLogo() {
@@ -24728,6 +24810,8 @@ function bindEvents() {
       else if (act === 'set-print-font-scale') { saveTicketSetting({ printFontScale: el.dataset.val }); }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
       else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); } }
+      else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
+      else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }
       else if (act === 'test-print') { sendTestPrint(); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }

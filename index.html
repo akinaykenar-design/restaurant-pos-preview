@@ -983,6 +983,20 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .pp-toggle.pp-off{opacity:.42;text-decoration:line-through;}
 .pp-inline-input{font:inherit;color:inherit;background:#fffbe8;border:1.5px dashed #b90;border-radius:3px;padding:1px 6px;text-align:center;max-width:200px;}
 .pp-inline-input:focus{outline:none;}
+/* Word-style docket toolbar: tap a part on the paper, restyle it up here.
+   Selection = inset ring + tint overlay only, so the paper never reflows. */
+.dk-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding:8px 10px;background:var(--steel-200);border-radius:12px;width:fit-content;}
+.dk-tb-part{font-size:12px;font-weight:700;color:var(--charcoal-soft);min-width:92px;}
+.dk-tb-btn{display:flex;align-items:center;justify-content:center;min-width:38px;min-height:38px;border:none;border-radius:8px;background:var(--surface);color:var(--charcoal-soft);cursor:pointer;font-weight:800;font-size:var(--fs-md);}
+.dk-tb-btn.active{background:var(--orange-dim);color:var(--orange);}
+.dk-tb-seg{background:var(--surface);}
+.dk-tb-off{opacity:.35;pointer-events:none;}
+.dk-tb-red{position:relative;}
+.dk-tb-red::after{content:'';position:absolute;left:10px;right:10px;bottom:6px;height:4px;border-radius:2px;background:#C0392B;}
+.dk-part{cursor:pointer;border-radius:4px;}
+.dk-part:hover{background:#fff3c9;}
+.dk-part.pp-off{opacity:.42;text-decoration:line-through;}
+.dk-part.dk-sel{box-shadow:inset 0 0 0 2px #3692E7;background:rgba(54,146,231,.10);}
 /* Rows expand inline on every screen — same simple collapse/expand
    everywhere. (The old phone-only full-screen takeover is retired: with
    most row types now editing inline, having only some cover the screen
@@ -4353,6 +4367,16 @@ app.put('/api/settings', (req, res) => {
         });
         return out;
       })(),
+      // Per-part alignment: a missing part = Auto (the layout's own placement).
+      align: (() => {
+        const src = dk.align !== undefined ? dk.align : (cur.align || {});
+        const out = {};
+        ['table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies'].forEach(k => {
+          const v = src && src[k];
+          if (v === 'left' || v === 'center' || v === 'right') out[k] = v;
+        });
+        return out;
+      })(),
     };
   }
   if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
@@ -7603,7 +7627,20 @@ const DOCKET_DEFAULTS = {
   showSeats: true, showNotes: true, showBuild: true, showStationTag: true,
   showOrderNo: false, showTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
-  font: 'A', red: { callaway: true }, sizes: {}, roundPrint: 'added',
+  font: 'A', red: { callaway: true }, sizes: {}, align: {}, roundPrint: 'added',
+};
+// The Word-style designer toolbar edits ONE docket part at a time — tap the
+// part on the paper, then use the toolbar. Each part declares what it can do:
+// its show/hide key (null = always printed), whether the printer can red it,
+// and whether alignment makes sense (notes ride inside the item line).
+const DK_PARTS = {
+  table: { label: 'Table', show: null, red: true, align: true },
+  covers: { label: 'Covers', show: 'showCovers', red: false, align: true },
+  course: { label: 'Courses', show: 'showCourseName', red: true, align: true },
+  items: { label: 'Items', show: null, red: true, align: true },
+  subs: { label: 'Sub-lines', show: 'showBuild', red: false, align: true },
+  notes: { label: 'Notes', show: 'showNotes', red: true, align: false },
+  allergies: { label: 'Allergies', show: 'showAllergies', red: true, align: true },
 };
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 function docketDocClasses() {
@@ -7714,7 +7751,11 @@ function buildDocketDoc(ctx, edit) {
   const rc = k => (d.red && d.red[k]) ? ' dk-red' : '';
   // Per-part size override → inline scale on the paper preview, so the
   // designer shows what the printer will do (Auto = no style).
-  const szs = k => { const n = (d.sizes || {})[k]; return n ? ` style="font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;"` : ''; };
+  const stl = k => {
+    const n = (d.sizes || {})[k], a = (d.align || {})[k];
+    const css = (n ? `font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;` : '') + (a ? `text-align:${a};` : '');
+    return css ? ` style="${css}"` : '';
+  };
   // Tap-to-toggle wrappers: in edit mode every element is tappable (off = dimmed
   // but still there so you can switch it back on); in print mode off = gone.
   const tog = (on, key, inner, label) => edit
@@ -7723,36 +7764,48 @@ function buildDocketDoc(ctx, edit) {
   const btog = (on, key, inner, label) => edit
     ? `<div class="pp-toggle ${on ? '' : 'pp-off'}" data-act="set-docket-opt" data-key="${key}" data-val="${!on}" title="Tap to ${on ? 'hide' : 'show'} ${label}">${inner}</div>`
     : (on ? inner : '');
+  // Word-style part selection: tapping a styleable part picks it for the
+  // designer toolbar (its visibility moved to the toolbar's eye); a part
+  // that's turned off stays visible but dimmed so it can still be picked.
+  const partW = (k, on, inner, block) => edit
+    ? `<${block ? 'div' : 'span'} class="dk-part ${on ? '' : 'pp-off'}${state.dkPart === k ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" title="Tap to edit ${DK_PARTS[k].label.toLowerCase()}">${inner}</${block ? 'div' : 'span'}>`
+    : (on ? inner : '');
 
-  const coversSeg = ctx.covers ? tog(d.showCovers, 'showCovers', `<div class="print-sub print-covers"${szs('covers')}>${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}</div>`, 'covers') : '';
+  // Covers gets its part attributes ON the line itself — an inline wrapper
+  // around a block collapses to zero size, so taps would fall through to the
+  // table header behind it.
+  const coversInner = `${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}`;
+  const coversSeg = ctx.covers ? (edit
+    ? `<div class="print-sub print-covers dk-part ${d.showCovers ? '' : 'pp-off'}${state.dkPart === 'covers' ? ' dk-sel' : ''}"${stl('covers')} data-act="dk-pick-part" data-part="covers" title="Tap to edit covers">${coversInner}</div>`
+    : (d.showCovers ? `<div class="print-sub print-covers"${stl('covers')}>${coversInner}</div>` : '')) : '';
   const meta = [];
   if (ctx.orderNo != null) meta.push(tog(d.showOrderNo, 'showOrderNo', `#${esc(String(ctx.orderNo))}`, 'order number'));
   if (ctx.timeLabel) meta.push(tog(d.showTime, 'showTime', esc(ctx.timeLabel), 'time'));
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
   const vipHtml = ctx.vip ? btog(d.showVip, 'showVip', `<div class="print-flag">🌟 VIP — ${esc(ctx.vip)}</div>`, 'the VIP flag') : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
-    ? btog(d.showAllergies, 'showAllergies', `<div class="print-flag-block${rc('allergies')}"${szs('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, 'allergy flags')
+    ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>⚠ ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
 
   return `
     <div class="${docketDocClasses()}">
       ${edit || d.headerText ? `<div class="print-dockmini${rc('header')}">${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
-      <h3 class="print-dockhead${rc('table')}"${szs('table')}>${esc(ctx.subLabel)}${coversSeg}</h3>
+      <h3 class="print-dockhead${rc('table')}${edit ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${edit ? ' data-act="dk-pick-part" data-part="table" title="Tap to edit table"' : ''}>${esc(ctx.subLabel)}${coversSeg}</h3>
       ${metaHtml}
       ${vipHtml}
       ${allergyHtml}
       <hr>
       ${ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
-          ${btog(d.showCourseName, 'showCourseName', `<div class="print-sub print-coursename${rc('course')}"${szs('course')}>${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, 'course names')}
+          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${c.isNew ? '★ NEW — ' : ''}${esc(c.name)}</div>`, true)}
           ${c.lines.map(l => {
             const seat = l.seat ? tog(d.showSeats, 'showSeats', ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`, 'seat numbers') : '';
             const tag = l.tag ? tog(d.showStationTag, 'showStationTag', l.tag, 'station tags') : '';
-            const note = l.note ? tog(d.showNotes, 'showNotes', ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`, 'item notes') : '';
+            const note = l.note ? partW('notes', d.showNotes, ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`) : '';
             const build = (l.build && (l.build.kept.length || l.build.removed.length))
-              ? btog(d.showBuild, 'showBuild', `<div class="print-build"${szs('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, 'the build lines')
+              ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
               : '';
-            return `<div class="print-line${rc('items')}"${szs('items')}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+            return `<div class="print-line${rc('items')}${edit ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${edit ? ' data-act="dk-pick-part" data-part="items" title="Tap to edit items"' : ''}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
           }).join('')}
         </div>`).join('')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
@@ -14532,7 +14585,7 @@ function renderPrintersSetupTab() {
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
         <div class="order-info">
           <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.labels ? `<span class="status-chip paid">labels</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
-          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'WaiterMate', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
         ${s.ip ? `<button class="btn-secondary sm" data-act="test-printer-ip" data-ip="${esc(s.ip)}">Test print</button>` : ''}
@@ -14576,19 +14629,12 @@ function renderPrintersDocketTab() {
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">Spacing</span>${seg(d.density, 'density', [{ v: 'tight', l: 'Tight' }, { v: 'normal', l: 'Normal' }, { v: 'roomy', l: 'Roomy' }])}</div>
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">New course</span>${seg(d.newCourseStyle, 'newCourseStyle', [{ v: 'invert', l: 'Inverse' }, { v: 'border', l: 'Border' }, { v: 'plain', l: 'Plain' }])}</div>
         <div class="dk-fmt-row"><span class="dk-fmt-lbl">Print in red</span><div style="display:flex;flex-wrap:wrap;gap:6px;">
-          ${[['table', 'Table'], ['course', 'Courses'], ['items', 'Items'], ['notes', 'Notes'], ['allergies', 'Allergies'], ['callaway', 'Call away'], ['header', 'Header']].map(([k, l]) =>
+          ${[['callaway', 'Call away'], ['header', 'Header']].map(([k, l]) =>
             `<button type="button" class="pay-opt dk-red-pill ${(d.red || {})[k] ? 'active' : ''}" style="flex:none;padding:7px 12px;" data-act="toggle-docket-red" data-key="${k}">${l}</button>`).join('')}
         </div></div>
-        ${[['table', 'Table size'], ['covers', 'Covers size'], ['course', 'Course size'], ['items', 'Item size'], ['subs', 'Sub-line size'], ['notes', 'Note size'], ['allergies', 'Allergy size']].map(([k, l]) => `
-        <div class="dk-fmt-row"><span class="dk-fmt-lbl">${l}</span><div class="seg">
-          ${[['auto', 'Auto'], ['1', 'S'], ['2', 'L'], ['3', 'H']].map(([v, vl]) => {
-            const cur = (d.sizes || {})[k];
-            const active = v === 'auto' ? cur === undefined : cur === parseInt(v);
-            return `<button class="${active ? 'active' : ''}" data-act="set-docket-size" data-key="${k}" data-val="${v}">${vl}</button>`;
-          }).join('')}
-        </div></div>`).join('')}
       </div>
-      <div class="print-preview-grid" style="margin-top:16px;">
+      ${dkToolbar(d)}
+      <div class="print-preview-grid" style="margin-top:12px;">
         <div>
           <div class="print-preview-cap">🍳 Kitchen docket <span>fired course</span></div>
           <div class="paper-preview">${buildDocketDoc(sampleDocketCtx(), true)}</div>
@@ -14596,6 +14642,44 @@ function renderPrintersDocketTab() {
       </div>
     </div>
   `;
+}
+
+// The Word-style bar above the docket sample: pick a part on the paper, then
+// the eye / size / alignment / red tools restyle just that part. Every choice
+// still lands in settings.docket, so the printer honours it too.
+function dkToolbar(d) {
+  const p = state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
+  const meta = p ? DK_PARTS[p] : null;
+  const shown = meta && meta.show ? d[meta.show] !== false : true;
+  const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+  const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
+  const svgAlign = v => v === 'center'
+    ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M6 10h12M3 14h18M6 18h12"/></svg>`
+    : v === 'right'
+      ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M9 10h12M3 14h18M9 18h12"/></svg>`
+      : `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 10h12M3 14h18M3 18h12"/></svg>`;
+  const off = ' dk-tb-off';
+  return `
+    <div class="dk-toolbar">
+      <span class="dk-tb-part">${meta ? esc(meta.label) : 'Tap a part below'}</span>
+      <button type="button" class="dk-tb-btn${meta && meta.show ? (shown ? ' active' : '') : off}" title="Show or hide"
+        ${meta && meta.show ? `data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}"` : ''}>${shown ? svgEye : svgEyeOff}</button>
+      <div class="seg dk-tb-seg${p ? '' : off}">
+        ${[['auto', 'Auto'], ['1', 'S'], ['2', 'L'], ['3', 'H']].map(([v, vl]) => {
+          const cur = p ? (d.sizes || {})[p] : undefined;
+          const active = p && (v === 'auto' ? cur === undefined : cur === parseInt(v));
+          return `<button class="${active ? 'active' : ''}" ${p ? `data-act="set-docket-size" data-key="${p}" data-val="${v}"` : ''}>${vl}</button>`;
+        }).join('')}
+      </div>
+      <div class="seg dk-tb-seg${meta && meta.align ? '' : off}">
+        ${['left', 'center', 'right'].map(v => {
+          const active = meta && meta.align && (d.align || {})[p] === v;
+          return `<button class="${active ? 'active' : ''}" title="Align ${v}" ${meta && meta.align ? `data-act="set-docket-align" data-key="${p}" data-val="${v}"` : ''}>${svgAlign(v)}</button>`;
+        }).join('')}
+      </div>
+      <button type="button" class="dk-tb-btn dk-tb-red${meta && meta.red ? ((d.red || {})[p] ? ' active' : '') : off}" title="Print in red"
+        ${meta && meta.red ? `data-act="toggle-docket-red" data-key="${p}"` : ''}>A</button>
+    </div>`;
 }
 
 // Tiny mono paper sketch of one receipt layout for the picker below.
@@ -14688,7 +14772,7 @@ function renderPrinterStationModal() {
         <div class="pay-opt ${m.paperWidth === '58' ? 'active' : ''}" data-act="set-station-paper" data-val="58">58mm</div>
       </div>
       ${[
-        ['layout', 'Format', [['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'WaiterMate']]],
+        ['layout', 'Format', [['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef']]],
         ['fontScale', 'Font', [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'XL']]],
         ['density', 'Spacing', [['inherit', 'Inherit'], ['tight', 'Tight'], ['normal', 'Normal'], ['roomy', 'Roomy']]],
       ].map(([key, label, opts]) => `
@@ -24840,6 +24924,21 @@ function bindEvents() {
         const next = Object.assign({}, docketCfg().sizes || {});
         if (v === 'auto') delete next[k]; else next[k] = parseInt(v, 10);
         setDocketOpt('sizes', next);
+      }
+      else if (act === 'set-docket-align') {
+        const k = el.dataset.key, v = el.dataset.val;
+        const next = Object.assign({}, docketCfg().align || {});
+        // Tapping the active alignment clears it back to Auto.
+        if (next[k] === v) delete next[k]; else next[k] = v;
+        setDocketOpt('align', next);
+      }
+      else if (act === 'dk-pick-part') {
+        // Parts nest (covers sits inside the table header, notes inside the
+        // item line) and every [data-act] has its own listener, so the tap
+        // bubbles to outer parts too — only the innermost one may handle it.
+        if (e.target.closest('[data-act]') !== el) return;
+        state.dkPart = state.dkPart === el.dataset.part ? null : el.dataset.part;
+        render();
       }
       else if (act === 'test-print') { sendTestPrint(); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }

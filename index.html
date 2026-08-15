@@ -1008,6 +1008,8 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .dk-part:hover{background:#fff3c9;}
 .dk-part.pp-off{opacity:.42;text-decoration:line-through;}
 .dk-part.dk-sel{box-shadow:inset 0 0 0 2px #3692E7;background:rgba(54,146,231,.10);}
+/* A chip whose edit popup is open stays visibly held — ring only, no reflow. */
+.seat-chip.chip-held{box-shadow:inset 0 0 0 2px var(--orange), 0 0 0 2px var(--orange-dim);filter:brightness(.96);}
 /* Rows expand inline on every screen — same simple collapse/expand
    everywhere. (The old phone-only full-screen takeover is retired: with
    most row types now editing inline, having only some cover the screen
@@ -11279,10 +11281,13 @@ function placeTileCounts() {
 // distinctive tail (vintage, cuvée, size) both survive, so two long wines
 // never truncate into identical-looking tiles.
 function fitTileNames() {
+  // One id→item map per pass — a per-tile state.menu.find() made this
+  // O(tiles × menu), a real stall on big menus + cheap tablets.
+  const byId = new Map(state.menu.map(x => [String(x.id), x]));
   document.querySelectorAll('.item-card[data-id] .item-name').forEach(el => {
     el.style.fontSize = '';
     const card = el.closest('.item-card');
-    const m = state.menu.find(x => x.id === card.dataset.id);
+    const m = byId.get(String(card.dataset.id));
     if (!m) return;
     if (el.textContent !== m.name) el.textContent = m.name;
     // Overflow is EITHER too many lines OR one long word running off the side
@@ -11301,7 +11306,7 @@ function fitTileNames() {
     while (seen.has(el.textContent) && bump < 4) {
       bump++;
       const card = el.closest('.item-card');
-      const m = state.menu.find(x => x.id === card.dataset.id);
+      const m = byId.get(String(card.dataset.id));
       middleCut(el, m.name, 8 + bump * 5);
     }
     seen.set(el.textContent, true);
@@ -11427,7 +11432,7 @@ function renderMenuScrollBody() {
   // A 1–2 letter search matches half the menu; rendering (and measuring)
   // hundreds of tiles freezes cheap tablets for seconds. Cap the grid —
   // typing more narrows it, same as every phone keyboard search.
-  if (state.search && filtered.length > 60) filtered = sortMenuItems(filtered).slice(0, 60);
+  if (state.search && filtered.length > 30) filtered = sortMenuItems(filtered).slice(0, 30);
   const catsToShow = state.search ? categories : categories.filter(c => c === state.activeCat);
   const comboCard = (combo) => `
     <button class="item-card" data-act="open-combo" data-id="${combo.id}">
@@ -11477,9 +11482,16 @@ function renderMenuScrollBody() {
               })() : ''}
             </button>`;
           };
+          // Search results render FLAT — one capped grid per section, none of
+          // the subsection machinery. Rebuilding (and measuring) the grouped
+          // tree on every keystroke and every add is what lagged the tablets.
+          if (state.search) {
+            return `
+              <div class="cat-title">${catIcon} ${cat}</div>
+              <div class="grid">${items.map(renderItemCard).join('')}</div>`;
+          }
           if (subcats.length === 0) {
             return `
-              ${state.search ? `<div class="cat-title">${catIcon} ${cat}</div>` : ''}
               <div class="grid">${catCombos.map(comboCard).join('')}${items.map(renderItemCard).join('')}</div>`;
           }
           const itemsWithoutSub = items.filter(i => !i.subcategoryId);
@@ -11498,9 +11510,6 @@ function renderMenuScrollBody() {
           const groupedAll = `
             ${topSubs.map(s => renderSubGroup(s, 0, true)).join('')}
             ${itemsWithoutSub.length > 0 ? `<div class="ts" style="font-weight:700;margin:12px 0 6px;">Other</div><div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>` : ''}`;
-          if (state.search) {
-            return `<div class="cat-title">${catIcon} ${cat}</div>${groupedAll}`;
-          }
           // No populated subsection → nothing to filter or drill into, so show
           // a plain grid with no subsection bar (or tiles) at all.
           if (topSubs.length === 0) {
@@ -12023,9 +12032,9 @@ function renderTicketPanel() {
           ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active' : ''}" title="Quick note — next docket only" data-act="toggle-quick-note">${DKT_BOLT_SVG}</button>` : ''}
           ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${DKT_FLAME_SVG}</button>` : ''}
           ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}" data-act="toggle-auto-course-order">${DKT_AUTO_SVG}</button>` : ''}
-          ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.attachedCustomerId ? 'active' : ''}" title="Customer" data-act="acct-go" data-target="open-customer-pane">${DKT_CUSTOMER_SVG}</button>` : ''}
+          ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.customerPane || state.attachedCustomerId ? 'active' : ''}" title="Customer" data-act="acct-go" data-target="open-customer-pane">${DKT_CUSTOMER_SVG}</button>` : ''}
           ${sc.reprint === true ? `<button class="tkt-icon-btn lg glyph-btn" title="Reprint docket" data-act="acct-go" data-target="reprint-docket">${SYS_PRINTER_SVG}</button>` : ''}
-          ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn" title="Move items" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
+          ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.moveItems ? 'active' : ''}" title="Move items" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
         </div>`;
       })() : ''}
       ${state.orderType === 'dine-in' ? `
@@ -12050,14 +12059,18 @@ function renderTicketPanel() {
               const preset = findAllergyPreset(list[0].allergy);
               const style = preset && preset.color ? `background:${preset.color};color:${contrastTextColor(preset.color)};border-color:${preset.color};` : '';
               const names = list.map(a => esc(a.allergy) + (a.notes ? ' (' + esc(a.notes) + ')' : '')).join(', ');
-              return `<span class="seat-chip" style="${style}cursor:pointer;" data-act="edit-seat-allergies" data-seat="${k}" title="Tap to edit">${esc(allergyLabel())}, ${names}, (${k === 'all' ? 'ALL' : esc(seatText(k)).toUpperCase()}) <button data-act="remove-seat-allergies" data-seat="${k}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
+              // While this chip's edit popup is open the chip stays HELD, so
+              // it's obvious which cover the pane is acting on.
+              const held = state.notesPanel && state.allergyModal && state.allergyModal.editSeat === k ? ' chip-held' : '';
+              return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-seat-allergies" data-seat="${k}" title="Tap to edit">${esc(allergyLabel())}, ${names}, (${k === 'all' ? 'ALL' : esc(seatText(k)).toUpperCase()}) <button data-act="remove-seat-allergies" data-seat="${k}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
             }).join('');
           })()}
           ${state.notes.map((n, idx) => {
             const cat = state.noteCategories.find(c => c.id === n.categoryId);
             const preset0 = cat && (cat.presets || []).find(p => p.name === n.text && p.color);
             const style = preset0 ? `background:${preset0.color};color:${contrastTextColor(preset0.color)};border-color:${preset0.color};` : '';
-            return `<span class="seat-chip" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}" title="Tap to edit">${cat ? esc(cat.name) + ', ' : ''}${esc(n.text)}, (${n.seat ? esc(seatText(n.seat)).toUpperCase() : 'ALL'}) <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
+            const held = state.notesPanel && state.customNoteDraft && state.customNoteDraft.editIdx === idx ? ' chip-held' : '';
+            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}" title="Tap to edit">${cat ? esc(cat.name) + ', ' : ''}${esc(n.text)}, (${n.seat ? esc(seatText(n.seat)).toUpperCase() : 'ALL'}) <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></span>`;
           }).join('')}
         </div>` : ''}
       ` : ''}

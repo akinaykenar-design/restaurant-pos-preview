@@ -4195,7 +4195,7 @@ app.put('/api/theme', (req, res) => {
   const data = readData();
   const { accent, mode, tktWidth } = req.body;
   if (accent && /^#[0-9A-Fa-f]{6}$/.test(accent)) data.theme.accent = accent;
-  if (mode === 'light' || mode === 'dark') data.theme.mode = mode;
+  if (mode === 'light' || mode === 'dark' || mode === 'auto') data.theme.mode = mode;
   // Size fields: a single step (all devices) or a {pc, tablet, mobile} map.
   const STEPS = ['xs', 'sm', 'md', 'lg', 'xl'];
   const sizeVal = (v) => {
@@ -8620,13 +8620,27 @@ function themeSizePatch(field, val) {
   const base = (cur && typeof cur === 'object') ? cur : { pc: cur || 'md', tablet: cur || 'md', mobile: cur || 'md' };
   return { ...base, [dev]: val };
 }
+// 'auto' theme follows the DEVICE's light/dark setting (the tablet's own
+// display mode), resolved live so flipping the tablet flips the till.
+function resolvedThemeMode() {
+  if (state.theme.mode === 'auto') {
+    try { return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'; } catch (e) { return 'light'; }
+  }
+  return state.theme.mode === 'dark' ? 'dark' : 'light';
+}
 function applyTheme() {
   const root = document.documentElement;
   root.style.setProperty('--orange', state.theme.accent);
   // --orange-dim is a CSS color-mix of the accent with the current --surface, so it
   // auto-adapts to light/dark (pale in light mode, a dark tint in dark mode).
   root.style.removeProperty('--orange-dim');
-  document.body.setAttribute('data-theme', state.theme.mode);
+  const mode = resolvedThemeMode();
+  document.body.setAttribute('data-theme', mode);
+  // Tell the browser which scheme the page IS rendering. Kiosk browsers on
+  // Android "force-darken" pages that don't declare a scheme — that's what
+  // made light and dark look the same on the kiosk tablet. Declaring the one
+  // resolved scheme (never both) opts out without touching our own colours.
+  root.style.colorScheme = mode;
   const dev = activeLayoutDevice();
   Object.entries(THEME_SIZE_ATTRS).forEach(([field, attr]) => document.body.setAttribute(attr, themeSizeFor(field, dev)));
   root.style.setProperty('--ticket-w', (state.theme.tktWidth || 360) + 'px');
@@ -8641,6 +8655,12 @@ function applyTheme() {
   }
 }
 window.addEventListener('resize', applyTheme);
+// In Auto the till re-themes the moment the DEVICE's light/dark flips.
+try {
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (state.theme.mode === 'auto') { applyTheme(); render(); }
+  });
+} catch (e) {}
 // Lock-screen clock stays right while nobody's signed in.
 setInterval(() => { if (!state.currentStaff) render(); }, 30000);
 // ---------- On-screen keyboard (touch tablets / tills) ----------
@@ -17320,10 +17340,12 @@ function renderScreenAdmin() {
   return `
   ${renderScreenMockup()}
   <div class="settings-card" id="ctl-appearance">
-    <div class="th" style="margin-bottom:14px;">Dark mode</div>
+    <div class="th" style="margin-bottom:14px;">Theme</div>
     <div class="pay-options">
-      ${togglePill(state.theme.mode === 'dark', 'set-theme-dark')}
+      ${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, lbl]) =>
+        `<div class="pay-opt ${(state.theme.mode || 'light') === v ? 'active' : ''}" data-act="set-theme-mode" data-val="${v}">${lbl}</div>`).join('')}
     </div>
+    ${state.theme.mode === 'auto' ? `<div class="ts" style="margin-top:8px;">Follows the device setting</div>` : ''}
   </div>
   <div class="settings-card" id="ctl-rail">
     <div class="th" style="margin-bottom:14px;">Menu bar — ${devName}</div>
@@ -24110,7 +24132,7 @@ function bindEvents() {
       else if (act === 'save-modifier-group-modal') { saveModifierGroupModal(); }
       else if (act === 'add-mod-option') { addModOption(); }
       else if (act === 'remove-mod-option') { removeModOption(parseInt(el.dataset.oidx)); }
-      else if (act === 'set-theme-dark') { setThemeModeDraft(el.dataset.val === 'true' ? 'dark' : 'light'); }
+      else if (act === 'set-theme-mode') { setThemeModeDraft(el.dataset.val); }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
       else if (act === 'save-appearance') { saveAppearance(); }
       else if (act === 'add-variant') { addVariantRow(); }

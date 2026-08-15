@@ -20730,7 +20730,7 @@ document.addEventListener('touchcancel', () => {
 // hold the tile, pick a quantity, done. The pick funnels through the same
 // qtyPadBuffer path the 123 pad uses, so items with options inherit the
 // quantity too (the options pane opens showing "Add ×N").
-let _qtyPopEl = null, _qtyHoldTimer = 0, _qtyHoldFired = false, _qtyPopApplyCount = null, _qtyPopCard = null, _qtyPopSwallow = null;
+let _qtyPopEl = null, _qtyHoldFired = false, _qtyPopApplyCount = null, _qtyPopCard = null, _qtyPopSwallow = null;
 function closeQtyPop() {
   if (_qtyPopCard) { _qtyPopCard.classList.remove('qp-held'); _qtyPopCard = null; }
   if (_qtyPopEl) { _qtyPopEl.remove(); _qtyPopEl = null; _qtyPopApplyCount = null; }
@@ -20883,6 +20883,12 @@ function openQtyPop(card) {
   if (navigator.vibrate) try { navigator.vibrate(10); } catch (err) {}
 }
 document.addEventListener('pointerdown', (e) => {
+  // Second-finger touches never arm a hold: with the SHARED timer variable a
+  // second overlapping touch overwrote the first press's timer id, leaving it
+  // uncancellable — rapid alternating taps on two tiles popped the qty pad
+  // with no finger down. Primary pointer only, and the timer is closure-local
+  // so each press can only ever clear its own.
+  if (e.isPrimary === false) return;
   if (e.target.closest && e.target.closest('.qty-pop')) return;
   closeQtyPop();
   // The price pop dismisses on any outside tap, same as the hold-qty pop.
@@ -20891,11 +20897,11 @@ document.addEventListener('pointerdown', (e) => {
   if (!card || card.closest('.mk-wrap')) return;
   const x0 = e.clientX, y0 = e.clientY;
   _qtyHoldFired = false;
-  const end = () => { clearTimeout(_qtyHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const myTimer = setTimeout(() => { _qtyHoldFired = true; openQtyPop(card); }, 450);
+  const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   // Cancel the hold only on a real drag, not the natural finger drift you get
   // pressing a tile's edge — a tight 8px made the hold feel centre-only.
   const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 16 || Math.abs(ev.clientY - y0) > 16) { end(); closeQtyPop(); } };
-  _qtyHoldTimer = setTimeout(() => { _qtyHoldFired = true; openQtyPop(card); }, 450);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -20904,17 +20910,18 @@ document.addEventListener('scroll', closeQtyPop, true);
 // Table peek: press-and-hold an occupied table on the picker to read its
 // order (same hold grammar as the qty pop). The fired flag swallows the
 // release's click so holding never also selects the table.
-let _peekHoldTimer = 0, _peekHoldFired = false;
+let _peekHoldFired = false;
 document.addEventListener('pointerdown', (e) => {
+  if (e.isPrimary === false) return; // second finger never arms a hold
   const tile = e.target.closest && e.target.closest('[data-act="pick-table"]');
   if (!tile || state.tablePeek) return;
   const t = findTableById(tile.dataset.id);
   if (!t || !tableOpenOrder(t.label)) return;
   const x0 = e.clientX, y0 = e.clientY;
   _peekHoldFired = false;
-  const end = () => { clearTimeout(_peekHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const myTimer = setTimeout(() => { _peekHoldFired = true; state.tablePeek = t.id; render(); }, 450);
+  const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
-  _peekHoldTimer = setTimeout(() => { _peekHoldFired = true; state.tablePeek = t.id; render(); }, 450);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -20922,8 +20929,9 @@ document.addEventListener('pointerdown', (e) => {
 // Hold a cover in the item's seat pop to start multi-select — arm several
 // covers, then ✓ adds the dish to each. Only in the seat-only pop; 'All' is
 // already everyone so it's skipped.
-let _seatHoldTimer = 0, _seatHoldFired = false;
+let _seatHoldFired = false;
 document.addEventListener('pointerdown', (e) => {
+  if (e.isPrimary === false) return; // second finger never arms a hold
   const io = state.itemOptions;
   if (!io || !io.seatOnly) return;
   const btn = e.target.closest && e.target.closest('[data-act="io-pick-seat"]');
@@ -20932,15 +20940,15 @@ document.addEventListener('pointerdown', (e) => {
   if (!Number.isFinite(seat)) return;
   const x0 = e.clientX, y0 = e.clientY;
   _seatHoldFired = false;
-  const end = () => { clearTimeout(_seatHoldTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
-  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
-  _seatHoldTimer = setTimeout(() => {
+  const myTimer = setTimeout(() => {
     _seatHoldFired = true;
     const cur = state.itemOptions; if (!cur) return;
     const set = cur.multiSeats && cur.multiSeats.length ? cur.multiSeats : [];
     cur.multiSeats = set.includes(seat) ? set : [...set, seat];
     render();
   }, 450);
+  const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -20948,8 +20956,9 @@ document.addEventListener('pointerdown', (e) => {
 // Hold grammar on the docket: hold a course tab to call it away (hold again
 // takes it back — the ✓ appears/disappears), hold Send to send + log off just
 // this once. Taps keep their meaning; fired flags swallow the release's click.
-let _dktHoldTimer = 0, _courseHoldFired = false, _sendHoldFired = false;
+let _courseHoldFired = false, _sendHoldFired = false;
 document.addEventListener('pointerdown', (e) => {
+  if (e.isPrimary === false) return; // second finger never arms a hold
   const tab = e.target.closest && e.target.closest('.course-tab[data-act="set-course"]');
   const send = !tab && e.target.closest && e.target.closest('[data-act="send-to-kitchen"]');
   const el = tab || send;
@@ -20961,12 +20970,13 @@ document.addEventListener('pointerdown', (e) => {
   el.classList.add('pressing');
   if (send) send.classList.add('holding'); // in-button sweep shows the hold building
   const t0 = e.timeStamp;
-  const end = () => { clearTimeout(_dktHoldTimer); el.classList.remove('pressing', 'holding'); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', end); };
+  let myTimer = 0; // closure-local — an overlapping press can't orphan it
+  const end = () => { clearTimeout(myTimer); el.classList.remove('pressing', 'holding'); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', end); };
   // A quick release (a real tap, not a partial hold) flashes the ring; a held-
   // then-released press never glows.
   const up = (ev) => { if (send && !_sendHoldFired && (ev.timeStamp - t0) < 250) { send.classList.add('pop'); setTimeout(() => send.classList.remove('pop'), 420); } end(); };
   const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 8 || Math.abs(ev.clientY - y0) > 8) end(); };
-  _dktHoldTimer = setTimeout(() => {
+  myTimer = setTimeout(() => {
     if (tab) {
       _courseHoldFired = true;
       const n = parseInt(tab.dataset.val);
@@ -21112,6 +21122,7 @@ document.addEventListener('pointerup', (e) => {
 // (>8px) drops it, a real tap keeps it ~150ms so the flash is visible.
 document.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse') return; // mouse gets native :active
+  if (e.isPrimary === false) return; // a second finger never claims the press
   const el = e.target.closest && e.target.closest('button:not(:disabled), .pay-opt, .item-card, .simple-table-btn, .floor-marker');
   if (!el) return;
   const x0 = e.clientX, y0 = e.clientY;

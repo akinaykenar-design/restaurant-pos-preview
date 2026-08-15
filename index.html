@@ -1009,7 +1009,7 @@ body[data-theme="dark"] .menu-item-price-quick-edit:hover {
 .dk-part.pp-off{opacity:.42;text-decoration:line-through;}
 .dk-part.dk-sel{box-shadow:inset 0 0 0 2px #3692E7;background:rgba(54,146,231,.10);}
 /* A chip whose edit popup is open stays visibly held — ring only, no reflow. */
-.seat-chip.chip-held{box-shadow:inset 0 0 0 2px var(--orange), 0 0 0 2px var(--orange-dim);filter:brightness(.96);}
+.seat-chip.chip-held{box-shadow:inset 0 0 0 2px var(--orange), 0 0 0 2px var(--orange-dim);filter:brightness(.88);}
 /* Rows expand inline on every screen — same simple collapse/expand
    everywhere. (The old phone-only full-screen takeover is retired: with
    most row types now editing inline, having only some cover the screen
@@ -1294,6 +1294,13 @@ button, input, select, textarea,
 button:not(:disabled):active,
 .pressed{ filter: brightness(.9); }
 .item-card.pressed:not(.out), .acct-tile.pressed{ filter:brightness(0.9) saturate(1.06); }
+/* HELD-OPEN: whatever launched a popup keeps the finger-hold look until the
+   selection is made. Same darken as .pressed + a ring — overlays only, the
+   layout never moves. (.prompting = the item tile whose options/seat popup
+   is open; .held-open = any launcher button whose pane is open.) */
+.item-card.prompting{ filter:brightness(0.88) saturate(1.06); box-shadow:inset 0 0 0 2.5px var(--orange); }
+.held-open{ filter:brightness(0.88); }
+.tkt-icon-btn.held-open{ background:var(--orange-dim); border-color:var(--orange); }
 /* A tile whose long-press opened the quantity pad stays HELD (orange ring +
    pressed tone) until the pad is dismissed — overlay only, no size change. */
 .item-card.qp-held{ filter:brightness(0.9) saturate(1.06); box-shadow:inset 0 0 0 2px var(--orange); z-index:2; }
@@ -11280,23 +11287,39 @@ function placeTileCounts() {
 // A name too long for its two lines is MIDDLE-cut — the start and the
 // distinctive tail (vintage, cuvée, size) both survive, so two long wines
 // never truncate into identical-looking tiles.
+// Fitted-name memory: identical name + tile geometry always fits (or cuts)
+// the same, so remember each outcome — the per-tile measure/cut loop forced
+// reflow after reflow and was the hottest per-render cost on the tablets.
+// '' = fits untouched; anything else = the middle-cut text to show.
+const _fitCache = new Map();
 function fitTileNames() {
   // One id→item map per pass — a per-tile state.menu.find() made this
   // O(tiles × menu), a real stall on big menus + cheap tablets.
   const byId = new Map(state.menu.map(x => [String(x.id), x]));
+  if (_fitCache.size > 3000) _fitCache.clear();
   document.querySelectorAll('.item-card[data-id] .item-name').forEach(el => {
     el.style.fontSize = '';
     const card = el.closest('.item-card');
     const m = byId.get(String(card.dataset.id));
     if (!m) return;
-    if (el.textContent !== m.name) el.textContent = m.name;
+    const name = m.name;
+    const key = `${name}|${el.clientWidth}x${el.clientHeight}`;
+    const hit = _fitCache.get(key);
+    if (hit !== undefined) {
+      if (hit === '') { if (el.textContent !== name) el.textContent = name; return; }
+      el.dataset.mcut = '1';
+      if (el.textContent !== hit) el.textContent = hit;
+      el.title = name;
+      return;
+    }
+    if (el.textContent !== name) el.textContent = name;
     // Overflow is EITHER too many lines OR one long word running off the side
     // ("Mograbieh|") — both get the middle-cut ellipsis, never a hard clip.
-    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) return;
-    const name = m.name;
+    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) { _fitCache.set(key, ''); return; }
     el.dataset.mcut = '1';
     middleCut(el, name, 8);
     el.title = name;
+    _fitCache.set(key, el.textContent);
   });
   // Two cut names can still collide (same vintage start, same cru tail) —
   // widen the tail window on later twins until every tile reads distinct.
@@ -11390,7 +11413,7 @@ function renderTopbar() {
       ${!state.online ? `<span title="Cannot reach server" style="display:flex;align-items:center;gap:6px;font-family:var(--font-mono);font-size:11px;color:var(--red);"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);"></span>Offline</span>` : ''}
       ${state.view === 'order' && !isChef && state.orderType === 'dine-in' && state.table && !state.showTablePicker ? (() => {
         const t = findTableById(state.table);
-        return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}</button></span>`;
+        return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active held-open' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}</button></span>`;
       })() : ''}
       ${state.view === 'order' && !isChef && state.settings.searchEnabled !== false && !state.showTablePicker && (state.orderType !== 'dine-in' || state.table) ? `<button class="${(state.searchOpen || state.search) ? 'active' : ''}" data-act="${(state.searchOpen || state.search) ? 'close-search' : 'open-search'}" title="Search the menu">${SYS_SEARCH_SVG}</button>` : ''}
       ${state.view === 'admin' ? `<button class="${state.adminSearchOpen ? 'active' : ''}" data-act="admin-search-toggle" title="Search admin">${SYS_SEARCH_SVG}</button>` : ''}
@@ -12024,17 +12047,17 @@ function renderTicketPanel() {
             ${DKT_TABLE_SVG}
             <span class="gnum">${(() => { const t = findTableById(state.table); return t ? esc(String(t.label)) : '—'; })()}</span>
           </button>` : ''}
-          ${state.settings.coversEnabled ? `<button class="tkt-icon-btn lg glyph-btn covers-chip ${state.coversPad ? 'active' : ''}" title="Covers — tap to change" data-act="open-covers-pad">
+          ${state.settings.coversEnabled ? `<button class="tkt-icon-btn lg glyph-btn covers-chip ${state.coversPad ? 'active held-open' : ''}" title="Covers — tap to change" data-act="open-covers-pad">
             ${DKT_USER_SVG}
             <span class="gnum cov">${state.covers || '—'}</span>
           </button>` : ''}
-          ${sc.notes !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.notesPanel ? 'active' : ''}" title="Notes" data-act="toggle-notes-panel">${DKT_NOTE_SVG}</button>` : ''}
-          ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active' : ''}" title="Quick note — next docket only" data-act="toggle-quick-note">${DKT_BOLT_SVG}</button>` : ''}
-          ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${DKT_FLAME_SVG}</button>` : ''}
+          ${sc.notes !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.notesPanel ? 'active held-open' : ''}" title="Notes" data-act="toggle-notes-panel">${DKT_NOTE_SVG}</button>` : ''}
+          ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active held-open' : ''}" title="Quick note — next docket only" data-act="toggle-quick-note">${DKT_BOLT_SVG}</button>` : ''}
+          ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active held-open' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" title="Call away a course" data-act="toggle-callaway">${DKT_FLAME_SVG}</button>` : ''}
           ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" title="${autoCourseOn() ? 'Auto-coursing ON — new items take their default course. Tap to course by hand.' : 'Auto-coursing OFF — items land on the open course tab. Tap to turn back on.'}" data-act="toggle-auto-course-order">${DKT_AUTO_SVG}</button>` : ''}
-          ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.customerPane || state.attachedCustomerId ? 'active' : ''}" title="Customer" data-act="acct-go" data-target="open-customer-pane">${DKT_CUSTOMER_SVG}</button>` : ''}
+          ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.customerPane ? 'active held-open' : state.attachedCustomerId ? 'active' : ''}" title="Customer" data-act="acct-go" data-target="open-customer-pane">${DKT_CUSTOMER_SVG}</button>` : ''}
           ${sc.reprint === true ? `<button class="tkt-icon-btn lg glyph-btn" title="Reprint docket" data-act="acct-go" data-target="reprint-docket">${SYS_PRINTER_SVG}</button>` : ''}
-          ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.moveItems ? 'active' : ''}" title="Move items" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
+          ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.moveItems ? 'active held-open' : ''}" title="Move items" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
         </div>`;
       })() : ''}
       ${state.orderType === 'dine-in' ? `

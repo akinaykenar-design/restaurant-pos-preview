@@ -4415,9 +4415,19 @@ app.put('/api/settings', (req, res) => {
   if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
     const allowed = ['express', 'grouped', 'classic', 'bigtotal'];
     const cur = data.settings.receipt || {};
+    const src = req.body.receipt;
+    // Receipt designer: per-part show flags (stored only when hidden) and
+    // size tiers (1/2/3). A field left out of the PUT keeps its saved value.
+    const showSrc = (src.show !== undefined ? src.show : cur.show) || {};
+    const show = {};
+    ['taxlabel', 'abn', 'orderinfo', 'table', 'payment'].forEach(k => { if (showSrc[k] === false) show[k] = false; });
+    const sizeSrc = (src.sizes !== undefined ? src.sizes : cur.sizes) || {};
+    const sizes = {};
+    ['header', 'items', 'totals'].forEach(k => { const v = sizeSrc[k]; if (v === 1 || v === 2 || v === 3) sizes[k] = v; });
     data.settings.receipt = {
-      layout: allowed.includes(req.body.receipt.layout) ? req.body.receipt.layout
+      layout: allowed.includes(src.layout) ? src.layout
         : allowed.includes(cur.layout) ? cur.layout : 'classic',
+      show, sizes,
     };
   }
   if (qtyPadEnabled !== undefined) data.settings.qtyPadEnabled = !!qtyPadEnabled;
@@ -7731,6 +7741,34 @@ function setDocketOpt(key, value) {
     .catch(() => { state.toast = 'Could not save docket layout.'; render(); });
 }
 
+// Receipt designer parts — same Word-style bar as the docket designer, on the
+// customer receipt. Text pieces (venue name, footer) stay editable in place;
+// covers/staff keep their on-paper tap-toggles.
+const RC_PARTS = {
+  taxlabel: { label: 'Tax invoice label', show: 'taxlabel', size: false },
+  header: { label: 'Venue name', show: null, size: true },
+  abn: { label: 'ABN', show: 'abn', size: false },
+  orderinfo: { label: 'Order no & date', show: 'orderinfo', size: false },
+  table: { label: 'Table line', show: 'table', size: false },
+  items: { label: 'Items', show: null, size: true },
+  totals: { label: 'Totals', show: null, size: true },
+  payment: { label: 'Payment', show: 'payment', size: false },
+};
+function receiptCfg() {
+  const r = (state.settings && state.settings.receipt) || {};
+  return { layout: r.layout || 'classic', show: r.show || {}, sizes: r.sizes || {} };
+}
+function rcShown(k) { return receiptCfg().show[k] !== false; }
+// Persist receipt designer options (merges into settings.receipt).
+function setReceiptOpt(patch) {
+  const next = Object.assign({}, receiptCfg(), patch);
+  state.settings.receipt = next;
+  render();
+  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ receipt: next }) })
+    .then(s => { state.settings = s; })
+    .catch(() => { state.toast = 'Could not save receipt layout.'; render(); });
+}
+
 // `edit` renders the Settings sample: the header, footer and show/hide lines
 // become tappable right on the paper, so the sample IS the form — and because
 // the same builder does the real print, what you edit is exactly what prints.
@@ -7745,27 +7783,43 @@ function sampleToggleLine(on, act, inner) {
 }
 function buildReceiptDoc(order, edit) {
   const s = state.settings;
+  const r = receiptCfg();
+  // Same Word-style part wrapper as the docket paper: in the designer a part
+  // is tappable (dimmed when hidden); on a real print a hidden part is gone.
+  const partR = (k, inner, block, styleAttr) => {
+    const on = RC_PARTS[k].show ? rcShown(RC_PARTS[k].show) : true;
+    if (edit) return `<${block ? 'div' : 'span'} class="dk-part ${on ? '' : 'pp-off'}${state.rcPart === k ? ' dk-sel' : ''}"${styleAttr || ''} data-act="rc-pick-part" data-part="${k}" title="Tap to edit ${RC_PARTS[k].label.toLowerCase()}">${inner}</${block ? 'div' : 'span'}>`;
+    if (!on) return '';
+    return styleAttr ? `<${block ? 'div' : 'span'}${styleAttr}>${inner}</${block ? 'div' : 'span'}>` : inner;
+  };
+  // Per-part size → same inline scale the docket paper uses.
+  const rstl = k => {
+    const n = r.sizes[k];
+    return n ? ` style="font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;"` : '';
+  };
   const coversOn = s.showCoversOnTicket !== false;
   const coversSeg = order.covers ? (edit
     ? `<span class="pp-toggle ${coversOn ? '' : 'pp-off'}" data-act="set-show-covers-ticket" data-val="${!coversOn}" title="Tap to ${coversOn ? 'hide' : 'show'} covers"> · ${order.covers} covers</span>`
     : (coversOn ? ' · ' + order.covers + ' covers' : '')) : '';
+  const headerInner = edit ? sampleEditable('ticketHeader', s.ticketHeader, 'Add header', '') : esc(s.ticketHeader);
   return `
     <div class="${printDocClasses()}">
-      <div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>
-      ${edit ? `<h3>${sampleEditable('ticketHeader', s.ticketHeader, 'Add header', '')}</h3>` : (s.ticketHeader ? `<h3>${esc(s.ticketHeader)}</h3>` : '')}
-      <div class="print-sub">${s.venueAbn ? 'ABN: ' + esc(s.venueAbn) : 'ABN: ______________'}</div>
-      <div class="print-sub">Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>
-      <div class="print-sub">${order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType)}${coversSeg}</div>
+      ${partR('taxlabel', `<div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>`, true)}
+      ${edit || s.ticketHeader ? partR('header', `<h3${rstl('header')}>${headerInner}</h3>`, true) : ''}
+      ${partR('abn', `<div class="print-sub">${s.venueAbn ? 'ABN: ' + esc(s.venueAbn) : 'ABN: ______________'}</div>`, true)}
+      ${partR('orderinfo', `<div class="print-sub">Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)}
+      ${partR('table', `<div class="print-sub">${order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType)}${coversSeg}</div>`, true)}
       <hr>
-      ${order.items.map(i => `<div class="print-line"><span>${i.qty}× ${esc(i.name)}${i.seat ? ' <span style="white-space:nowrap;">(' + esc(seatText(i.seat)) + ')</span>' : ''}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`).join('')}
+      ${partR('items', order.items.map(i => `<div class="print-line"><span>${i.qty}× ${esc(i.name)}${i.seat ? ' <span style="white-space:nowrap;">(' + esc(seatText(i.seat)) + ')</span>' : ''}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`).join(''), true, rstl('items'))}
       <hr>
+      ${partR('totals', `
       <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
       ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}
       ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
       <div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>
       ${order.tax && taxLabelInclusive() ? `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>` : ''}
-      ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>` : ''}
-      ${order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`}
+      ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>` : ''}`, true, rstl('totals'))}
+      ${partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true)}
       ${edit
         ? sampleToggleLine(!!s.showStaffOnTicket, 'set-show-staff-ticket', `<span>Served by</span><span>${esc(order.staffName || '')}</span>`)
         : (s.showStaffOnTicket ? `<div class="print-line"><span>Served by</span><span>${esc(order.staffName || '')}</span></div>` : '')}
@@ -7867,7 +7921,7 @@ function buildDocketDoc(ctx, edit) {
       <hr>
       ${ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
-          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${c.isNew ? '* NEW — ' : ''}${esc(c.name)}</div>`, true)}
+          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${esc(c.name)}</div>`, true)}
           ${c.lines.map(l => {
             const seat = l.seat ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
             const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
@@ -7891,10 +7945,9 @@ function printKitchenDocket(courseNumber) {
       .catch(e => { state.toast = e.message || 'Could not print the docket.'; render(); armToastTimer(3000); });
     return;
   }
-  // Cumulative: shows every course fired so far for this table, with the
-  // just-fired one highlighted so the kitchen can tell what's new without
-  // losing the context of what's already been sent.
-  const firedNumbers = Object.keys(state.firedCourses).map(n => parseInt(n)).filter(n => n <= courseNumber).sort((a, b) => a - b);
+  // Round-only, same as the real printers: the fired course and nothing else.
+  // The owner ruled out cumulative reprints — a docket per send, no history.
+  const firedNumbers = [courseNumber];
   const table = state.orderType === 'dine-in' ? findTableById(state.table) : null;
   const ctx = {
     headerText: state.settings.ticketHeader || '',
@@ -7959,8 +8012,17 @@ function sampleDocketCtx() {
     .filter(o => o.items && o.items.length)
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
   if (real) {
-    const nums = [...new Set(real.items.map(i => i.course || 1))].sort((a, b) => a - b);
-    const latest = nums[nums.length - 1];
+    // Only the latest course — a real docket is one round, never a reprint of
+    // everything sent so far. Identical lines combine into one row with a
+    // summed quantity, exactly as the kitchen expects to read it.
+    const latest = Math.max(...real.items.map(i => i.course || 1));
+    const merged = [];
+    real.items.filter(i => (i.course || 1) === latest).forEach(l => {
+      const k = [l.name, l.seat || '', l.note || ''].join('|');
+      const ex = merged.find(m => m._k === k);
+      if (ex) ex.qty += l.qty || 1;
+      else merged.push({ _k: k, qty: l.qty || 1, name: l.name, seat: l.seat, note: l.note, tag: stationTag(l), build: l.menuItemId ? lineBuild(l) : null });
+    });
     const table = real.orderType === 'dine-in' ? findTableById(real.table) : null;
     return {
       headerText: state.settings.ticketHeader || '',
@@ -7973,16 +8035,10 @@ function sampleDocketCtx() {
       vip: (table && table.vipType) || (((state.vipPresets || [])[0] || {}).name || 'VIP'),
       allergies: (table && table.allergies && table.allergies.length) ? table.allergies
         : [{ seat: 2, allergy: (((state.allergyPresets || [])[0] || {}).name || 'Shellfish'), notes: '' }],
-      courses: nums.map(n => {
-        const info = courseInfo(n);
-        return {
-          name: info.name, color: info.color || '#fffbcc', isNew: n === latest,
-          lines: real.items.filter(i => (i.course || 1) === n).map(l => ({
-            qty: l.qty, name: l.name, seat: l.seat, note: l.note,
-            tag: stationTag(l), build: l.menuItemId ? lineBuild(l) : null,
-          })),
-        };
-      }),
+      courses: [{
+        name: courseInfo(latest).name, color: courseInfo(latest).color || '#fffbcc', isNew: true,
+        lines: merged.map(({ _k, ...l }) => l),
+      }],
     };
   }
   return {
@@ -7994,10 +8050,6 @@ function sampleDocketCtx() {
     vip: 'Food Critic',
     allergies: [{ seat: 2, allergy: 'Shellfish', notes: 'severe' }],
     courses: [
-      { name: 'Starters', color: '#3B82C4', isNew: false, lines: [
-        { qty: 1, name: 'Burrata & Heirloom Tomato', seat: 1 },
-        { qty: 1, name: 'Soup of the Day', seat: 3 },
-      ] },
       { name: 'Mains', color: '#E0A72E', isNew: true, lines: [
         { qty: 2, name: 'Ribeye Steak', seat: 1, note: 'med-rare', build: { kept: [{ label: 'Fries' }, { label: 'Slaw' }], removed: [{ label: 'Peppercorn Sauce' }] } },
         { qty: 1, name: 'Pan-seared Sea Bass', seat: 2, note: 'no butter' },
@@ -14913,6 +14965,41 @@ async function setReceiptLayout(layout) {
   armToastTimer(2000);
 }
 
+// The Word-style bar above the receipt sample — same ribbon behaviour as the
+// docket designer: tap a part on the paper (or pick it from Element), then
+// size it or hide it. Anything a part can't do greys out.
+function rcToolbar() {
+  const r = receiptCfg();
+  const p = state.rcPart && RC_PARTS[state.rcPart] ? state.rcPart : null;
+  const meta = p ? RC_PARTS[p] : null;
+  const shown = meta && meta.show ? rcShown(meta.show) : true;
+  const menu = state.rcMenu || null;
+  const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+  const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+  const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
+  const dd = (id, label, enabled, items, title) => {
+    const open = enabled && menu === id;
+    return `<span class="dk-dd-wrap${enabled ? '' : ' dk-tb-off'}">
+      <button type="button" class="dk-tb-btn dk-tb-dd${open ? ' active' : ''}" title="${title}"${enabled ? ` data-act="rc-menu" data-menu="${id}"` : ''}>${label} ${caret}</button>
+      ${open ? `<div class="dk-menu">${items.map(it =>
+        `<button type="button" class="dk-menu-item${it.on ? ' active' : ''}" data-act="rc-menu-opt" data-menu="${id}" data-val="${it.v}"><span class="dk-mi-check">${it.on ? '✓' : ''}</span>${it.l}</button>`).join('')}</div>` : ''}
+    </span>`;
+  };
+  const partSize = meta && meta.size ? r.sizes[p] : undefined;
+  const sizeLabel = meta && meta.size ? (partSize === undefined ? 'Auto' : { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize]) : 'Auto';
+  return `
+    <div class="dk-toolbar">
+      ${menu ? `<div class="dk-menu-scrim" data-act="rc-menu-close"></div>` : ''}
+      ${dd('element', meta ? esc(meta.label) : 'Whole receipt', true, [
+        { v: 'whole', l: 'Whole receipt', on: !p },
+        ...Object.entries(RC_PARTS).map(([k, m]) => ({ v: k, l: m.label, on: p === k })),
+      ], 'Element to edit')}
+      ${dd('size', sizeLabel, !!(meta && meta.size), [['auto', 'Auto'], ['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
+        ({ v, l, on: v === 'auto' ? partSize === undefined : partSize === parseInt(v) })), 'Text size')}
+      <button type="button" class="dk-tb-btn${meta && meta.show ? (shown ? ' active' : '') : ' dk-tb-off'}" title="Show or hide"${meta && meta.show ? ` data-act="set-receipt-show" data-key="${meta.show}" data-val="${!shown}"` : ''}>${shown ? svgEye : svgEyeOff}</button>
+    </div>`;
+}
+
 function renderPrintersReceiptTab() {
   const s = state.settings;
   const rl = (s.receipt && ['express', 'grouped', 'classic', 'bigtotal'].includes(s.receipt.layout)) ? s.receipt.layout : 'classic';
@@ -14936,8 +15023,9 @@ function renderPrintersReceiptTab() {
       </div>
     </div>
     <div class="settings-card wide" style="max-width:640px;">
-      <div class="th" style="margin-bottom:6px;">Layout</div>
-      <div class="print-preview-grid">
+      <div class="th" style="margin-bottom:4px;">Receipt designer</div>
+      ${rcToolbar()}
+      <div class="print-preview-grid" style="margin-top:12px;">
         <div>
           <div class="print-preview-cap">🧾 Customer receipt <span>the check</span></div>
           <div class="paper-preview">${buildReceiptDoc(sampleReceiptOrder(), true)}</div>
@@ -26173,6 +26261,34 @@ function handleActClick(el, e) {
         }
         // Red extras are checkable toggles — the menu stays open like Word's.
         else if (m === 'red') { const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [v]: !cur[v] })); }
+      }
+      else if (act === 'rc-pick-part') {
+        // Same nesting rule as docket parts (covers toggle sits inside the
+        // table line) — only the innermost data-act may handle the tap.
+        if (e.target.closest('[data-act]') !== el) return;
+        state.rcPart = state.rcPart === el.dataset.part ? null : el.dataset.part;
+        state.rcMenu = null;
+        render();
+      }
+      else if (act === 'rc-menu') { state.rcMenu = state.rcMenu === el.dataset.menu ? null : el.dataset.menu; render(); }
+      else if (act === 'rc-menu-close') { state.rcMenu = null; render(); }
+      else if (act === 'rc-menu-opt') {
+        const m = el.dataset.menu, v = el.dataset.val;
+        state.rcMenu = null;
+        if (m === 'element') { state.rcPart = v === 'whole' ? null : v; render(); }
+        else if (m === 'size') {
+          const pk = state.rcPart;
+          if (pk && RC_PARTS[pk] && RC_PARTS[pk].size) {
+            const next = Object.assign({}, receiptCfg().sizes);
+            if (v === 'auto') delete next[pk]; else next[pk] = parseInt(v, 10);
+            setReceiptOpt({ sizes: next });
+          }
+        }
+      }
+      else if (act === 'set-receipt-show') {
+        const next = Object.assign({}, receiptCfg().show);
+        if (el.dataset.val === 'false') next[el.dataset.key] = false; else delete next[el.dataset.key];
+        setReceiptOpt({ show: next });
       }
       else if (act === 'test-station') { testStation(el.dataset.id); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }

@@ -4712,6 +4712,37 @@ app.put('/api/subcategories/:id', (req, res) => {
   if (!sub) return res.status(404).json({ error: 'Subcategory not found' });
   const { name, color, icon, iconEnabled, image } = req.body;
   const oldName = sub.name;
+  // Re-parent: move this subsection under a section (root level) or under a
+  // ROOT subsection (making it a sub-subsection). The whole subtree moves
+  // with it, and every item filed anywhere in it follows to the new section.
+  if (req.body.moveTo && typeof req.body.moveTo === 'object') {
+    const mv = req.body.moveTo;
+    const kids = data.subcategories.filter(s => s.parentSubcategoryId === sub.id);
+    if (mv.categoryId) {
+      const cat = data.categories.find(c => c.id === mv.categoryId);
+      if (!cat) return res.status(400).json({ error: 'Section not found' });
+      sub.categoryId = cat.id;
+      sub.parentSubcategoryId = null;
+    } else if (mv.parentSubcategoryId) {
+      const parent = data.subcategories.find(s => s.id === mv.parentSubcategoryId);
+      if (!parent) return res.status(400).json({ error: 'Subsection not found' });
+      if (parent.id === sub.id) return res.status(400).json({ error: 'Cannot move a subsection into itself' });
+      if (parent.parentSubcategoryId) return res.status(400).json({ error: 'Only two levels deep — pick a top-level subsection' });
+      if (kids.length) return res.status(400).json({ error: 'This subsection has its own subsections — move it to a section instead' });
+      sub.parentSubcategoryId = parent.id;
+      sub.categoryId = null;
+    }
+    // Items in the moved subtree adopt the new root section's name.
+    const collect = (id) => [id, ...data.subcategories.filter(s => s.parentSubcategoryId === id).flatMap(s => collect(s.id))];
+    const treeIds = new Set(collect(sub.id));
+    let root = sub;
+    while (root && !root.categoryId && root.parentSubcategoryId) root = data.subcategories.find(x => x.id === root.parentSubcategoryId);
+    const rootCat = root && data.categories.find(c => c.id === root.categoryId);
+    if (rootCat) data.menu.forEach(m => { if (treeIds.has(m.subcategoryId)) m.category = rootCat.name; });
+    logAudit(data, staffFromReq(req), `Moved subsection "${sub.name}"${rootCat ? ` to ${rootCat.name}` : ''}`);
+    writeData(data);
+    return res.json(sub);
+  }
   if (name && name.trim()) sub.name = name.trim();
   if (color !== undefined) { sub.color = color || null; }
   if (image !== undefined) sub.image = (typeof image === 'string' && image) || null;
@@ -16612,12 +16643,39 @@ function renderAdminSubcatTree(categoryId, parentId, depth) {
             <input class="subcategory-name-quick-input" data-id="${s.id}" type="text" value="${esc(s.name)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
             <label class="field-label">Default course</label>
             <select class="pp-select" onchange="saveSectionCourse('subcategory', '${s.id}', this.value)">${courseOptionsHtml(s.defaultCourse)}</select>
+            <label class="field-label">Move to</label>
+            <select class="pp-select" onchange="moveSubcategory('${s.id}', this.value)">
+              <option value="">— stays here —</option>
+              ${state.categories.map(c => {
+                const here = !s.parentSubcategoryId && s.categoryId === c.id;
+                const roots = kids.length ? [] : state.subcategories.filter(x => x.categoryId === c.id && !x.parentSubcategoryId && x.id !== s.id);
+                return `<option value="cat::${c.id}" ${here ? 'disabled' : ''}>${esc(c.name)}${here ? ' (here)' : ''}</option>`
+                  + roots.map(x => `<option value="sub::${x.id}" ${s.parentSubcategoryId === x.id ? 'disabled' : ''}>&nbsp;&nbsp;&nbsp;&nbsp;↳ ${esc(x.name)}${s.parentSubcategoryId === x.id ? ' (here)' : ''}</option>`).join('');
+              }).join('')}
+            </select>
           </div>
         </div>` : ''}
       </div>
       ${kids.length > 0 && expanded ? renderAdminSubcatTree(categoryId, s.id, depth + 1) : ''}
     `;
     }).join('');
+}
+// Move a subsection under another section (root level) or under a top-level
+// subsection (becoming a sub-subsection). Items in its subtree follow.
+async function moveSubcategory(id, val) {
+  if (!val) return;
+  const moveTo = val.startsWith('cat::') ? { categoryId: val.slice(5) } : { parentSubcategoryId: val.slice(5) };
+  try {
+    await api(`/api/subcategories/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ moveTo }) });
+    [state.subcategories, state.menu] = await Promise.all([api('/api/subcategories'), api('/api/menu')]);
+    state.toast = 'Moved.';
+    render();
+    armToastTimer(2200);
+  } catch (e) {
+    state.toast = e.message || 'Could not move the subsection.';
+    render();
+    armToastTimer(3000);
+  }
 }
 function renderCategoriesAdmin() {
   return `

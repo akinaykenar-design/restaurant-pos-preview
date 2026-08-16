@@ -2522,6 +2522,21 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 }
 
 
+/* Deep navy app bar (owner pick, Aug '26): the bar wears its own navy shell in
+   BOTH themes so it reads as the till's hardware edge, not part of the page.
+   Fixed palette on purpose — do not swap these for theme tokens. */
+.topbar{background:#1d2b3d;color:#e7edf4;border-color:#2b3d54;}
+body[data-appbar-pos] .topbar{border-color:#2b3d54;}
+.topbar .tab-btn{color:#9db2c9;}
+.topbar .tab-btn.active{color:#fff;background:#3467a5;}
+.topbar .topbar-seg{background:#27384e;}
+.topbar .topbar-seg button{color:#a7bad0;}
+.topbar .topbar-seg button.active{background:#3c5270;color:#fff;}
+.topbar .staff-badge{color:#c5d3e2;}
+.topbar .staff-badge button{background:#27384e;border-color:#33475f;color:#c5d3e2;}
+.topbar .staff-badge button.active{background:#3c5270;border-color:#5b79a0;color:#fff;}
+.topbar .status-dot{color:#8ba1ba;}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -4543,6 +4558,16 @@ app.put('/api/settings', (req, res) => {
         if (src.every((k, i) => k === DEF[i])) return {};
         return { callawayOrder: src.slice() };
       })(),
+      // Docket top-block order (standard format): only a full permutation of
+      // the five blocks is stored, and the default order is omitted so
+      // untouched dockets keep printing the exact old bytes.
+      ...(() => {
+        const DEF = ['header', 'table', 'meta', 'staff', 'items'];
+        const src = dk.lineOrder !== undefined ? dk.lineOrder : cur.lineOrder;
+        if (!Array.isArray(src) || src.length !== DEF.length || DEF.some(k => !src.includes(k))) return {};
+        if (src.every((k, i) => k === DEF[i])) return {};
+        return { lineOrder: src.slice() };
+      })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
       align: (() => {
         const src = dk.align !== undefined ? dk.align : (cur.align || {});
@@ -4600,6 +4625,16 @@ app.put('/api/settings', (req, res) => {
         ? (String(src.staffLabel).trim() && String(src.staffLabel).trim() !== 'Served by' ? { staffLabel: String(src.staffLabel).trim().slice(0, 30) } : {})
         : (cur.staffLabel ? { staffLabel: cur.staffLabel } : {})),
       ...(['tight', 'roomy', '0.9', '1.15', '1.5', '2'].includes(den) ? { density: den } : {}),
+      // Classic-invoice line order: only a full permutation of the thirteen
+      // parts is stored, and the default order is omitted so untouched
+      // invoices keep printing the exact old bytes.
+      ...(() => {
+        const DEF = ['taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
+        const o = src.lineOrder !== undefined ? src.lineOrder : cur.lineOrder;
+        if (!Array.isArray(o) || o.length !== DEF.length || DEF.some(k => !o.includes(k))) return {};
+        if (o.every((k, i) => k === DEF[i])) return {};
+        return { lineOrder: o.slice() };
+      })(),
     };
   }
   if (qtyPadEnabled !== undefined) data.settings.qtyPadEnabled = !!qtyPadEnabled;
@@ -8021,6 +8056,18 @@ function callawayOrder(d) {
   return Array.isArray(o) && o.length === 3 && CALLAWAY_DEFAULT_ORDER.every(k => o.includes(k))
     ? o : CALLAWAY_DEFAULT_ORDER;
 }
+// The docket's top blocks (standard format) reorder as whole units — items
+// carry their notices and dividing rule with them. Only a full permutation
+// counts; anything else falls back to the printed default.
+const DOCKET_LINE_ORDER = ['header', 'table', 'meta', 'staff', 'items'];
+function docketLineOrder(d) {
+  const o = d.lineOrder;
+  return Array.isArray(o) && o.length === DOCKET_LINE_ORDER.length && DOCKET_LINE_ORDER.every(k => o.includes(k))
+    ? o : DOCKET_LINE_ORDER;
+}
+// Which movable docket block a designer part rides in (covers ride the table
+// header, order no & time share the meta line).
+const DK_MOVE_BLOCK = { header: 'header', table: 'table', covers: 'table', orderno: 'meta', time: 'meta', staff: 'staff', items: 'items' };
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
 function docketDocClasses(ov) {
@@ -8065,7 +8112,16 @@ function receiptCfg() {
     density: (r.density === 'tight' || r.density === 'roomy') ? r.density : 'normal',
     font: r.font === 'B' ? 'B' : 'A', align: r.align || {}, red: r.red || {},
     staffLabel: r.staffLabel || '',
+    ...(Array.isArray(r.lineOrder) ? { lineOrder: r.lineOrder } : {}),
   };
+}
+// The classic invoice's line order — same rule as the docket blocks: only a
+// full permutation counts, the default order is never stored.
+const RECEIPT_LINE_ORDER = ['taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
+function receiptLineOrder(r) {
+  const o = r.lineOrder;
+  return Array.isArray(o) && o.length === RECEIPT_LINE_ORDER.length && RECEIPT_LINE_ORDER.every(k => o.includes(k))
+    ? o : RECEIPT_LINE_ORDER;
 }
 function rcShown(k) {
   // 'staff' has always lived on settings.showStaffOnTicket — the part's eye
@@ -8141,6 +8197,42 @@ function buildReceiptDoc(order, edit) {
         return groups.map(g => `<div class="print-line" style="font-weight:800;"><span>${esc(g.name.toUpperCase())}</span><span></span></div>${g.items.map(itemLine).join('')}`).join('');
       })()
     : order.items.map(itemLine).join('');
+  // Parts shared by every layout's top block.
+  const cHeader = edit || s.ticketHeader ? partR('header', `<h3${rstl('header')}>${headerInner}</h3>`, true) : '';
+  const cAbn = partR('abn', `<div class="print-sub"${rstl('abn')}>${abnInner}</div>`, true);
+  const cAddress = partR('address', `<div class="print-sub"${rstl('address')}>${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress || '')}</div>`, true);
+  const cPhone = partR('phone', `<div class="print-sub"${rstl('phone')}>${edit ? sampleEditable('venuePhone', s.venuePhone, 'add phone', '') : esc(s.venuePhone || '')}</div>`, true);
+  // Classic renders as ORDERED CHUNKS (settings.receipt.lineOrder) so the
+  // paper always matches what receiptClassic prints; the compact layouts are
+  // fixed designs and keep their own template below.
+  const classicHtml = layout !== 'classic' ? '' : (() => {
+    const chunks = {
+      taxlabel: partR('taxlabel', `<div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>`, true),
+      header: cHeader, abn: cAbn, address: cAddress, phone: cPhone,
+      orderinfo: partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true),
+      table: partR('table', `<div class="print-sub">${whereLine}${coversSeg}</div>`, true),
+      // The dividing rules ride with the items block wherever it lands.
+      items: `<hr>${partR('items', itemsHtml, true, rstl('items'))}<hr>`,
+      subtotal: partR('subtotal', `
+      <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
+      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}`, true, rstl('subtotal')),
+      gstExcl: order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
+      gstIncl: order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
+      total: partR('totals', `<div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>`, true, rstl('totals')),
+      tip: order.tip ? partR('totals', `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>`, true, rstl('totals')) : '',
+      payment: partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true),
+      staff: partR('staff', `<div class="print-line"${rstl('staff')}><span>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')}</span><span>${esc(order.staffName || '')}</span></div>`, true),
+    };
+    const seq = receiptLineOrder(r);
+    // Default keeps the legacy arrangement (GST rides its tax-mode slot
+    // around the Total, tip after); a stored order groups each part whole —
+    // exactly like the printed classic invoice.
+    const body = seq.some((k, i) => k !== RECEIPT_LINE_ORDER[i])
+      ? seq.map(k => k === 'gst' ? chunks.gstExcl + chunks.gstIncl : k === 'totals' ? chunks.total + chunks.tip : chunks[k]).join('\n      ')
+      : [chunks.taxlabel, chunks.header, chunks.abn, chunks.address, chunks.phone, chunks.orderinfo, chunks.table, chunks.items,
+        chunks.subtotal, chunks.gstExcl, chunks.total, chunks.gstIncl, chunks.tip, chunks.payment, chunks.staff].join('\n      ');
+    return body + '\n      ' + (edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : ''));
+  })();
   return `
     <div class="${printDocClasses()}${r.font === 'B' ? ' dk-font-b' : ''}"${(() => {
       // Designer line spacing mirrors the ESC 3 tiers; express runs tight by
@@ -8148,31 +8240,17 @@ function buildReceiptDoc(order, edit) {
       const lh = ({ tight: '1.2', '0.9': '1.2', '1.15': '1.55', '1.5': '1.9', roomy: '1.9', '2': '2.4' })[r.density] || (layout === 'express' ? '1.35' : '');
       return lh ? ` style="line-height:${lh};"` : '';
     })()}>
-      ${layout === 'classic' ? partR('taxlabel', `<div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>`, true) : ''}
-      ${edit || s.ticketHeader ? partR('header', `<h3${rstl('header')}>${headerInner}</h3>`, true) : ''}
-      ${partR('abn', `<div class="print-sub"${rstl('abn')}>${abnInner}</div>`, true)}
-      ${partR('address', `<div class="print-sub"${rstl('address')}>${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress || '')}</div>`, true)}
-      ${partR('phone', `<div class="print-sub"${rstl('phone')}>${edit ? sampleEditable('venuePhone', s.venuePhone, 'add phone', '') : esc(s.venuePhone || '')}</div>`, true)}
+      ${layout === 'classic' ? classicHtml : `
+      ${cHeader}
+      ${cAbn}
+      ${cAddress}
+      ${cPhone}
       ${layout === 'grouped' && (edit || s.venueAddress) ? `<div class="print-sub">${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress)}</div>` : ''}
-      ${layout === 'classic'
-        ? partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)
-        : partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>${whereLine} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)}
-      ${layout === 'classic' ? partR('table', `<div class="print-sub">${whereLine}${coversSeg}</div>`, true) : ''}
+      ${partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>${whereLine} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)}
       ${layout === 'grouped' && order.covers ? partR('table', `<div class="print-sub">${order.covers} covers${s.showStaffOnTicket && order.staffName ? ' · Served by ' + esc(order.staffName) : ''}</div>`, true) : ''}
       <hr>
       ${partR('items', itemsHtml, true, rstl('items'))}
       <hr>
-      ${layout === 'classic' ? `
-      ${partR('subtotal', `
-      <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
-      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}`, true, rstl('subtotal'))}
-      ${order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : ''}
-      ${partR('totals', `<div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>`, true, rstl('totals'))}
-      ${order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : ''}
-      ${order.tip ? partR('totals', `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>`, true, rstl('totals')) : ''}
-      ${partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true)}
-      ${partR('staff', `<div class="print-line"${rstl('staff')}><span>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')}</span><span>${esc(order.staffName || '')}</span></div>`, true)}
-      ${edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : '')}` : `
       ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}
       ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div>` : ''}
@@ -8287,10 +8365,12 @@ function buildDocketDoc(ctx, edit) {
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
 
-  return `
-    <div class="${docketDocClasses(stOv)}">
-      ${edit || d.headerText ? `<div class="print-dockmini${rc('header')}"${stl('header')}>${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : ''}
-      ${(() => {
+  // The paper renders the SELECTED STYLE (By course / By seat / Chef), so
+  // picking a preset card changes what you're editing — same deal as the
+  // receipt templates.
+  const layout = ['byseat', 'waitermate'].includes(d.layout) ? d.layout : 'standard';
+  const headerHtml = edit || d.headerText ? `<div class="print-dockmini${rc('header')}"${stl('header')}>${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>` : '';
+  const tableHtml = (() => {
         // The table WORD is a designer choice (TABLE 12 / Table 12 / T 12 /
         // #12 / just 12); Auto keeps the venue's own label untouched. Covers
         // sits OUTSIDE the heading so selecting Table highlights only Table.
@@ -8306,17 +8386,8 @@ function buildDocketDoc(ctx, edit) {
           return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table" title="Tap to edit table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}</h3>`;
         }
         return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table" title="Tap to edit table"' : ''}>${esc(headLabel)}</h3>`;
-      })()}
-      ${coversSeg}
-      ${metaHtml}${staffHtml}
-      ${vipHtml}
-      ${allergyHtml}
-      <hr>
-      ${(() => {
-        // The paper renders the SELECTED STYLE (By course / By seat / Chef),
-        // so picking a preset card changes what you're editing — same deal as
-        // the receipt templates.
-        const layout = ['byseat', 'waitermate'].includes(d.layout) ? d.layout : 'standard';
+  })();
+  const bodyHtml = (() => {
         const lineRow = (l, pre, noSeat) => {
           const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
           const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
@@ -8355,7 +8426,21 @@ function buildDocketDoc(ctx, edit) {
           ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${esc(c.name)}</div>`, true)}
           ${c.lines.map(l => lineRow(l)).join('')}
         </div>`).join('');
-      })()}
+  })();
+  // Standard-format blocks render in the designer's stored order (mirroring
+  // printing.js kitchenDocket): VIP/allergies and the dividing rule ride with
+  // the items block, so what moves on the paper is what moves on the printer.
+  const blocks = {
+    header: headerHtml,
+    table: tableHtml + '\n      ' + coversSeg,
+    meta: metaHtml,
+    staff: staffHtml,
+    items: vipHtml + '\n      ' + allergyHtml + '\n      <hr>\n      ' + bodyHtml,
+  };
+  const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
+  return `
+    <div class="${docketDocClasses(stOv)}">
+      ${seq.map(k => blocks[k]).join('\n      ')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
     </div>`;
 }
@@ -8493,12 +8578,12 @@ function buildCallAwaySample() {
   // Sections render in the stored order — the printed slip follows the same
   // list, so the preview stays WYSIWYG.
   const parts = {
-    callaway: `<div class="dk-part${sel ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="callaway" style="text-align:center;padding:2px 0 4px;">
+    callaway: `<div class="dk-part${sel ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="callaway" data-slip="1" style="text-align:center;padding:2px 0 4px;">
       <div style="display:inline-block;padding:2px 12px;font-weight:800;font-size:1.4em;background:${red ? '#C0392B' : '#111'};color:#fff;">CALL AWAY</div>
       <div style="font-weight:800;font-size:1.2em;margin-top:2px;${red ? 'color:#C0392B;' : ''}">${esc(course)}</div>
     </div>`,
-    table: `<div class="dk-part${state.dkPart === 'table' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="table" style="text-align:center;font-weight:700;">${esc(t)}</div>`,
-    time: `<div class="dk-part${state.dkPart === 'time' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="time" style="text-align:center;">7:41 pm</div>`,
+    table: `<div class="dk-part${state.dkPart === 'table' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="table" data-slip="1" style="text-align:center;font-weight:700;">${esc(t)}</div>`,
+    time: `<div class="dk-part${state.dkPart === 'time' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="time" data-slip="1" style="text-align:center;">7:41 pm</div>`,
   };
   return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}">
     <div class="pp-railgap" title="Blank paper — the rail clip covers this"></div>
@@ -15717,16 +15802,26 @@ function dkToolbar(d) {
       ${dd('style', { invert: 'Inverse', border: 'Border', plain: 'Plain' }[d.newCourseStyle] || 'Plain', p === 'course',
         [['invert', 'Inverse'], ['border', 'Border'], ['plain', 'Plain']].map(([v, l]) => ({ v, l, on: d.newCourseStyle === v })), 'Course header style', 'For the course header')}
       ${(() => {
-        // Reorder the call-away slip's sections: the arrows stay in the bar
-        // (fixed set) and only light up for a slip part with room to move.
-        const seq = callawayOrder(d);
-        const i = p && seq.includes(p) ? seq.indexOf(p) : -1;
+        // ONE fixed arrow pair reorders lines: a part picked on the call-away
+        // slip moves the slip's sections; a movable docket part moves its
+        // whole block (standard format only — the other formats are fixed).
         const svgUp = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>`;
         const svgDown = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
-        const arrow = (dir, glyph, title, can) =>
-          `<button type="button" class="dk-tb-btn${can ? '' : ' dk-tb-off'}" title="${title}"${can ? ` data-act="move-callaway-line" data-dir="${dir}"` : ` data-act="dk-why" data-why="For the call-away lines"`}>${glyph}</button>`;
-        return arrow('up', svgUp, 'Move up on the slip', i > 0)
-          + arrow('down', svgDown, 'Move down on the slip', i >= 0 && i < seq.length - 1);
+        const arrow = (dir, glyph, title, can, act, why) =>
+          `<button type="button" class="dk-tb-btn${can ? '' : ' dk-tb-off'}" title="${title}"${can ? ` data-act="${act}" data-dir="${dir}"` : ` data-act="dk-why" data-why="${why}"`}>${glyph}</button>`;
+        const slipSeq = callawayOrder(d);
+        if (p && (p === 'callaway' || (state.dkSlip && slipSeq.includes(p)))) {
+          const i = slipSeq.indexOf(p);
+          return arrow('up', svgUp, 'Move up on the slip', i > 0, 'move-callaway-line', 'For the call-away lines')
+            + arrow('down', svgDown, 'Move down on the slip', i >= 0 && i < slipSeq.length - 1, 'move-callaway-line', 'For the call-away lines');
+        }
+        const blk = p ? DK_MOVE_BLOCK[p] : null;
+        const movable = blk && !['byseat', 'waitermate'].includes(d.layout);
+        const seq = docketLineOrder(d);
+        const i = movable ? seq.indexOf(blk) : -1;
+        const why = (edgeWhy) => !p ? whyNoPart : !blk ? 'This line rides its block' : !movable ? 'For the By course format' : edgeWhy;
+        return arrow('up', svgUp, 'Move up the docket', i > 0, 'move-docket-line', why('Already at the top'))
+          + arrow('down', svgDown, 'Move down the docket', i >= 0 && i < seq.length - 1, 'move-docket-line', why('Already at the bottom'));
       })()}
     </div>`;
 }
@@ -15807,6 +15902,20 @@ function rcToolbar() {
       </span>
       <button type="button" class="dk-tb-btn dk-tb-red${meta && meta.red ? ((r.red || {})[p] ? ' active' : '') : ' dk-tb-off'}" title="Print in red"${meta && meta.red ? ` data-act="toggle-receipt-red" data-key="${p}"` : ` data-act="dk-why" data-why="${whyNoPart}"`}>A</button>
       <button type="button" class="dk-tb-btn${meta && meta.show ? (shown ? ' active' : '') : ' dk-tb-off'}" title="Show or hide"${meta && meta.show ? ` data-act="set-receipt-show" data-key="${meta.show}" data-val="${!shown}"` : ` data-act="dk-why" data-why="${p ? 'This line always prints' : whyNoPart}"`}>${shown ? svgEye : svgEyeOff}</button>
+      ${(() => {
+        // Fixed arrow pair — reorder the invoice's lines. Classic only: the
+        // compact presets are fixed designs, so the arrows dim there.
+        const svgUp = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>`;
+        const svgDown = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+        const arrow = (dir, glyph, title, can, why) =>
+          `<button type="button" class="dk-tb-btn${can ? '' : ' dk-tb-off'}" title="${title}"${can ? ` data-act="move-receipt-line" data-dir="${dir}"` : ` data-act="dk-why" data-why="${why}"`}>${glyph}</button>`;
+        const classic = !['express', 'grouped', 'bigtotal'].includes(r.layout);
+        const seq = receiptLineOrder(r);
+        const i = p && classic ? seq.indexOf(p) : -1;
+        const why = (edgeWhy) => !p ? whyNoPart : !classic ? 'For the Classic layout' : edgeWhy;
+        return arrow('up', svgUp, 'Move up the invoice', i > 0, why('Already at the top'))
+          + arrow('down', svgDown, 'Move down the invoice', i >= 0 && i < seq.length - 1, why('Already at the bottom'));
+      })()}
     </div>`;
 }
 
@@ -27316,7 +27425,12 @@ function handleActClick(el, e) {
         // bubbles to outer parts too — only the innermost one may handle it.
         if (state.dkStation) return; // station scope: paper parts aren't editable
         if (e.target.closest('[data-act]') !== el) return;
-        state.dkPart = state.dkPart === el.dataset.part ? null : el.dataset.part;
+        // Which paper the pick landed on — table/time live on BOTH the docket
+        // and the call-away slip, and the arrows move the paper that was
+        // tapped. Same part on the OTHER paper re-selects, never deselects.
+        const slip = el.dataset.slip === '1';
+        state.dkPart = state.dkPart === el.dataset.part && !!state.dkSlip === slip ? null : el.dataset.part;
+        state.dkSlip = slip;
         state.dkMenu = null;
         render();
       }
@@ -27334,11 +27448,30 @@ function handleActClick(el, e) {
         [next[i], next[i + step]] = [next[i + step], next[i]];
         setDocketOpt('callawayOrder', next);
       }
+      else if (act === 'move-docket-line') {
+        // Swap the selected part's BLOCK with its neighbour on the docket.
+        const step = el.dataset.dir === 'up' ? -1 : 1;
+        const blk = DK_MOVE_BLOCK[state.dkPart];
+        const next = docketLineOrder(docketCfg()).slice();
+        const i = blk ? next.indexOf(blk) : -1;
+        if (i < 0 || i + step < 0 || i + step >= next.length) return;
+        [next[i], next[i + step]] = [next[i + step], next[i]];
+        setDocketOpt('lineOrder', next);
+      }
+      else if (act === 'move-receipt-line') {
+        // Swap the selected invoice line with its neighbour (Classic layout).
+        const step = el.dataset.dir === 'up' ? -1 : 1;
+        const next = receiptLineOrder(receiptCfg()).slice();
+        const i = next.indexOf(state.rcPart);
+        if (i < 0 || i + step < 0 || i + step >= next.length) return;
+        [next[i], next[i + step]] = [next[i + step], next[i]];
+        setReceiptOpt({ lineOrder: next });
+      }
       else if (act === 'dk-why') { if (el.dataset.why) { state.toast = el.dataset.why; render(); armToastTimer(2200); } }
       else if (act === 'dk-menu-close') { state.dkMenu = null; render(); }
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
-        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; render(); }
+        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = v === 'callaway'; render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }

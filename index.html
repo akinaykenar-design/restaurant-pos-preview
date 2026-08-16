@@ -2550,6 +2550,18 @@ body[data-appbar-pos] .topbar{border-color:#2b3d54;}
 .freeze-scrim .pin-pad button{background:#22303f;border-color:#33475f;color:#e7edf4;}
 .freeze-scrim .pin-pad button[data-act="frz-enter"]{background:var(--green);border-color:var(--green);color:#fff;}
 
+/* Hold-power freeze: the same ½s build the Send hold uses — a shade sweeps
+   the power button, the glyph flips to the lock as it completes. */
+.staff-badge button[data-act="logout"]{position:relative;overflow:hidden;}
+.staff-badge button[data-act="logout"].holding::after{
+  content:""; position:absolute; inset:0; z-index:0; pointer-events:none;
+  background:rgba(0,0,0,.26); transform-origin:left; transform:scaleX(0);
+  animation:send-hold-fill .5s linear forwards;
+}
+@media (prefers-reduced-motion: reduce){
+  .staff-badge button[data-act="logout"].holding::after{ animation:none; }
+}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -12285,8 +12297,7 @@ function renderTopbar() {
         const pm = adminPageMeta(k);
         return pm ? `<button class="${state.view === 'admin' && state.adminTab === k ? 'active' : ''}" data-act="open-admin-pin" data-val="${k}" title="${esc(pm.label)} — hold its admin tile to unpin">${adminPinIcon(k)}</button>` : '';
       }).join('') : ''}
-      ${state.view === 'order' && !isChef ? `<button data-act="freeze-screen" title="Hold the screen — your PIN unlocks it"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></button>` : ''}
-      <button data-act="logout" title="Log out">${ACT_POWER_SVG}</button>
+      <button data-act="logout" title="Log off — hold to freeze">${ACT_POWER_SVG}</button>
     </div>
   </div>`;
 }
@@ -22090,22 +22101,23 @@ document.addEventListener('pointerdown', (e) => {
 // Hold grammar on the docket: hold a course tab to call it away (hold again
 // takes it back — the ✓ appears/disappears), hold Send to send + log off just
 // this once. Taps keep their meaning; fired flags swallow the release's click.
-let _courseHoldFired = false, _sendHoldFired = false;
+let _courseHoldFired = false, _sendHoldFired = false, _powerHoldFired = false;
 document.addEventListener('pointerdown', (e) => {
   if (e.isPrimary === false) return; // second finger never arms a hold
   const tab = e.target.closest && e.target.closest('.course-tab[data-act="set-course"]');
   const send = !tab && e.target.closest && e.target.closest('[data-act="send-to-kitchen"]');
-  const el = tab || send;
+  const power = !tab && !send && e.target.closest && e.target.closest('[data-act="logout"]');
+  const el = tab || send || power;
   if (!el || el.disabled || el.closest('.mk-wrap')) return;
   const x0 = e.clientX, y0 = e.clientY;
   // Press-in the moment the finger lands (deep sink). A quick tap flashes a
   // white ring on release; a hold just stays pressed and fires at ½s with no
   // completion graphic.
   el.classList.add('pressing');
-  if (send) send.classList.add('holding'); // in-button sweep shows the hold building
+  if (send || power) el.classList.add('holding'); // in-button sweep shows the hold building
   const t0 = e.timeStamp;
   let myTimer = 0; // closure-local — an overlapping press can't orphan it
-  const end = () => { clearTimeout(myTimer); el.classList.remove('pressing', 'holding'); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', end); };
+  const end = () => { clearTimeout(myTimer); el.classList.remove('pressing', 'holding'); setTimeout(() => { _courseHoldFired = false; _sendHoldFired = false; _powerHoldFired = false; }, 400); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', up); document.removeEventListener('pointercancel', end); };
   // A quick release (a real tap, not a partial hold) flashes the ring; a held-
   // then-released press never glows.
   const up = (ev) => { if (send && !_sendHoldFired && (ev.timeStamp - t0) < 250) { send.classList.add('pop'); setTimeout(() => send.classList.remove('pop'), 420); } end(); };
@@ -22121,7 +22133,7 @@ document.addEventListener('pointerdown', (e) => {
         state.toast = `${courseInfo(n).name} call away taken back`;
         render();
       } else fireCourse(n);
-    } else {
+    } else if (send) {
       _sendHoldFired = true;
       // Hold = send this round, then hand the till back to table select (still
       // logged in). Nothing new on the docket → just go back (offer to close an
@@ -22129,6 +22141,13 @@ document.addEventListener('pointerdown', (e) => {
       if (!cartSendable()) { offerCloseEmptyTable(() => backToTableSelect()); return; }
       state._backToTableOnce = true;
       sendToKitchen();
+    } else {
+      // Hold power = freeze. The fill completes, the glyph flips to the lock
+      // for a beat, THEN the scrim lands — the button itself shows what the
+      // hold just did.
+      _powerHoldFired = true;
+      power.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>`;
+      setTimeout(() => { if (state.currentStaff && !state.frozen) freezeScreen(); }, 220);
     }
   }, 500);
   document.addEventListener('pointermove', mv, { passive: true });
@@ -26658,11 +26677,13 @@ function handleActClick(el, e) {
       else if (act === 'pin-digit') { pressPinDigit(el.dataset.val); }
       else if (act === 'pin-enter') { pressPinEnter(); }
       else if (act === 'pin-back') { pressPinBackspace(); }
-      else if (act === 'freeze-screen') { freezeScreen(); }
       else if (act === 'frz-digit') { if (state.frozenPin.length < 4) { state.frozenPin += el.dataset.val; state.frozenErr = ''; render(); } }
       else if (act === 'frz-back') { state.frozenPin = state.frozenPin.slice(0, -1); render(); }
       else if (act === 'frz-enter') { pressFrzEnter(); }
       else if (act === 'logout') {
+        // A completed hold just froze the screen — the release must not ALSO
+        // start a log off.
+        if (_powerHoldFired) { _powerHoldFired = false; return; }
         // Only stop to warn when there are UNSENT items to lose — otherwise log
         // off straight away. A mis-tap must never eat an unsent order.
         const go = () => offerCloseEmptyTable(() => logOut());

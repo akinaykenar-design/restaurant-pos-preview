@@ -696,6 +696,11 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .ps-expander::before{content:'';position:absolute;inset:-12px 0;}
 .ps-expander .ps-x-sum{margin-left:auto;font-weight:400;}
 .modal input, .modal select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--steel-300);font-family:var(--font-mono);font-size:14px;background:var(--surface);color:var(--text-primary);}
+/* The station form renders in TWO homes — the Add modal and the expanded
+   Printers row (inline editor). Same field dress in both. */
+.ps-inline-form label{font-size:12px;font-weight:600;color:var(--charcoal-soft);display:block;margin:12px 0 5px;}
+.ps-inline-form input, .ps-inline-form select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--steel-300);font-family:var(--font-mono);font-size:14px;background:var(--surface);color:var(--text-primary);}
+.ps-inline-form select.found-assign{width:auto;}
 .change-due{background:var(--green-dim);color:var(--green);border-radius:8px;padding:10px 14px;margin-top:12px;font-family:var(--font-mono);font-weight:700;display:flex;justify-content:space-between;}
 /* Pay/discount content hosted in the middle pane reuses the modal typography. */
 .pay-pane h2{font-family:var(--font-display);font-size:19px;margin:0 0 4px;}
@@ -8304,7 +8309,9 @@ async function addFoundPrinter(ip) {
   try {
     const st = await api('/api/printer-stations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, categories: [], ips: [ip], kind: info.kind || 'thermal', paperWidth: info.paperWidth || '80' }) });
     state.printerStations = await api('/api/printer-stations');
-    openEditPrinterStation(st.id);
+    state.expandedStationId = st.id;
+    openEditPrinterStationInline(st.id);
+    refreshStationStatus();
     render();
   } catch (e) { state.toast = e.message || 'Could not set up the printer.'; render(); armToastTimer(3000); }
 }
@@ -8448,7 +8455,7 @@ const MODAL_DELETE_ACTIONS = {
   'modal-delete-customer': ['customerModal', (id) => deleteCustomerAction(id), 'Delete this customer?'],
   'modal-delete-supplier': ['supplierModal', (id) => deleteSupplier(id), 'Delete this supplier?'],
   'modal-delete-inventory-item': ['inventoryItemModal', (id) => deleteInventoryItem(id), 'Delete this inventory item?'],
-  'modal-delete-printer-station': ['printerStationModal', (id) => deletePrinterStationAction(id), 'Delete this printer station?'],
+  'modal-delete-printer-station': ['printerStationModal', (id) => deletePrinterStationAction(id), 'Delete this printer?'],
   'modal-delete-happy-hour': ['happyHourModal', (id) => deleteHappyHourAction(id), 'Delete this promotion?'],
   'modal-delete-discount-preset': ['discountPresetModal', (id) => deleteDiscountPresetAction(id), 'Delete this preset?'],
   'modal-delete-modifier-group': ['modifierGroupModal', (id) => deleteModifierGroupAction(id), 'Delete this modifier group? Items using it will lose it.'],
@@ -11590,7 +11597,7 @@ function render() {
     ${state.bulkStaffModal ? renderBulkStaffModal() : ''}
     ${state.reservationModal ? renderReservationModal() : ''}
     ${state.customerModal ? renderCustomerModal() : ''}
-    ${state.printerStationModal ? renderPrinterStationModal() : ''}
+    ${state.printerStationModal && !state.printerStationModal.inline ? renderPrinterStationModal() : ''}
     ${state.happyHourModal ? renderHappyHourModal() : ''}
     ${state.giftCardModal ? renderGiftCardModal() : ''}
     ${state.voucherModal ? renderVoucherModal() : ''}
@@ -14707,6 +14714,7 @@ function togglePrinterStationCategory(catName) {
   const idx = m.categories.indexOf(catName);
   if (idx === -1) m.categories.push(catName); else m.categories.splice(idx, 1);
   render();
+  schedulePsAutosave();
 }
 function togglePrinterStationSubcategory(subId) {
   const m = state.printerStationModal;
@@ -14714,6 +14722,58 @@ function togglePrinterStationSubcategory(subId) {
   const idx = m.subcategoryIds.indexOf(subId);
   if (idx === -1) m.subcategoryIds.push(subId); else m.subcategoryIds.splice(idx, 1);
   render();
+  schedulePsAutosave();
+}
+// Inline row editor: same object the modal uses, flagged inline so it renders
+// inside the expanded row and SAVES AS YOU GO instead of on a Save button.
+function openEditPrinterStationInline(id) {
+  const s = (state.printerStations || []).find(x => String(x.id) === String(id));
+  if (!s) return;
+  const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
+  state.psSubsOpen = (s.subcategoryIds || []).length > 0; state.psAdvOpen = false;
+  state.adminError = '';
+  state.printerStationModal = { inline: true, mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), subcategoryIds: (s.subcategoryIds || []).slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), kind: s.kind === 'impact' ? 'impact' : 'thermal', receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) };
+}
+let _psSaveTimer = 0;
+function schedulePsAutosave() {
+  const m = state.printerStationModal;
+  if (!m || !m.inline || !m.id) return;
+  clearTimeout(_psSaveTimer);
+  _psSaveTimer = setTimeout(savePrinterStationInline, 500);
+}
+function flushPsAutosave() {
+  const m = state.printerStationModal;
+  if (!m || !m.inline || !m.id) return;
+  clearTimeout(_psSaveTimer);
+  savePrinterStationInline();
+}
+async function savePrinterStationInline() {
+  const m = state.printerStationModal;
+  if (!m || !m.inline || !m.id) return;
+  // Read half-typed inputs straight off the row, same as the modal save.
+  const ipInputs = [...document.querySelectorAll('.ps-ip-input')];
+  const backupInput = document.getElementById('printer-station-backup-input');
+  const fbSelect = document.getElementById('printer-station-fallback');
+  const payload = {
+    name: m.name, categories: m.categories, subcategoryIds: m.subcategoryIds || [],
+    ips: ipInputs.length ? ipInputs.map(el => el.value.trim()).filter(Boolean) : m.ips.filter(Boolean),
+    backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
+    paperWidth: m.paperWidth === '58' ? '58' : m.paperWidth === '76' ? '76' : '80',
+    kind: m.kind === 'impact' ? 'impact' : 'thermal',
+    receipts: !!m.receipts, labels: !!m.labels, fallbackId: fbSelect ? fbSelect.value : (m.fallbackId || ''),
+    docket: m.docket || null,
+  };
+  try {
+    await api(`/api/printer-stations/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    state.printerStations = await api('/api/printer-stations');
+    state.adminError = '';
+    // No re-render while an input in the row still has focus — a save must
+    // never eat a keystroke.
+    if (!document.activeElement || !document.activeElement.closest || !document.activeElement.closest('.menu-item-expandable')) render();
+  } catch (e) {
+    state.adminError = e.message || 'Could not save.';
+    render();
+  }
 }
 async function savePrinterStationModal() {
   const m = state.printerStationModal;
@@ -14743,7 +14803,12 @@ async function savePrinterStationModal() {
   }
 }
 async function deletePrinterStationAction(id) {
-  try { await api(`/api/printer-stations/${id}`, { method: 'DELETE' }); state.printerStations = await api('/api/printer-stations'); render(); } catch (e) {}
+  try {
+    await api(`/api/printer-stations/${id}`, { method: 'DELETE' });
+    state.printerStations = await api('/api/printer-stations');
+    if (String(state.expandedStationId) === String(id)) state.expandedStationId = null;
+    render();
+  } catch (e) {}
 }
 // Scan the wifi for printers via the server (which sits on the same network).
 async function findPrinters() {
@@ -15095,7 +15160,7 @@ function renderPrinterStationsSettingsAdmin() {
   return `
   <div style="max-width:640px;">
     <div class="seg" style="width:fit-content;margin-bottom:16px;">
-      <button class="${tab === 'setup' ? 'active' : ''}" data-act="printers-tab" data-val="setup">Printer setup</button>
+      <button class="${tab === 'setup' ? 'active' : ''}" data-act="printers-tab" data-val="setup">Printers</button>
       <button class="${tab === 'docket' ? 'active' : ''}" data-act="printers-tab" data-val="docket">Kitchen dockets</button>
       <button class="${tab === 'receipt' ? 'active' : ''}" data-act="printers-tab" data-val="receipt">Customer receipts</button>
     </div>
@@ -15137,7 +15202,7 @@ function renderPrintersSetupTab() {
   return `
     <div class="admin-toolbar">
       <button class="icon-sq" data-act="find-printers" ${state.findingPrinters ? 'disabled style="opacity:.55;"' : ''} title="${state.findingPrinters ? 'Scanning the wifi…' : 'Find printers on the wifi'}">${SYS_SEARCH_SVG}</button>
-      <button class="btn-add inline" data-act="add-printer-station" title="Add printer station" style="margin-left:auto;">+ Add printer station</button>
+      <button class="btn-add inline" data-act="add-printer-station" title="Add a printer" style="margin-left:auto;">+ Add printer</button>
     </div>
     ${found ? `
     <div class="settings-card wide" style="max-width:600px;">
@@ -15176,7 +15241,7 @@ function renderPrintersSetupTab() {
       // Stations wear the ITEMS-row uniform: online dot on the left (tap =
       // re-check), tap the row to open its full detail, On/Off chip on the
       // right (Off = paused; dockets go to the fallback).
-      if (!state.printerStations.length) return `<div class="empty-hist">No printer stations yet.</div>`;
+      if (!state.printerStations.length) return `<div class="empty-hist">No printers yet.</div>`;
       if (!state._stationStatusFetched) { state._stationStatusFetched = true; refreshStationStatus(); }
       return state.printerStations.map(s => {
         const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : []));
@@ -15194,13 +15259,14 @@ function renderPrintersSetupTab() {
           <span style="flex:1;"></span>
           <button class="status-chip ${s.paused ? 'void' : 'paid'}" style="border:none;cursor:pointer;flex-shrink:0;" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Off — dockets go to the fallback. Tap to resume.' : 'On — printing here. Tap to pause.'}" onclick="event.stopPropagation();">${s.paused ? 'Off' : 'On'}</button>
         </div>
-        ${open ? `
-        <div style="padding:0 12px 12px 40px;">
-          <div class="t2">${ips.length ? `${SYS_PRINTER_SVG} ${ips.map(ip => { const ok = st && st.ips ? st.ips[ip] : undefined; return `${esc(ip)}${ok === false ? ' ✕' : ''}`; }).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : s.paperWidth === '76' ? ' · 76mm' : ''}${s.kind === 'impact' ? ' · Ink' : ''}` : 'No printer assigned'}</div>
-          <div class="t2">${(() => { const subNames = (s.subcategoryIds || []).map(id => { const sc = (state.subcategories || []).find(x => x.id === id); return sc ? '↳ ' + sc.name : null; }).filter(Boolean); const all = [...s.categories, ...subNames]; return all.length ? all.join(', ') : 'all sections'; })()}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
-          <div style="display:flex;gap:8px;margin-top:10px;">
-            <button class="btn-secondary sm" data-act="edit-printer-station" data-id="${s.id}">Edit</button>
+        ${open && state.printerStationModal && state.printerStationModal.inline && state.printerStationModal.id === s.id ? `
+        <div class="ps-inline-form" style="padding:0 12px 14px 40px;">
+          ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+          ${stationFormFields(state.printerStationModal)}
+          <div style="display:flex;gap:8px;margin-top:14px;align-items:center;">
             ${ips.length ? `<button class="btn-secondary sm" data-act="test-station" data-id="${s.id}">Test print</button>` : ''}
+            <span style="flex:1;"></span>
+            <button type="button" class="btn-modal-delete" data-act="modal-delete-printer-station">Delete</button>
           </div>
         </div>` : ''}
       </div>`;
@@ -15467,8 +15533,9 @@ function renderPrintersReceiptTab() {
 // fine-tuning, backup/fallback, paper, type, stickers) folds away behind
 // expanders so the everyday screen stays one glance long. No physical/virtual
 // printer split — printers just live inside the station they serve.
-function renderPrinterStationModal() {
-  const m = state.printerStationModal;
+// The station form — shared by the Add modal and the INLINE row editor
+// (expanded rows edit in place, exactly like the Items list).
+function stationFormFields(m) {
   const caret = (open) => `<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" style="transform:rotate(${open ? 90 : 0}deg);"><path d="M9 6l6 6-6 6"/></svg>`;
   // Folding group headers styled as the modal's own labels — same rhythm as
   // every other admin modal, a caret marks the two that open.
@@ -15482,10 +15549,6 @@ function renderPrinterStationModal() {
   if (m.fallbackId) { const fb = state.printerStations.find(s => s.id === m.fallbackId); if (fb) advBits.push('↳ ' + fb.name); }
   if (m.labels) advBits.push('stickers');
   return `
-  <div class="modal-bg" data-act="printer-station-modal-bg">
-    <div class="modal" data-stop="1">
-      <h2>${m.mode === 'add' ? 'Add printer station' : 'Edit printer station'}</h2>
-      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
       <label>Name</label>
       <input id="printer-station-name-input" type="text" value="${esc(m.name)}" placeholder="e.g. Bar">
       <label>Printers (all print every docket)</label>
@@ -15549,10 +15612,20 @@ function renderPrinterStationModal() {
       <label style="display:flex;align-items:center;gap:10px;cursor:pointer;">
         ${togglePill(!!m.labels, 'toggle-printer-station-labels')} Sticker roll — one label per item
       </label>
-      ${m.labels ? `<div class="paper-preview" style="max-width:230px;margin:4px 0 0;">${sampleLabelPreview()}</div>` : ''}` : ''}
+      ${m.labels ? `<div class="paper-preview" style="max-width:230px;margin:4px 0 0;">${sampleLabelPreview()}</div>` : ''}` : ''}`;
+}
+
+function renderPrinterStationModal() {
+  const m = state.printerStationModal;
+  return `
+  <div class="modal-bg" data-act="printer-station-modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>${m.mode === 'add' ? 'Add printer' : 'Edit printer'}</h2>
+      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      ${stationFormFields(m)}
       <div class="modal-actions">
         <button class="icon-action discard" title="Cancel" data-act="close-printer-station-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.printerStationModal && state.printerStationModal.id ? `<button type="button" class="btn-modal-delete" data-act="modal-delete-printer-station">Delete</button>` : ''}
+        ${m.id ? `<button type="button" class="btn-modal-delete" data-act="modal-delete-printer-station">Delete</button>` : ''}
         <button class="icon-action send" title="Save" data-act="save-printer-station-modal">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
     </div>
@@ -16077,7 +16150,7 @@ const SETTINGS_INDEX = [
   { page: 'screen', label: 'Icon-only menu bar', terms: 'icon only menu bar categories sections rail' },
   { page: 'screen', label: 'Panel layout', terms: 'layout panels order docket menu categories arrange drag' },
   { page: 'settings-printers', tab: 'setup', label: 'Test print', terms: 'print printing test printer' },
-  { page: 'settings-printers', tab: 'setup', label: 'Printer stations & wifi scan', terms: 'printer station ip address find scan wifi bar kitchen pause fallback route paper size width 80mm 58mm' },
+  { page: 'settings-printers', tab: 'setup', label: 'Printers & wifi scan', terms: 'printer station ip address find scan wifi bar kitchen pause fallback route paper size width 80mm 58mm' },
   { page: 'settings-printers', tab: 'docket', label: 'Kitchen docket layout & auto-print', terms: 'docket kitchen layout auto print fire course' },
   { page: 'settings-printers', tab: 'receipt', label: 'Receipt header, footer & auto-print', terms: 'receipt check header footer served staff covers auto print' },
   { page: 'settings-payments', label: 'Card terminal (EFTPOS)', terms: 'card terminal eftpos linkly commbank pair payment machine' },
@@ -25700,6 +25773,15 @@ function bindEvents() {
 
   const printerStationNameInput = document.getElementById('printer-station-name-input');
   if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
+  // Inline row editor saves text fields when the finger leaves them —
+  // same feel as the Items quick-edits.
+  if (state.printerStationModal && state.printerStationModal.inline) {
+    const psAuto = (el, ev) => { if (el) el.addEventListener(ev, () => schedulePsAutosave()); };
+    psAuto(printerStationNameInput, 'blur');
+    document.querySelectorAll('.ps-ip-input').forEach(el => psAuto(el, 'blur'));
+    psAuto(document.getElementById('printer-station-backup-input'), 'blur');
+    psAuto(document.getElementById('printer-station-fallback'), 'change');
+  }
   // Keep typed printer addresses in state so a background re-render can never
   // wipe them mid-keystroke.
   // Found-printers list: the "→ station…" dropdown adds the printer to an
@@ -26523,13 +26605,14 @@ function handleActClick(el, e) {
           if (act === 'add-station-ip') m.ips.push('');
           else { m.ips.splice(parseInt(el.dataset.idx), 1); if (!m.ips.length) m.ips.push(''); }
           render();
+          if (act === 'remove-station-ip') schedulePsAutosave(); // a new empty row saves once an address is typed
         }
       }
       else if (act === 'assign-printer-ip') { assignPrinterIp(el.dataset.id, el.dataset.ip); }
       else if (act === 'toggle-station-paused') { toggleStationPaused(el.dataset.id); }
       else if (act === 'bulk-price-mode') { state.bulkEditModal.priceMode = el.dataset.val; render(); }
-      else if (act === 'toggle-printer-station-receipts') { const m = state.printerStationModal; if (m) { const inp = document.getElementById('printer-station-ip-input'); if (inp) m.ip = inp.value.trim(); m.receipts = !m.receipts; render(); } }
-      else if (act === 'toggle-printer-station-labels') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.labels = !m.labels; render(); } }
+      else if (act === 'toggle-printer-station-receipts') { const m = state.printerStationModal; if (m) { const inp = document.getElementById('printer-station-ip-input'); if (inp) m.ip = inp.value.trim(); m.receipts = !m.receipts; render(); schedulePsAutosave(); } }
+      else if (act === 'toggle-printer-station-labels') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.labels = !m.labels; render(); schedulePsAutosave(); } }
       else if (act === 'apply-simple-tables') {
         const n = state.simpleCountDraft != null ? state.simpleCountDraft : (state.settings.simpleTableCount || allTables().length || 12);
         state.simpleCountDraft = null;
@@ -26779,8 +26862,8 @@ function handleActClick(el, e) {
       else if (act === 'set-auto-print-kitchen') { saveTicketSetting({ autoPrintKitchenDocket: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
-      else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); } }
-      else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); } }
+      else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); schedulePsAutosave(); } }
+      else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); schedulePsAutosave(); } }
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'set-docket-layout') { setDocketOpt('layout', el.dataset.val); }
@@ -27051,7 +27134,21 @@ function handleActClick(el, e) {
       else if (act === 'save-printer-station-modal') { savePrinterStationModal(); }
       else if (act === 'toggle-printer-station-category') { togglePrinterStationCategory(el.dataset.val); }
       else if (act === 'toggle-printer-station-subcategory') { togglePrinterStationSubcategory(el.dataset.val); }
-      else if (act === 'toggle-station-open') { state.expandedStationId = state.expandedStationId === el.dataset.id ? null : el.dataset.id; render(); }
+      else if (act === 'toggle-station-open') {
+        // Open = start the INLINE editor for that row (Items-style, saves as
+        // you go); close = flush any pending autosave first.
+        const id = el.dataset.id;
+        if (state.expandedStationId === id) {
+          flushPsAutosave();
+          state.expandedStationId = null;
+          state.printerStationModal = null;
+        } else {
+          flushPsAutosave();
+          state.expandedStationId = id;
+          openEditPrinterStationInline(id);
+        }
+        render();
+      }
       else if (act === 'check-station-status') { refreshStationStatus(); state.toast = 'Checking printers…'; render(); armToastTimer(1500); }
       else if (act === 'toggle-ps-subs' || act === 'toggle-ps-adv') {
         // Folding a group re-renders — carry any half-typed printer/backup

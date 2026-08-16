@@ -684,6 +684,14 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 /* Folding modal group header — LOOKS like the label above it (same size,
    weight, colour) so the modal keeps one rhythm; the caret is the only tell.
    Invisible halo gives the small row a full finger-size tap. */
+/* Station online light — round like the menu-item colour dot: green = every
+   printer answered, amber = some, red = none, grey = unknown/no printer.
+   Tap re-checks; the halo covers the finger. */
+.st-dot{width:20px;height:20px;border-radius:50%;border:0;flex-shrink:0;cursor:pointer;position:relative;background:var(--steel-300);}
+.st-dot::before{content:'';position:absolute;inset:-9px;}
+.st-dot.on{background:#2fa35a;}
+.st-dot.part{background:#e0a41c;}
+.st-dot.off{background:#d64545;}
 .ps-expander{display:flex;align-items:center;gap:7px;width:100%;background:none;border:0;padding:0;margin:14px 0 5px;font-size:12px;font-weight:600;color:var(--charcoal-soft);cursor:pointer;text-align:left;position:relative;}
 .ps-expander::before{content:'';position:absolute;inset:-12px 0;}
 .ps-expander .ps-x-sum{margin-left:auto;font-weight:400;}
@@ -5643,6 +5651,22 @@ app.post('/api/backups/restore', (req, res) => {
 // Print problems the floor should know about (docket didn't print, re-routed…).
 app.get('/api/print-alerts', (req, res) => {
   res.json(printing.getAlerts(parseInt(req.query.since, 10) || 0));
+});
+
+// Live reachability per station — drives the online dot on the Printers page.
+// Every non-serial printer address gets a quick knock; COM ports can't be
+// probed over the network and count as unknown.
+app.get('/api/printer-stations/status', async (req, res) => {
+  const data = readData();
+  const out = {};
+  await Promise.all((data.printerStations || []).map(async (s) => {
+    const ips = [...new Set([...(Array.isArray(s.ips) ? s.ips : []), s.ip].filter(Boolean))].filter(ip => !/^COM/i.test(ip));
+    const results = await Promise.all(ips.map(ip => printing.probe(ip, 900).catch(() => false)));
+    const perIp = {};
+    ips.forEach((ip, i) => { perIp[ip] = results[i]; });
+    out[s.id] = { online: ips.length > 0 && results.every(Boolean), someOnline: results.some(Boolean), ips: perIp };
+  }));
+  res.json(out);
 });
 
 // Scan the local wifi for printers (anything answering on port 9100), then
@@ -14724,7 +14748,10 @@ async function deletePrinterStationAction(id) {
 // Scan the wifi for printers via the server (which sits on the same network).
 async function findPrinters() {
   state.findingPrinters = true;
+  // Icon-only button — the toast carries the "working on it" message.
+  state.toast = 'Scanning the wifi for printers…';
   render();
+  armToastTimer(4000);
   try {
     const result = await api('/api/printers/discover');
     state.discoveredPrinters = result.ips || [];
@@ -15108,9 +15135,8 @@ function renderPrintersSetupTab() {
   const assignedIps = new Set(state.printerStations.flatMap(stationIps));
   const stationOf = (ip) => state.printerStations.find(s => stationIps(s).includes(ip));
   return `
-    <div class="th" style="margin:6px 0 8px;">Printer stations</div>
     <div class="admin-toolbar">
-      <button class="btn-secondary" data-act="find-printers" ${state.findingPrinters ? 'disabled' : ''}>${state.findingPrinters ? 'Scanning the wifi…' : '🔍 Find printers'}</button>
+      <button class="icon-sq" data-act="find-printers" ${state.findingPrinters ? 'disabled style="opacity:.55;"' : ''} title="${state.findingPrinters ? 'Scanning the wifi…' : 'Find printers on the wifi'}">${SYS_SEARCH_SVG}</button>
       <button class="btn-add inline" data-act="add-printer-station" title="Add printer station" style="margin-left:auto;">+ Add printer station</button>
     </div>
     ${found ? `
@@ -15146,18 +15172,47 @@ function renderPrintersSetupTab() {
       })()}
       ${state.discoverReport ? `<div style="font-size:var(--fs-chip);color:var(--charcoal-soft);margin-top:8px;">Swept ${state.discoverReport.subnets.map(b => esc(b) + '.x').join(', ')} · ${state.discoverReport.hostsProbed} addresses · ARP ${state.discoverReport.arpCount} · Bonjour ${state.discoverReport.mdnsCount}</div>` : ''}
     </div>` : ''}
-    ${state.printerStations.length === 0 ? `<div class="empty-hist">No printer stations yet.</div>` : state.printerStations.map(s => `
-      <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
-        <div class="order-info">
-          <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.labels ? `<span class="status-chip paid">labels</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
-          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : s.paperWidth === '76' ? ' · 76mm' : ''}${s.kind === 'impact' ? ' · Ink' : ''}` : 'No printer assigned'; })()}</div>
-          <div class="t2">${(() => { const subNames = (s.subcategoryIds || []).map(id => { const sc = (state.subcategories || []).find(x => x.id === id); return sc ? '↳ ' + sc.name : null; }).filter(Boolean); const all = [...s.categories, ...subNames]; return all.length ? all.join(', ') : 'all sections'; })()}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+    ${(() => {
+      // Stations wear the ITEMS-row uniform: online dot on the left (tap =
+      // re-check), tap the row to open its full detail, On/Off chip on the
+      // right (Off = paused; dockets go to the fallback).
+      if (!state.printerStations.length) return `<div class="empty-hist">No printer stations yet.</div>`;
+      if (!state._stationStatusFetched) { state._stationStatusFetched = true; refreshStationStatus(); }
+      return state.printerStations.map(s => {
+        const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : []));
+        const st = (state.stationStatus || {})[s.id];
+        const open = state.expandedStationId === s.id;
+        const dotCls = !ips.length || !st ? 'unknown' : st.online ? 'on' : st.someOnline ? 'part' : 'off';
+        const dotTitle = !ips.length ? 'No printer assigned' : !st ? 'Checking…' : st.online ? 'Online — tap to re-check' : st.someOnline ? 'Some printers offline — tap to re-check' : 'Offline — tap to re-check';
+        return `
+      <div class="menu-item-expandable${open ? ' open' : ''}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;${s.paused ? 'opacity:.7;' : ''}">
+        <div class="menu-item-header" data-act="toggle-station-open" data-id="${s.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;" title="Tap to open">
+          <button type="button" class="st-dot ${dotCls}" data-act="check-station-status" data-id="${s.id}" title="${dotTitle}" onclick="event.stopPropagation();"></button>
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(s.name)}</span>
+          ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''}
+          ${s.labels ? `<span class="status-chip paid">labels</span>` : ''}
+          <span style="flex:1;"></span>
+          <button class="status-chip ${s.paused ? 'void' : 'paid'}" style="border:none;cursor:pointer;flex-shrink:0;" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Off — dockets go to the fallback. Tap to resume.' : 'On — printing here. Tap to pause.'}" onclick="event.stopPropagation();">${s.paused ? 'Off' : 'On'}</button>
         </div>
-        <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
-        ${(s.ips && s.ips.length) || s.ip ? `<button class="btn-secondary sm" data-act="test-station" data-id="${s.id}">Test print</button>` : ''}
-      </div>
-    `).join('')}
+        ${open ? `
+        <div style="padding:0 12px 12px 40px;">
+          <div class="t2">${ips.length ? `${SYS_PRINTER_SVG} ${ips.map(ip => { const ok = st && st.ips ? st.ips[ip] : undefined; return `${esc(ip)}${ok === false ? ' ✕' : ''}`; }).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : s.paperWidth === '76' ? ' · 76mm' : ''}${s.kind === 'impact' ? ' · Ink' : ''}` : 'No printer assigned'}</div>
+          <div class="t2">${(() => { const subNames = (s.subcategoryIds || []).map(id => { const sc = (state.subcategories || []).find(x => x.id === id); return sc ? '↳ ' + sc.name : null; }).filter(Boolean); const all = [...s.categories, ...subNames]; return all.length ? all.join(', ') : 'all sections'; })()}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+          <div style="display:flex;gap:8px;margin-top:10px;">
+            <button class="btn-secondary sm" data-act="edit-printer-station" data-id="${s.id}">Edit</button>
+            ${ips.length ? `<button class="btn-secondary sm" data-act="test-station" data-id="${s.id}">Test print</button>` : ''}
+          </div>
+        </div>` : ''}
+      </div>`;
+      }).join('');
+    })()}
   `;
+}
+
+// One knock per printer, all stations at once — paints the online dots.
+async function refreshStationStatus() {
+  try { state.stationStatus = await api('/api/printer-stations/status'); } catch (e) {}
+  render();
 }
 
 // Mini paper previews for the docket layout presets — same card row the
@@ -26996,6 +27051,8 @@ function handleActClick(el, e) {
       else if (act === 'save-printer-station-modal') { savePrinterStationModal(); }
       else if (act === 'toggle-printer-station-category') { togglePrinterStationCategory(el.dataset.val); }
       else if (act === 'toggle-printer-station-subcategory') { togglePrinterStationSubcategory(el.dataset.val); }
+      else if (act === 'toggle-station-open') { state.expandedStationId = state.expandedStationId === el.dataset.id ? null : el.dataset.id; render(); }
+      else if (act === 'check-station-status') { refreshStationStatus(); state.toast = 'Checking printers…'; render(); armToastTimer(1500); }
       else if (act === 'toggle-ps-subs' || act === 'toggle-ps-adv') {
         // Folding a group re-renders — carry any half-typed printer/backup
         // values into the modal state first (same idiom as paper/kind taps).

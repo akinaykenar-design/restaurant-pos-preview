@@ -18391,7 +18391,12 @@ function renderBulkEditModal() {
       <label>Move to section</label>
       <select id="bulk-category-input">
         <option value="">No change</option>
-        ${state.categories.map(c => `<option value="${esc(c.name)}" ${m.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+        ${state.categories.map(c => {
+          const subs = state.subcategories.filter(s => s.categoryId === c.id && !s.parentSubcategoryId);
+          const subOpt = (s, depth) => `<option value="sub::${s.id}" ${m.category === 'sub::' + s.id ? 'selected' : ''}>${' '.repeat(depth * 4)}↳ ${esc(s.name)}</option>`
+            + state.subcategories.filter(x => x.parentSubcategoryId === s.id).map(x => subOpt(x, depth + 1)).join('');
+          return `<option value="${esc(c.name)}" ${m.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>` + subs.map(s => subOpt(s, 1)).join('');
+        }).join('')}
       </select>
       <label>Availability</label>
       <div class="pay-options">
@@ -23538,27 +23543,12 @@ async function reorderMenuItems(draggedId, targetId) {
   const ordered = visible.slice();
   const [dragged] = ordered.splice(fromPos, 1);
   ordered.splice(toPos, 0, dragged);
-  // Dragging past a section boundary MOVES the item: it adopts the section
-  // (and subsection) of the row it landed on — up or down, any section. A
-  // drop inside its own section stays a plain reorder.
-  const tgt = state.menu.find(m => m.id === targetId);
-  const crossed = tgt && (tgt.category !== dragged.category || (tgt.subcategoryId || null) !== (dragged.subcategoryId || null));
-  if (crossed) {
-    dragged.category = tgt.category;
-    dragged.subcategoryId = tgt.subcategoryId || null;
-  }
   const updates = ordered.map((m, i) => ({ id: m.id, sequence: i + 1 }));
   ordered.forEach((m, i) => { m.sequence = i + 1; });
   render();
   try {
-    await Promise.all(updates.map(u => api(`/api/menu/${u.id}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(u.id === dragged.id && crossed
-        ? { sequence: u.sequence, category: dragged.category, subcategoryId: dragged.subcategoryId }
-        : { sequence: u.sequence }),
-    })));
+    await Promise.all(updates.map(u => api(`/api/menu/${u.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sequence: u.sequence }) })));
     state.menu = await api('/api/menu');
-    if (crossed) { state.toast = `Moved to ${dragged.category}.`; armToastTimer(2400); }
     render();
   } catch (e) {
     state.toast = 'Could not reorder items.';
@@ -23595,7 +23585,19 @@ async function saveBulkEditModal() {
     await Promise.all(ids.map(id => {
       const item = state.menu.find(x => x.id === id);
       const payload = {};
-      if (m.category) payload.category = m.category;
+      // Move target can be a section (subsection cleared) or any subsection
+      // at any depth ('sub::<id>' — the item adopts that subsection AND the
+      // section it ultimately belongs to).
+      if (m.category && m.category.startsWith('sub::')) {
+        let sub = state.subcategories.find(s => s.id === m.category.slice(5));
+        const target = sub;
+        while (sub && !sub.categoryId && sub.parentSubcategoryId) sub = state.subcategories.find(s => s.id === sub.parentSubcategoryId);
+        const cat = sub && state.categories.find(c => c.id === sub.categoryId);
+        if (target && cat) { payload.category = cat.name; payload.subcategoryId = target.id; }
+      } else if (m.category) {
+        payload.category = m.category;
+        payload.subcategoryId = null;
+      }
       if (m.out !== null) payload.out = m.out;
       if (item && m.priceMode === 'set') payload.price = parseFloat(m.priceValue);
       else if (item && m.priceMode === 'increase') payload.price = Math.max(0, item.price * (1 + parseFloat(m.priceValue) / 100));

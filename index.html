@@ -2537,6 +2537,19 @@ body[data-appbar-pos] .topbar{border-color:#2b3d54;}
 .topbar .staff-badge button.active{background:#3c5270;border-color:#5b79a0;color:#fff;}
 .topbar .status-dot{color:#8ba1ba;}
 
+/* Held screen ("do not touch"): a full scrim over everything — z above the
+   keyboard (2500) and every modal — with the holder's name and a PIN pad.
+   Deliberately one dark look in both themes: a held till should read the
+   same wherever it stands. */
+.freeze-scrim{position:fixed;inset:0;z-index:3200;background:rgba(9,13,18,.99);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:#e7edf4;}
+.freeze-scrim .fz-lock{width:44px;height:44px;color:#8ba1ba;margin-bottom:8px;}
+.freeze-scrim .fz-title{font-family:var(--font-display);font-size:var(--fs-num);color:#fff;}
+.freeze-scrim .fz-sub{font-size:var(--fs-sm);color:#8ba1ba;margin-bottom:18px;}
+.freeze-scrim .pin-dot{border-color:#3c4f66;}
+.freeze-scrim .pin-dot.filled{background:var(--orange);border-color:var(--orange);}
+.freeze-scrim .pin-pad button{background:#22303f;border-color:#33475f;color:#e7edf4;}
+.freeze-scrim .pin-pad button[data-act="frz-enter"]{background:var(--green);border-color:var(--green);color:#fff;}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -7815,6 +7828,11 @@ let state = {
   loginSelectedId: null,
   loginPin: '',
   loginError: '',
+  // Held screen ("do not touch"): {id, name} of who froze it. Their PIN (or a
+  // manager's) unlocks. Survives reload via localStorage 'pos-frozen'.
+  frozen: null,
+  frozenPin: '',
+  frozenErr: '',
 
   // Admin panel
   adminTab: 'register',
@@ -9823,6 +9841,10 @@ function finishLogin(staff) {
   const resume = staff.role !== 'chef' && prevId && String(prevId) === String(staff.id);
   state.currentStaff = staff;
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
+  // A fresh PIN entry proves the person — any held screen from before the
+  // reload is spent (the login screen was the lock in the meantime).
+  state.frozen = null; state.frozenPin = ''; state.frozenErr = '';
+  try { localStorage.removeItem('pos-frozen'); } catch (e) {}
   resetIdleTimer(); // start the idle-logoff clock for this session
   state.loginSelectedId = null;
   state.loginPin = '';
@@ -9903,6 +9925,57 @@ async function pressPinEnter() {
 }
 function pressPinBackspace() { state.loginPin = state.loginPin.slice(0, -1); render(); }
 
+// ---------- Freeze screen ----------
+// "Do not touch": mid-order, a waiter can hold the till and walk away — the
+// scrim swallows every tap, so nobody can exit the order, send a half round,
+// or log them off. Their own PIN (or a manager's) hands the screen back
+// exactly as they left it. The order itself is never touched.
+function freezeScreen() {
+  if (!state.currentStaff) return;
+  state.frozen = { id: state.currentStaff.id, name: state.currentStaff.name };
+  state.frozenPin = ''; state.frozenErr = '';
+  clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
+  try { localStorage.setItem('pos-frozen', JSON.stringify(state.frozen)); } catch (e) {}
+  render();
+}
+function unfreezeScreen() {
+  state.frozen = null; state.frozenPin = ''; state.frozenErr = '';
+  try { localStorage.removeItem('pos-frozen'); } catch (e) {}
+  resetIdleTimer();
+  render();
+}
+async function pressFrzEnter() {
+  if (!state.frozenPin) return;
+  try {
+    const r = await api('/api/staff/verify-pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin: state.frozenPin, force: true }),
+    });
+    if (r && r.id && (r.id === state.frozen.id || r.role === 'manager')) { unfreezeScreen(); return; }
+  } catch (e) {}
+  state.frozenErr = 'shake'; state.frozenPin = '';
+  render();
+}
+function renderFreezeOverlay() {
+  const f = state.frozen;
+  return `
+  <div class="freeze-scrim">
+    <svg viewBox="0 0 24 24" class="fz-lock" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    <div class="fz-title">Held by ${esc(f.name)}</div>
+    <div class="fz-sub">Their PIN — or a manager's — unlocks it</div>
+    <div class="pin-dots${state.frozenErr === 'shake' ? ' shake' : ''}">
+      ${Array.from({ length: Math.max(4, state.frozenPin.length) }).map((_, i) => `<span class="pin-dot ${i < state.frozenPin.length ? 'filled' : ''}"></span>`).join('')}
+    </div>
+    <div class="pin-pad">
+      ${['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(d => `<button data-act="frz-digit" data-val="${d}">${d}</button>`).join('')}
+      <button class="util" data-act="frz-back">⌫</button>
+      <button data-act="frz-digit" data-val="0">0</button>
+      <button class="util" data-act="frz-enter" title="Unlock">${ACT_TICK_SVG.replace('<svg ', '<svg style="width:26px;height:26px;display:block;margin:0 auto;" ')}</button>
+    </div>
+  </div>`;
+}
+
 // ---------- Idle auto-logoff ----------
 // An unattended till hands itself back: after N minutes with no touch, a
 // countdown warns, and if nobody taps "Stay", it logs off (releasing the
@@ -9923,7 +9996,9 @@ function resetIdleTimer() {
   _idleTimer = setTimeout(startIdleWarn, mins * 60000);
 }
 function startIdleWarn() {
-  if (!idleMinutes() || !state.currentStaff) return;
+  // A held screen must never idle-logoff — that would eat the unsent order
+  // the hold exists to protect.
+  if (!idleMinutes() || !state.currentStaff || state.frozen) return;
   state.idleWarn = true; _idleLeft = IDLE_WARN_SECS; render();
   clearInterval(_idleCountdown);
   _idleCountdown = setInterval(() => {
@@ -11949,6 +12024,7 @@ function render() {
     ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
+    ${state.frozen ? renderFreezeOverlay() : ''}
   `;
   bindEvents();
   oskMarkInputs();
@@ -12209,6 +12285,7 @@ function renderTopbar() {
         const pm = adminPageMeta(k);
         return pm ? `<button class="${state.view === 'admin' && state.adminTab === k ? 'active' : ''}" data-act="open-admin-pin" data-val="${k}" title="${esc(pm.label)} — hold its admin tile to unpin">${adminPinIcon(k)}</button>` : '';
       }).join('') : ''}
+      ${state.view === 'order' && !isChef ? `<button data-act="freeze-screen" title="Hold the screen — your PIN unlocks it"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></button>` : ''}
       <button data-act="logout" title="Log out">${ACT_POWER_SVG}</button>
     </div>
   </div>`;
@@ -26402,6 +26479,9 @@ function bindEvents() {
 // those tiles used to be DEAF until the next full render.
 function handleActClick(el, e) {
       const act = el.dataset.act;
+      // Held screen: the scrim already swallows taps physically — this guard
+      // is the belt-and-braces so NOTHING else can run until the PIN unlocks.
+      if (state.frozen && act !== 'frz-digit' && act !== 'frz-back' && act !== 'frz-enter') return;
       // The account panel needs no Close: tapping anything that isn't one of
       // its own tiles drops it and the tap does its normal job — BUT while one
       // of its popups (notes, covers, customer, move, call-away, quick note) is
@@ -26578,6 +26658,10 @@ function handleActClick(el, e) {
       else if (act === 'pin-digit') { pressPinDigit(el.dataset.val); }
       else if (act === 'pin-enter') { pressPinEnter(); }
       else if (act === 'pin-back') { pressPinBackspace(); }
+      else if (act === 'freeze-screen') { freezeScreen(); }
+      else if (act === 'frz-digit') { if (state.frozenPin.length < 4) { state.frozenPin += el.dataset.val; state.frozenErr = ''; render(); } }
+      else if (act === 'frz-back') { state.frozenPin = state.frozenPin.slice(0, -1); render(); }
+      else if (act === 'frz-enter') { pressFrzEnter(); }
       else if (act === 'logout') {
         // Only stop to warn when there are UNSENT items to lose — otherwise log
         // off straight away. A mis-tap must never eat an unsent order.

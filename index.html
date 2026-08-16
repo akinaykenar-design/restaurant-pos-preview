@@ -4543,10 +4543,11 @@ app.put('/api/settings', (req, res) => {
     // size tiers (1/2/3). A field left out of the PUT keeps its saved value.
     const showSrc = (src.show !== undefined ? src.show : cur.show) || {};
     const show = {};
-    ['taxlabel', 'abn', 'orderinfo', 'table', 'payment'].forEach(k => { if (showSrc[k] === false) show[k] = false; });
+    ['taxlabel', 'abn', 'orderinfo', 'table', 'payment', 'subtotal'].forEach(k => { if (showSrc[k] === false) show[k] = false; });
+    ['address', 'phone'].forEach(k => { if (showSrc[k] === true) show[k] = true; });
     const sizeSrc = (src.sizes !== undefined ? src.sizes : cur.sizes) || {};
     const sizes = {};
-    ['header', 'items', 'totals', 'abn', 'orderinfo', 'payment'].forEach(k => { const v = sizeSrc[k]; if (v === 1 || v === 2 || v === 3) sizes[k] = v; });
+    ['header', 'items', 'totals', 'abn', 'orderinfo', 'payment', 'subtotal', 'gst', 'staff', 'address', 'phone'].forEach(k => { const v = sizeSrc[k]; if (v === 1 || v === 2 || v === 3) sizes[k] = v; });
     // Line spacing: stored only when it differs from the printer default, so
     // untouched receipts keep printing byte-identical.
     const den = src.density !== undefined ? src.density : cur.density;
@@ -4554,6 +4555,9 @@ app.put('/api/settings', (req, res) => {
       layout: allowed.includes(src.layout) ? src.layout
         : allowed.includes(cur.layout) ? cur.layout : 'classic',
       show, sizes,
+      ...(src.staffLabel !== undefined
+        ? (String(src.staffLabel).trim() && String(src.staffLabel).trim() !== 'Served by' ? { staffLabel: String(src.staffLabel).trim().slice(0, 30) } : {})
+        : (cur.staffLabel ? { staffLabel: cur.staffLabel } : {})),
       ...(den === 'tight' || den === 'roomy' ? { density: den } : {}),
     };
   }
@@ -4603,6 +4607,8 @@ app.put('/api/settings', (req, res) => {
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
   if (req.body.venueAbn !== undefined) data.settings.venueAbn = String(req.body.venueAbn || '').trim().slice(0, 20);
+  if (req.body.venueAddress !== undefined) data.settings.venueAddress = String(req.body.venueAddress || '').trim().slice(0, 80);
+  if (req.body.venuePhone !== undefined) data.settings.venuePhone = String(req.body.venuePhone || '').trim().slice(0, 30);
   if (req.body.messageOfTheDay !== undefined) data.settings.messageOfTheDay = String(req.body.messageOfTheDay || '').slice(0, 280);
   if (req.body.autoSurcharge && typeof req.body.autoSurcharge === 'object') {
     const a = req.body.autoSurcharge;
@@ -7971,14 +7977,27 @@ const RC_PARTS = {
   orderinfo: { label: 'Order no & date', show: 'orderinfo', size: true },
   table: { label: 'Table line', show: 'table', size: false },
   items: { label: 'Items', show: null, size: true },
-  totals: { label: 'Totals', show: null, size: true },
+  subtotal: { label: 'Subtotal line', show: 'subtotal', size: true },
+  totals: { label: 'Total line', show: null, size: true },
+  gst: { label: 'GST line', show: null, size: true },
   payment: { label: 'Payment', show: 'payment', size: true },
+  staff: { label: 'Served by', show: 'staff', size: true },
+  address: { label: 'Address', show: 'address', size: true },
+  phone: { label: 'Phone', show: 'phone', size: true },
 };
 function receiptCfg() {
   const r = (state.settings && state.settings.receipt) || {};
   return { layout: r.layout || 'classic', show: r.show || {}, sizes: r.sizes || {}, density: (r.density === 'tight' || r.density === 'roomy') ? r.density : 'normal' };
 }
-function rcShown(k) { return receiptCfg().show[k] !== false; }
+function rcShown(k) {
+  // 'staff' has always lived on settings.showStaffOnTicket — the part's eye
+  // reads and writes that same switch, so there is only one door.
+  if (k === 'staff') return state.settings.showStaffOnTicket !== false;
+  // Address/phone are OPT-IN: venues stored an address long before the
+  // receipt could print it, so an untouched receipt must not grow lines.
+  if (k === 'address' || k === 'phone') return receiptCfg().show[k] === true;
+  return receiptCfg().show[k] !== false;
+}
 // Persist receipt designer options (merges into settings.receipt).
 function setReceiptOpt(patch) {
   const next = Object.assign({}, receiptCfg(), patch);
@@ -8052,6 +8071,8 @@ function buildReceiptDoc(order, edit) {
       ${layout === 'classic' ? partR('taxlabel', `<div class="print-sub" style="font-weight:800;letter-spacing:.06em;">TAX INVOICE</div>`, true) : ''}
       ${edit || s.ticketHeader ? partR('header', `<h3${rstl('header')}>${headerInner}</h3>`, true) : ''}
       ${partR('abn', `<div class="print-sub"${rstl('abn')}>${abnInner}</div>`, true)}
+      ${partR('address', `<div class="print-sub"${rstl('address')}>${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress || '')}</div>`, true)}
+      ${partR('phone', `<div class="print-sub"${rstl('phone')}>${edit ? sampleEditable('venuePhone', s.venuePhone, 'add phone', '') : esc(s.venuePhone || '')}</div>`, true)}
       ${layout === 'grouped' && (edit || s.venueAddress) ? `<div class="print-sub">${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress)}</div>` : ''}
       ${layout === 'classic'
         ? partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)
@@ -8061,17 +8082,15 @@ function buildReceiptDoc(order, edit) {
       <hr>
       ${partR('items', itemsHtml, true, rstl('items'))}
       <hr>
-      ${partR('totals', `
+      ${partR('subtotal', `
       <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
-      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}
-      ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
-      <div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>
-      ${order.tax && taxLabelInclusive() ? `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>` : ''}
-      ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>` : ''}`, true, rstl('totals'))}
+      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}`, true, rstl('subtotal'))}
+      ${order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : ''}
+      ${partR('totals', `<div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>`, true, rstl('totals'))}
+      ${order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : ''}
+      ${order.tip ? partR('totals', `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>`, true, rstl('totals')) : ''}
       ${partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true)}
-      ${edit
-        ? sampleToggleLine(!!s.showStaffOnTicket, 'set-show-staff-ticket', `<span>Served by</span><span>${esc(order.staffName || '')}</span>`)
-        : (s.showStaffOnTicket ? `<div class="print-line"><span>Served by</span><span>${esc(order.staffName || '')}</span></div>` : '')}
+      ${partR('staff', `<div class="print-line"${rstl('staff')}><span>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')}</span><span>${esc(order.staffName || '')}</span></div>`, true)}
       ${edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : '')}
     </div>`;
 }
@@ -25859,6 +25878,9 @@ function bindEvents() {
       if (state.printEdit !== f) return;
       state.printEdit = null;
       if (f === 'docketHeader') setDocketOpt('headerText', sampleEditInput.value.trim());
+      else if (f === 'staffLabel') setReceiptOpt({ staffLabel: sampleEditInput.value.trim() || 'Served by' });
+      else if (f === 'venueAddress') saveTicketSetting({ venueAddress: sampleEditInput.value.trim() });
+      else if (f === 'venuePhone') saveTicketSetting({ venuePhone: sampleEditInput.value.trim() });
       else if (f === 'docketFooter') setDocketOpt('footerText', sampleEditInput.value.trim());
       else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
     });
@@ -27092,9 +27114,17 @@ function handleActClick(el, e) {
         else if (m === 'spacing') { setReceiptOpt({ density: v }); }
       }
       else if (act === 'set-receipt-show') {
-        const next = Object.assign({}, receiptCfg().show);
-        if (el.dataset.val === 'false') next[el.dataset.key] = false; else delete next[el.dataset.key];
-        setReceiptOpt({ show: next });
+        if (el.dataset.key === 'staff') { saveTicketSetting({ showStaffOnTicket: el.dataset.val !== 'false' }); }
+        else if (el.dataset.key === 'address' || el.dataset.key === 'phone') {
+          const next = Object.assign({}, receiptCfg().show);
+          if (el.dataset.val === 'false') delete next[el.dataset.key]; else next[el.dataset.key] = true;
+          setReceiptOpt({ show: next });
+        }
+        else {
+          const next = Object.assign({}, receiptCfg().show);
+          if (el.dataset.val === 'false') next[el.dataset.key] = false; else delete next[el.dataset.key];
+          setReceiptOpt({ show: next });
+        }
       }
       else if (act === 'add-found-printer') { addFoundPrinter(el.dataset.ip); }
       else if (act === 'print-sample-docket') { printSample('docket'); }

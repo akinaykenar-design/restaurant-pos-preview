@@ -2333,7 +2333,7 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 /* The peek pop is a fixed-height column: title/meta/chips pinned at the top,
    total + actions pinned at the bottom, and ONLY the order list scrolls in the
    middle. Long orders never push the buttons off a short (phone) screen. */
-.qty-pop.peek-pop{ width:340px; max-height:88vh; display:flex; flex-direction:column; }
+.qty-pop.peek-pop{ width:340px; max-height:calc(100dvh - 170px); display:flex; flex-direction:column; }
 .peek-meta{ text-align:center; font-size:12.5px; color:var(--charcoal-soft); flex:none; }
 .peek-chips{ display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-top:4px; flex:none; }
 .peek-pop .sp-item, .peek-pop .peek-total, .peek-pop .qp-actions{ flex:none; }
@@ -2557,6 +2557,40 @@ body[data-appbar-pos] .topbar{border-color:#2b3d54;}
 @media (prefers-reduced-motion: reduce){
   .staff-badge button[data-act="logout"].holding::after{ animation:none; }
 }
+
+/* Move-items pane: docket reading order — name first, price right, courses
+   as quiet group labels. Selected = the till's orange ring, no checkbox. */
+.mv-row{display:flex;align-items:center;gap:12px;border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);padding:10px 14px;min-height:52px;cursor:pointer;}
+.mv-row.sel{border-color:var(--orange);box-shadow:inset 0 0 0 1px var(--orange);background:var(--orange-dim);}
+.mv-main{flex:1;min-width:0;}
+.mv-name{font-weight:700;font-size:var(--fs-md);color:var(--text-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mv-sub{font-size:var(--fs-sm);color:var(--charcoal-soft);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.mv-price{font-family:var(--font-mono);font-size:var(--fs-md);font-weight:700;flex-shrink:0;color:var(--text-primary);}
+.mv-course{font-size:var(--fs-chip);letter-spacing:1.5px;text-transform:uppercase;font-weight:700;color:var(--charcoal-soft);margin:6px 2px 0;}
+
+/* Transfer landing mark (owner pick "2+4"): ring blooms once on the new
+   table, the "⇄ from" chip springs in, its arrows swap once, all settles.
+   One-shot (no infinite) — the state clears itself after ~2.4s. */
+.tfx{position:absolute;inset:0;pointer-events:none;z-index:7;}
+.tfx-ring{position:absolute;inset:-3px;border-radius:12px;border:3px solid var(--green);opacity:0;animation:tfx-bloom 1s cubic-bezier(.2,.6,.35,1) forwards;}
+@keyframes tfx-bloom{0%{transform:scale(1);opacity:.85;}100%{transform:scale(2.1);opacity:0;}}
+.tfx-chip{position:absolute;top:-13px;right:-9px;display:flex;align-items:center;gap:4px;background:var(--surface);border:1.5px solid var(--green);color:var(--text-primary);border-radius:999px;padding:2px 9px 2px 6px;font-size:var(--fs-sm);font-weight:800;box-shadow:var(--shadow);opacity:0;animation:tfx-spring .5s cubic-bezier(.34,1.56,.64,1) .12s forwards;}
+.tfx-chip svg{width:14px;height:14px;color:var(--green);}
+@keyframes tfx-spring{0%{opacity:0;transform:translateY(7px) scale(.7);}62%{opacity:1;transform:translateY(0) scale(1.07);}100%{opacity:1;transform:none;}}
+.tfx-a1{animation:tfx-crossR .8s ease-in-out .35s both;}
+.tfx-a2{animation:tfx-crossL .8s ease-in-out .35s both;}
+@keyframes tfx-crossR{0%{transform:translateX(-5px);}100%{transform:translateX(5px);}}
+@keyframes tfx-crossL{0%{transform:translateX(5px);}100%{transform:translateX(-5px);}}
+@media (prefers-reduced-motion: reduce){
+  .tfx-ring{display:none;}
+  .tfx-chip,.tfx-a1,.tfx-a2{animation:none;opacity:1;transform:none;}
+}
+
+/* Show order timeline: course labels inside each put-through block, and the
+   call-away moments as their own red stamps in the stream. */
+.peek-subcourse{font-size:var(--fs-chip);letter-spacing:1.5px;text-transform:uppercase;font-weight:700;color:var(--charcoal-soft);margin:5px 0 2px;}
+.peek-fire{font-size:var(--fs-sm);font-weight:800;color:var(--red);margin:8px 0 2px;display:flex;align-items:center;gap:6px;}
+.peek-fire::before{content:'';width:7px;height:7px;border-radius:50%;background:var(--red);flex:none;}
 
 </style>
 <div id="app">Loading…</div>
@@ -11574,18 +11608,42 @@ function renderOrderHistoryPop() {
         <span class="peek-price">${it.price > 0 ? money(it.price * it.qty) : ''}</span>
       </div>`;
   const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
+  // The night as it happened: every put-through docket (its items split by
+  // course) and every call-away, one stream, in time order.
+  const events = [];
+  (o.rounds || []).forEach(r => events.push({ at: r.sentAt || 0, html: (() => {
+    const byCourse = [];
+    (r.items || []).forEach(it => {
+      const c = it.course || 0;
+      let g = byCourse.find(x => x.c === c);
+      if (!g) { g = { c, items: [] }; byCourse.push(g); }
+      g.items.push(it);
+    });
+    byCourse.sort((a, b) => a.c - b.c);
+    return `
+      <div class="peek-course">Put through · ${fmtTime(r.sentAt)}${(r.staffName || o.staffName) ? ' · ' + esc(r.staffName || o.staffName) : ''}</div>
+      ${byCourse.map(g => `
+        ${g.c ? `<div class="peek-subcourse">${esc(courseInfo(g.c).name)}</div>` : ''}
+        ${g.items.map(line).join('')}`).join('')}
+      ${r.quickNote ? `<div class="peek-line"><span class="peek-name"><span class="peek-note">${esc(r.quickNote)}</span></span></div>` : ''}`;
+  })() }));
+  Object.entries(o.firedCourses || {}).forEach(([n, ts]) => {
+    if (!(ts > 0)) return;
+    events.push({ at: ts, html: `<div class="peek-fire">${esc(courseInfo(parseInt(n)).name)} called away · ${fmtTime(ts)}</div>` });
+  });
+  events.sort((a, b) => a.at - b.at);
   return `
       <div class="pop-scrim" data-act="close-order-history"></div>
       <div class="qty-pop covers-pop peek-pop">
         <div class="sp-item">${o.orderType === 'dine-in' ? 'Table ' + esc(String(o.table)) : esc(o.customerName || o.orderType || '')}</div>
         <div class="peek-meta">Opened ${fmtTime(o.createdAt)} · ${esc(o.staffName || '')}</div>
         <div class="peek-list">
-          ${(o.rounds || []).map(r => `
-            <div class="peek-course">Docket #${r.id} · ${fmtTime(r.sentAt)}${(r.staffName || o.staffName) ? ' · ' + esc(r.staffName || o.staffName) : ''}</div>
-            ${(r.items || []).map(line).join('')}
-            ${r.quickNote ? `<div class="peek-line"><span class="peek-name"><span class="peek-note">${esc(r.quickNote)}</span></span></div>` : ''}`).join('')}
+          ${events.map(e => e.html).join('')}
         </div>
         <div class="peek-total"><span>Total</span><span>${money(total)}</span></div>
+        <div class="qp-actions" style="margin-top:8px;">
+          <button class="icon-action discard" style="width:100%;" title="Close" data-act="close-order-history">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
+        </div>
       </div>`;
 }
 
@@ -20108,21 +20166,47 @@ function renderMoveItemsMiddle() {
   const o = state.orders.find(x => x.id === state.openOrderId);
   const sel = state.moveItems.sel;
   const lines = o ? (o.items || []) : [];
+  const t = findTableById(state.table);
+  // Same reading order as the docket: grouped by course, name first, price
+  // right. Tap a row to pick it — orange ring, like everything else selected
+  // on the till.
+  const groups = [];
+  lines.forEach(i => {
+    const c = i.course || 0;
+    let g = groups.find(x => x.c === c);
+    if (!g) { g = { c, items: [] }; groups.push(g); }
+    g.items.push(i);
+  });
+  groups.sort((a, b) => a.c - b.c);
+  const row = (i) => {
+    const on = sel.includes(String(i.id));
+    const subBits = [];
+    if (i.seat && i.seat !== 'all') subBits.push('Seat ' + esc(String(i.seat)));
+    (i.mods || []).forEach(m => subBits.push(esc(m.name || String(m))));
+    return `
+      <div class="mv-row${on ? ' sel' : ''}" data-act="toggle-move-item" data-id="${i.id}">
+        <div class="mv-main">
+          <div class="mv-name">${i.qty > 1 ? `${i.qty} × ` : ''}${esc(i.name)}</div>
+          ${subBits.length ? `<div class="mv-sub">${subBits.join(' · ')}</div>` : ''}
+        </div>
+        <span class="mv-price">${money(i.price * i.qty)}</span>
+      </div>`;
+  };
   return `
   <div class="modal-bg" data-act="pane-escape">
-    <div class="modal modal-pane" data-stop="1" style="width:min(460px,94vw);max-height:82vh;display:flex;flex-direction:column;gap:12px;">
-      <div style="display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;align-content:flex-start;min-height:120px;">
-        ${lines.length ? lines.map(i => { const on = sel.includes(String(i.id)); return `
-        <div class="menu-item-header" style="flex:none;border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;${on ? 'border-color:var(--orange);box-shadow:inset 0 0 0 1px var(--orange);' : ''}" data-act="toggle-move-item" data-id="${i.id}">
-          <input type="checkbox" ${on ? 'checked' : ''} style="pointer-events:none;" tabindex="-1">
-          <span class="t1" style="font-weight:700;font-size:var(--fs-md);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${i.qty} × ${esc(i.name)}${i.seat && i.seat !== 'all' ? ` · seat ${i.seat}` : ''}</span>
-          <span style="flex:1;"></span>
-          <span style="font-family:var(--font-mono);font-size:var(--fs-md);font-weight:700;flex-shrink:0;">${money(i.price * i.qty)}</span>
-        </div>`; }).join('') : `<div class="ts">Nothing sent yet.</div>`}
+    <div class="modal modal-pane" data-stop="1" style="width:min(480px,94vw);max-height:82vh;display:flex;flex-direction:column;gap:10px;">
+      <div>
+        <div class="th" style="margin:0;">Move items${t ? ` — table ${esc(String(t.label))}` : ''}</div>
+        <div class="ts" style="margin-top:2px;">Tap what's moving, then pick the table.</div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;min-height:120px;">
+        ${lines.length ? groups.map(g => `
+          ${g.c && groups.length > 1 ? `<div class="mv-course">${esc(courseInfo(g.c).name)}</div>` : ''}
+          ${g.items.map(row).join('')}`).join('') : `<div class="ts">Nothing sent yet.</div>`}
       </div>
       <div class="modal-actions">
         <button class="icon-action discard" title="Close" data-act="close-move-items">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
-        <button class="icon-action send" title="Pick the table to move to" data-act="move-items-pick-table" ${sel.length ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">To table…</span></button>
+        <button class="icon-action send" title="Pick the table to move to" data-act="move-items-pick-table" ${sel.length ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${sel.length ? `Move ${sel.length} to…` : 'To table…'}</span></button>
       </div>
     </div>
   </div>`;
@@ -20205,6 +20289,7 @@ function renderTablePickerMiddle() {
                 return oo && oo.covers ? oo.covers + ' covers' : '';
               })()}</span>
               ${!lock ? floorPillHtml(t, cs) : ''}
+              ${transferFxHtml(t)}
             </div>`;
           }).join('')}
         </div>`;
@@ -20227,6 +20312,7 @@ function renderTablePickerMiddle() {
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
             ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
             ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
+            ${transferFxHtml(t)}
           </div>`;
         }).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').length === 0 ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--charcoal-soft);font-size:var(--fs-md);">No tables set up yet.</div>` : ''}
@@ -20431,11 +20517,26 @@ async function doTransferToTable(newTableId) {
     state.vipType = newTable.vipType || '';
   }
   state.transferMode = false; state.transferFrom = null;
-  state.showTablePicker = false;
+  // Moving another table from the floor keeps you ON the floor — that's where
+  // the ⇄ lands and where the next job is. Moving your own table follows it.
+  if (movingOwn) state.showTablePicker = false;
+  // The owner-picked move signal: ring blooms on the new table, the "⇄ from"
+  // chip springs in, its arrows swap once, everything settles. One-shot.
+  state.transferFx = { tableId: newTableId, from: String(movedLabel || '') };
+  clearTimeout(_transferFxTimer);
+  _transferFxTimer = setTimeout(() => { state.transferFx = null; render(); }, 2400);
   state.toast = combined ? `Combined table ${esc(String(movedLabel))} into ${esc(String(newTable.label))}`
     : movingOwn ? `Moved to ${tableDisplayLabel(newTableId)}` : `Moved table ${esc(String(movedLabel))} to ${esc(String(newTable.label))}`;
   render();
   armToastTimer(2500);
+}
+let _transferFxTimer = 0;
+// The chip + bloom that mark where a moved table landed (floor + simple grid).
+function transferFxHtml(t) {
+  const fx = state.transferFx;
+  if (!fx || fx.tableId !== t.id) return '';
+  const swapSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><g class="tfx-a1"><path d="M4 8h13M14 4.5L17.5 8 14 11.5"/></g><g class="tfx-a2"><path d="M20 16H7M10 12.5L6.5 16l3.5 3.5"/></g></svg>`;
+  return `<span class="tfx"><span class="tfx-ring"></span><span class="tfx-chip">${swapSvg}${fx.from ? esc(String(fx.from)) : ''}</span></span>`;
 }
 
 // Link fromId INTO intoId's group. Staff physically push the tables together —

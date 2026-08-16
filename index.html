@@ -236,6 +236,10 @@ body[data-appbar-pos="left"] .topbar .staff-badge,body[data-appbar-pos="right"] 
 /* Compact topbar identity: full text on desktop, initial + power icon on phones */
 .seg button{border:none;background:none;padding:7px 16px;font-size:var(--fs-md);font-weight:600;color:var(--charcoal-soft);border-radius:8px;cursor:pointer;}
 .seg button.active{background:var(--orange-dim);color:var(--orange);}
+/* Icon-only segment buttons (the floor editor's map / # mode toggle): the
+   title carries the words, so the button itself stays a 38px square tap. */
+.seg button.seg-icon{min-width:38px;min-height:38px;padding:0;display:inline-flex;align-items:center;justify-content:center;}
+.seg button.seg-icon .sys-i{width:18px;height:18px;}
 /* Subsection bar size (Design → Screen). md = the defaults above; these win
    over the phone-portrait padding override via attribute specificity. */
 /* Subsection bar sizes via vars (same nearest-ancestor trick as the scales
@@ -1949,7 +1953,9 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    width-bound instead, so no vertical overflow there either. */
 .fp-wrap-top{flex-direction:column;}
 .fp-wrap-top .fp-main{order:2;}
-.fp-rail-top{order:1;width:auto;flex-direction:row;flex-wrap:nowrap;overflow-x:auto;align-items:center;gap:8px 18px;padding:10px 14px;}
+/* The min-height pins the strip to its tallest state (the labelled object
+   tiles), so switching Tables / Objects / Structure never moves the canvas. */
+.fp-rail-top{order:1;width:auto;flex-direction:row;flex-wrap:nowrap;overflow-x:auto;align-items:center;gap:8px 18px;padding:10px 14px;min-height:97px;}
 .fp-rail-top .pp-group{gap:5px;flex-shrink:0;}
 .fp-rail-top .fp-add-row{display:flex;align-items:center;flex-wrap:nowrap;gap:10px 14px;}
 .fp-rail-top .shape-chip-row,.fp-rail-top .decor-chip-row{flex-wrap:nowrap;gap:8px;}
@@ -1961,10 +1967,10 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 /* Layout/mode strip above the tool bar: also ONE scrolling row, so the canvas
    sits at a constant offset and its height budget stays predictable. */
 .fp-topbar{flex-wrap:nowrap;overflow-x:auto;}
-.fp-topbar .pay-options{flex-wrap:nowrap;}
+.fp-topbar .seg{flex-shrink:0;}
 @media (max-width: 900px){
   .fp-topbar{flex-wrap:wrap;overflow-x:visible;}
-  .fp-topbar .pay-options{flex-wrap:wrap;}
+  .fp-topbar .seg{flex-shrink:1;}
 }
 .pp-group{display:flex;flex-direction:column;gap:6px;}
 .pp-label{font-size:var(--fs-chip);font-weight:700;text-transform:uppercase;letter-spacing:0.8px;color:var(--charcoal-soft);}
@@ -4527,6 +4533,16 @@ app.put('/api/settings', (req, res) => {
         });
         return out;
       })(),
+      // Call-away slip section order: only a full permutation of the three
+      // parts is stored, and the default order is omitted so untouched slips
+      // keep printing the exact old bytes.
+      ...(() => {
+        const DEF = ['callaway', 'table', 'time'];
+        const src = dk.callawayOrder !== undefined ? dk.callawayOrder : cur.callawayOrder;
+        if (!Array.isArray(src) || src.length !== 3 || DEF.some(k => !src.includes(k))) return {};
+        if (src.every((k, i) => k === DEF[i])) return {};
+        return { callawayOrder: src.slice() };
+      })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
       align: (() => {
         const src = dk.align !== undefined ? dk.align : (cur.align || {});
@@ -4632,6 +4648,19 @@ app.put('/api/settings', (req, res) => {
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
   if (req.body.venueAbn !== undefined) data.settings.venueAbn = String(req.body.venueAbn || '').trim().slice(0, 20);
+  // Saved designer setups. The cfg blobs are stored as-is (clamped) — they
+  // only ever take effect by being APPLIED through this same endpoint's
+  // docket/receipt sanitisers, so junk in a snapshot can't reach a printer.
+  for (const key of ['docketDesigns', 'receiptDesigns']) {
+    if (req.body[key] !== undefined) {
+      const src = Array.isArray(req.body[key]) ? req.body[key] : [];
+      data.settings[key] = src.slice(0, 12).map(d => ({
+        id: String(d && d.id || '').slice(0, 24) || ('dz' + Date.now()),
+        name: String(d && d.name || '').trim().slice(0, 24) || 'Design',
+        cfg: (d && typeof d.cfg === 'object' && JSON.stringify(d.cfg).length <= 8192) ? d.cfg : {},
+      }));
+    }
+  }
   if (req.body.venueAddress !== undefined) data.settings.venueAddress = String(req.body.venueAddress || '').trim().slice(0, 80);
   if (req.body.venuePhone !== undefined) data.settings.venuePhone = String(req.body.venuePhone || '').trim().slice(0, 30);
   if (req.body.messageOfTheDay !== undefined) data.settings.messageOfTheDay = String(req.body.messageOfTheDay || '').slice(0, 280);
@@ -7974,6 +8003,14 @@ const DK_PARTS = {
   callaway: { label: 'Call away', show: null, red: true, align: false, size: false },
 };
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
+// The call-away slip's section order (banner+course move as one unit). Only a
+// full permutation counts; anything else falls back to the printed default.
+const CALLAWAY_DEFAULT_ORDER = ['callaway', 'table', 'time'];
+function callawayOrder(d) {
+  const o = d.callawayOrder;
+  return Array.isArray(o) && o.length === 3 && CALLAWAY_DEFAULT_ORDER.every(k => o.includes(k))
+    ? o : CALLAWAY_DEFAULT_ORDER;
+}
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
 function docketDocClasses(ov) {
@@ -8386,6 +8423,53 @@ function sampleLabelPreview() {
     ${sticker('Ribeye Steak', 1, 2)}
   </div>`;
 }
+// "My designs": named snapshots of the whole designer setup, shown as cards
+// above the style presets in BOTH designers. Tap a card to apply it (through
+// the normal settings door, so everything is sanitised); ✕ deletes after a
+// confirm; the dashed card saves what's on the paper right now.
+function myDesignsStrip(kind) {
+  const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
+  const designs = state.settings[key] || [];
+  const naming = state.designNaming === kind;
+  return `
+    <div class="settings-card wide" style="max-width:720px;">
+      <div class="th" style="margin-bottom:10px;">My designs</div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        ${designs.map(d => `
+        <div class="pay-opt" style="flex:none;min-width:110px;padding:10px 12px;position:relative;" data-act="apply-design" data-kind="${kind}" data-id="${esc(d.id)}">
+          <span style="font-size:12px;font-weight:700;">${esc(d.name)}</span>
+          <button type="button" class="delete-icon-btn" style="position:absolute;top:2px;right:2px;padding:2px 6px;" data-act="delete-design" data-kind="${kind}" data-id="${esc(d.id)}" title="Delete">${ACT_TRASH_SVG}</button>
+        </div>`).join('')}
+        ${naming
+          ? `<input id="design-name-input" type="text" maxlength="24" placeholder="name this design" style="width:150px;">`
+          : `<div class="pay-opt" style="flex:none;min-width:120px;padding:10px 12px;border-style:dashed;" data-act="name-design" data-kind="${kind}"><span style="font-size:12px;font-weight:700;">+ Save this design</span></div>`}
+      </div>
+    </div>`;
+}
+async function saveDesign(kind, name) {
+  const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
+  const cfgSrc = kind === 'docket' ? (state.settings.docket || {}) : (state.settings.receipt || {});
+  const designs = (state.settings[key] || []).slice(0, 11);
+  designs.push({ id: 'dz' + Date.now(), name: name || 'Design', cfg: JSON.parse(JSON.stringify(cfgSrc)) });
+  const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: designs }) });
+  state.settings = saved; state.designNaming = null;
+  state.toast = 'Design saved'; render(); armToastTimer(1600);
+}
+async function applyDesign(kind, id) {
+  const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
+  const d = (state.settings[key] || []).find(x => x.id === id);
+  if (!d) return;
+  const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(kind === 'docket' ? { docket: d.cfg } : { receipt: d.cfg }) });
+  state.settings = saved;
+  state.toast = `Applied "${d.name}"`; render(); armToastTimer(1600);
+}
+async function deleteDesign(kind, id) {
+  const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
+  const designs = (state.settings[key] || []).filter(x => x.id !== id);
+  const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: designs }) });
+  state.settings = saved; render();
+}
+
 // The call-away slip as its OWN paper in the designer — mirrors printing.js
 // callAwaySlip (rail-clip gap, loud banner, course, table, time). The banner
 // is the designable 'callaway' part: tap it, toggle red.
@@ -8396,14 +8480,19 @@ function buildCallAwaySample() {
   const word = d.tableWord;
   const t = word === undefined ? 'TABLE 12' : ({ TABLE: 'TABLE 12', Table: 'Table 12', T: 'T 12', '#': '#12', none: '12' }[word] || 'TABLE 12');
   const course = ((courseInfo(2) || {}).name || 'Mains').toUpperCase();
-  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}">
-    <div class="pp-railgap" title="Blank paper — the rail clip covers this"></div>
-    <div class="dk-part${sel ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="callaway" style="text-align:center;padding:2px 0 4px;">
+  // Sections render in the stored order — the printed slip follows the same
+  // list, so the preview stays WYSIWYG.
+  const parts = {
+    callaway: `<div class="dk-part${sel ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="callaway" style="text-align:center;padding:2px 0 4px;">
       <div style="display:inline-block;padding:2px 12px;font-weight:800;font-size:1.4em;background:${red ? '#C0392B' : '#111'};color:#fff;">CALL AWAY</div>
       <div style="font-weight:800;font-size:1.2em;margin-top:2px;${red ? 'color:#C0392B;' : ''}">${esc(course)}</div>
-    </div>
-    <div class="dk-part${state.dkPart === 'table' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="table" style="text-align:center;font-weight:700;">${esc(t)}</div>
-    <div class="dk-part${state.dkPart === 'time' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="time" style="text-align:center;">7:41 pm</div>
+    </div>`,
+    table: `<div class="dk-part${state.dkPart === 'table' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="table" style="text-align:center;font-weight:700;">${esc(t)}</div>`,
+    time: `<div class="dk-part${state.dkPart === 'time' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="time" style="text-align:center;">7:41 pm</div>`,
+  };
+  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}">
+    <div class="pp-railgap" title="Blank paper — the rail clip covers this"></div>
+    ${callawayOrder(d).map(k => parts[k]).join('\n    ')}
   </div>`;
 }
 function sampleDocketCtx() {
@@ -15470,6 +15559,7 @@ function renderPrintersDocketTab() {
   const d = docketCfg();
   const dl = d.layout || 'standard';
   return `
+    ${myDesignsStrip('docket')}
     <div class="settings-card wide" style="max-width:660px;">
       <div class="th" style="margin-bottom:8px;">Docket style</div>
       <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
@@ -15616,6 +15706,18 @@ function dkToolbar(d) {
       <button type="button" class="dk-tb-btn${meta && meta.show ? (shown ? ' active' : '') : ' dk-tb-off'}" title="Show or hide"${meta && meta.show ? ` data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}"` : ` data-act="dk-why" data-why="${p ? 'This line always prints' : whyNoPart}"`}>${shown ? svgEye : svgEyeOff}</button>
       ${dd('style', { invert: 'Inverse', border: 'Border', plain: 'Plain' }[d.newCourseStyle] || 'Plain', p === 'course',
         [['invert', 'Inverse'], ['border', 'Border'], ['plain', 'Plain']].map(([v, l]) => ({ v, l, on: d.newCourseStyle === v })), 'Course header style', 'For the course header')}
+      ${(() => {
+        // Reorder the call-away slip's sections: the arrows stay in the bar
+        // (fixed set) and only light up for a slip part with room to move.
+        const seq = callawayOrder(d);
+        const i = p && seq.includes(p) ? seq.indexOf(p) : -1;
+        const svgUp = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>`;
+        const svgDown = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+        const arrow = (dir, glyph, title, can) =>
+          `<button type="button" class="dk-tb-btn${can ? '' : ' dk-tb-off'}" title="${title}"${can ? ` data-act="move-callaway-line" data-dir="${dir}"` : ` data-act="dk-why" data-why="For the call-away lines"`}>${glyph}</button>`;
+        return arrow('up', svgUp, 'Move up on the slip', i > 0)
+          + arrow('down', svgDown, 'Move down on the slip', i >= 0 && i < seq.length - 1);
+      })()}
     </div>`;
 }
 
@@ -15710,6 +15812,7 @@ function renderPrintersReceiptTab() {
         ${togglePill(s.autoPrintReceipt, 'set-auto-print-receipt')}
       </div>` : `<div class="ts">Printing is off.</div>`}
     </div>
+    ${myDesignsStrip('receipt')}
     <div class="settings-card wide" style="max-width:640px;">
       <div class="th" style="margin-bottom:8px;">Receipt</div>
       <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
@@ -18045,28 +18148,31 @@ function renderFloorPlanAdmin() {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   const selected = fp ? fp.tables.find(t => t.id === state.selectedAdminTableId) : null;
   const tableMode = state.settings.tableMode === 'simple' ? 'simple' : 'floorplan';
+  // The mode toggle is icon-only (map = floor plan, # = simple numbers) so the
+  // top row stays narrow; the title carries the words for anyone unsure.
   const modeSeg = `
       <div class="seg">
-        <button data-act="set-table-mode" data-mode="floorplan" class="${tableMode === 'floorplan' ? 'active' : ''}">${SYS_MAP_SVG} Floor plan</button>
-        <button data-act="set-table-mode" data-mode="simple" class="${tableMode === 'simple' ? 'active' : ''}">${SYS_HASH_SVG} Simple numbers</button>
+        <button data-act="set-table-mode" data-mode="floorplan" class="seg-icon${tableMode === 'floorplan' ? ' active' : ''}" title="Floor plan">${SYS_MAP_SVG}</button>
+        <button data-act="set-table-mode" data-mode="simple" class="seg-icon${tableMode === 'simple' ? ' active' : ''}" title="Simple numbers">${SYS_HASH_SVG}</button>
       </div>`;
   if (tableMode === 'simple') {
     return `
   <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px;align-items:center;max-width:100%;">
-    <div class="th">Floor layout</div>
     <span style="flex:1;"></span>
     ${modeSeg}
   </div>
   ` + renderSimpleTablesAdmin();
   }
   // Floor mode: the map is the hero — a slim tool rail sits beside it and the
-  // set-once settings live behind ⚙ Options.
+  // set-once settings live behind ⚙ Options. The plan switcher wears the exact
+  // .seg tabs the order screen's floor-plan menu uses (no page title beside
+  // it), so both screens read as one control.
   return `
   <div class="fp-topbar" style="display:flex;gap:8px;margin-bottom:12px;align-items:center;max-width:100%;">
-    <div class="pay-options" style="margin:0;">
+    <div class="seg" style="flex-wrap:wrap;">
       ${state.floorPlans.map(f => f.id === state.adminFloorPlanId
-        ? `<button type="button" class="pay-opt active" style="flex:none;padding:9px 16px;font-size:var(--fs-md);" data-act="edit-floorplan" data-id="${f.id}" title="Tap to rename">${esc(f.name)}</button>`
-        : `<button type="button" class="pay-opt" style="flex:none;padding:9px 16px;font-size:var(--fs-md);" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('')}
+        ? `<button type="button" class="active" data-act="edit-floorplan" data-id="${f.id}" title="Tap to rename">${esc(f.name)}</button>`
+        : `<button type="button" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('')}
     </div>
     <button type="button" class="btn-add inline" title="Add layout" style="height:34px;" data-act="add-floorplan">+ Add layout</button>
     <span style="flex:1;"></span>
@@ -26019,6 +26125,11 @@ function bindEvents() {
   const adjustStockReasonInput = document.getElementById('adjust-stock-reason-input');
   if (adjustStockReasonInput) adjustStockReasonInput.addEventListener('input', (e) => { state.adjustStockModal.reason = e.target.value; });
 
+  const designNameInput = document.getElementById('design-name-input');
+  if (designNameInput) {
+    designNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveDesign(state.designNaming, e.target.value.trim()); });
+    designNameInput.addEventListener('blur', () => { const v = designNameInput.value.trim(); if (v) saveDesign(state.designNaming, v); else { state.designNaming = null; render(); } });
+  }
   const printerStationNameInput = document.getElementById('printer-station-name-input');
   if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
   // Inline row editor saves text fields when the finger leaves them —
@@ -27139,6 +27250,19 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'dk-menu') { state.dkMenu = state.dkMenu === el.dataset.menu ? null : el.dataset.menu; render(); }
+      else if (act === 'apply-design') { applyDesign(el.dataset.kind, el.dataset.id); }
+      else if (act === 'delete-design') { e.stopPropagation(); const d = ((state.settings[el.dataset.kind === 'docket' ? 'docketDesigns' : 'receiptDesigns'] || []).find(x => x.id === el.dataset.id) || {}); openConfirm({ message: `Delete design “${d.name || ''}”?`, confirmLabel: 'Delete', danger: true }, () => deleteDesign(el.dataset.kind, el.dataset.id)); }
+      else if (act === 'name-design') { state.designNaming = el.dataset.kind; render(); const inp = document.getElementById('design-name-input'); if (inp) inp.focus(); }
+      else if (act === 'move-callaway-line') {
+        // Swap the selected call-away section with its neighbour; the arrows
+        // only enable when the move exists, so out-of-range taps are inert.
+        const step = el.dataset.dir === 'up' ? -1 : 1;
+        const next = callawayOrder(docketCfg()).slice();
+        const i = next.indexOf(state.dkPart);
+        if (i < 0 || i + step < 0 || i + step >= next.length) return;
+        [next[i], next[i + step]] = [next[i + step], next[i]];
+        setDocketOpt('callawayOrder', next);
+      }
       else if (act === 'dk-why') { if (el.dataset.why) { state.toast = el.dataset.why; render(); armToastTimer(2200); } }
       else if (act === 'dk-menu-close') { state.dkMenu = null; render(); }
       else if (act === 'dk-menu-opt') {

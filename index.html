@@ -5089,38 +5089,48 @@ app.delete('/api/floorplans/:id', (req, res) => {
 
 // ---------- Saved arrangements (named snapshots of a floor's geometry) ----------
 // A "layout" here snapshots WHERE everything sits (positions/sizes/links) so the
-// venue can flip between, say, a normal and a function set-up. Snapshots key off
-// table id, so loading only moves existing tables — it never adds or deletes.
-const LAYOUT_GEOM = ['x', 'y', 'width', 'height', 'shape', 'rotation', 'color', 'finish', 'mergedInto', 'prevX', 'prevY'];
+// venue can flip between, say, a normal and a function set-up. Follows the
+// docketDesigns snapshot pattern: named (≤24 chars), capped, same-name saves
+// overwrite. The snapshot is built SERVER-SIDE from the stored tables (the
+// client only sends a name) and every number is clamped; loading happens in the
+// client through the same table PUTs the drag editor uses, so a snapshot can
+// never smuggle junk past validation. Snapshots key off table id, so loading
+// only moves existing tables — it never adds or deletes.
+const FLOOR_LAYOUTS_CAP = 8;
 function snapshotTables(fp) {
-  return (fp.tables || []).map(t => { const o = { id: t.id }; LAYOUT_GEOM.forEach(k => { if (t[k] !== undefined) o[k] = t[k]; }); return o; });
+  const num = (v, lo, hi, fb) => { const n = parseFloat(v); return isNaN(n) ? fb : Math.max(lo, Math.min(hi, n)); };
+  const ids = new Set((fp.tables || []).map(t => t.id));
+  return (fp.tables || []).map(t => {
+    const o = {
+      id: t.id,
+      x: num(t.x, 0, 100, 50), y: num(t.y, 0, 100, 50),
+      width: num(t.width, 1, 100, 9), height: num(t.height, 1, 100, 15),
+      shape: String(t.shape || 'square').slice(0, 20),
+      rotation: ((num(t.rotation, -3600, 3600, 0) % 360) + 360) % 360,
+    };
+    if (t.color) o.color = String(t.color).slice(0, 32);
+    if (t.finish) o.finish = String(t.finish).slice(0, 20);
+    if (t.mergedInto && ids.has(t.mergedInto)) o.mergedInto = t.mergedInto;
+    if (t.prevX !== undefined && t.prevX !== null) o.prevX = num(t.prevX, 0, 100, 50);
+    if (t.prevY !== undefined && t.prevY !== null) o.prevY = num(t.prevY, 0, 100, 50);
+    return o;
+  });
 }
 app.post('/api/floorplans/:id/layouts', (req, res) => {
   const data = readData();
   const fp = data.floorPlans.find(f => f.id === req.params.id);
   if (!fp) return res.status(404).json({ error: 'Layout not found' });
-  const name = (req.body.name || '').trim();
+  const name = String(req.body.name || '').trim().slice(0, 24);
   if (!name) return res.status(400).json({ error: 'Name the layout' });
   fp.savedLayouts = fp.savedLayouts || [];
   const existing = fp.savedLayouts.find(l => l.name.toLowerCase() === name.toLowerCase());
+  if (!existing && fp.savedLayouts.length >= FLOOR_LAYOUTS_CAP) {
+    return res.status(400).json({ error: `Limit of ${FLOOR_LAYOUTS_CAP} saved layouts — delete one first` });
+  }
   const snap = snapshotTables(fp);
   if (existing) { existing.tables = snap; }
   else fp.savedLayouts.push({ id: 'lay' + Date.now(), name, tables: snap });
   logAudit(data, staffFromReq(req), `Saved floor layout "${name}" on ${fp.name}`);
-  writeData(data);
-  res.json(fp);
-});
-app.post('/api/floorplans/:id/layouts/:layoutId/apply', (req, res) => {
-  const data = readData();
-  const fp = data.floorPlans.find(f => f.id === req.params.id);
-  if (!fp) return res.status(404).json({ error: 'Layout not found' });
-  const lay = (fp.savedLayouts || []).find(l => l.id === req.params.layoutId);
-  if (!lay) return res.status(404).json({ error: 'Saved layout not found' });
-  lay.tables.forEach(snap => {
-    const t = fp.tables.find(x => x.id === snap.id);
-    if (t) LAYOUT_GEOM.forEach(k => { if (snap[k] !== undefined) t[k] = snap[k]; });
-  });
-  logAudit(data, staffFromReq(req), `Loaded floor layout "${lay.name}" on ${fp.name}`);
   writeData(data);
   res.json(fp);
 });
@@ -18141,6 +18151,29 @@ function tableTimerControls() {
       })()}`;
 }
 
+// "Saved layouts": named snapshots of where everything sits on THIS floor —
+// the floor editor's twin of the designers' "My designs" strip. Tap a card to
+// load it (confirm names the layout and says how many tables move); ✕ deletes
+// after a named confirm; the dashed card saves the arrangement on screen now
+// (tap → name it, Enter/blur saves). Save/overwrite is by name, capped at 8.
+function floorLayoutsStrip(fp) {
+  const layouts = fp.savedLayouts || [];
+  const naming = state.layoutNaming === fp.id;
+  return `
+  <div class="settings-card wide" style="max-width:100%;margin-bottom:12px;">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+      <div class="th" style="margin:0 6px 0 0;">Saved layouts</div>
+      ${layouts.map(l => `
+      <div class="pay-opt" style="flex:none;min-width:110px;padding:10px 12px;position:relative;" data-act="load-floor-layout" data-fp="${fp.id}" data-id="${esc(l.id)}" title="Tap to load">
+        <span style="font-size:var(--fs-sm);font-weight:700;">${esc(l.name)}</span>
+        <button type="button" class="delete-icon-btn" style="position:absolute;top:2px;right:2px;padding:2px 6px;" data-act="delete-floor-layout" data-fp="${fp.id}" data-id="${esc(l.id)}" title="Delete">${ACT_TRASH_SVG}</button>
+      </div>`).join('')}
+      ${naming
+        ? `<input id="layout-name-input" type="text" maxlength="24" placeholder="name this layout" style="width:150px;">`
+        : `<div class="pay-opt" style="flex:none;min-width:120px;padding:10px 12px;border-style:dashed;" data-act="name-floor-layout" data-fp="${fp.id}"><span style="font-size:var(--fs-sm);font-weight:700;">+ Save this layout</span></div>`}
+    </div>
+  </div>`;
+}
 function renderFloorPlanAdmin() {
   if (!state.floorPlans.find(f => f.id === state.adminFloorPlanId)) {
     state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
@@ -18179,6 +18212,7 @@ function renderFloorPlanAdmin() {
     ${modeSeg}
   </div>
   ${fp ? `
+  ${floorLayoutsStrip(fp)}
   ${state.floorAdvancedOpen ? `
   <div data-expkey="floor-adv" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;align-items:center;gap:22px;flex-wrap:wrap;">
     <div style="display:flex;align-items:center;gap:8px;">
@@ -18192,20 +18226,6 @@ function renderFloorPlanAdmin() {
     <label style="display:flex;align-items:center;gap:6px;font-size:var(--fs-sm);font-weight:600;cursor:pointer;">
       <input type="checkbox" id="floorplan-snap-input" data-fp="${fp.id}" ${fp.snapToGrid ? 'checked' : ''}> Snap to grid
     </label>
-  </div>
-  <div data-expkey="floor-layouts" class="settings-card wide" style="max-width:100%;margin-bottom:12px;display:flex;flex-direction:column;gap:8px;">
-    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-      <label class="ts" style="margin:0;">Saved layouts</label>
-      <input id="layout-name-input" type="text" placeholder="Name a layout…" style="flex:1;min-width:130px;padding:7px 10px;border:1px solid var(--steel-300);border-radius:8px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-      <button class="btn-secondary" style="width:auto;padding:8px 14px;" data-act="save-floor-layout" data-fp="${fp.id}" title="Snapshot the current arrangement">Save current</button>
-    </div>
-    ${(fp.savedLayouts || []).length ? `<div style="display:flex;flex-direction:column;gap:6px;">
-      ${(fp.savedLayouts || []).map(l => `<div class="settings-card" style="display:flex;align-items:center;gap:10px;padding:9px 12px;">
-        <span style="flex:1;font-weight:700;font-size:var(--fs-md);overflow:hidden;text-overflow:ellipsis;">${esc(l.name)}</span>
-        <button class="btn-secondary" style="width:auto;padding:7px 14px;" data-act="load-floor-layout" data-fp="${fp.id}" data-id="${l.id}" data-name="${esc(l.name)}">Load</button>
-        <button class="delete-icon-btn" data-act="delete-floor-layout" data-fp="${fp.id}" data-id="${l.id}" title="Delete this layout">${ACT_TRASH_SVG}</button>
-      </div>`).join('')}
-    </div>` : ''}
   </div>` : ''}
   <div class="fp-wrap fp-wrap-top">
     <div class="fp-rail fp-rail-top">
@@ -20996,6 +21016,55 @@ function floorRedo() {
   floorHistory.undo.push(_cloneTables(fp));
   if (floorHistory.undo.length > FLOOR_HISTORY_CAP) floorHistory.undo.shift();
   applyFloorSnapshot(state.adminFloorPlanId, floorHistory.redo.pop());
+}
+
+// Saved-layout snapshots (the "Saved layouts" strip). Save POSTs just the
+// NAME — the server snapshots its own stored geometry, so nothing client-made
+// gets stored. Load merges the snapshot onto the live tables and walks it
+// through applyFloorSnapshot — the drag editor's own save door — so the same
+// PUT validation applies and Ctrl+Z undoes a load like any other edit.
+const FLOOR_LAYOUT_GEOM = ['x', 'y', 'width', 'height', 'shape', 'rotation', 'color', 'finish', 'mergedInto', 'prevX', 'prevY'];
+async function saveFloorLayout(fpId, name) {
+  try {
+    const fp = await api(`/api/floorplans/${fpId}/layouts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp;
+    state.layoutNaming = null;
+    state.toast = `Saved “${name}”`; render(); armToastTimer(1600);
+  } catch (err) {
+    state.layoutNaming = null;
+    state.toast = err.message || 'Could not save.'; render(); armToastTimer(2500);
+  }
+}
+// How many real tables (not decor) a snapshot would move — for the confirm.
+function floorLayoutTableCount(fp, lay) {
+  return (lay.tables || []).filter(s => { const t = fp.tables.find(x => x.id === s.id); return t && t.type !== 'decor'; }).length;
+}
+async function loadFloorLayout(fpId, layoutId) {
+  const fp = state.floorPlans.find(f => f.id === fpId);
+  const lay = fp && (fp.savedLayouts || []).find(l => l.id === layoutId);
+  if (!fp || !lay) return;
+  pushFloorHistory();
+  const snapById = new Map((lay.tables || []).map(s => [s.id, s]));
+  const target = fp.tables.map(t => {
+    const s = snapById.get(t.id);
+    if (!s) return { ...t }; // added after the snapshot — stays where it is
+    const o = { ...t };
+    FLOOR_LAYOUT_GEOM.forEach(k => {
+      if (s[k] !== undefined) o[k] = s[k];
+      else if (k === 'rotation') o[k] = 0;
+      else if (k === 'color' || k === 'finish' || k === 'mergedInto' || k === 'prevX' || k === 'prevY') o[k] = null;
+    });
+    return o;
+  });
+  await applyFloorSnapshot(fpId, target);
+  state.toast = `Loaded “${lay.name}”`; render(); armToastTimer(1600);
+}
+async function deleteFloorLayout(fpId, layoutId) {
+  try {
+    const fp = await api(`/api/floorplans/${fpId}/layouts/${layoutId}`, { method: 'DELETE' });
+    const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp;
+    render();
+  } catch (err) {}
 }
 
 async function patchFloorObject(fpId, id, patch) {
@@ -26130,6 +26199,11 @@ function bindEvents() {
     designNameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveDesign(state.designNaming, e.target.value.trim()); });
     designNameInput.addEventListener('blur', () => { const v = designNameInput.value.trim(); if (v) saveDesign(state.designNaming, v); else { state.designNaming = null; render(); } });
   }
+  const layoutNameInput = document.getElementById('layout-name-input');
+  if (layoutNameInput) {
+    layoutNameInput.addEventListener('keydown', (e) => { const v = e.target.value.trim(); if (e.key === 'Enter' && v && state.layoutNaming) saveFloorLayout(state.layoutNaming, v); });
+    layoutNameInput.addEventListener('blur', () => { const v = layoutNameInput.value.trim(); if (v && state.layoutNaming) saveFloorLayout(state.layoutNaming, v); else if (state.layoutNaming) { state.layoutNaming = null; render(); } });
+  }
   const printerStationNameInput = document.getElementById('printer-station-name-input');
   if (printerStationNameInput) printerStationNameInput.addEventListener('input', (e) => { state.printerStationModal.name = e.target.value; });
   // Inline row editor saves text fields when the finger leaves them —
@@ -27005,28 +27079,25 @@ function handleActClick(el, e) {
       }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
       else if (act === 'size-all-tables') { sizeAllTables(parseFloat(el.dataset.step)); }
-      else if (act === 'save-floor-layout') {
-        const inp = document.getElementById('layout-name-input');
-        const name = inp ? inp.value.trim() : '';
-        const fpId = el.dataset.fp;
-        if (!name) { state.toast = 'Name the layout first.'; render(); armToastTimer(2000); return; }
-        api(`/api/floorplans/${fpId}/layouts`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) })
-          .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; state.toast = `Layout "${name}" saved.`; render(); armToastTimer(2000); })
-          .catch(e => { state.toast = e.message || 'Could not save.'; render(); armToastTimer(2500); });
+      else if (act === 'name-floor-layout') {
+        state.layoutNaming = el.dataset.fp; render();
+        const inp = document.getElementById('layout-name-input'); if (inp) inp.focus();
       }
       else if (act === 'load-floor-layout') {
-        const fpId = el.dataset.fp, id = el.dataset.id, nm = el.dataset.name || 'this layout';
-        openConfirm({ message: `Load "${nm}"? Tables move to that saved arrangement.`, confirmLabel: 'Load', danger: false }, () => {
-          api(`/api/floorplans/${fpId}/layouts/${id}/apply`, { method: 'POST' })
-            .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; state.toast = 'Layout loaded.'; render(); armToastTimer(2000); })
-            .catch(e => { state.toast = e.message || 'Could not load.'; render(); armToastTimer(2500); });
-        });
+        const fpId = el.dataset.fp, id = el.dataset.id;
+        const fp = state.floorPlans.find(f => f.id === fpId);
+        const lay = fp && (fp.savedLayouts || []).find(l => l.id === id);
+        if (fp && lay) {
+          const n = floorLayoutTableCount(fp, lay);
+          openConfirm({ message: `Load “${lay.name}”? This moves ${n} table${n === 1 ? '' : 's'}.`, confirmLabel: 'Load', danger: false }, () => loadFloorLayout(fpId, id));
+        }
       }
       else if (act === 'delete-floor-layout') {
+        e.stopPropagation();
         const fpId = el.dataset.fp, id = el.dataset.id;
-        api(`/api/floorplans/${fpId}/layouts/${id}`, { method: 'DELETE' })
-          .then(fp => { const i = state.floorPlans.findIndex(f => f.id === fpId); if (i >= 0) state.floorPlans[i] = fp; render(); })
-          .catch(() => {});
+        const fp = state.floorPlans.find(f => f.id === fpId);
+        const lay = (fp && (fp.savedLayouts || []).find(l => l.id === id)) || {};
+        openConfirm({ message: `Delete layout “${lay.name || ''}”?`, confirmLabel: 'Delete', danger: true }, () => deleteFloorLayout(fpId, id));
       }
       else if (act === 'set-table-size') { sizeSelectedTables(parseFloat(el.dataset.step)); }
       else if (act === 'cycle-table-size') {

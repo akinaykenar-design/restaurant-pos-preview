@@ -1481,9 +1481,13 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
   transition: scale .06s ease, translate .06s ease, filter .06s ease, box-shadow .06s ease; }
 :is(.floor-marker, .simple-table-btn, .covers-pad-key,
   .btn-add, .btn-secondary, .pay-opt, .cat-btn, .tab-btn, .course-tab, .seg button,
-  .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn, .order-row,
+  .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
   .subcat-seg button):active{
   scale: .965; filter: brightness(.94); }
+/* A row full of buttons only sinks when the ROW is what's pressed — :active
+   also marks ancestors, so without the :has guard a tap on "+ Set up" (or
+   Test, or an edit pencil) dragged the whole row down with it. */
+.order-row:active:not(:has(:active)){ scale: .965; filter: brightness(.94); }
 
 /* ── Touch halos ──────────────────────────────────────────────────────
    Small controls keep their visual size but grow an INVISIBLE hit area
@@ -4425,6 +4429,7 @@ app.put('/api/settings', (req, res) => {
       headerText: String(dk.headerText !== undefined ? dk.headerText : (cur.headerText || '')).slice(0, 40),
       footerText: String(dk.footerText !== undefined ? dk.footerText : (cur.footerText || '')).slice(0, 60),
       newCourseStyle: pick(dk.newCourseStyle, ['invert', 'border', 'plain'], cur.newCourseStyle || 'invert'),
+      layout: pick(dk.layout, ['standard', 'byseat', 'waitermate'], cur.layout || 'standard'),
       fontScale: pick(dk.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'normal'),
       font: pick(dk.font, ['A', 'B'], cur.font || 'A'),
       density: pick(dk.density, ['tight', 'normal', 'roomy'], cur.density || 'normal'),
@@ -5642,13 +5647,13 @@ app.get('/api/printers/discover', async (req, res) => {
     const known = (data.printerStations || [])
       .flatMap(s => [...(Array.isArray(s.ips) ? s.ips : []), s.ip, s.backupIp])
       .filter(Boolean);
-    const ips = await printing.discoverPrinters(known);
+    const { ips, report } = await printing.discoverPrinters(known);
     const printers = await Promise.all(ips.map(async (ip) => {
       const p = await printing.probePrinter(ip).catch(() => null);
       const model = p && p.model ? p.model : null;
       return { ip, model, ...printing.classifyPrinter(model) };
     }));
-    res.json({ ips, printers });
+    res.json({ ips, printers, report });
   } catch (e) {
     res.status(500).json({ error: 'Could not scan the network.' });
   }
@@ -5664,7 +5669,9 @@ app.post('/api/orders/:id/print-course', (req, res) => {
   const items = (order.items || []).filter(i => (i.course || 1) === course);
   if (!items.length) return res.status(400).json({ error: 'No items in that course yet' });
   const courseName = (((data.settings || {}).courses || [])[course - 1] || {}).name || `Course ${course}`;
-  printing.printDocketsForRound(data, order, items, 0, { callAway: courseName });
+  // A call-away prints a SLIM slip (banner + course + table) — not the whole
+  // course again; the kitchen already has those items from the send.
+  printing.printCallAwaySlips(data, order, items, courseName);
   // Remember which courses have been called away (drives "next course" on the
   // table peek) and reset the call-away timer, same as a floor call-away.
   order.firedCourses = order.firedCourses || {};
@@ -5757,7 +5764,10 @@ app.post('/api/printer-stations', (req, res) => {
   const cleanBackup = String(backupIp || '').trim();
   if (cleanBackup && !IP_RE.test(cleanBackup)) return res.status(400).json({ error: 'The backup printer IP address does not look right' });
   const pw = req.body.paperWidth === '58' ? '58' : req.body.paperWidth === '76' ? '76' : '80';
-  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, kind: req.body.kind === 'impact' ? 'impact' : 'thermal', receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null, docket: cleanStationDocket(req.body.docket) };
+  // Subsection routing: only ids that exist survive (finer than sections).
+  const cleanSubIds = Array.isArray(req.body.subcategoryIds)
+    ? req.body.subcategoryIds.filter(id => (data.subcategories || []).some(s => s.id === id)) : [];
+  const station = { id: 'ps' + Date.now(), name: name.trim(), categories: Array.isArray(categories) ? categories : [], subcategoryIds: cleanSubIds, ips: cleanIps, ip: cleanIps[0] || null, backupIp: cleanBackup || null, paperWidth: pw, kind: req.body.kind === 'impact' ? 'impact' : 'thermal', receipts: !!receipts, labels: !!labels, paused: false, fallbackId: null, docket: cleanStationDocket(req.body.docket) };
   data.printerStations = [...(data.printerStations || []), station];
   logAudit(data, staffFromReq(req), `Added printer station: ${station.name}`);
   writeData(data);
@@ -5771,6 +5781,9 @@ app.put('/api/printer-stations/:id', (req, res) => {
   const { name, categories, ip, ips, backupIp, receipts, labels, paused, fallbackId } = req.body;
   if (name !== undefined && name.trim()) station.name = name.trim();
   if (Array.isArray(categories)) station.categories = categories;
+  if (Array.isArray(req.body.subcategoryIds)) {
+    station.subcategoryIds = req.body.subcategoryIds.filter(id => (data.subcategories || []).some(s => s.id === id));
+  }
   const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
   if (Array.isArray(ips)) {
     const clean = ips.map(x => String(x || '').trim()).filter(Boolean);
@@ -7982,11 +7995,24 @@ function printReceipt(order) {
 function stationForCategory(categoryName) {
   return (state.printerStations || []).find(s => s.categories.includes(categoryName));
 }
+// A station claiming the item's SUBSECTION (or a parent subsection) — finer
+// than the section route, mirrored in printing.js itemsForStation.
+function stationForSubcategory(mi) {
+  if (!mi || !mi.subcategoryId) return null;
+  let s = (state.subcategories || []).find(x => x.id === mi.subcategoryId), guard = 0;
+  while (s && guard++ < 5) {
+    const st = (state.printerStations || []).find(x => (x.subcategoryIds || []).includes(s.id));
+    if (st) return st;
+    s = s.parentSubcategoryId ? (state.subcategories || []).find(x => x.id === s.parentSubcategoryId) : null;
+  }
+  return null;
+}
 function stationForLine(line) {
   const mi = line.menuItemId ? state.menu.find(x => x.id === line.menuItemId) : null;
-  // The item's own "Prints at" beats its section's station.
+  // The item's own "Prints at" beats its subsection's station, which beats
+  // its section's.
   return mi && mi.station ? (state.printerStations || []).find(s => s.id === mi.station)
-    : (mi ? stationForCategory(mi.category) : null);
+    : (mi ? (stationForSubcategory(mi) || stationForCategory(mi.category)) : null);
 }
 function stationTag(line) {
   const st = stationForLine(line);
@@ -8067,19 +8093,50 @@ function buildDocketDoc(ctx, edit) {
       ${vipHtml}
       ${allergyHtml}
       <hr>
-      ${ctx.courses.map(c => `
+      ${(() => {
+        // The paper renders the SELECTED STYLE (By course / By seat / Chef),
+        // so picking a preset card changes what you're editing — same deal as
+        // the receipt templates.
+        const layout = ['byseat', 'waitermate'].includes(d.layout) ? d.layout : 'standard';
+        const lineRow = (l, pre, noSeat) => {
+          const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
+          const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
+          const note = l.note ? partW('notes', d.showNotes, ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`) : '';
+          const build = (l.build && (l.build.kept.length || l.build.removed.length))
+            ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
+            : '';
+          return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items" title="Tap to edit items"' : ''}><span>${pre || ''}${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+        };
+        if (layout === 'byseat') {
+          // Sections per seat, shared last — course rides each line as a
+          // [Course] prefix, exactly like the printed by-seat docket.
+          const all = [];
+          ctx.courses.forEach(c => c.lines.forEach(l => all.push({ ...l, courseName: c.name })));
+          const keyOf = (l) => (l.seat == null || l.seat === '' || l.seat === 'all') ? '' : String(l.seat);
+          const groups = new Map();
+          all.forEach(l => { const k = keyOf(l); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(l); });
+          const keys = [...groups.keys()].sort((a, b) => a === '' ? 1 : b === '' ? -1 : parseInt(a) - parseInt(b));
+          return keys.map(k => `
+        <div class="print-course is-old">
+          ${partW('course', true, `<div class="print-sub print-coursename${rc('course')}">${esc((k === '' ? (state.settings.sharedSeatLabel || 'All') : seatText(k)).toUpperCase())}</div>`, true)}
+          ${groups.get(k).map(l => lineRow(l, d.showCourseName ? `[${esc(l.courseName)}] ` : '', true)).join('')}
+        </div>`).join('');
+        }
+        if (layout === 'waitermate') {
+          // The venue's old chef slip: *Course* headers, Cover (n) under each
+          // seated item, date/No footer.
+          return ctx.courses.map(c => `
+        <div class="print-course is-old" style="margin-bottom:8px;">
+          ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course') || ' style="text-align:center;"'}>*${esc(c.name)}*</div>`, true)}
+          ${c.lines.map(l => lineRow(l, '', true) + ((l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, `<div class="print-sub" style="padding-left:10px;">Cover (${esc(String(l.seat))})</div>`, true) : '')).join('')}
+        </div>`).join('') + `<hr><div class="print-sub">${esc(new Date(Date.now()).toLocaleDateString('en-AU'))}  ${esc(fmtTime(Date.now()))}  No:1</div>`;
+        }
+        return ctx.courses.map(c => `
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
           ${partW('course', d.showCourseName, `<div class="print-sub print-coursename${rc('course')}"${stl('course')}>${esc(c.name)}</div>`, true)}
-          ${c.lines.map(l => {
-            const seat = (l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
-            const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
-            const note = l.note ? partW('notes', d.showNotes, ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`) : '';
-            const build = (l.build && (l.build.kept.length || l.build.removed.length))
-              ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
-              : '';
-            return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items" title="Tap to edit items"' : ''}><span>${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
-          }).join('')}
-        </div>`).join('')}
+          ${c.lines.map(l => lineRow(l)).join('')}
+        </div>`).join('');
+      })()}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
     </div>`;
 }
@@ -14600,14 +14657,14 @@ async function loadPrinterStations() {
   render();
 }
 function openAddPrinterStation() {
-  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), kind: 'thermal', receipts: false, labels: false, fallbackId: null, docket: null });
+  state.printerStationModal = withDirtyCheck({ mode: 'add', id: null, name: '', categories: [], subcategoryIds: [], ips: [''], backupIp: '', paperWidth: (state.settings.paperWidth === '58' ? '58' : '80'), kind: 'thermal', receipts: false, labels: false, fallbackId: null, docket: null });
   state.adminError = '';
   render();
 }
 function openEditPrinterStation(id) {
   const s = state.printerStations.find(x => x.id === id);
   const ips = (s.ips && s.ips.length ? s.ips.slice() : (s.ip ? [s.ip] : ['']));
-  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), kind: s.kind === 'impact' ? 'impact' : 'thermal', receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) });
+  state.printerStationModal = withDirtyCheck({ mode: 'edit', id: s.id, name: s.name, categories: s.categories.slice(), subcategoryIds: (s.subcategoryIds || []).slice(), ips, backupIp: s.backupIp || '', paperWidth: s.paperWidth || (state.settings.paperWidth === '58' ? '58' : '80'), kind: s.kind === 'impact' ? 'impact' : 'thermal', receipts: !!s.receipts, labels: !!s.labels, fallbackId: s.fallbackId || null, docket: pickStationDocket(s.docket) });
   state.adminError = '';
   render();
 }
@@ -14618,6 +14675,13 @@ function togglePrinterStationCategory(catName) {
   if (idx === -1) m.categories.push(catName); else m.categories.splice(idx, 1);
   render();
 }
+function togglePrinterStationSubcategory(subId) {
+  const m = state.printerStationModal;
+  m.subcategoryIds = m.subcategoryIds || [];
+  const idx = m.subcategoryIds.indexOf(subId);
+  if (idx === -1) m.subcategoryIds.push(subId); else m.subcategoryIds.splice(idx, 1);
+  render();
+}
 async function savePrinterStationModal() {
   const m = state.printerStationModal;
   if (!m.name.trim()) { state.adminError = 'Station name is required.'; render(); return; }
@@ -14625,7 +14689,7 @@ async function savePrinterStationModal() {
   const backupInput = document.getElementById('printer-station-backup-input');
   const fbSelect = document.getElementById('printer-station-fallback');
   const payload = {
-    name: m.name, categories: m.categories,
+    name: m.name, categories: m.categories, subcategoryIds: m.subcategoryIds || [],
     ips: ipInputs.length ? ipInputs.map(el => el.value.trim()).filter(Boolean) : m.ips.filter(Boolean),
     backupIp: backupInput ? backupInput.value.trim() : (m.backupIp || ''),
     paperWidth: m.paperWidth === '58' ? '58' : m.paperWidth === '76' ? '76' : '80',
@@ -14655,6 +14719,7 @@ async function findPrinters() {
   try {
     const result = await api('/api/printers/discover');
     state.discoveredPrinters = result.ips || [];
+    state.discoverReport = result.report || null;
     // ip → { model, kind, paperWidth } from the scan's model probe.
     state.discoveredPrinterInfo = {};
     (result.printers || []).forEach(p => { state.discoveredPrinterInfo[p.ip] = p; });
@@ -15042,7 +15107,8 @@ function renderPrintersSetupTab() {
     ${found ? `
     <div class="settings-card wide" style="max-width:600px;">
       <div class="th" style="margin-bottom:4px;">Printers found on this wifi</div>
-      <div style="font-size:var(--fs-sm);color:var(--charcoal-soft);margin-bottom:10px;">${found.length === 0 ? 'None found. Check the printer is on and connected to the same wifi/router as this computer, then scan again.' : 'Tap Test to make one print a test page, then assign it to a station.'}</div>
+      ${state.discoverReport ? `<div style="font-size:var(--fs-chip);color:var(--charcoal-soft);margin-bottom:4px;font-family:var(--font-mono);">Swept ${state.discoverReport.subnets.map(b => esc(b) + '.x').join(', ')} · ${state.discoverReport.hostsProbed} addresses · ARP ${state.discoverReport.arpCount} · Bonjour ${state.discoverReport.mdnsCount}</div>` : ''}
+      <div style="font-size:var(--fs-sm);color:var(--charcoal-soft);margin-bottom:10px;">${found.length === 0 ? 'None found. A missing printer is outside the swept subnets, or on USB/serial — type its IP or COM port in + Add printer station.' : 'Tap Test to make one print a test page, then assign it to a station.'}</div>
       ${found.map(ip => {
         const info = (state.discoveredPrinterInfo || {})[ip];
         // Honest about identity: a printer that answered the model query shows
@@ -15067,7 +15133,7 @@ function renderPrintersSetupTab() {
       <div class="order-row" style="${s.paused ? 'opacity:.75;' : ''}">
         <div class="order-info">
           <div class="t1">${esc(s.name)} ${editIconButton('edit-printer-station', s.id, 'Edit')} ${s.receipts ? `<span class="status-chip paid">receipts</span>` : ''} ${s.labels ? `<span class="status-chip paid">labels</span>` : ''} ${s.paused ? `<span class="status-chip void">PAUSED${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb ? ' → ' + esc(fb.name) : ''; })()}</span>` : ''}</div>
-          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${s.categories.length > 0 ? s.categories.join(', ') : 'all sections'}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
+          <div class="t2">${(() => { const ips = (s.ips && s.ips.length ? s.ips : (s.ip ? [s.ip] : [])); return ips.length ? `${SYS_PRINTER_SVG} ${ips.map(esc).join(' + ')}${s.backupIp ? ` (backup ${esc(s.backupIp)})` : ''}${s.paperWidth === '58' ? ' · 58mm' : ''} · ` : 'No printer assigned · '; })()}${(() => { const subNames = (s.subcategoryIds || []).map(id => { const sc = (state.subcategories || []).find(x => x.id === id); return sc ? '↳ ' + sc.name : null; }).filter(Boolean); const all = [...s.categories, ...subNames]; return all.length ? all.join(', ') : 'all sections'; })()}${(() => { const d = pickStationDocket(s.docket) || {}; const L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef', normal: 'Normal', large: 'Large', xlarge: 'XL', tight: 'Tight', roomy: 'Roomy' }; return ['layout', 'fontScale', 'density'].map(k => d[k] ? ` · ${L[d[k]]}` : '').join(''); })()}${(() => { const fb = state.printerStations.find(x => x.id === s.fallbackId); return fb && !s.paused ? ` · ↳ falls back to ${esc(fb.name)}` : ''; })()}</div>
         </div>
         <button class="btn-secondary sm" data-act="toggle-station-paused" data-id="${s.id}" title="${s.paused ? 'Resume printing here' : 'Pause — its dockets go to the fallback station'}">${s.paused ? 'Resume' : 'Pause'}</button>
         ${(s.ips && s.ips.length) || s.ip ? `<button class="btn-secondary sm" data-act="test-station" data-id="${s.id}">Test print</button>` : ''}
@@ -15076,9 +15142,23 @@ function renderPrintersSetupTab() {
   `;
 }
 
+// Mini paper previews for the docket layout presets — same card row the
+// receipt templates use, so picking a docket style works the same way.
+function docketMini(v) {
+  const line = (t, x) => `<div style="${x || ''}">${t}</div>`;
+  const head = (t) => `<div style="text-align:center;font-weight:800;">${t}</div>`;
+  const rule = `<div style="border-top:1px dashed #000;margin:3px 0;"></div>`;
+  const body =
+    v === 'byseat' ? head('TABLE 12') + rule + line('SEAT 1', 'font-weight:800;') + line('1 x Fish') + line('SEAT 2', 'font-weight:800;') + line('1 x Lamb') + line('SHARE', 'font-weight:800;') + line('1 x Fries')
+    : v === 'waitermate' ? line('Grill') + rule + line('Table 12', 'text-align:center;font-weight:800;font-size:11px;') + line('*Entrees*', 'text-align:center;') + line('1 x Fish') + line('Cover (2)', 'padding-left:6px;') + rule + line('No:1')
+    : head('TABLE 12') + line('5 covers', 'text-align:center;') + rule + line('ENTREES', 'font-weight:800;') + line('1 x Fish') + line('MAINS', 'font-weight:800;') + line('2 x Lamb');
+  return `<div class="paper-preview" style="width:118px;padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:7px;line-height:1.6;text-align:left;box-shadow:0 1px 4px rgba(0,0,0,0.25);">${body}</div>`;
+}
+
 function renderPrintersDocketTab() {
   const s = state.settings;
   const d = docketCfg();
+  const dl = d.layout || 'standard';
   return `
     <div class="settings-card wide" style="max-width:660px;">
       <div class="th" style="margin-bottom:14px;">Kitchen dockets</div>
@@ -15087,6 +15167,16 @@ function renderPrintersDocketTab() {
       <div class="pay-options">
         ${togglePill(s.autoPrintKitchenDocket, 'set-auto-print-kitchen')}
       </div>` : `<div class="ts">Printing is off.</div>`}
+    </div>
+    <div class="settings-card wide" style="max-width:660px;">
+      <div class="th" style="margin-bottom:8px;">Docket style</div>
+      <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
+        ${[['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef']].map(([v, l]) => `
+        <div class="pay-opt ${dl === v ? 'active' : ''}" style="flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 12px;" data-act="set-docket-layout" data-val="${v}">
+          ${docketMini(v)}
+          <span>${l}</span>
+        </div>`).join('')}
+      </div>
     </div>
     <div class="settings-card wide" style="max-width:660px;">
       <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Docket designer<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-sample-docket" title="Print this design on the real printers">${SYS_PRINTER_SVG} Test docket</button></div>
@@ -15312,6 +15402,23 @@ function renderPrinterStationModal() {
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
         ${state.categories.map(c => `<button type="button" class="pay-opt ${m.categories.includes(c.name) ? 'active' : ''}" style="flex:none;padding:8px 14px;" data-act="toggle-printer-station-category" data-val="${esc(c.name)}">${esc(c.name)}</button>`).join('')}
       </div>
+      ${(() => {
+        // Finer routing: a subsection chip claims JUST that subsection (its
+        // sub-subsections follow) — it beats any section pick, on any station.
+        const subs = state.subcategories || [];
+        if (!subs.length) return '';
+        const kidsOf = (pid) => subs.filter(x => x.parentSubcategoryId === pid);
+        const chips = [];
+        state.categories.forEach(c => {
+          const walk = (list, depth) => list.forEach(sc => {
+            chips.push(`<button type="button" class="pay-opt ${m.subcategoryIds.includes(sc.id) ? 'active' : ''}" style="flex:none;padding:8px 12px;font-size:var(--fs-sm);" data-act="toggle-printer-station-subcategory" data-val="${esc(sc.id)}" title="${esc(c.name)}">${'↳'.repeat(Math.min(depth, 2))} ${esc(sc.name)}</button>`);
+            walk(kidsOf(sc.id), depth + 1);
+          });
+          walk(subs.filter(x => x.categoryId === c.id && !x.parentSubcategoryId), 1);
+        });
+        return `<label>Subsections routed here</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">${chips.join('')}</div>`;
+      })()}
       <label>Printers (all print every docket)</label>
       ${m.ips.map((ip, idx) => `
       <div style="display:flex;gap:8px;margin-bottom:6px;">
@@ -26580,6 +26687,7 @@ function handleActClick(el, e) {
       else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); } }
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
+      else if (act === 'set-docket-layout') { setDocketOpt('layout', el.dataset.val); }
       else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }
       else if (act === 'set-docket-size') {
         const k = el.dataset.key, v = el.dataset.val;
@@ -26846,6 +26954,7 @@ function handleActClick(el, e) {
       else if (act === 'printer-station-modal-bg') { if (e.target === el) closePrinterStationModal(); }
       else if (act === 'save-printer-station-modal') { savePrinterStationModal(); }
       else if (act === 'toggle-printer-station-category') { togglePrinterStationCategory(el.dataset.val); }
+      else if (act === 'toggle-printer-station-subcategory') { togglePrinterStationSubcategory(el.dataset.val); }
       else if (act === 'add-happy-hour') { openAddHappyHour(); }
       else if (act === 'edit-happy-hour') { openEditHappyHour(el.dataset.id); }
       else if (act === 'delete-happy-hour') { deleteHappyHourAction(el.dataset.id); }

@@ -1084,6 +1084,24 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 /* The blank strip the kitchen rail's clip covers — kept visible on the
    designer papers so the gap reads as intentional. */
 .pp-railgap{height:44px;border-bottom:1px dashed #ccc;margin-bottom:8px;}
+/* The gap between two docket lines is the join control — tap it to merge the
+   line below into the one above, tap again to split. The strip is thin so it
+   doesn't push the paper around; a ::before halo gives it a real finger
+   target (tap-target gate probes with elementFromPoint). */
+/* Names the line the controls after it act on. */
+.dk-tb-label{display:inline-flex;align-items:center;min-height:36px;padding:0 4px 0 10px;
+  font-size:var(--fs-xs);font-weight:800;letter-spacing:.05em;text-transform:uppercase;
+  color:var(--charcoal-soft);border-left:1px solid var(--steel-300);margin-left:4px;}
+.dk-gap{position:relative;height:10px;margin:0 auto;width:82%;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;}
+.dk-gap:before{content:'';position:absolute;left:0;right:0;top:-13px;bottom:-13px;}
+.dk-gap span{font:600 9px/1 var(--font-body);letter-spacing:.06em;text-transform:uppercase;
+  color:transparent;background:transparent;padding:1px 6px;border-radius:6px;transition:none;}
+.dk-gap:hover span, .dk-gap.on span{color:var(--charcoal-soft);background:var(--steel-100);}
+.dk-gap.on span{color:var(--orange);}
+.dk-gap:after{content:'';position:absolute;left:0;right:0;top:50%;height:1px;
+  background:repeating-linear-gradient(90deg,var(--steel-300) 0 4px,transparent 4px 8px);opacity:0;}
+.dk-gap:hover:after{opacity:1;}
 /* Compact printer Font B: smaller, narrower glyphs — more per line. */
 .print-doc.dk-font-b{font-size:0.82em;letter-spacing:-0.02em;}
 /* Editable print sample: the paper is the form. Tappable bits get a dashed
@@ -1127,6 +1145,9 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(--steel-300);}
 .dk-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding:8px 10px;background:var(--steel-200);border-radius:12px;width:100%;box-sizing:border-box;}
 .dk-tb-btn.dk-tb-dd{min-width:96px;justify-content:space-between;}
+/* An icon-only dropdown keeps the square button size — a text button's width
+   around a single glyph reads as a giant empty control. */
+.dk-tb-btn.dk-tb-dd.dk-tb-ico{min-width:38px;justify-content:center;padding:0;}
 .dk-tb-part{font-size:12px;font-weight:700;color:var(--charcoal-soft);min-width:92px;}
 .dk-tb-btn{display:flex;align-items:center;justify-content:center;min-width:38px;min-height:38px;border:none;border-radius:8px;background:var(--surface);color:var(--charcoal-soft);cursor:pointer;font-weight:800;font-size:var(--fs-md);}
 .dk-tb-btn.active{background:var(--orange-dim);color:var(--orange);}
@@ -4871,7 +4892,7 @@ app.put('/api/settings', (req, res) => {
       })()),
       fontScale: pick(dk.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'normal'),
       font: pick(dk.font, ['A', 'B'], cur.font || 'A'),
-      density: pick(dk.density, ['tight', 'normal', 'roomy', '0.9', '1.15', '1.5', '2'], cur.density || 'normal'),
+      density: pick(dk.density, ['1', '1.5', '2', 'tight', 'normal', 'roomy', '0.9', '1.15'], cur.density || 'normal'),
       // Red accents for 2-colour (impact/red-black thermal) printers.
       red: (() => {
         const r = dk.red !== undefined ? dk.red : (cur.red || {});
@@ -8821,31 +8842,39 @@ function buildDocketDoc(ctx, edit) {
   const joined = d.joined || {};
   const isJoined = (k) => joined[k] !== undefined ? !!joined[k] : k === 'time';
   const SEGS = {
+    header: null, table: null,
     covers: ctx.covers ? { on: d.showCovers, html: esc(coversInner) } : null,
     orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: `#${esc(String(ctx.orderNo))}` } : null,
     time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
     staff: ctx.staffName ? { on: d.showStaff, html: esc(ctx.staffName) } : null,
     vip: ctx.vip ? { on: d.showVip, html: 'VIP: ' + esc(ctx.vip) } : null,
   };
-  // Groups are built over the same expanded order the printer walks.
+  // Groups are built over the same order the printer walks, header and table
+  // included — joining Covers means joining the TABLE line, so the table has to
+  // be in the list or the preview and the paper disagree.
   const groups = [];
-  for (const k of ['covers', 'orderno', 'time', 'staff', 'vip']) {
+  for (const k of docketLineOrder(d).filter(x => x !== 'items')) {
     const seg = SEGS[k];
     if (!seg) continue;
     if (isJoined(k) && groups.length) groups[groups.length - 1].push({ k, seg });
     else groups.push([{ k, seg }]);
   }
-  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${g.map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean).join(' · ')}</div>`;
-  // Covers keeps its place under the table when it starts its own line.
-  const coversOwn = groups.find(g => g[0].k === 'covers');
-  const coversSeg = coversOwn ? lineHtml(coversOwn) : '';
-  const metaHtml = groups.filter(g => g[0].k !== 'covers' && g[0].k !== 'staff' && g[0].k !== 'vip').map(lineHtml).join('');
-  const staffGroup = groups.find(g => g[0].k === 'staff');
-  const staffHtml = staffGroup ? lineHtml(staffGroup) : '';
+  // Followers appended to their leader's line; a line absorbed into the one
+  // above renders nothing of its own.
+  const followers = (g) => g.slice(1).map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean).join('');
+  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${partW(g[0].k, g[0].seg.on, g[0].seg.html)}${followers(g).split('<').length > 1 ? ' · ' + followers(g).split('</span>').filter(Boolean).map(x => x + '</span>').join(' · ') : ''}</div>`;
+  const groupOf = (k) => groups.find(g => g[0].k === k);
+  const renderGroup = (k) => { const g = groupOf(k); return g ? lineHtml(g) : ''; };
+  const coversJoined = isJoined('covers') && SEGS.covers;
+  const coversSeg = coversJoined ? '' : renderGroup('covers');
+  const coversRider = coversJoined
+    ? ' ' + partW('covers', d.showCovers, esc(coversInner))
+    : '';
+  const metaHtml = renderGroup('orderno') + renderGroup('time');
+  const staffHtml = renderGroup('staff');
   // Printable characters only — the printer has no emoji, so the preview
   // doesn't either (its star/warning glyphs never reached paper).
-  const vipGroup = groups.find(g => g[0].k === 'vip');
-  const vipHtml = vipGroup ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
+  const vipHtml = groupOf('vip') ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
@@ -8868,9 +8897,9 @@ function buildDocketDoc(ctx, edit) {
           // clear it for just the number, type anything for anything.
           const dispWord = w === undefined ? (d.layout === 'waitermate' ? 'Table' : 'TABLE') : (w === 'none' ? '' : w);
           const sep = dispWord && !dispWord.endsWith('#') ? ' ' : '';
-          return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}</h3>`;
+          return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}${coversRider}</h3>`;
         }
-        return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}</h3>`;
+        return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}${coversRider}</h3>`;
   })();
   const bodyHtml = (() => {
         const lineRow = (l, pre, noSeat) => {
@@ -8925,10 +8954,15 @@ function buildDocketDoc(ctx, edit) {
     items: vipHtml + '\n      ' + allergyHtml + '\n      <hr>\n      ' + bodyHtml,
   };
   const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
+  // A gap is offered wherever the line BELOW it can join the one above.
+  const gap = (k) => (edit && selectable && DK_JOINABLE.includes(k) && blocks[k])
+    ? `<div class="dk-gap${isJoined(k) ? ' on' : ''}" data-act="dk-toggle-join" data-key="${k}"><span>${isJoined(k) ? 'joined' : 'join'}</span></div>`
+    : '';
+  const body = seq.map(k => (blocks[k] ? gap(k) + blocks[k] : '')).filter(Boolean).join('\n      ');
   return `
     <div class="${docketDocClasses(stOv)}">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
-      ${seq.map(k => blocks[k]).join('\n      ')}
+      ${body}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
     </div>`;
 }
@@ -16393,33 +16427,12 @@ async function refreshStationStatus() {
 
 // Mini paper previews for the docket layout presets — same card row the
 // receipt templates use, so picking a docket style works the same way.
-function docketMini(v) {
-  const line = (t, x) => `<div style="${x || ''}">${t}</div>`;
-  const head = (t) => `<div style="text-align:center;font-weight:800;">${t}</div>`;
-  const rule = `<div style="border-top:1px dashed #000;margin:3px 0;"></div>`;
-  const body =
-    v === 'byseat' ? head('TABLE 12') + rule + line('SEAT 1', 'font-weight:800;') + line('1 x Fish') + line('SEAT 2', 'font-weight:800;') + line('1 x Lamb') + line('SHARE', 'font-weight:800;') + line('1 x Fries')
-    : v === 'waitermate' ? line('Grill') + rule + line('Table 12', 'text-align:center;font-weight:800;font-size:11px;') + line('*Entrees*', 'text-align:center;') + line('1 x Fish') + line('Cover (2)', 'padding-left:6px;') + rule + line('No:1')
-    : head('TABLE 12') + line('5 covers', 'text-align:center;') + rule + line('ENTREES', 'font-weight:800;') + line('1 x Fish') + line('MAINS', 'font-weight:800;') + line('2 x Lamb');
-  return `<div class="paper-preview" style="width:118px;padding:7px 8px;font-family:'IBM Plex Mono',monospace;font-size:7px;line-height:1.6;text-align:left;box-shadow:0 1px 4px rgba(0,0,0,0.25);">${body}</div>`;
-}
-
 function renderPrintersDocketTab() {
   const s = state.settings;
   const d = docketCfg();
   const dl = d.layout || 'standard';
   return `
     ${myDesignsStrip('docket')}
-    <div class="settings-card wide" style="max-width:660px;">
-      <div class="th" style="margin-bottom:8px;">Docket style</div>
-      <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
-        ${[['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef']].map(([v, l]) => `
-        <div class="pay-opt ${dl === v ? 'active' : ''}" style="flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 12px;" data-act="set-docket-layout" data-val="${v}">
-          ${docketMini(v)}
-          <span>${l}</span>
-        </div>`).join('')}
-      </div>
-    </div>
     <div class="settings-card wide" style="max-width:740px;">
       <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Docket designer<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-sample-docket">${SYS_PRINTER_SVG} Test docket</button></div>
       ${dkToolbar(d)}
@@ -16460,94 +16473,18 @@ async function setDkStationOpt(key, val) {
     await api(`/api/printer-stations/${st.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: st.docket }) });
   } catch (e) { state.toast = 'Could not save the station design.'; render(); armToastTimer(2600); }
 }
-function dkToolbar(d) {
-  const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
-  const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
-  const p = !station && state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
-  const meta = p ? DK_PARTS[p] : null;
-  const shown = meta && meta.show ? d[meta.show] !== false : true;
-  const menu = state.dkMenu || null;
-  const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
-  const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
-  const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
-  const svgSpacing = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v16"/><path d="M3.5 6.5L6 4l2.5 2.5"/><path d="M3.5 17.5L6 20l2.5-2.5"/><path d="M12 6h9M12 12h9M12 18h9"/></svg>`;
-  const svgAlign = v => v === 'center'
-    ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M6 10h12M3 14h18M6 18h12"/></svg>`
-    : v === 'right'
-      ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M9 10h12M3 14h18M9 18h12"/></svg>`
-      : `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 10h12M3 14h18M3 18h12"/></svg>`;
+// The picked line's own controls. A control that cannot apply to this line is
+// NOT drawn — a greyed button cannot say why it is dead.
+function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN) {
 
-  // A Word-style dropdown: labelled button + caret, menu below with a ✓ on
-  // the current choice. `enabled` false greys it out (ribbon behaviour).
-  // Touch has no tooltip: a dimmed control stays tappable and toasts why
-  // it's off (data-act dk-why) instead of dying under pointer-events:none.
-  const dd = (id, label, enabled, items, title, why) => {
-    const open = enabled && menu === id;
-    return `<span class="dk-dd-wrap${enabled ? '' : ' dk-tb-off'}">
-      <button type="button" class="dk-tb-btn dk-tb-dd${open ? ' active' : ''}"${enabled ? ` data-act="dk-menu" data-menu="${id}"` : ` data-act="dk-why" data-why="${why || ''}"`}>${label}</button>
-      ${open ? `<div class="dk-menu">${items.map(it =>
-        `<button type="button" class="dk-menu-item${it.on ? ' active' : ''}" data-act="dk-menu-opt" data-menu="${id}" data-val="${it.v}"><span class="dk-mi-check">${it.on ? '✓' : ''}</span>${it.l}</button>`).join('')}</div>` : ''}
-    </span>`;
-  };
-  const whyNoPart = 'Tap a line on the paper first';
-
-  const partSize = (d.sizes || {})[p];
-  const sizeOn = !p || meta.size;
-  // No 'Auto' (owner: confusing): the menu shows the RESOLVED size ticked;
-  // picking the layout's own default clears the override — stored nothing,
-  // printed bytes identical, but the menu always answers with a real size.
-  const dkBaseN = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
-  const defN = dkBaseN;
-  const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
-  const sizeLabel = station
-    ? (stOv.fontScale ? SCALE_L[stOv.fontScale] : 'Inherit')
-    : p
-      ? (meta.size ? { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize || defN] : '\u2014')
-      : (SCALE_L[d.fontScale] || 'Normal');
-  const sizeItems = station
-    ? [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) =>
-        ({ v, l, on: v === 'inherit' ? stOv.fontScale === undefined : stOv.fontScale === v }))
-    : p
-      ? [['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
-          ({ v, l, on: (partSize || defN) === parseInt(v) }))
-      : [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) => ({ v, l, on: d.fontScale === v }));
-  // Word-style numbers (owner call), mapped to real printer line feeds.
-  // Legacy tight/roomy read as their numeric neighbours.
-  const SPACING_OPTS = [['0.9', '0.9'], ['normal', '1.0'], ['1.15', '1.15'], ['1.5', '1.5'], ['2', '2.0']];
-  const denTick = (v) => { const cur = station ? stOv.density : d.density; const c = cur === 'tight' ? '0.9' : cur === 'roomy' ? '1.5' : (cur || 'normal'); return c === v; };
-  const spacingItems = station
-    ? [['inherit', 'Inherit'], ...SPACING_OPTS].map(([v, l]) =>
-        ({ v, l, on: v === 'inherit' ? stOv.density === undefined : denTick(v) }))
-    : SPACING_OPTS.map(([v, l]) => ({ v, l, on: denTick(v) }));
-  const FMT_L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef' };
-
-  return `
-    <div class="dk-toolbar">
-      ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
-      ${(state.printerStations || []).length ? dd('station', station ? esc(station.name) : 'All stations', true, [
-        { v: 'all', l: 'All stations', on: !station },
-        ...(state.printerStations || []).map(s => ({ v: s.id, l: esc(s.name), on: state.dkStation === s.id })),
-      ], 'Design for which station') : ''}
-      ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
-        ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef'],
-      ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
-      ${dd('font', d.font === 'B' ? 'Narrow letters' : 'Normal letters', !station, [
-        { v: 'A', l: 'Normal letters', on: (d.font || 'A') === 'A' },
-        { v: 'B', l: 'Narrow letters — fits more', on: d.font === 'B' },
-      ], 'Letter shape')}
-      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : dd('docsize', SCALE_L[d.fontScale] || 'Normal', true, [
-        { v: 'normal', l: 'Normal', on: (d.fontScale || 'normal') === 'normal' },
-        { v: 'large', l: 'Large', on: d.fontScale === 'large' },
-        { v: 'xlarge', l: 'Huge', on: d.fontScale === 'xlarge' },
-      ], 'Text size for the whole docket')}
-      ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing')}
-      ${(() => {
         // Per-line controls. A control that cannot apply to this line is NOT
         // drawn — a greyed button can't say why it's dead, and the bar used to
         // open with nine of them (owner, Aug '26: "there should be no dead
         // controls"). Everything you can see here works on the picked line.
         if (!meta) return '';
-        const bits = [];
+        // Which line the controls after this act on. Without it the bar showed
+        // two size controls and nothing saying what either one changed.
+        const bits = [`<span class="dk-tb-label">${esc(meta.label)}</span>`];
         if (meta.size) bits.push(dd('size', { 1: 'Small', 2: 'Big', 3: 'Biggest' }[(d.sizes || {})[p] || defN] || 'Small',
           true, sizeItems, 'Text size for this line'));
         if (meta.align) bits.push(`<span class="dk-tb-group">${['left', 'center', 'right'].map(v =>
@@ -16576,8 +16513,110 @@ function dkToolbar(d) {
         const svgDown = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
         if (idx > 0) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="up">${svgUp}</button>`);
         if (idx >= 0 && idx < seq.length - 1) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="down">${svgDown}</button>`);
-        return bits.join('\n      ');
-      })()}
+          return bits.join('\n      ');
+}
+const FMT_L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef' };
+function dkToolbar(d) {
+  const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
+  const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
+  const p = !station && state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
+  const meta = p ? DK_PARTS[p] : null;
+  const shown = meta && meta.show ? d[meta.show] !== false : true;
+  const menu = state.dkMenu || null;
+  const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
+  const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
+  const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
+  const svgSpacing = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v20"/><path d="M2 5l3-3 3 3"/><path d="M2 19l3 3 3-3"/><path d="M11 4h11M11 12h11M11 20h11"/></svg>`;
+  const svgAlign = v => v === 'center'
+    ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M6 10h12M3 14h18M6 18h12"/></svg>`
+    : v === 'right'
+      ? `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M9 10h12M3 14h18M9 18h12"/></svg>`
+      : `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 10h12M3 14h18M3 18h12"/></svg>`;
+
+  // A Word-style dropdown: labelled button + caret, menu below with a ✓ on
+  // the current choice. `enabled` false greys it out (ribbon behaviour).
+  // Touch has no tooltip: a dimmed control stays tappable and toasts why
+  // it's off (data-act dk-why) instead of dying under pointer-events:none.
+  const dd = (id, label, enabled, items, title, why, iconOnly) => {
+    const open = enabled && menu === id;
+    return `<span class="dk-dd-wrap${enabled ? '' : ' dk-tb-off'}">
+      <button type="button" class="dk-tb-btn dk-tb-dd${iconOnly ? ' dk-tb-ico' : ''}${open ? ' active' : ''}"${enabled ? ` data-act="dk-menu" data-menu="${id}"` : ` data-act="dk-why" data-why="${why || ''}"`}>${label}</button>
+      ${open ? `<div class="dk-menu">${items.map(it =>
+        `<button type="button" class="dk-menu-item${it.on ? ' active' : ''}" data-act="dk-menu-opt" data-menu="${id}" data-val="${it.v}"><span class="dk-mi-check">${it.on ? '✓' : ''}</span>${it.l}</button>`).join('')}</div>` : ''}
+    </span>`;
+  };
+  const whyNoPart = 'Tap a line on the paper first';
+
+  const partSize = (d.sizes || {})[p];
+  const sizeOn = !p || meta.size;
+  // No 'Auto' (owner: confusing): the menu shows the RESOLVED size ticked;
+  // picking the layout's own default clears the override — stored nothing,
+  // printed bytes identical, but the menu always answers with a real size.
+  const dkBaseN = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
+  const defN = dkBaseN;
+  const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
+  const sizeLabel = station
+    ? (stOv.fontScale ? SCALE_L[stOv.fontScale] : 'Inherit')
+    : p
+      ? (meta.size ? { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize || defN] : '\u2014')
+      : (SCALE_L[d.fontScale] || 'Normal');
+  const sizeItems = station
+    ? [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) =>
+        ({ v, l, on: v === 'inherit' ? stOv.fontScale === undefined : stOv.fontScale === v }))
+    : p
+      ? [['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
+          ({ v, l, on: (partSize || defN) === parseInt(v) }))
+      : [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) => ({ v, l, on: d.fontScale === v }));
+  // Word-style numbers (owner call), mapped to real printer line feeds.
+  // Legacy tight/roomy read as their numeric neighbours.
+  // Three steps, as multiples of the printer's own line height (owner ask):
+  // five near-identical options were a choice nobody could see the point of.
+  const SPACING_OPTS = [['1', '1'], ['1.5', '1.5'], ['2', '2']];
+  const denTick = (v) => {
+    const cur = station ? stOv.density : d.density;
+    const c = (cur === 'roomy' || cur === '1.5') ? '1.5' : cur === '2' ? '2' : '1';
+    return c === v;
+  };
+  const spacingItems = station
+    ? [['inherit', 'Inherit'], ...SPACING_OPTS].map(([v, l]) =>
+        ({ v, l, on: v === 'inherit' ? stOv.density === undefined : denTick(v) }))
+    : SPACING_OPTS.map(([v, l]) => ({ v, l, on: denTick(v) }));
+
+  // The bar edits ONE thing at a time (owner, Aug '26): with a line picked it
+  // shows that line's controls and nothing else, so a whole-docket setting
+  // can't be changed by accident while you are working on a line. Tap the
+  // paper away, or "Whole docket", to get the paper-wide settings back.
+  if (meta) return `
+    <div class="dk-toolbar">
+      ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
+      <button type="button" class="dk-tb-btn" data-act="dk-pick-none">Whole docket</button>
+      ${dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN)}
+    </div>`;
+  return `
+    <div class="dk-toolbar">
+      ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
+      ${(state.printerStations || []).length ? dd('station', station ? esc(station.name) : 'All stations', true, [
+        { v: 'all', l: 'All stations', on: !station },
+        ...(state.printerStations || []).map(s => ({ v: s.id, l: esc(s.name), on: state.dkStation === s.id })),
+      ], 'Design for which station') : ''}
+      ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
+        ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef'],
+      ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
+      ${station ? '' : dd('layout', FMT_L[d.layout || 'standard'], true, [
+        { v: 'standard', l: 'By course', on: (d.layout || 'standard') === 'standard' },
+        { v: 'byseat', l: 'By seat — for a pass printer', on: d.layout === 'byseat' },
+        { v: 'waitermate', l: 'Chef', on: d.layout === 'waitermate' },
+      ], 'Docket format')}
+      ${dd('font', d.font === 'B' ? 'Narrow letters' : 'Normal letters', !station, [
+        { v: 'A', l: 'Normal letters', on: (d.font || 'A') === 'A' },
+        { v: 'B', l: 'Narrow letters — fits more', on: d.font === 'B' },
+      ], 'Letter shape')}
+      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : dd('docsize', 'All lines · ' + (SCALE_L[d.fontScale] || 'Normal'), true, [
+        { v: 'normal', l: 'Normal', on: (d.fontScale || 'normal') === 'normal' },
+        { v: 'large', l: 'Large', on: d.fontScale === 'large' },
+        { v: 'xlarge', l: 'Huge', on: d.fontScale === 'xlarge' },
+      ], 'Text size for the whole docket')}
+      ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing', '', true)}
     </div>`;
 }
 
@@ -16612,7 +16651,7 @@ function rcToolbar() {
   const shown = meta && meta.show ? rcShown(meta.show) : true;
   const menu = state.rcMenu || null;
   const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
-    const svgSpacing = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v16"/><path d="M3.5 6.5L6 4l2.5 2.5"/><path d="M3.5 17.5L6 20l2.5-2.5"/><path d="M12 6h9M12 12h9M12 18h9"/></svg>`;
+    const svgSpacing = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v20"/><path d="M2 5l3-3 3 3"/><path d="M2 19l3 3 3-3"/><path d="M11 4h11M11 12h11M11 20h11"/></svg>`;
   const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
   const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
     const svgAlign = v => v === 'center'
@@ -28542,6 +28581,12 @@ function handleActClick(el, e) {
         const cur = docketCfg().bold || {};
         setDocketOpt('bold', Object.assign({}, cur, { [el.dataset.key]: !cur[el.dataset.key] }));
       }
+      else if (act === 'dk-pick-none') { state.dkPart = null; state.dkSlip = false; state.dkMenu = null; render(); }
+      else if (act === 'dk-toggle-join') {
+        const k = el.dataset.key, cur = docketCfg().joined || {};
+        const now = cur[k] !== undefined ? !!cur[k] : k === 'time';
+        setDocketOpt('joined', Object.assign({}, cur, { [k]: !now }));
+      }
       else if (act === 'set-docket-join') {
         const cur = docketCfg().joined || {};
         setDocketOpt('joined', Object.assign({}, cur, { [el.dataset.key]: el.dataset.val === '1' }));
@@ -28551,7 +28596,6 @@ function handleActClick(el, e) {
       else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); schedulePsAutosave(); } }
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
-      else if (act === 'set-docket-layout') { setDocketOpt('layout', el.dataset.val); }
       else if (act === 'toggle-docket-red') {
         const k = el.dataset.key, cur = docketCfg().red || {};
         // data-force lets the line panel's Black/Red pair SET the ink; without
@@ -28628,6 +28672,7 @@ function handleActClick(el, e) {
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
+        else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
         else if (m === 'style') { state.dkMenu = null; setDocketOpt('newCourseStyle', v); }

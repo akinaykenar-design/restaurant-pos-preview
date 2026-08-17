@@ -1547,10 +1547,43 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
   .lg-left{padding-right:40px;}
   .lg-logo{width:52px;height:52px;margin-bottom:12px;}
   .lg-clock{font-size:32px;}
-  .pin-dots.lg{gap:12px;margin:0 0 14px;}
+  /* .lg-right-prefixed: the bare .pin-dots.lg selector loses to the
+     .lg-right .pin-dots.lg centring rule above, so this gap never applied. */
+  .lg-right .pin-dots.lg{gap:12px;margin:0 auto 14px;}
   .pin-pad.lg{grid-template-columns:repeat(3,64px);gap:10px;width:212px;}
   .pin-pad.lg button{height:52px;font-size:20px;border-radius:12px;}
   .ls-minimal .lg-venue{margin-bottom:14px;}
+}
+/* Centre the PAD, not the block (owner, Aug '26: "i want the number pad to be
+   centred. thats way it looked funny to me"). The wordmark, clock and dots all
+   sit above the keys, so centring the whole block pushed the pad 91px below the
+   screen's centre at every size. The hand goes to the pad, so the pad is what
+   gets centred; the header now hangs above it.
+   Two offsets to cancel: the dots (handled by padding under .lg-right, since a
+   centred box with dead space beneath it puts its own content above centre),
+   and the header column (handled by giving it a 1fr row of its own in a grid,
+   so it takes no part in the centring at all). */
+.login-screen.pinfirst{--lg-dots-block:39px;} /* 13px dot row + its 26px gap */
+.pinfirst .lg-right{padding-bottom:var(--lg-dots-block);}
+.login-screen.pinfirst.ls-stack,
+.login-screen.pinfirst.ls-minimal{display:grid;grid-template-rows:1fr auto 1fr;justify-items:center;align-items:center;gap:0;}
+.ls-stack .lg-left{grid-row:1;align-self:end;margin-bottom:34px;}
+.ls-minimal .lg-left{grid-row:1;align-self:end;}
+.ls-stack .lg-right,.ls-minimal .lg-right{grid-row:2;}
+/* Split collapses to a column on portrait/narrow — same treatment there. */
+@media (max-width:760px), (orientation:portrait){
+  .login-screen.pinfirst{display:grid;grid-template-rows:1fr auto 1fr;justify-items:center;align-items:center;gap:0;}
+  .pinfirst .lg-left{grid-row:1;align-self:end;margin-bottom:34px;}
+  .pinfirst .lg-right{grid-row:2;}
+}
+/* Short screens put Stacked back into a row, which needs flex again — the
+   grid rows above would otherwise stack it. */
+@media (max-height:560px){
+  .login-screen.pinfirst,
+  .login-screen.pinfirst.ls-stack,
+  .login-screen.pinfirst.ls-minimal{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:40px;}
+  .pinfirst .lg-left{margin-bottom:0;}
+  .login-screen.pinfirst{--lg-dots-block:27px;} /* 13px dot row + its 14px gap */
 }
 .venue-logo-thumb{width:56px;height:56px;border-radius:12px;border:0.5px solid var(--steel-300);background:var(--surface);display:flex;align-items:center;justify-content:center;overflow:hidden;}
 .venue-logo-thumb img{max-width:100%;max-height:100%;}
@@ -4800,6 +4833,9 @@ app.put('/api/settings', (req, res) => {
       showStationTag: b(dk.showStationTag, cur.showStationTag !== false),
       showOrderNo: b(dk.showOrderNo, !!cur.showOrderNo),
       showTime: b(dk.showTime, cur.showTime !== false),
+      // The call-away slip's time has its own switch — the docket's Time and
+      // the slip's are separate lines and hide independently.
+      showCaTime: b(dk.showCaTime, cur.showCaTime !== false),
       showStaff: b(dk.showStaff, cur.showStaff !== false),
       headerText: String(dk.headerText !== undefined ? dk.headerText : (cur.headerText || '')).slice(0, 40),
       footerText: String(dk.footerText !== undefined ? dk.footerText : (cur.footerText || '')).slice(0, 60),
@@ -4821,7 +4857,8 @@ app.put('/api/settings', (req, res) => {
       red: (() => {
         const r = dk.red !== undefined ? dk.red : (cur.red || {});
         const out = {};
-        ['header', 'table', 'course', 'items', 'notes', 'allergies', 'callaway'].forEach(k => { out[k] = !!(r && r[k]); });
+        ['header', 'table', 'course', 'items', 'notes', 'allergies',
+          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => { out[k] = !!(r && r[k]); });
         if (dk.red === undefined && cur.red === undefined) out.callaway = true; // sensible default
         return out;
       })(),
@@ -4830,7 +4867,8 @@ app.put('/api/settings', (req, res) => {
       sizes: (() => {
         const src = dk.sizes !== undefined ? dk.sizes : (cur.sizes || {});
         const out = {};
-        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies'].forEach(k => {
+        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies',
+          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => {
           const v = src && src[k];
           if (v === 1 || v === 2 || v === 3) out[k] = v;
         });
@@ -4840,11 +4878,22 @@ app.put('/api/settings', (req, res) => {
       // parts is stored, and the default order is omitted so untouched slips
       // keep printing the exact old bytes.
       ...(() => {
-        const DEF = ['callaway', 'table', 'time'];
-        const src = dk.callawayOrder !== undefined ? dk.callawayOrder : cur.callawayOrder;
-        if (!Array.isArray(src) || src.length !== 3 || DEF.some(k => !src.includes(k))) return {};
+        const DEF = ['callaway', 'cacourse', 'catable', 'catime'];
+        const LEGACY = { table: 'catable', time: 'catime' };
+        const raw = dk.callawayOrder !== undefined ? dk.callawayOrder : cur.callawayOrder;
+        if (!Array.isArray(raw)) return {};
+        // A three-part order saved before the banner/course split is migrated
+        // rather than discarded: the course sat right under the banner.
+        const src = [];
+        for (const k of raw) {
+          const nk = LEGACY[k] || k;
+          if (!DEF.includes(nk) || src.includes(nk)) continue;
+          src.push(nk);
+          if (nk === 'callaway' && !raw.includes('cacourse') && !src.includes('cacourse')) src.push('cacourse');
+        }
+        if (src.length !== DEF.length) return {};
         if (src.every((k, i) => k === DEF[i])) return {};
-        return { callawayOrder: src.slice() };
+        return { callawayOrder: src };
       })(),
       // Docket top-block order (standard format): only a full permutation of
       // the five blocks is stored, and the default order is omitted so
@@ -4860,7 +4909,8 @@ app.put('/api/settings', (req, res) => {
       align: (() => {
         const src = dk.align !== undefined ? dk.align : (cur.align || {});
         const out = {};
-        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies'].forEach(k => {
+        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies',
+          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => {
           const v = src && src[k];
           if (v === 'left' || v === 'center' || v === 'right') out[k] = v;
         });
@@ -8336,7 +8386,7 @@ function printDocClasses() {
 const DOCKET_DEFAULTS = {
   showCovers: true, showVip: true, showAllergies: true, showCourseName: true,
   showSeats: true, showNotes: true, showBuild: true, showStationTag: true,
-  showOrderNo: false, showTime: true, headerText: '', footerText: '',
+  showOrderNo: false, showTime: true, showCaTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
   font: 'A', red: { callaway: true }, sizes: {}, align: {}, roundPrint: 'added',
 };
@@ -8359,16 +8409,45 @@ const DK_PARTS = {
   seats: { label: 'Seats', show: 'showSeats', red: false, align: false, size: false },
   station: { label: 'Station tag', show: 'showStationTag', red: false, align: false, size: false },
   staff: { label: 'Server', show: 'showStaff', red: true, align: true, size: true },
-  callaway: { label: 'Call away', show: null, red: true, align: false, size: false },
+  // The call-away slip's lines are their OWN parts, not shares of the docket's.
+  // They used to reuse 'table' and 'time', which meant tapping the slip's table
+  // lit the docket's too and sent the edit to the wrong paper. Separate keys,
+  // separate styling, and every option available on each (owner, Aug '26).
+  callaway: { label: 'Call away banner', show: null, red: true, align: true, size: true },
+  cacourse: { label: 'Call away course', show: null, red: true, align: true, size: true },
+  catable: { label: 'Call away table', show: null, red: true, align: true, size: true },
+  catime: { label: 'Call away time', show: 'showCaTime', red: true, align: true, size: true },
 };
+// Slip parts print big and centred by default, matching the pre-designer slip.
+const CA_DEFAULT_SIZE = { callaway: 2, cacourse: 2, catable: 2, catime: 1 };
+// Before the split, one red switch ('callaway') coloured the banner, the course
+// AND the table. Those three inherit it until each is set on its own.
+function caRed(d, k) {
+  const r = d.red || {};
+  if (r[k] !== undefined) return !!r[k];
+  return (k === 'cacourse' || k === 'catable') ? !!r.callaway : false;
+}
+const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
-// The call-away slip's section order (banner+course move as one unit). Only a
-// full permutation counts; anything else falls back to the printed default.
-const CALLAWAY_DEFAULT_ORDER = ['callaway', 'table', 'time'];
+// The call-away slip's section order — four independent lines now that the
+// banner and the course have been split apart. Only a full permutation counts;
+// anything else falls back to the printed default.
+const CALLAWAY_DEFAULT_ORDER = ['callaway', 'cacourse', 'catable', 'catime'];
+// Orders stored before the split have three entries and borrow the docket's
+// 'table'/'time'. Map those across and slot the course straight after the
+// banner, which is where it printed when the two moved as one unit.
+const CALLAWAY_LEGACY_KEY = { table: 'catable', time: 'catime' };
 function callawayOrder(d) {
-  const o = d.callawayOrder;
-  return Array.isArray(o) && o.length === 3 && CALLAWAY_DEFAULT_ORDER.every(k => o.includes(k))
-    ? o : CALLAWAY_DEFAULT_ORDER;
+  const raw = d.callawayOrder;
+  if (!Array.isArray(raw)) return CALLAWAY_DEFAULT_ORDER;
+  const out = [];
+  for (const k of raw) {
+    const nk = CALLAWAY_LEGACY_KEY[k] || k;
+    if (!CALLAWAY_DEFAULT_ORDER.includes(nk) || out.includes(nk)) continue;
+    out.push(nk);
+    if (nk === 'callaway' && !raw.includes('cacourse') && !out.includes('cacourse')) out.push('cacourse');
+  }
+  return out.length === CALLAWAY_DEFAULT_ORDER.length ? out : CALLAWAY_DEFAULT_ORDER;
 }
 // The docket's top blocks (standard format) reorder as whole units — items
 // carry their notices and dividing rule with them. Only a full permutation
@@ -8884,20 +8963,30 @@ async function deleteDesign(kind, id) {
 // is the designable 'callaway' part: tap it, toggle red.
 function buildCallAwaySample() {
   const d = docketCfg();
-  const red = d.red && d.red.callaway;
-  const sel = state.dkPart === 'callaway';
   const word = d.tableWord;
   const t = word === undefined ? 'TABLE 12' : ({ TABLE: 'TABLE 12', Table: 'Table 12', T: 'T 12', '#': '#12', none: '12' }[word] || 'TABLE 12');
   const course = ((courseInfo(2) || {}).name || 'Mains').toUpperCase();
+  // Each slip line carries its own size, alignment and red — the same grammar
+  // the docket's parts use, so the toolbar drives them identically.
+  const em = { 1: '1em', 2: '1.45em', 3: '2em' };
+  const caStl = (k, extra) => {
+    const n = (d.sizes || {})[k] || CA_DEFAULT_SIZE[k] || 1;
+    return ` style="font-size:${em[n]};line-height:1.3;text-align:${(d.align || {})[k] || 'center'};${extra || ''}"`;
+  };
+  // A line that's switched off stays visible but dimmed, so it can still be
+  // tapped and switched back on — same behaviour as the docket's parts.
+  const caPart = (k, inner, extra) => {
+    const meta = DK_PARTS[k] || {};
+    const off = meta.show && d[meta.show] === false;
+    return `<div class="dk-part${off ? ' pp-off' : ''}${state.dkPart === k ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
+  };
   // Sections render in the stored order — the printed slip follows the same
   // list, so the preview stays WYSIWYG.
   const parts = {
-    callaway: `<div class="dk-part${sel ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="callaway" data-slip="1" style="text-align:center;padding:2px 0 4px;">
-      <div style="display:inline-block;padding:2px 12px;font-weight:800;font-size:1.4em;background:${red ? '#C0392B' : '#111'};color:#fff;">CALL AWAY</div>
-      <div style="font-weight:800;font-size:1.2em;margin-top:2px;${red ? 'color:#C0392B;' : ''}">${esc(course)}</div>
-    </div>`,
-    table: `<div class="dk-part${state.dkPart === 'table' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="table" data-slip="1" style="text-align:center;font-weight:700;">${esc(t)}</div>`,
-    time: `<div class="dk-part${state.dkPart === 'time' ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="time" data-slip="1" style="text-align:center;">7:41 pm</div>`,
+    callaway: caPart('callaway', `<span style="display:inline-block;padding:2px 12px;font-weight:800;background:${caRed(d, 'callaway') ? '#C0392B' : '#111'};color:#fff;">CALL AWAY</span>`, 'padding:2px 0 4px;'),
+    cacourse: caPart('cacourse', esc(course), `font-weight:800;${caRed(d, 'cacourse') ? 'color:#C0392B;' : ''}`),
+    catable: caPart('catable', esc(t), `font-weight:700;${caRed(d, 'catable') ? 'color:#C0392B;' : ''}`),
+    catime: caPart('catime', '7:41 pm', caRed(d, 'catime') ? 'color:#C0392B;' : ''),
   };
   return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}">
     <div class="pp-railgap"></div>
@@ -16313,7 +16402,7 @@ function dkToolbar(d) {
   // picking the layout's own default clears the override — stored nothing,
   // printed bytes identical, but the menu always answers with a real size.
   const dkBaseN = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
-  const dkSizeDefault = { table: 2, covers: 2, items: dkBaseN, subs: dkBaseN >= 3 ? 2 : 1 };
+  const dkSizeDefault = Object.assign({ table: 2, covers: 2, items: dkBaseN, subs: dkBaseN >= 3 ? 2 : 1 }, CA_DEFAULT_SIZE);
   const defN = p ? (dkSizeDefault[p] || 1) : 1;
   const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
   const sizeLabel = station
@@ -28426,7 +28515,7 @@ function handleActClick(el, e) {
       else if (act === 'dk-menu-close') { state.dkMenu = null; render(); }
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
-        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = v === 'callaway'; render(); }
+        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
@@ -28439,7 +28528,7 @@ function handleActClick(el, e) {
           else if (pk && DK_PARTS[pk]) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
-            const defs = { table: 2, covers: 2, items: bN, subs: bN >= 3 ? 2 : 1 };
+            const defs = Object.assign({ table: 2, covers: 2, items: bN, subs: bN >= 3 ? 2 : 1 }, CA_DEFAULT_SIZE);
             const next = Object.assign({}, dcfg.sizes || {});
             if (parseInt(v, 10) === (defs[pk] || 1)) delete next[pk]; else next[pk] = parseInt(v, 10);
             setDocketOpt('sizes', next);

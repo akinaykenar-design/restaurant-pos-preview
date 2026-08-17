@@ -13024,12 +13024,20 @@ function renderVoidReasonPop() {
       <div class="pop-scrim" data-act="close-void-reason"></div>
       <div class="qty-pop covers-pop" style="width:340px;">
         <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${esc(it.name || 'item')}</div>
+        ${m.needPin ? `
+        <label class="field-label">Manager PIN</label>
+        <input id="void-item-pin" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" style="width:100%;box-sizing:border-box;padding:10px 12px;border:1px solid var(--steel-300);border-radius:8px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);" oninput="state.voidItemPrompt.pin = this.value;">
+        ${m.pinError ? `<div class="login-error">${esc(m.pinError)}</div>` : ''}
+        <div class="qp-row qp-actions" style="margin-top:12px;">
+          <button class="icon-action neutral" title="Cancel" data-act="close-void-reason">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+          <button class="icon-action discard" title="Remove" data-act="void-item-approve">${ACT_TICK_SVG}<span class="ia-label">Remove</span></button>
+        </div>` : `
         <div style="display:flex;flex-direction:column;gap:8px;max-height:46vh;overflow-y:auto;">
           ${itemVoidReasons().map(r => `<button class="btn-secondary" style="width:100%;" data-act="void-reason-pick" data-val="${esc(r)}">${esc(r)}</button>`).join('')}
         </div>
         <div class="qp-row qp-actions" style="margin-top:12px;">
           <button class="icon-action neutral" title="Cancel" data-act="close-void-reason">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        </div>
+        </div>`}
       </div>`;
 }
 async function commitRemoveSent(match, reason) {
@@ -13378,14 +13386,12 @@ function renderTicketPanel() {
           // Remove control is a cross (✕), not a bin. An UNSENT line — an item
           // "just put through" that hasn't gone to the kitchen — carries the ✕
           // for EVERYONE: any waiter can pull back what they haven't sent yet.
-          // A purely SENT line shows the ✕ for a MANAGER only (taking it off is
-          // a logged void); regular staff get a hidden placeholder so the row
-          // stays aligned. On a mixed line the ✕ removes just the unsent part.
+          // A purely SENT line's ✕ shows for EVERYONE, but taking it off is a
+          // logged void: a manager commits directly, staff must key a manager
+          // PIN at the reason pop. On a mixed line the ✕ removes the unsent part.
           const removeHtml = hasNew
             ? `<button class="tl-remove" data-act="remove-new-line" data-idx="${e.cartIdx}" title="Remove — not sent yet" onclick="event.stopPropagation();">${ACT_X_SVG}</button>`
-            : (isManager
-                ? `<button class="tl-remove" data-act="remove-sent-line" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-price="${e.price}" data-course="${e.course}" title="Remove from order" onclick="event.stopPropagation();">${ACT_X_SVG}</button>`
-                : `<span class="tl-remove" style="visibility:hidden;">${ACT_X_SVG}</span>`);
+            : `<button class="tl-remove" data-act="remove-sent-line" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-price="${e.price}" data-course="${e.course}" title="Remove from order" onclick="event.stopPropagation();">${ACT_X_SVG}</button>`;
           const lineAct = isSent
             ? `data-act="edit-sent" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-price="${e.price}" data-course="${e.course}"`
             : `data-act="edit-line" data-idx="${e.cartIdx}"`;
@@ -19592,6 +19598,8 @@ function renderMenuImport() {
     <textarea id="mi-paste" rows="4" placeholder="Copy the rows in Excel, paste here" style="width:100%;max-width:560px;padding:10px 12px;border:1px solid var(--steel-300);border-radius:8px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:inherit;" oninput="miSetText(this.value)"></textarea>
     <div style="display:flex;gap:6px;align-items:center;margin-top:10px;flex-wrap:wrap;">
       <label class="fp-chip" style="cursor:pointer;">Open CSV<input type="file" accept=".csv,text/csv,text/tab-separated-values,.tsv,.txt" style="display:none;" onchange="miFile(this.files)"></label>
+      <button class="fp-chip" data-act="mi-export-copy">Copy for Excel</button>
+      <button class="fp-chip" data-act="mi-export-csv">Download CSV</button>
       ${mi ? `<button class="fp-chip" data-act="mi-clear">Clear</button>` : ''}
     </div>
   </div>
@@ -19651,6 +19659,30 @@ function miSetMap(i, v) {
   render();
 }
 function miSetFallbackCat(v) { if (state.menuImport) { state.menuImport.fallbackCat = v; render(); } }
+// Export is the importer's mirror: the same three columns the importer reads,
+// so a round trip (export -> edit in Excel -> paste back) is price updates.
+function miExportRows(sep) {
+  const head = ['Name', 'Category', 'Price'].join(sep);
+  const rows = state.menu.filter(m => !m.disabled).map(m =>
+    [sep === ',' ? '"' + m.name.replace(/"/g, '""') + '"' : m.name,
+     sep === ',' ? '"' + (m.category || '').replace(/"/g, '""') + '"' : (m.category || ''),
+     m.price].join(sep));
+  return [head, ...rows].join('\n');
+}
+function miExportCopy() {
+  navigator.clipboard.writeText(miExportRows('\t')).then(() => {
+    state.toast = state.menu.filter(m => !m.disabled).length + ' items copied — paste into Excel.';
+    render(); armToastTimer(2600);
+  }).catch(() => { state.toast = 'Could not reach the clipboard.'; render(); armToastTimer(2600); });
+}
+function miExportCsv() {
+  const blob = new Blob([miExportRows(',')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'menu.csv';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
 async function miApply() {
   const rows = miPreviewRows().filter(r => r.status === 'add' || r.status === 'update');
   if (!rows.length) return;
@@ -27171,7 +27203,18 @@ function handleActClick(el, e) {
       else if (act === 'add-serving') { addAnotherServing(); }
       else if (act === 'reprice-sent') { repriceSentItem(); }
       else if (act === 'remove-sent') { removeSentItem(); }
-      else if (act === 'void-reason-pick') { const m = state.voidItemPrompt; if (m) commitRemoveSent(m.match, el.dataset.val); }
+      else if (act === 'void-reason-pick') {
+        const m = state.voidItemPrompt; if (!m) return;
+        const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
+        if (isMgr) commitRemoveSent(m.match, el.dataset.val);
+        else { m.reason = el.dataset.val; m.needPin = true; m.pin = ''; m.pinError = ''; render(); const pi = document.getElementById('void-item-pin'); if (pi) pi.focus(); }
+      }
+      else if (act === 'void-item-approve') {
+        const m = state.voidItemPrompt; if (!m) return;
+        api('/api/staff/verify-manager-pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: m.pin || '' }) })
+          .then(() => commitRemoveSent(m.match, m.reason))
+          .catch(() => { m.pinError = 'Incorrect manager PIN.'; render(); });
+      }
       else if (act === 'house-reason') {
         state.houseDraft = {
           item: (document.getElementById('house-item') || {}).value || '',
@@ -27988,6 +28031,8 @@ function handleActClick(el, e) {
       else if (act === 'set-venue-style') { saveTicketSetting({ venueStyle: el.dataset.val }); }
       else if (act === 'set-search-enabled') { saveTicketSetting({ searchEnabled: state.settings.searchEnabled === false }); }
       else if (act === 'mi-clear') { state.menuImport = null; render(); }
+      else if (act === 'mi-export-copy') { miExportCopy(); }
+      else if (act === 'mi-export-csv') { miExportCsv(); }
       else if (act === 'mi-apply') { miApply(); }
       else if (act === 'set-ticket-pos') {
         const dev0 = state.mockDevice || 'pc';

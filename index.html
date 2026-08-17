@@ -553,7 +553,6 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 body[data-theme="dark"] .acct-tile.pinned{border-color:#8A847A;box-shadow:inset 0 0 0 1px #8A847A;}
 body[data-theme="dark"] .acct-pin{color:#8A847A;}
 body[data-theme="dark"] .acct-tile .acct-pin svg{fill:#8A847A !important;}
-.acct-tile.on{border-color:var(--charcoal-soft);box-shadow:inset 0 0 0 1px var(--charcoal-soft);background:var(--steel-200);}
 .acct-badge{position:absolute;top:8px;right:8px;min-width:20px;height:20px;padding:0 6px;border-radius:10px;background:var(--red);color:#fff;font-family:var(--font-mono);font-size:12px;font-weight:800;display:flex;align-items:center;justify-content:center;line-height:1;}
 /* Pin marker: a plain solid blue pin in the tile corner — no circle, no shadow. */
 .acct-pin{position:absolute;top:7px;right:7px;width:15px;height:15px;display:flex;align-items:center;justify-content:center;color:var(--charcoal-soft);z-index:2;pointer-events:none;}
@@ -12657,10 +12656,19 @@ function renderTopbar() {
         const t = findTableById(state.table);
         return `<span class="acct-wrap"><button class="${state.accountMenuOpen ? 'active held-open' : ''}" data-act="toggle-account-menu" title="Account — table, covers, notes">${SYS_HUB_SVG}</button></span>`;
       })() : ''}
-      ${state.view === 'order' && !isChef && state.settings.searchEnabled !== false && !state.showTablePicker && (state.orderType !== 'dine-in' || state.table) ? `<button class="${(state.searchOpen || state.search) ? 'active' : ''}" data-act="${(state.searchOpen || state.search) ? 'close-search' : 'open-search'}" title="Search the menu">${SYS_SEARCH_SVG}</button>` : ''}
+      ${(() => {
+        // ONE search (owner ask): a single magnifier serves both views — on
+        // the order screen it searches the menu, in admin it opens the finder
+        // (which also matches menu items). Selected = open, tap again = closed.
+        if (isChef || state.settings.searchEnabled === false) return '';
+        if (state.view === 'admin') return `<button class="${state.adminSearchOpen ? 'active' : ''}" data-act="admin-search-toggle" title="Search">${SYS_SEARCH_SVG}</button>`;
+        if (state.view !== 'order' || state.showTablePicker || (state.orderType === 'dine-in' && !state.table)) return '';
+        const on = state.searchOpen || state.search;
+        return `<button class="${on ? 'active' : ''}" data-act="${on ? 'close-search' : 'open-search'}" title="Search">${SYS_SEARCH_SVG}</button>`;
+      })()}
       ${isManager && (state.settings.adminPins || []).length ? `<div class="pin-strip">${(state.settings.adminPins || []).map(k => {
         const pm = adminPageMeta(k);
-        const on = k === 'search' ? (state.view === 'admin' && state.adminSearchOpen) : (state.view === 'admin' && state.adminTab === k);
+        const on = state.view === 'admin' && state.adminTab === k;
         return pm ? `<button class="${on ? 'active' : ''}" data-act="open-admin-pin" data-val="${k}" title="${esc(pm.label)} — tap opens, hold unpins">${adminPinIcon(k)}</button>` : '';
       }).join('')}</div>` : ''}
       <button data-act="logout" title="Log off — hold to freeze">${ACT_POWER_SVG}</button>
@@ -17039,9 +17047,6 @@ const SETTINGS_INDEX = [
   { page: 'audit', label: 'Audit log', terms: 'audit log history who changed' },
 ];
 function adminPageMeta(key) {
-  // 'search' is not a page — it's the admin search overlay (the topbar
-  // magnifier's door). It gets meta so its Menu-hub tile can be pinned.
-  if (key === 'search') return { key: 'search', label: 'Search', group: 'Menu' };
   for (const s of ADMIN_SECTIONS) {
     const c = s.children.find(x => x.key === key);
     if (c) return { ...c, group: s.group };
@@ -18344,7 +18349,6 @@ const MENU_HUB_ICON = {
   'settings-notes': '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 9h6"/><path d="M9 14h4"/>',
   // Not Menu children, but drawn in the same language: the Search tile /
   // pinned magnifier, and the Kitchen pin (Daily-grid tile, Dashboard page).
-  'search': '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.8-3.8"/>',
   'kitchen': '<path d="M4 11h16v5a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4z"/><path d="M2 11h20"/><path d="M9 7V5M12.5 7V4M16 7V5"/>',
 };
 // Every admin group lands on a tile hub (same component as the Daily dashboard
@@ -18361,9 +18365,6 @@ function renderAdminGroupHub(groupKey) {
   const pins = state.settings.adminPins || [];
   const pin = k => pins.includes(k) ? `<span class="acct-pin" title="Pinned to top bar — hold to unpin">${ACT_PIN_SVG}</span>` : '';
   const tiles = grp.children.map(c => `<button class="acct-tile${withIcons ? '' : ' no-ic'}${pins.includes(c.key) ? ' pinned' : ''}" data-act="admin-tab" data-val="${c.key}">${pin(c.key)}${ic(c.key)}<span class="acct-tile-label">${esc(c.label)}${c.key === 'stock-ledger' && lowStockItems().length > 0 ? ` <span class="status-chip void" style="margin-left:4px;">${lowStockItems().length}</span>` : ''}</span></button>`);
-  // Search tile: the SAME door as the topbar magnifier (same act), just
-  // reachable — and pinnable — from the Menu hub.
-  if (groupKey === 'menu') tiles.push(`<button class="acct-tile${pins.includes('search') ? ' pinned' : ''}${state.adminSearchOpen ? ' on' : ''}" data-act="admin-search-toggle">${pin('search')}${ic('search')}<span class="acct-tile-label">Search</span></button>`);
   return `<div class="acct-grid">${tiles.join('')}</div>`;
 }
 function renderMenuHub() { return renderAdminGroupHub('menu'); }
@@ -22657,7 +22658,7 @@ window.addEventListener('blur', _clearStuckDragState);
 document.addEventListener('visibilitychange', () => { if (document.hidden) _clearStuckDragState(); });
 
 // Long-press must not summon the browser context menu on the tiles.
-document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send, .acct-tile[data-act="admin-tab"], .acct-tile[data-act="mgr-quick-go"], .acct-tile[data-act="admin-search-toggle"], .admin-nav-group-btn, .staff-badge button[data-act="open-admin-pin"]')) e.preventDefault(); });
+document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send, .acct-tile[data-act="admin-tab"], .acct-tile[data-act="mgr-quick-go"], .admin-nav-group-btn, .staff-badge button[data-act="open-admin-pin"]')) e.preventDefault(); });
 // HOLD an admin tile → pin/unpin its page in the topbar (next to power).
 // Works on hub tiles and single-page rail groups (Daily). The hold both
 // fires the toggle and arms _adminPinFired so the release's click doesn't
@@ -22665,12 +22666,11 @@ document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.targ
 let _adminPinFired = false, _adminPinTimer = 0;
 document.addEventListener('pointerdown', (e) => {
   if (state.view !== 'admin') return;
-  const el = e.target.closest && e.target.closest('.acct-tile[data-act="admin-tab"], .acct-tile[data-act="mgr-quick-go"], .acct-tile[data-act="admin-search-toggle"], .admin-nav-group-btn');
+  const el = e.target.closest && e.target.closest('.acct-tile[data-act="admin-tab"], .acct-tile[data-act="mgr-quick-go"], .admin-nav-group-btn');
   if (!el) return;
   let key = null;
   if (el.dataset.act === 'admin-tab') key = el.dataset.val;
   else if (el.dataset.act === 'mgr-quick-go') { key = el.dataset.tab; if (key && key.startsWith('__')) key = null; } // action tiles (no page) can't pin
-  else if (el.dataset.act === 'admin-search-toggle') key = 'search';
   else {
     const grp = ADMIN_SECTIONS.find(s => s.group.split('.')[0].replace(/\s/g, '-').toLowerCase() === el.dataset.val);
     if (grp && grp.children.length === 1) key = grp.children[0].key;
@@ -27154,23 +27154,6 @@ function handleActClick(el, e) {
         // ALSO navigate.
         if (_pinHoldFired) { _pinHoldFired = false; return; }
         const key = el.dataset.val;
-        if (key === 'search') {
-          // The pinned magnifier IS the admin search toggle now — tap opens,
-          // tap again (or the row's ✕) closes.
-          if (state.view === 'admin' && state.adminSearchOpen) {
-            state.adminSearchOpen = false;
-            state.adminSearch = '';
-            oskHide();
-            render();
-            return;
-          }
-          state.view = 'admin';
-          state.adminSearchOpen = true;
-          render();
-          const si = document.getElementById('admin-search-input');
-          if (si) { si.focus(); if (oskEligible()) oskShow(si); }
-          return;
-        }
         state.view = 'admin';
         state.adminTab = key;
         openAdminGroupFor(key);
@@ -27696,7 +27679,7 @@ function handleActClick(el, e) {
       // mouse or a hardware keyboard is attached — hardware keys still type.
       else if (act === 'open-search') { state.searchOpen = true; render(); const si = document.getElementById('search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } }
       else if (act === 'close-search') { state.searchOpen = false; state.search = ''; oskHide(); render(); }
-      else if (act === 'admin-search-toggle') { if (_adminPinFired) { _adminPinFired = false; return; } state.adminSearchOpen = !state.adminSearchOpen; if (!state.adminSearchOpen) { state.adminSearch = ''; oskHide(); } render(); if (state.adminSearchOpen) { const si = document.getElementById('admin-search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } } }
+      else if (act === 'admin-search-toggle') { state.adminSearchOpen = !state.adminSearchOpen; if (!state.adminSearchOpen) { state.adminSearch = ''; oskHide(); } render(); if (state.adminSearchOpen) { const si = document.getElementById('admin-search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } } }
       else if (act === 'open-covers-pad') { openCoversPad(); }
       else if (act === 'covers-pad-key') { tapCoversKey(el.dataset.key); }
       else if (act === 'covers-clear') { if (state.coversPad) { state.coversPad.buffer = ''; render(); } }

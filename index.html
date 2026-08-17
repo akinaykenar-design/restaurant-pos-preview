@@ -9715,12 +9715,133 @@ document.addEventListener('focusout', () => {
 function oskMarkInputs() {
   if (!oskEligible()) return;
   document.querySelectorAll(OSK_TEXT_SEL).forEach(el => { el.inputMode = 'none'; });
+  // Number fields get the pad (below) — the OS keyboard stays away too.
+  document.querySelectorAll('input[type="number"]').forEach(el => { el.inputMode = 'none'; });
 }
 // Touch screens: press-and-hold must never pop the browser's copy/paste
 // menu mid-service. Real text fields keep theirs.
 document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('input, textarea, select, [contenteditable]')) e.preventDefault();
 });
+// ---------- Number pad (touch tablets / tills) ----------
+// Owner-asked: numbers are pads, not caret boxes. Tapping ANY bare
+// <input type="number"> on a touch till opens the same centred pad grammar
+// as the qty/covers pops — ONE generic pad wired to whichever field was
+// tapped, so the tap never summons the OS caret. Tab + hardware keys still
+// reach the raw field (the pad only arms on a direct tap).
+// Same seed grammar as the qty pad: opens showing what's in the field, the
+// first digit starts fresh, ⌫ edits what's there, ✕ blanks it, and the
+// qty-pad zero rules hold (a bare 0 never grows zeros; a digit replaces it).
+// The field's attributes shape the pad: a fractional step (or no step) gets
+// the decimal dot, a min below zero (or none) gets ±, min/max clamp on ✓.
+let _numPadEl = null, _numPadSwallow = null;
+function numPadSelector(el) {
+  if (el.id) return '#' + (window.CSS && CSS.escape ? CSS.escape(el.id) : el.id);
+  const cls = Array.from(el.classList).map(c => '.' + c).join('');
+  const data = Object.entries(el.dataset).map(([k, v]) => `[data-${k.replace(/[A-Z]/g, ch => '-' + ch.toLowerCase())}="${v}"]`).join('');
+  return 'input[type="number"]' + cls + data;
+}
+function closeNumPad() {
+  if (_numPadSwallow) { document.removeEventListener('click', _numPadSwallow, true); _numPadSwallow = null; }
+  if (_numPadEl) { _numPadEl.remove(); _numPadEl = null; }
+}
+function openNumPad(el) {
+  closeNumPad();
+  const sel = numPadSelector(el);
+  const stepAttr = el.getAttribute('step');
+  const step = parseFloat(stepAttr);
+  const dec = step > 0 && step < 1 ? (String(step).split('.')[1] || '').length : 0;
+  const allowDot = dec > 0 || stepAttr == null; // no step = unopinionated: keep the dot
+  const maxDec = dec > 0 ? dec : 2;
+  const minAttr = el.getAttribute('min'), maxAttr = el.getAttribute('max');
+  const allowNeg = minAttr == null || parseFloat(minAttr) < 0;
+  const wrap = document.createElement('div');
+  wrap.className = 'num-pop-wrap';
+  wrap.innerHTML = `
+    <div class="pop-scrim"></div>
+    <div class="qty-pop covers-pop num-pop">
+      <div class="pad-disp-row">
+        ${allowNeg ? `<button class="covers-pad-key util pad-clear np-neg" title="Plus or minus">±</button>` : `<span class="pad-clear-sp"></span>`}
+        <div class="covers-pad-display qp-display"></div>
+        <button class="covers-pad-key util pad-clear np-clear" title="Clear">✕</button>
+      </div>
+      <div class="covers-pad-grid qp-grid">
+        ${['1', '2', '3', '4', '5', '6', '7', '8', '9', allowDot ? '.' : '', '0', 'back'].map(k => k === '' ? '<span></span>' : `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-k="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
+      </div>
+      <div class="qp-row qp-actions">
+        <button class="icon-action discard np-cancel" title="Cancel">${ACT_CROSS_SVG}</button>
+        <button class="icon-action send np-ok" title="Done">${ACT_TICK_SVG}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  _numPadEl = wrap;
+  // The pad pops centred UNDER the finger that tapped the field — the lift-off
+  // click would "tap" whatever key sits beneath the fingertip (same phantom
+  // double-tap the qty pop guards against). Swallow the first click if it
+  // lands on the pad; the first click anywhere disarms.
+  _numPadSwallow = (ev) => {
+    const fn = _numPadSwallow;
+    _numPadSwallow = null;
+    document.removeEventListener('click', fn, true);
+    if (wrap.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault(); ev.stopImmediatePropagation(); }
+  };
+  document.addEventListener('click', _numPadSwallow, true);
+  let neg = /^-/.test(el.value);
+  let buf = el.value.replace(/^-/, '');
+  let touched = false;
+  const disp = wrap.querySelector('.qp-display');
+  const paint = () => {
+    disp.textContent = buf === '' ? '—' : (neg ? '-' : '') + buf;
+    disp.classList.toggle('placeholder', buf === '');
+  };
+  paint();
+  const press = (k) => {
+    if (!touched) { touched = true; if (k !== 'back') buf = ''; } // first key starts fresh
+    if (k === 'back') buf = buf.slice(0, -1);
+    else if (k === '.') { if (!buf.includes('.')) buf = (buf === '' ? '0' : buf) + '.'; }
+    else if (buf === '0') { if (k !== '0') buf = k; }
+    else { if (buf.includes('.') && buf.split('.')[1].length >= maxDec) return; buf = buf + k; }
+    if (buf.length > 7) buf = buf.slice(0, 7);
+    paint();
+  };
+  wrap.querySelectorAll('.qp-grid button').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); press(b.dataset.k); }));
+  const negBtn = wrap.querySelector('.np-neg');
+  if (negBtn) negBtn.addEventListener('click', (e) => { e.stopPropagation(); touched = true; neg = !neg; paint(); });
+  wrap.querySelector('.np-clear').addEventListener('click', (e) => { e.stopPropagation(); touched = true; buf = ''; neg = false; paint(); });
+  wrap.querySelector('.np-cancel').addEventListener('click', (e) => { e.stopPropagation(); closeNumPad(); });
+  wrap.querySelector('.pop-scrim').addEventListener('click', (e) => { e.stopPropagation(); closeNumPad(); });
+  wrap.querySelector('.np-ok').addEventListener('click', (e) => {
+    e.stopPropagation();
+    // A poll can re-render while the pad is up — write to the LIVE field.
+    const field = document.contains(el) ? el : document.querySelector(sel);
+    closeNumPad();
+    if (!touched || !field) return; // untouched ✓ leaves the field alone
+    let out = '';
+    const raw = buf.replace(/\.$/, '');
+    if (raw !== '') {
+      // Keep the typed string ("12.50" stays 12.50); clamp only when the
+      // field's own min/max say so.
+      out = (neg ? '-' : '') + raw;
+      const v = parseFloat(out);
+      if (isNaN(v)) out = '0';
+      else if (minAttr != null && v < parseFloat(minAttr)) out = String(parseFloat(minAttr));
+      else if (maxAttr != null && v > parseFloat(maxAttr)) out = String(parseFloat(maxAttr));
+    }
+    field.value = out;
+    // Walk the field's whole listener chain — live 'input' previews, inline
+    // onchange= savers and onblur= savers all fire exactly as if typed.
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+    field.dispatchEvent(new FocusEvent('blur'));
+  });
+}
+document.addEventListener('pointerdown', (e) => {
+  if (!oskEligible()) return;
+  const t = e.target;
+  if (!t || !t.matches || !t.matches('input[type="number"]') || t.disabled || t.readOnly) return;
+  e.preventDefault(); // the pad IS the caret here — block the focus the tap would give
+  openNumPad(t);
+}, true);
 // Order-screen panel arrangement, per device size. Two device classes only
 // (owner-merged): the Till profile (stored under the legacy 'pc' key) covers
 // PCs AND tablets — they run the same layout engine and the venue wants them
@@ -25921,7 +26042,7 @@ function bindEvents() {
       render();
       requestAnimationFrame(() => {
         const el = document.getElementById('refund-amount-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
       });
     });
   }
@@ -25932,7 +26053,7 @@ function bindEvents() {
       render();
       requestAnimationFrame(() => {
         const el = document.getElementById('register-cash-counted-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+        if (el) { el.focus(); try { el.setSelectionRange(el.value.length, el.value.length); } catch (_) {} }
       });
     });
   }
@@ -27431,9 +27552,12 @@ function handleActClick(el, e) {
           setTimeout(() => t.classList.remove('ctl-flash'), 1300);
         }
       }
-      else if (act === 'open-search') { state.searchOpen = true; render(); const si = document.getElementById('search-input'); if (si) si.focus(); }
-      else if (act === 'close-search') { state.searchOpen = false; state.search = ''; render(); }
-      else if (act === 'admin-search-toggle') { if (_adminPinFired) { _adminPinFired = false; return; } state.adminSearchOpen = !state.adminSearchOpen; if (!state.adminSearchOpen) state.adminSearch = ''; render(); if (state.adminSearchOpen) { const si = document.getElementById('admin-search-input'); if (si) si.focus(); } }
+      // Search is tablet-first (owner-asked): opening it raises the app's own
+      // keyboard on any touch-capable till, even when the open tap came from a
+      // mouse or a hardware keyboard is attached — hardware keys still type.
+      else if (act === 'open-search') { state.searchOpen = true; render(); const si = document.getElementById('search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } }
+      else if (act === 'close-search') { state.searchOpen = false; state.search = ''; oskHide(); render(); }
+      else if (act === 'admin-search-toggle') { if (_adminPinFired) { _adminPinFired = false; return; } state.adminSearchOpen = !state.adminSearchOpen; if (!state.adminSearchOpen) { state.adminSearch = ''; oskHide(); } render(); if (state.adminSearchOpen) { const si = document.getElementById('admin-search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } } }
       else if (act === 'open-covers-pad') { openCoversPad(); }
       else if (act === 'covers-pad-key') { tapCoversKey(el.dataset.key); }
       else if (act === 'covers-clear') { if (state.coversPad) { state.coversPad.buffer = ''; render(); } }

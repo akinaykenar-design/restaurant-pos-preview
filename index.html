@@ -244,11 +244,13 @@ body[data-theme="dark"] .staff-badge button.active{background:#322E28;border-col
 .status-dot .dot{width:8px;height:8px;border-radius:50%;background:var(--green);}
 .status-dot.offline .dot{background:var(--red);}
 
-.seg{display:flex;background:var(--steel-200);border-radius:10px;padding:3px;gap:2px;}
+/* Segments ARE chips (owner-approved change 2): one selection language
+   app-wide — separate steel chips, solid accent when on. */
+.seg{display:flex;background:none;border-radius:0;padding:0;gap:6px;flex-wrap:wrap;}
 .subcat-seg{width:fit-content;flex-wrap:wrap;}
 /* Compact topbar identity: full text on desktop, initial + power icon on phones */
-.seg button{border:none;background:none;padding:7px 16px;font-size:var(--fs-md);font-weight:600;color:var(--charcoal-soft);border-radius:8px;cursor:pointer;}
-.seg button.active{background:var(--orange-dim);color:var(--orange);}
+.seg button{border:none;background:var(--steel-100);padding:7px 13px;min-height:38px;font-size:var(--rail-fs,13px);font-weight:600;color:var(--charcoal-soft);border-radius:var(--btn-radius);cursor:pointer;}
+.seg button.active{background:var(--orange);color:#fff;}
 /* Icon-only segment buttons (the floor editor's map / # mode toggle): the
    title carries the words, so the button itself stays a 38px square tap. */
 .seg button.seg-icon{min-width:38px;min-height:38px;padding:0;display:inline-flex;align-items:center;justify-content:center;}
@@ -1855,6 +1857,7 @@ body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
   .admin-sidebar .exp-body{display:contents;}
 }
 /* Floor editor: Tables / Objects placement dropdowns. */
+select{appearance:none;-webkit-appearance:none;} /* no dropdown arrows anywhere — house rule */
 .pp-select{padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;font-size:var(--fs-md);font-weight:600;min-width:170px;cursor:pointer;appearance:none;-webkit-appearance:none;} /* no dropdown arrows — house rule */
 /* Dropdown-summary buttons share the exact .pp-select look — ONE dropdown
    style everywhere (see DESIGN.md § Dropdowns). */
@@ -10162,16 +10165,6 @@ function hideSpinner() {
   if (el) el.style.display = 'none';
 }
 function finishLogin(staff) {
-  // Read who was last signed in (and where) BEFORE we overwrite it — used only
-  // to resume the SAME person's interrupted session after an accidental
-  // refresh. A different person, or a genuine re-open, always starts fresh.
-  let prevId = null, savedView = null, savedTable = null;
-  try {
-    prevId = localStorage.getItem('pos-signed-in');
-    savedView = localStorage.getItem('pos-view');
-    savedTable = localStorage.getItem('pos-table');
-  } catch (e) {}
-  const resume = staff.role !== 'chef' && prevId && String(prevId) === String(staff.id);
   state.currentStaff = staff;
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
   // A fresh PIN entry proves the person — any held screen from before the
@@ -10183,50 +10176,15 @@ function finishLogin(staff) {
   state.loginPin = '';
   state.loginError = '';
   state.loginDupMatches = null;
+  // EVERY login lands on the table select (owner ask) — no resuming a saved
+  // view or table. Chefs keep their kitchen screen (they have no till).
   if (staff.role === 'chef') state.view = 'kitchen';
-  else if (resume && savedView === 'admin' && staff.role === 'manager') state.view = 'admin';
-  // Kitchen is an admin page for managers now (full-screen KDS is chef-only) —
-  // a manager who left off there resumes onto that page, not the old view.
-  else if (resume && savedView === 'kitchen' && staff.role === 'manager') { state.view = 'admin'; state.adminTab = 'kitchen'; }
-  else state.view = 'order';
-  if (resume && state.view === 'order' && savedTable) state.table = savedTable;
+  else { state.view = 'order'; setOrderType('dine-in'); state.table = null; state.showTablePicker = true; }
   render();
   showSpinner('Signing in…'); // the menu can be big — show it's loading, not stuck
   const done = () => hideSpinner();
   loadInitial().then(() => {
     if (staff.role === 'chef') { loadKdsData(); done(); return; }
-    // ONLY the resumed table needs validating — and only when we actually
-    // resumed one. On a fresh login we must not touch state.table, or we'd
-    // clobber a table the user picked while the menu was still loading.
-    if (resume && state.table) {
-      // Table may have been cleared/deleted since; if it's gone, drop it (picker
-      // shows). Otherwise re-hydrate its covers/notes so the order reads right.
-      if (!findTableById(state.table)) { state.table = null; }
-      else {
-        const t = findTableById(state.table);
-        state.covers = (t && t.covers) || 0;
-        state.allergies = (t && t.allergies) || [];
-        state.notes = (t && t.notes) || [];
-        state.vipType = (t && t.vipType) || '';
-        state.showTablePicker = false;
-        // The unsent cart rides the refresh too: same person, same table,
-        // recent snapshot → put the items back exactly as they were.
-        try {
-          const c = JSON.parse(localStorage.getItem('pos-cart') || 'null');
-          if (c && String(c.staffId) === String(staff.id) && String(c.table) === String(state.table)
-              && Date.now() - (c.ts || 0) < 15 * 60000 && Array.isArray(c.cart) && c.cart.length) {
-            state.cart = c.cart;
-            if (c.activeCourse) state.activeCourse = c.activeCourse;
-            const oo = c.openOrderId && state.orders.find(o => o.id === c.openOrderId && o.open !== false);
-            if (oo) state.openOrderId = oo.id;
-            state.toast = 'Unsent items restored after the refresh.';
-            armToastTimer(3200);
-          }
-        } catch (e) {}
-        render();
-      }
-    }
-    if (state.view === 'admin' && state.adminTab === 'register') loadRegisterData();
     done();
   }).catch(() => { done(); });
 }
@@ -15078,7 +15036,7 @@ function renderInventoryRows() {
           <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
             ${used.length === 0
               ? `<span class="t2" style="color:var(--charcoal-soft);">Not used in any recipe yet</span>`
-              : `<button type="button" class="link-btn" style="font-weight:700;padding:0;" data-act="toggle-inv-usage" data-id="${i.id}">${open ? '▾' : '▸'} Used in ${used.length} recipe${used.length === 1 ? '' : 's'}</button>
+              : `<button type="button" class="link-btn" style="font-weight:700;padding:0;" data-act="toggle-inv-usage" data-id="${i.id}">Used in ${used.length} recipe${used.length === 1 ? '' : 's'}</button>
                  ${open ? used.map(m => `
                    <div class="detail-line" style="margin:8px 0 0;">
                      <span>${esc(m.name)}</span>
@@ -18724,7 +18682,7 @@ function tableTimerControls() {
         const chip = (val, label) => `<button class="${String(cur) === String(val) ? 'active' : ''}" data-act="set-burn-cap" data-val="${val}">${label}</button>`;
         return `<div style="display:flex;align-items:center;gap:8px;">
           <label class="field-label" style="margin:0;" title="Occupied tables shade green → gold → violet with time; solid violet at the cap.">Table colour timer</label>
-          <div class="seg">${chip(60, '60m')}${chip(90, '90m')}${chip(120, '120m')}${chip('booking', 'Sitting')}${chip('null', 'Off')}</div>
+          <div class="seg">${chip(60, '60m')}${chip(90, '90m')}${chip(120, '120m')}${chip('booking', 'Seated')}${chip('null', 'Off')}</div>
         </div>`;
       })()}`;
 }
@@ -20718,17 +20676,18 @@ function pickTable(id) {
     // no table now) — the waiter may have rung items up before choosing.
     if (hadTable) { state.cart = []; state.firedCourses = {}; }
     state.autoCourseOverride = null;
-    state.covers = (t && t.covers) || 0;
+    const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
+    // Covers may be recorded on the table OR its open order — either counts
+    // as "already entered", never ask twice (owner ask).
+    state.covers = (t && t.covers) || (oo && oo.covers) || 0;
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
     state.vipType = (t && t.vipType) || '';
-    state.openOrderId = (t && state.orders.find(o => o.status === 'open' && o.table === t.label)?.id) || null;
-    // Ask for covers at the natural moment: seating a FRESH table (covers
-    // enabled, none recorded yet). The pad POPS OVER the table screen —
-    // ✓ moves on to the order, ✕ skips (asked once).
-    // The green pick sweep STAYS on the table while the covers pad asks —
-    // same effect as picking a set-up table, just held through the prompt.
-    if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers) openCoversPad();
+    state.openOrderId = (oo && oo.id) || null;
+    // Ask for covers at the natural moment ONLY: seating a FRESH table
+    // (covers enabled, none recorded, no order in progress). The pad POPS
+    // OVER the table screen — ✓ moves on to the order, ✕ skips (asked once).
+    if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers && !oo) openCoversPad();
     else { state.showTablePicker = false; state.pickFlashId = null; }
     render();
   };

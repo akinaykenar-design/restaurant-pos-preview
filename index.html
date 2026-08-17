@@ -1088,6 +1088,14 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
    line below into the one above, tap again to split. The strip is thin so it
    doesn't push the paper around; a ::before halo gives it a real finger
    target (tap-target gate probes with elementFromPoint). */
+/* Inserted blank lines and dividers. A blank line has no ink, so in the
+   designer it shows a faint band you can actually tap; it prints as a feed. */
+.print-gap{height:14px;}
+.print-doc.dk .print-gap.dk-part{background:repeating-linear-gradient(45deg,var(--steel-100) 0 5px,transparent 5px 10px);border-radius:3px;}
+.print-rule{height:0;border-top:1px dashed #000;margin:4px 0;}
+.print-rule.rs-dotted{border-top-style:dotted;}
+.print-rule.rs-solid{border-top-style:solid;}
+.print-rule.rs-bold{border-top-style:solid;border-top-width:2.5px;}
 /* Names the line the controls after it act on. */
 .dk-tb-label{display:inline-flex;align-items:center;min-height:36px;padding:0 4px 0 10px;
   font-size:var(--fs-xs);font-weight:800;letter-spacing:.05em;text-transform:uppercase;
@@ -4873,6 +4881,7 @@ app.put('/api/settings', (req, res) => {
       showStationTag: b(dk.showStationTag, cur.showStationTag !== false),
       showOrderNo: b(dk.showOrderNo, !!cur.showOrderNo),
       showTime: b(dk.showTime, cur.showTime !== false),
+      time24: b(dk.time24, !!cur.time24),
       // The call-away slip's time has its own switch — the docket's Time and
       // the slip's are separate lines and hide independently.
       showCaTime: b(dk.showCaTime, cur.showCaTime !== false),
@@ -4932,7 +4941,7 @@ app.put('/api/settings', (req, res) => {
           if (nk === 'callaway' && !raw.includes('cacourse') && !src.includes('cacourse')) src.push('cacourse');
         }
         if (src.length !== DEF.length) return {};
-        if (src.every((k, i) => k === DEF[i])) return {};
+        if (src.length === DEF.length && src.every((k, i) => k === DEF[i])) return {};
         return { callawayOrder: src };
       })(),
       // Docket top-block order (standard format): only a full permutation of
@@ -4952,7 +4961,7 @@ app.put('/api/settings', (req, res) => {
             src = out;
           }
         }
-        if (!Array.isArray(src) || src.length !== DEF.length || DEF.some(k => !src.includes(k))) return {};
+        if (!Array.isArray(src) || src.length > 40 || DEF.some(k => !src.includes(k))) return {};
         if (src.every((k, i) => k === DEF[i])) return {};
         return { topOrder: src.slice() };
       })(),
@@ -4962,6 +4971,14 @@ app.put('/api/settings', (req, res) => {
         const out = {};
         ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'vip', 'course', 'items', 'notes', 'allergies'].forEach(k => { if (src && src[k]) out[k] = true; });
         return out;
+      })(),
+      // Inserted blank lines and dividers, in the order they were added.
+      extras: (() => {
+        const src = dk.extras !== undefined ? dk.extras : (cur.extras || []);
+        if (!Array.isArray(src)) return [];
+        return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && (x.kind === 'gap' || x.kind === 'rule'))
+          .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
+            style: ['dashed', 'dotted', 'solid', 'bold'].includes(x.style) ? x.style : null }));
       })(),
       // Which short lines ride the meta line instead of taking one of their own.
       joined: (() => {
@@ -8511,6 +8528,11 @@ const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 // elements land on one printed line. Items and the per-item bits are not in
 // the list: they repeat, so there is no single line to join.
 const DK_JOINABLE = ['covers', 'orderno', 'time', 'staff', 'vip'];
+// Blank lines and dividers are ordinary elements: they sit in the order list
+// like any other line, so they move, select and delete the same way.
+const DK_RULE_STYLES = [['dashed', 'Dashed'], ['dotted', 'Dotted'], ['solid', 'Solid'], ['bold', 'Bold']];
+function dkExtras(d) { return Array.isArray(d.extras) ? d.extras : []; }
+function dkExtraOf(d, k) { return dkExtras(d).find(x => x && x.id === k) || null; }
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
 // banner and the course have been split apart. Only a full permutation counts;
@@ -8541,7 +8563,7 @@ const DOCKET_LINE_ORDER = ['header', 'table', 'covers', 'orderno', 'time', 'staf
 const DK_BLOCK_PARTS = { header: ['header'], table: ['table', 'covers'], meta: ['orderno', 'time'], staff: ['staff'], items: ['items'] };
 function docketLineOrder(d) {
   const o = d.topOrder;
-  if (Array.isArray(o) && o.length === DOCKET_LINE_ORDER.length && DOCKET_LINE_ORDER.every(k => o.includes(k))) return o;
+  if (Array.isArray(o) && DOCKET_LINE_ORDER.every(k => o.includes(k))) return o;
   const legacy = d.lineOrder;
   if (Array.isArray(legacy)) {
     const out = [];
@@ -8562,6 +8584,17 @@ function docketDocClasses(ov) {
     + ' dk-fs-' + d.fontScale + ' dk-den-' + String(d.density).replace('.', '_') + ' dk-nc-' + d.newCourseStyle + (d.font === 'B' ? ' dk-font-b' : '');
 }
 // Persist one docket-layout option (merges into settings.docket).
+// Several keys in ONE save. Two setDocketOpt calls in a row race each other:
+// the second builds its payload from the config the first has not stored yet,
+// so the first change is silently dropped.
+function setDocketOpts(patch) {
+  const next = Object.assign({}, docketCfg(), patch);
+  state.settings.docket = next;
+  render();
+  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: next }) })
+    .then(s => { state.settings = s; })
+    .catch(() => { state.toast = 'Could not save docket layout.'; render(); });
+}
 function setDocketOpt(key, value) {
   const next = Object.assign({}, docketCfg(), { [key]: value });
   state.settings.docket = next;
@@ -8955,10 +8988,23 @@ function buildDocketDoc(ctx, edit) {
   };
   const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
   // A gap is offered wherever the line BELOW it can join the one above.
-  const gap = (k) => (edit && selectable && DK_JOINABLE.includes(k) && blocks[k])
-    ? `<div class="dk-gap${isJoined(k) ? ' on' : ''}" data-act="dk-toggle-join" data-key="${k}"><span>${isJoined(k) ? 'joined' : 'join'}</span></div>`
+  const gap = (k) => (edit && selectable && DK_JOINABLE.includes(k) && SEGS[k])
+    ? `<div class="dk-gap${isJoined(k) ? ' on' : ''}" data-act="dk-toggle-join" data-key="${k}"><span>${isJoined(k) ? 'split' : 'join'}</span></div>`
     : '';
-  const body = seq.map(k => (blocks[k] ? gap(k) + blocks[k] : '')).filter(Boolean).join('\n      ');
+  const extraHtml = (k) => {
+    const ex = dkExtraOf(d, k);
+    if (!ex) return '';
+    const sel = selectable && state.dkPart === k ? ' dk-sel' : '';
+    const pick = selectable ? ` data-act="dk-pick-part" data-part="${k}"` : '';
+    if (ex.kind === 'gap') return `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
+    return `<div class="print-rule rs-${esc(ex.style || 'dashed')}${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
+  };
+  const body = seq.map(k => {
+    const ex = extraHtml(k);
+    if (ex) return ex;
+    const g = gap(k);
+    return (g || blocks[k]) ? g + (blocks[k] || '') : '';
+  }).filter(Boolean).join('\n      ');
   return `
     <div class="${docketDocClasses(stOv)}">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
@@ -16484,14 +16530,17 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         if (!meta) return '';
         // Which line the controls after this act on. Without it the bar showed
         // two size controls and nothing saying what either one changed.
-        const bits = [`<span class="dk-tb-label">${esc(meta.label)}</span>`];
+        const bits = [];
         if (meta.size) bits.push(dd('size', { 1: 'Small', 2: 'Big', 3: 'Biggest' }[(d.sizes || {})[p] || defN] || 'Small',
           true, sizeItems, 'Text size for this line'));
         if (meta.align) bits.push(`<span class="dk-tb-group">${['left', 'center', 'right'].map(v =>
           `<button type="button" class="dk-tb-btn${(d.align || {})[p] === v ? ' active' : ''}" data-act="set-docket-align" data-key="${p}" data-val="${v}">${svgAlign(v)}</button>`).join('')}</span>`);
         if (meta.red) {
           const on = CA_PARTS.includes(p) ? caRed(d, p) : !!(d.red || {})[p];
-          bits.push(`<button type="button" class="dk-tb-btn dk-tb-red${on ? ' active' : ''}" data-act="toggle-docket-red" data-key="${p}">A</button>`);
+          bits.push(`<span class="dk-tb-group">`
+            + `<button type="button" class="dk-tb-btn${on ? '' : ' active'}" data-act="toggle-docket-red" data-key="${p}" data-force="0">Black</button>`
+            + `<button type="button" class="dk-tb-btn dk-tb-red${on ? ' active' : ''}" data-act="toggle-docket-red" data-key="${p}" data-force="1">Red</button>`
+            + `</span>`);
         }
         bits.push(`<button type="button" class="dk-tb-btn${(d.bold || {})[p] ? ' active' : ''}" data-act="toggle-docket-bold" data-key="${p}" style="font-weight:800;">B</button>`);
         if (meta.show) bits.push(`<button type="button" class="dk-tb-btn${shown ? ' active' : ''}" data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}">${shown ? svgEye : svgEyeOff}</button>`);
@@ -16586,6 +16635,24 @@ function dkToolbar(d) {
   // shows that line's controls and nothing else, so a whole-docket setting
   // can't be changed by accident while you are working on a line. Tap the
   // paper away, or "Whole docket", to get the paper-wide settings back.
+  // Inserted lines aren't in DK_PARTS, so they must be read from the selection
+  // itself rather than from `p` (which is null for anything DK_PARTS lacks).
+  const ex = state.dkPart ? dkExtraOf(d, state.dkPart) : null;
+  if (ex) {
+    const seqE = docketLineOrder(d), iE = seqE.indexOf(state.dkPart);
+    const up = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15l8-8 8 8"/></svg>`;
+    const down = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9l8 8 8-8"/></svg>`;
+    return `
+    <div class="dk-toolbar">
+      ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
+      <button type="button" class="dk-tb-btn" data-act="dk-pick-none">Whole docket</button>
+      ${ex.kind === 'rule' ? dd('rulestyle', (DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed', true,
+        DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (ex.style || 'dashed') === v })), 'Divider style') : ''}
+      ${iE > 0 ? `<button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>` : ''}
+      ${iE >= 0 && iE < seqE.length - 1 ? `<button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>` : ''}
+      <button type="button" class="dk-tb-btn" data-act="dk-del-line">Remove</button>
+    </div>`;
+  }
   if (meta) return `
     <div class="dk-toolbar">
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
@@ -16617,6 +16684,8 @@ function dkToolbar(d) {
         { v: 'xlarge', l: 'Huge', on: d.fontScale === 'xlarge' },
       ], 'Text size for the whole docket')}
       ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing', '', true)}
+      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
+      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>
     </div>`;
 }
 
@@ -28581,6 +28650,29 @@ function handleActClick(el, e) {
         const cur = docketCfg().bold || {};
         setDocketOpt('bold', Object.assign({}, cur, { [el.dataset.key]: !cur[el.dataset.key] }));
       }
+      else if (act === 'dk-add-line') {
+        const d = docketCfg();
+        const kind = el.dataset.kind;
+        const id = kind + Date.now().toString(36);
+        const extras = dkExtras(d).concat([{ id, kind, style: kind === 'rule' ? 'dashed' : null }]);
+        // Dropped in just above the items, which is where a separator or a
+        // breath almost always wants to be.
+        const order = docketLineOrder(d).slice();
+        const at = order.indexOf('items');
+        order.splice(at < 0 ? order.length : at, 0, id);
+        state.dkPart = id; state.dkMenu = null;
+        setDocketOpts({ extras, topOrder: order });
+      }
+      else if (act === 'dk-del-line') {
+        const d = docketCfg(), k = state.dkPart;
+        state.dkPart = null;
+        setDocketOpts({ extras: dkExtras(d).filter(x => x.id !== k), topOrder: docketLineOrder(d).filter(x => x !== k) });
+      }
+      else if (act === 'dk-rule-style') {
+        const d = docketCfg(), k = state.dkPart;
+        setDocketOpt('extras', dkExtras(d).map(x => x.id === k ? { ...x, style: el.dataset.val } : x));
+        state.dkMenu = null;
+      }
       else if (act === 'dk-pick-none') { state.dkPart = null; state.dkSlip = false; state.dkMenu = null; render(); }
       else if (act === 'dk-toggle-join') {
         const k = el.dataset.key, cur = docketCfg().joined || {};
@@ -28648,7 +28740,7 @@ function handleActClick(el, e) {
       else if (act === 'move-docket-line') {
         // Swap the selected part's BLOCK with its neighbour on the docket.
         const step = el.dataset.dir === 'up' ? -1 : 1;
-        const blk = DK_MOVE_BLOCK[state.dkPart];
+        const blk = DK_MOVE_BLOCK[state.dkPart] || (dkExtraOf(docketCfg(), state.dkPart) ? state.dkPart : null);
         const next = docketLineOrder(docketCfg()).slice();
         const i = blk ? next.indexOf(blk) : -1;
         if (i < 0 || i + step < 0 || i + step >= next.length) return;
@@ -28673,6 +28765,11 @@ function handleActClick(el, e) {
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
+        else if (m === 'rulestyle') {
+          state.dkMenu = null;
+          const dc = docketCfg();
+          setDocketOpt('extras', dkExtras(dc).map(x => x.id === state.dkPart ? { ...x, style: v } : x));
+        }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
         else if (m === 'style') { state.dkMenu = null; setDocketOpt('newCourseStyle', v); }

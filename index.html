@@ -4918,11 +4918,29 @@ app.put('/api/settings', (req, res) => {
       // the five blocks is stored, and the default order is omitted so
       // untouched dockets keep printing the exact old bytes.
       ...(() => {
-        const DEF = ['header', 'table', 'meta', 'staff', 'items'];
-        const src = dk.lineOrder !== undefined ? dk.lineOrder : cur.lineOrder;
+        const DEF = ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'items'];
+        const BLOCKS = { header: ['header'], table: ['table', 'covers'], meta: ['orderno', 'time'], staff: ['staff'], items: ['items'] };
+        let src = dk.topOrder !== undefined ? dk.topOrder : cur.topOrder;
+        // A five-block order saved before lines became individually movable is
+        // expanded rather than dropped.
+        if (!Array.isArray(src)) {
+          const legacy = dk.lineOrder !== undefined ? dk.lineOrder : cur.lineOrder;
+          if (Array.isArray(legacy)) {
+            const out = [];
+            for (const b of legacy) for (const k of (BLOCKS[b] || [])) if (!out.includes(k)) out.push(k);
+            src = out;
+          }
+        }
         if (!Array.isArray(src) || src.length !== DEF.length || DEF.some(k => !src.includes(k))) return {};
         if (src.every((k, i) => k === DEF[i])) return {};
-        return { lineOrder: src.slice() };
+        return { topOrder: src.slice() };
+      })(),
+      // Bold is a highlight that costs no character width, unlike size.
+      bold: (() => {
+        const src = dk.bold !== undefined ? dk.bold : (cur.bold || {});
+        const out = {};
+        ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'vip', 'course', 'items', 'notes', 'allergies'].forEach(k => { if (src && src[k]) out[k] = true; });
+        return out;
       })(),
       // Which short lines ride the meta line instead of taking one of their own.
       joined: (() => {
@@ -8496,15 +8514,23 @@ function callawayOrder(d) {
 // The docket's top blocks (standard format) reorder as whole units — items
 // carry their notices and dividing rule with them. Only a full permutation
 // counts; anything else falls back to the printed default.
-const DOCKET_LINE_ORDER = ['header', 'table', 'meta', 'staff', 'items'];
+const DOCKET_LINE_ORDER = ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'items'];
+// Orders saved as the old five blocks expand to their parts, so an arrangement
+// made before this keeps printing the way it was left.
+const DK_BLOCK_PARTS = { header: ['header'], table: ['table', 'covers'], meta: ['orderno', 'time'], staff: ['staff'], items: ['items'] };
 function docketLineOrder(d) {
-  const o = d.lineOrder;
-  return Array.isArray(o) && o.length === DOCKET_LINE_ORDER.length && DOCKET_LINE_ORDER.every(k => o.includes(k))
-    ? o : DOCKET_LINE_ORDER;
+  const o = d.topOrder;
+  if (Array.isArray(o) && o.length === DOCKET_LINE_ORDER.length && DOCKET_LINE_ORDER.every(k => o.includes(k))) return o;
+  const legacy = d.lineOrder;
+  if (Array.isArray(legacy)) {
+    const out = [];
+    for (const b of legacy) for (const k of (DK_BLOCK_PARTS[b] || [])) if (!out.includes(k)) out.push(k);
+    if (out.length === DOCKET_LINE_ORDER.length) return out;
+  }
+  return DOCKET_LINE_ORDER;
 }
-// Which movable docket block a designer part rides in (covers ride the table
-// header, order no & time share the meta line).
-const DK_MOVE_BLOCK = { header: 'header', table: 'table', covers: 'table', orderno: 'meta', time: 'meta', staff: 'staff', items: 'items' };
+// Every line moves on its own now — no part rides another's block.
+const DK_MOVE_BLOCK = { header: 'header', table: 'table', covers: 'covers', orderno: 'orderno', time: 'time', staff: 'staff', items: 'items' };
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
 function docketDocClasses(ov) {
@@ -8773,7 +8799,8 @@ function buildDocketDoc(ctx, edit) {
   // designer shows what the printer will do (Auto = no style).
   const stl = k => {
     const n = (d.sizes || {})[k], a = (d.align || {})[k];
-    const css = (n ? `font-size:${dkSizeEm(n, d)};line-height:1.3;` : '') + (a ? `text-align:${a};` : '');
+    const css = (n ? `font-size:${dkSizeEm(n, d)};line-height:1.3;` : '') + (a ? `text-align:${a};` : '')
+      + ((d.bold || {})[k] ? 'font-weight:800;' : '');
     return css ? ` style="${css}"` : '';
   };
   // Word-style part selection: tapping a styleable part picks it for the
@@ -8890,8 +8917,10 @@ function buildDocketDoc(ctx, edit) {
   // the items block, so what moves on the paper is what moves on the printer.
   const blocks = {
     header: headerHtml,
-    table: tableHtml + '\n      ' + coversSeg,
-    meta: metaHtml,
+    table: tableHtml,
+    covers: coversSeg,
+    orderno: metaHtml,
+    time: '',
     staff: staffHtml,
     items: vipHtml + '\n      ' + allergyHtml + '\n      <hr>\n      ' + bodyHtml,
   };
@@ -16527,6 +16556,7 @@ function dkToolbar(d) {
           const on = CA_PARTS.includes(p) ? caRed(d, p) : !!(d.red || {})[p];
           bits.push(`<button type="button" class="dk-tb-btn dk-tb-red${on ? ' active' : ''}" data-act="toggle-docket-red" data-key="${p}">A</button>`);
         }
+        bits.push(`<button type="button" class="dk-tb-btn${(d.bold || {})[p] ? ' active' : ''}" data-act="toggle-docket-bold" data-key="${p}" style="font-weight:800;">B</button>`);
         if (meta.show) bits.push(`<button type="button" class="dk-tb-btn${shown ? ' active' : ''}" data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}">${shown ? svgEye : svgEyeOff}</button>`);
         const FIELD = { header: 'docketHeader', table: 'tableWord' };
         if (FIELD[p]) bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${FIELD[p]}">${ACT_PENCIL_SVG}</button>`);
@@ -28508,6 +28538,10 @@ function handleActClick(el, e) {
       else if (act === 'set-print-enabled') { saveTicketSetting({ printEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }
+      else if (act === 'toggle-docket-bold') {
+        const cur = docketCfg().bold || {};
+        setDocketOpt('bold', Object.assign({}, cur, { [el.dataset.key]: !cur[el.dataset.key] }));
+      }
       else if (act === 'set-docket-join') {
         const cur = docketCfg().joined || {};
         setDocketOpt('joined', Object.assign({}, cur, { [el.dataset.key]: el.dataset.val === '1' }));
@@ -28575,7 +28609,7 @@ function handleActClick(el, e) {
         const i = blk ? next.indexOf(blk) : -1;
         if (i < 0 || i + step < 0 || i + step >= next.length) return;
         [next[i], next[i + step]] = [next[i + step], next[i]];
-        setDocketOpt('lineOrder', next);
+        setDocketOpt('topOrder', next);
       }
       else if (act === 'move-receipt-line') {
         // Swap the selected invoice line with its neighbour (Classic layout).

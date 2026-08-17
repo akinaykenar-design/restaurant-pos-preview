@@ -4928,7 +4928,7 @@ app.put('/api/settings', (req, res) => {
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
         const out = {};
-        ['covers', 'staff', 'vip'].forEach(k => { if (src && src[k]) out[k] = true; });
+        ['covers', 'orderno', 'time', 'staff', 'vip'].forEach(k => { if (src && src[k]) out[k] = true; });
         return out;
       })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
@@ -8468,7 +8468,10 @@ const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 // Lines short enough to ride the meta line. The order number and the time ARE
 // that line, so they are what gets joined TO; the table is the anchor the chef
 // finds the ticket by. Joining anything to anything needs the line model.
-const DK_JOINABLE = ['covers', 'staff', 'vip'];
+// Any top line can join the line above it, and they chain — three or four
+// elements land on one printed line. Items and the per-item bits are not in
+// the list: they repeat, so there is no single line to join.
+const DK_JOINABLE = ['covers', 'orderno', 'time', 'staff', 'vip'];
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
 // banner and the course have been split apart. Only a full permutation counts;
@@ -8784,22 +8787,38 @@ function buildDocketDoc(ctx, edit) {
   // around a block collapses to zero size, so taps would fall through to the
   // table header behind it.
   const coversInner = `${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}`;
-  const coversSeg = (ctx.covers && !(d.joined || {}).covers) ? (edit
-    ? `<div class="print-sub print-covers${selectable ? ' dk-part' : ''} ${d.showCovers ? '' : 'pp-off'}${selectable && state.dkPart === 'covers' ? ' dk-sel' : ''}"${stl('covers')}${selectable ? ' data-act="dk-pick-part" data-part="covers"' : ''}>${coversInner}</div>`
-    : (d.showCovers ? `<div class="print-sub print-covers"${stl('covers')}>${coversInner}</div>` : '')) : '';
-  // A joined line rides the meta line instead of taking one of its own.
+  // Mirrors kitchenDocket exactly: the top lines are a list of segments, and a
+  // segment flagged "join" prints on the line above — chaining, so three or
+  // four land on one line. A joined group wears its FIRST part's style,
+  // because one printed line carries one size and one alignment.
   const joined = d.joined || {};
-  const meta = [];
-  if (ctx.orderNo != null) meta.push(partW('orderno', d.showOrderNo, `#${esc(String(ctx.orderNo))}`));
-  if (ctx.timeLabel) meta.push(partW('time', d.showTime, esc(ctx.timeLabel)));
-  if (joined.covers && ctx.covers) meta.push(partW('covers', d.showCovers, esc(coversInner)));
-  if (joined.staff && ctx.staffName) meta.push(partW('staff', d.showStaff, esc(ctx.staffName)));
-  if (joined.vip && ctx.vip) meta.push(partW('vip', d.showVip, 'VIP: ' + esc(ctx.vip)));
-  const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
-  const staffHtml = (ctx.staffName && !joined.staff) ? partW('staff', d.showStaff, `<div class="print-sub"${stl('staff')}>${esc(ctx.staffName)}</div>`, true) : '';
+  const isJoined = (k) => joined[k] !== undefined ? !!joined[k] : k === 'time';
+  const SEGS = {
+    covers: ctx.covers ? { on: d.showCovers, html: esc(coversInner) } : null,
+    orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: `#${esc(String(ctx.orderNo))}` } : null,
+    time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
+    staff: ctx.staffName ? { on: d.showStaff, html: esc(ctx.staffName) } : null,
+    vip: ctx.vip ? { on: d.showVip, html: 'VIP: ' + esc(ctx.vip) } : null,
+  };
+  // Groups are built over the same expanded order the printer walks.
+  const groups = [];
+  for (const k of ['covers', 'orderno', 'time', 'staff', 'vip']) {
+    const seg = SEGS[k];
+    if (!seg) continue;
+    if (isJoined(k) && groups.length) groups[groups.length - 1].push({ k, seg });
+    else groups.push([{ k, seg }]);
+  }
+  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${g.map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean).join(' · ')}</div>`;
+  // Covers keeps its place under the table when it starts its own line.
+  const coversOwn = groups.find(g => g[0].k === 'covers');
+  const coversSeg = coversOwn ? lineHtml(coversOwn) : '';
+  const metaHtml = groups.filter(g => g[0].k !== 'covers' && g[0].k !== 'staff' && g[0].k !== 'vip').map(lineHtml).join('');
+  const staffGroup = groups.find(g => g[0].k === 'staff');
+  const staffHtml = staffGroup ? lineHtml(staffGroup) : '';
   // Printable characters only — the printer has no emoji, so the preview
   // doesn't either (its star/warning glyphs never reached paper).
-  const vipHtml = (ctx.vip && !(d.joined || {}).vip) ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
+  const vipGroup = groups.find(g => g[0].k === 'vip');
+  const vipHtml = vipGroup ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';

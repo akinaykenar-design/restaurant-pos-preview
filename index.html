@@ -1103,6 +1103,9 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
   height:3px;border-radius:2px;background:var(--text-primary);}
 .dk-tb-btn.dk-tb-ink.on:after{background:var(--red);}
 .dk-tb-btn.dk-tb-ink.on{color:var(--red);}
+/* Says which row the pick prints on, or how many lines an edit will touch. */
+.dk-tb-note{display:inline-flex;align-items:center;min-height:36px;padding:0 8px;
+  font-size:var(--fs-xs);font-weight:700;color:var(--charcoal-soft);}
 /* Leaving a line is a back action, not a setting — so it does not wear the
    same chip as the dropdowns beside it. */
 .dk-tb-btn.dk-tb-back{gap:5px;padding:0 12px 0 8px;background:transparent;
@@ -8578,7 +8581,39 @@ function dkBoldOn(d, k) {
   const b = d.bold || {};
   return b[k] !== undefined ? !!b[k] : !!DK_DEFAULT_BOLD[k];
 }
+// The current selection. state.dkPart stays the "primary" (the one the bar
+// names and the arrows move); dkSel is everything an edit applies to.
+function dkSelection() {
+  const sel = Array.isArray(state.dkSel) ? state.dkSel.filter(Boolean) : [];
+  if (sel.length) return sel;
+  return state.dkPart ? [state.dkPart] : [];
+}
+function dkIsSelected(k) { return dkSelection().includes(k); }
+// Pick order for shift-range: the paper's own top-to-bottom order.
+function dkPickOrder(slip) {
+  const d = docketCfg();
+  return slip ? callawayOrder(d)
+    : docketLineOrder(d).concat(['course', 'items', 'subs', 'seats', 'notes', 'allergies', 'divider'])
+      .filter((k, i, a) => a.indexOf(k) === i);
+}
 function dkExtras(d) { return Array.isArray(d.extras) ? d.extras : []; }
+// Keyboard on the designer: ctrl/cmd+A takes every line, Escape drops the
+// selection. Ignored while typing, so editing the header text still works.
+function dkKeydown(e) {
+  if (!(state.view === 'admin' && state.adminTab === 'settings-printers' && state.printersTab === 'docket')) return;
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+    e.preventDefault();
+    state.dkSel = [...document.querySelectorAll('[data-act="dk-pick-part"]:not([data-slip])')]
+      .map(x => x.dataset.part).filter((k, i, a) => a.indexOf(k) === i);
+    state.dkPart = state.dkSel[0] || null; state.dkSlip = false; render();
+  } else if (e.key === 'Escape' && dkSelection().length) {
+    e.preventDefault();
+    state.dkSel = []; state.dkPart = null; render();
+  }
+}
+document.addEventListener('keydown', dkKeydown);
 function dkExtraOf(d, k) { return dkExtras(d).find(x => x && x.id === k) || null; }
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
@@ -8909,7 +8944,7 @@ function buildDocketDoc(ctx, edit) {
   // designer toolbar (its visibility moved to the toolbar's eye); a part
   // that's turned off stays visible but dimmed so it can still be picked.
   const partW = (k, on, inner, block) => edit
-    ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${on ? '' : 'pp-off'}${selectable && state.dkPart === k ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
+    ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${on ? '' : 'pp-off'}${selectable && dkIsSelected(k) ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
     : (on ? inner : '');
 
   // Covers gets its part attributes ON the line itself — an inline wrapper
@@ -8958,7 +8993,7 @@ function buildDocketDoc(ctx, edit) {
   // The docket's own divider: same element as an inserted one, so there is one
   // kind of divider rather than two that look different and behave differently.
   const dividerHtml = d.showRule === false && !edit ? '' :
-    `<div class="print-rule rs-${esc(d.ruleStyle || 'dashed')}${selectable ? ' dk-part' : ''}${d.showRule === false ? ' pp-off' : ''}${selectable && state.dkPart === 'divider' ? ' dk-sel' : ''}"${selectable ? ' data-act="dk-pick-part" data-part="divider"' : ''}></div>`;
+    `<div class="print-rule rs-${esc(d.ruleStyle || 'dashed')}${selectable ? ' dk-part' : ''}${d.showRule === false ? ' pp-off' : ''}${selectable && dkIsSelected('divider') ? ' dk-sel' : ''}"${selectable ? ' data-act="dk-pick-part" data-part="divider"' : ''}></div>`;
   const vipHtml = groupOf('vip') ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
@@ -8972,7 +9007,7 @@ function buildDocketDoc(ctx, edit) {
   // went the header could be TYPED into but never styled — the only way in was
   // the list that no longer exists.
   const headerHtml = edit || d.headerText
-    ? `<div class="print-dockmini${rc('header')}${selectable ? ' dk-part' : ''}${selectable && state.dkPart === 'header' ? ' dk-sel' : ''}"${stl('header')}${selectable ? ' data-act="dk-pick-part" data-part="header"' : ''}>${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>`
+    ? `<div class="print-dockmini${rc('header')}${selectable ? ' dk-part' : ''}${selectable && dkIsSelected('header') ? ' dk-sel' : ''}"${stl('header')}${selectable ? ' data-act="dk-pick-part" data-part="header"' : ''}>${edit ? sampleEditable('docketHeader', d.headerText, 'add header line', '') : esc(d.headerText)}</div>`
     : '';
   const tableHtml = (() => {
         // The table WORD is a designer choice (TABLE 12 / Table 12 / T 12 /
@@ -8987,9 +9022,9 @@ function buildDocketDoc(ctx, edit) {
           // clear it for just the number, type anything for anything.
           const dispWord = w === undefined ? (d.layout === 'waitermate' ? 'Table' : 'TABLE') : (w === 'none' ? '' : w);
           const sep = dispWord && !dispWord.endsWith('#') ? ' ' : '';
-          return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}${coversRider}</h3>`;
+          return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (dkIsSelected('table') ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}${coversRider}</h3>`;
         }
-        return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (state.dkPart === 'table' ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}${coversRider}</h3>`;
+        return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (dkIsSelected('table') ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}${coversRider}</h3>`;
   })();
   const bodyHtml = (() => {
         const lineRow = (l, pre, noSeat) => {
@@ -8999,7 +9034,7 @@ function buildDocketDoc(ctx, edit) {
           const build = (l.build && (l.build.kept.length || l.build.removed.length))
             ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
             : '';
-          return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (state.dkPart === 'items' ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items"' : ''}><span>${pre || ''}${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+          return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (dkIsSelected('items') ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items"' : ''}><span>${pre || ''}${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
         };
         if (layout === 'byseat') {
           // Sections per seat, shared last — course rides each line as a
@@ -9047,13 +9082,13 @@ function buildDocketDoc(ctx, edit) {
   };
   const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
   // A gap is offered wherever the line BELOW it can join the one above.
-  const gap = (k) => (edit && selectable && DK_JOINABLE.includes(k) && SEGS[k])
-    ? `<div class="dk-gap${isJoined(k) ? ' on' : ''}" data-act="dk-toggle-join" data-key="${k}"><span>${isJoined(k) ? 'split' : 'join'}</span></div>`
-    : '';
+  // Join/split lives in the designer bar, not on the paper — a control drawn
+  // between the lines cluttered the thing you are trying to read (owner ask).
+  const gap = () => '';
   const extraHtml = (k) => {
     const ex = dkExtraOf(d, k);
     if (!ex) return '';
-    const sel = selectable && state.dkPart === k ? ' dk-sel' : '';
+    const sel = selectable && dkIsSelected(k) ? ' dk-sel' : '';
     const pick = selectable ? ` data-act="dk-pick-part" data-part="${k}"` : '';
     if (ex.kind === 'gap') return `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
     return `<div class="print-rule rs-${esc(ex.style || 'dashed')}${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
@@ -9211,7 +9246,7 @@ function buildCallAwaySample() {
   const caPart = (k, inner, extra) => {
     const meta = DK_PARTS[k] || {};
     const off = meta.show && d[meta.show] === false;
-    return `<div class="dk-part${off ? ' pp-off' : ''}${state.dkPart === k ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
+    return `<div class="dk-part${off ? ' pp-off' : ''}${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
   };
   // Sections render in the stored order — the printed slip follows the same
   // list, so the preview stays WYSIWYG.
@@ -16623,8 +16658,8 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         if (p === 'course') bits.push(dd('style', { invert: 'Black bar', border: 'Outline', plain: 'None' }[d.newCourseStyle] || 'None',
           true, [['invert', 'Black bar'], ['border', 'Outline'], ['plain', 'None']].map(([v, l]) => ({ v, l, on: d.newCourseStyle === v })), 'Background'));
         if (DK_JOINABLE.includes(p)) {
-          const on = !!(d.joined || {})[p];
-          bits.push(`<button type="button" class="dk-tb-btn${on ? ' active' : ''}" data-act="set-docket-join" data-key="${p}" data-val="${on ? '0' : '1'}">${on ? 'Own line' : 'Join up'}</button>`);
+          const on = (d.joined || {})[p] !== undefined ? !!(d.joined || {})[p] : p === 'time';
+          bits.push(`<button type="button" class="dk-tb-btn${on ? ' active' : ''}" data-act="set-docket-join" data-key="${p}" data-val="${on ? '0' : '1'}">${on ? 'Split' : 'Join up'}</button>`);
         }
         const slipSeq = callawayOrder(d);
         const onSlip = slipSeq.includes(p);
@@ -16741,12 +16776,27 @@ function dkToolbar(d) {
       <button type="button" class="dk-tb-btn" data-act="dk-del-line">Remove</button>
     </div>`;
   }
-  if (meta) return `
+  if (meta) {
+    const sel = dkSelection();
+    // Which row the pick prints on, and how many lines an edit will touch.
+    const rowOf = (k) => {
+      const order = docketLineOrder(d).filter(x => x !== 'items');
+      const j = (kk) => (d.joined || {})[kk] !== undefined ? !!(d.joined || {})[kk] : kk === 'time';
+      let lead = k;
+      for (let i = order.indexOf(k); i > 0 && j(order[i]); i--) lead = order[i - 1];
+      return (DK_PARTS[lead] || {}).label || '';
+    };
+    const row = rowOf(p);
+    const note = sel.length > 1 ? sel.length + ' lines'
+      : (row && row !== meta.label ? 'on ' + row : '');
+    return `
     <div class="dk-toolbar">
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
       <button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8 8 8"/></svg>Done</button>
+      ${note ? `<span class="dk-tb-note">${esc(note)}</span>` : ''}
       ${dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN)}
     </div>`;
+  }
   return `
     <div class="dk-toolbar">
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
@@ -16766,11 +16816,7 @@ function dkToolbar(d) {
         { v: 'A', l: 'Normal letters', on: (d.font || 'A') === 'A' },
         { v: 'B', l: 'Narrow letters — fits more', on: d.font === 'B' },
       ], 'Letter shape')}
-      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : dd('docsize', 'All lines · ' + (SCALE_L[d.fontScale] || 'Normal'), true, [
-        { v: 'normal', l: 'Normal', on: (d.fontScale || 'normal') === 'normal' },
-        { v: 'large', l: 'Large', on: d.fontScale === 'large' },
-        { v: 'xlarge', l: 'Huge', on: d.fontScale === 'xlarge' },
-      ], 'Text size for the whole docket')}
+      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : ''}
       ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing', '', true)}
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>
@@ -28735,12 +28781,14 @@ function handleActClick(el, e) {
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }
       else if (act === 'toggle-docket-under') {
-        const dc = docketCfg(), k = el.dataset.key;
-        setDocketOpt('under', Object.assign({}, dc.under || {}, { [k]: !dkUnderOn(dc, k) }));
+        const dc = docketCfg(), on = !dkUnderOn(dc, el.dataset.key), next = Object.assign({}, dc.under || {});
+        dkSelection().forEach(k => { next[k] = on; });
+        setDocketOpt('under', next);
       }
       else if (act === 'toggle-docket-bold') {
-        const dc = docketCfg(), k = el.dataset.key;
-        setDocketOpt('bold', Object.assign({}, dc.bold || {}, { [k]: !dkBoldOn(dc, k) }));
+        const dc = docketCfg(), on = !dkBoldOn(dc, el.dataset.key), next = Object.assign({}, dc.bold || {});
+        dkSelection().forEach(k => { next[k] = on; });
+        setDocketOpt('bold', next);
       }
       else if (act === 'dk-add-line') {
         const d = docketCfg();
@@ -28772,8 +28820,9 @@ function handleActClick(el, e) {
         setDocketOpt('joined', Object.assign({}, cur, { [k]: !now }));
       }
       else if (act === 'set-docket-join') {
-        const cur = docketCfg().joined || {};
-        setDocketOpt('joined', Object.assign({}, cur, { [el.dataset.key]: el.dataset.val === '1' }));
+        const cur = docketCfg().joined || {}, on = el.dataset.val === '1', next = Object.assign({}, cur);
+        dkSelection().filter(k => DK_JOINABLE.includes(k)).forEach(k => { next[k] = on; });
+        setDocketOpt('joined', next);
       }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
       else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); schedulePsAutosave(); } }
@@ -28781,11 +28830,11 @@ function handleActClick(el, e) {
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') {
-        const k = el.dataset.key, cur = docketCfg().red || {};
-        // data-force lets the line panel's Black/Red pair SET the ink; without
-        // it (the old toolbar button) the control still toggles.
-        const f = el.dataset.force;
-        setDocketOpt('red', Object.assign({}, cur, { [k]: f === undefined ? !cur[k] : f === '1' }));
+        const cur = docketCfg().red || {}, f = el.dataset.force;
+        const on = f === undefined ? !cur[el.dataset.key] : f === '1';
+        const next = Object.assign({}, cur);
+        dkSelection().forEach(k => { next[k] = on; });
+        setDocketOpt('red', next);
       }
       else if (act === 'set-docket-size') {
         const k = el.dataset.key, v = el.dataset.val;
@@ -28794,10 +28843,8 @@ function handleActClick(el, e) {
         setDocketOpt('sizes', next);
       }
       else if (act === 'set-docket-align') {
-        const k = el.dataset.key, v = el.dataset.val;
-        const next = Object.assign({}, docketCfg().align || {});
-        // Tapping the active alignment clears it back to Auto.
-        if (next[k] === v) delete next[k]; else next[k] = v;
+        const cur = docketCfg().align || {}, v = el.dataset.val, next = Object.assign({}, cur);
+        dkSelection().forEach(k => { if ((DK_PARTS[k] || {}).align) next[k] = v; });
         setDocketOpt('align', next);
       }
       else if (act === 'dk-pick-part') {
@@ -28810,7 +28857,25 @@ function handleActClick(el, e) {
         // and the call-away slip, and the arrows move the paper that was
         // tapped. Same part on the OTHER paper re-selects, never deselects.
         const slip = el.dataset.slip === '1';
-        state.dkPart = state.dkPart === el.dataset.part && !!state.dkSlip === slip ? null : el.dataset.part;
+        const k = el.dataset.part;
+        // Multi-select: ctrl/cmd adds one, shift takes the run between, a plain
+        // tap starts again. Every edit then applies to the whole selection.
+        const add = e.ctrlKey || e.metaKey;
+        const range = e.shiftKey;
+        if (range && state.dkPart && !slip === !state.dkSlip) {
+          const seq = dkPickOrder(slip);
+          const a = seq.indexOf(state.dkPart), b = seq.indexOf(k);
+          if (a >= 0 && b >= 0) {
+            const [lo, hi] = a < b ? [a, b] : [b, a];
+            state.dkSel = seq.slice(lo, hi + 1);
+          } else state.dkSel = [k];
+        } else if (add) {
+          const cur = dkSelection();
+          state.dkSel = cur.includes(k) ? cur.filter(x => x !== k) : cur.concat([k]);
+        } else {
+          state.dkSel = (state.dkPart === k && !!state.dkSlip === slip && dkSelection().length === 1) ? [] : [k];
+        }
+        state.dkPart = state.dkSel.length ? (state.dkSel.includes(k) ? k : state.dkSel[state.dkSel.length - 1]) : null;
         state.dkSlip = slip;
         state.dkMenu = null;
         render();
@@ -28878,7 +28943,10 @@ function handleActClick(el, e) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
             const next = Object.assign({}, dcfg.sizes || {});
-            if (parseInt(v, 10) === bN) delete next[pk]; else next[pk] = parseInt(v, 10);
+            dkSelection().forEach((k) => {
+              if (!(DK_PARTS[k] || {}).size) return;
+              if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10);
+            });
             setDocketOpt('sizes', next);
           } else setDocketOpt('fontScale', v);
         }

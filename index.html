@@ -1106,6 +1106,25 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
    Selection = inset ring + tint overlay only, so the paper never reflows. */
 /* Fixed-size bar (owner call): full card width and steady button slots, so
    picking an element never resizes or reflows the toolbar. */
+/* The line panel: a line's own options, opened at the line it belongs to.
+   Every control in here applies to the selected line, so none of them can be
+   dead — the greyed-out toolbar is what made this page read as broken. */
+.dk-pop-scrim{position:fixed;inset:0;z-index:118;background:transparent;}
+.dk-linepop{position:fixed;z-index:119;width:268px;box-sizing:border-box;background:var(--surface);
+  border:1px solid var(--steel-300);border-radius:14px;box-shadow:0 12px 34px rgba(20,24,25,.20);padding:12px;}
+.dkp-head{font-size:var(--fs-sm);font-weight:800;color:var(--text-primary);margin-bottom:10px;}
+.dkp-row{display:flex;align-items:center;gap:8px;margin-bottom:8px;}
+.dkp-rl{flex:0 0 52px;font-size:var(--fs-xs);font-weight:600;color:var(--charcoal-soft);}
+.dkp-ctl{flex:1;display:flex;gap:6px;}
+.dkp-chip{flex:1;min-height:36px;padding:8px 6px;border:1px solid var(--steel-200);background:var(--steel-100);
+  border-radius:var(--btn-radius);font-size:var(--fs-sm);font-weight:700;color:var(--text-primary);cursor:pointer;
+  font-family:inherit;white-space:nowrap;}
+.dkp-chip.on{background:var(--orange);border-color:var(--orange);color:#fff;}
+.dkp-chip.wide{flex:1 1 100%;}
+.dkp-wide{display:block;width:100%;min-height:36px;margin-top:2px;padding:8px 10px;border:1px solid var(--steel-200);
+  background:var(--steel-100);border-radius:var(--btn-radius);font-size:var(--fs-sm);font-weight:700;
+  color:var(--text-primary);cursor:pointer;font-family:inherit;}
+body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(--steel-300);}
 .dk-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:14px;padding:8px 10px;background:var(--steel-200);border-radius:12px;width:100%;box-sizing:border-box;}
 .dk-tb-btn.dk-tb-dd{min-width:96px;justify-content:space-between;}
 .dk-tb-part{font-size:12px;font-weight:700;color:var(--charcoal-soft);min-width:92px;}
@@ -12571,6 +12590,28 @@ function render() {
       localStorage.removeItem('pos-cart');
     }
   } catch (e) {}
+
+  // The line panel is position:fixed, so it re-anchors to the selected line
+  // after every render — the line changes height under it (a size change is
+  // the whole point), and a stale anchor would leave the panel adrift.
+  anchorDkLinePop();
+}
+
+// Keep the docket line panel pinned under the line it belongs to.
+function anchorDkLinePop() {
+  const pop = document.querySelector('.dk-linepop');
+  if (!pop) return;
+  const line = document.querySelector('.dk-part.dk-sel');
+  if (!line) return;
+  const r = line.getBoundingClientRect();
+  const w = pop.offsetWidth || 268, h = pop.offsetHeight || 240, pad = 10;
+  let left = Math.round(r.left + r.width / 2 - w / 2);
+  left = Math.max(pad, Math.min(left, window.innerWidth - w - pad));
+  // Below the line by default; above it when there isn't room underneath.
+  let top = Math.round(r.bottom + 9);
+  if (top + h > window.innerHeight - pad) top = Math.max(pad, Math.round(r.top - h - 9));
+  pop.style.left = left + 'px';
+  pop.style.top = top + 'px';
 }
 
 // Popup tile grids (order notes, size/seat pickers) mirror the ORDER PANEL
@@ -16336,6 +16377,7 @@ function renderPrintersDocketTab() {
           <div class="paper-preview">${buildCallAwaySample()}</div>
         </div>
       </div>
+      ${dkLinePop(d)}
     </div>
   `;
 }
@@ -16364,6 +16406,67 @@ async function setDkStationOpt(key, val) {
   try {
     await api(`/api/printer-stations/${st.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: st.docket }) });
   } catch (e) { state.toast = 'Could not save the station design.'; render(); armToastTimer(2600); }
+}
+// The line panel: tap a line on the paper and its own options open AT the line.
+// Only rows that apply to that line are drawn, so nothing is ever greyed out —
+// a greyed control can't tell you why it's dead, and this page used to open
+// with nine of them (owner, Aug '26: "they should all be live").
+// Labels say what the thing IS in plain words, not printer jargon.
+function dkLinePop(d) {
+  const p = state.dkPart;
+  const meta = p ? DK_PARTS[p] : null;
+  if (state.dkStation || !meta) return '';
+  const row = (label, inner) => `<div class="dkp-row"><span class="dkp-rl">${label}</span><span class="dkp-ctl">${inner}</span></div>`;
+  const chip = (on, act, extra, label) => `<button type="button" class="dkp-chip${on ? ' on' : ''}" data-act="${act}" ${extra}>${label}</button>`;
+  const out = [];
+
+  if (meta.size) {
+    const base = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
+    const defs = Object.assign({ table: 2, covers: 2, items: base, subs: base >= 3 ? 2 : 1 }, CA_DEFAULT_SIZE);
+    const cur = (d.sizes || {})[p] || defs[p] || 1;
+    out.push(row('Text size', [[1, 'Small'], [2, 'Big'], [3, 'Biggest']]
+      .map(([v, l]) => chip(cur === v, 'dk-menu-opt', `data-menu="size" data-val="${v}"`, l)).join('')));
+  }
+  if (meta.align) {
+    const cur = (d.align || {})[p] || '';
+    out.push(row('Position', [['left', 'Left'], ['center', 'Middle'], ['right', 'Right']]
+      .map(([v, l]) => chip(cur === v, 'set-docket-align', `data-key="${p}" data-val="${v}"`, l)).join('')));
+  }
+  if (meta.red) {
+    const on = p.startsWith('ca') || p === 'callaway' ? caRed(d, p) : !!(d.red || {})[p];
+    out.push(row('Ink', chip(!on, 'toggle-docket-red', `data-key="${p}" data-force="0"`, 'Black')
+      + chip(on, 'toggle-docket-red', `data-key="${p}" data-force="1"`, 'Red')));
+  }
+  if (p === 'course') {
+    out.push(row('Background', [['invert', 'Black bar'], ['border', 'Outline'], ['plain', 'None']]
+      .map(([v, l]) => chip(d.newCourseStyle === v, 'dk-menu-opt', `data-menu="style" data-val="${v}"`, l)).join('')));
+  }
+  const DK_EDIT_FIELD = { header: 'docketHeader', table: 'tableWord' };
+  if (DK_EDIT_FIELD[p]) {
+    out.push(row('Wording', `<button type="button" class="dkp-chip wide" data-act="print-sample-edit" data-field="${DK_EDIT_FIELD[p]}">Change the words</button>`));
+  }
+  // Move: the slip's lines reorder within the slip; a docket line moves its
+  // whole block. A line that can't move simply shows no Move row.
+  const slipSeq = callawayOrder(d);
+  const onSlip = slipSeq.includes(p);
+  const seq = onSlip ? slipSeq : docketLineOrder(d);
+  const idx = onSlip ? slipSeq.indexOf(p)
+    : (!['byseat', 'waitermate'].includes(d.layout) && DK_MOVE_BLOCK[p] ? seq.indexOf(DK_MOVE_BLOCK[p]) : -1);
+  const act = onSlip ? 'move-callaway-line' : 'move-docket-line';
+  if (idx > 0 || (idx >= 0 && idx < seq.length - 1)) {
+    out.push(row('Move', (idx > 0 ? `<button type="button" class="dkp-chip" data-act="${act}" data-dir="up">Up</button>` : '')
+      + (idx >= 0 && idx < seq.length - 1 ? `<button type="button" class="dkp-chip" data-act="${act}" data-dir="down">Down</button>` : '')));
+  }
+  if (meta.show) {
+    const shown = d[meta.show] !== false;
+    out.push(`<button type="button" class="dkp-wide${shown ? '' : ' on'}" data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}">${shown ? 'Hide this line' : 'Show this line'}</button>`);
+  }
+
+  return `<div class="dk-pop-scrim" data-act="dk-pop-close"></div>
+    <div class="dk-linepop">
+      <div class="dkp-head">${esc(meta.label)}</div>
+      ${out.join('')}
+    </div>`;
 }
 function dkToolbar(d) {
   const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
@@ -16437,52 +16540,16 @@ function dkToolbar(d) {
       ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
         ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef'],
       ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
-      ${dd('element', meta ? esc(meta.label) : 'Whole docket', !station, [
-        { v: 'whole', l: 'Whole docket', on: !p },
-        ...Object.entries(DK_PARTS).map(([k, m]) => ({ v: k, l: m.label, on: p === k })),
-      ], 'Element to edit')}
       ${dd('font', d.font === 'B' ? 'Compact' : 'Standard', !station, [
         { v: 'A', l: 'Standard', on: (d.font || 'A') === 'A' },
         { v: 'B', l: 'Compact — more per line', on: d.font === 'B' },
       ], 'Print style')}
-      ${dd('size', sizeLabel, sizeOn, sizeItems, 'Text size', 'No size for this part')}
+      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : dd('docsize', SCALE_L[d.fontScale] || 'Normal', true, [
+        { v: 'normal', l: 'Normal', on: (d.fontScale || 'normal') === 'normal' },
+        { v: 'large', l: 'Large', on: d.fontScale === 'large' },
+        { v: 'xlarge', l: 'Huge', on: d.fontScale === 'xlarge' },
+      ], 'Text size for the whole docket')}
       ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing')}
-      ${(() => {
-        // ONE way to type (owner call): select the line, press the pencil.
-        const DK_EDIT_FIELD = { header: 'docketHeader', table: 'tableWord' };
-        const f = p && DK_EDIT_FIELD[p];
-        return `<button type="button" class="dk-tb-btn${f ? '' : ' dk-tb-off'}"${f ? ` data-act="print-sample-edit" data-field="${f}"` : ` data-act="dk-why" data-why="${p ? 'No text on this line' : whyNoPart}"`}>${ACT_PENCIL_SVG}</button>`;
-      })()}
-      <span class="dk-tb-group${meta && meta.align ? '' : ' dk-tb-off'}">
-        ${['left', 'center', 'right'].map(v =>
-          `<button type="button" class="dk-tb-btn${meta && meta.align && (d.align || {})[p] === v ? ' active' : ''}"${meta && meta.align ? ` data-act="set-docket-align" data-key="${p}" data-val="${v}"` : ` data-act="dk-why" data-why="${p ? 'No alignment for this part' : whyNoPart}"`}>${svgAlign(v)}</button>`).join('')}
-      </span>
-      <button type="button" class="dk-tb-btn dk-tb-red${meta && meta.red ? ((d.red || {})[p] ? ' active' : '') : ' dk-tb-off'}"${meta && meta.red ? ` data-act="toggle-docket-red" data-key="${p}"` : ` data-act="dk-why" data-why="${p ? 'No red for this part' : whyNoPart}"`}>A</button>
-      <button type="button" class="dk-tb-btn${meta && meta.show ? (shown ? ' active' : '') : ' dk-tb-off'}"${meta && meta.show ? ` data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}"` : ` data-act="dk-why" data-why="${p ? 'This line always prints' : whyNoPart}"`}>${shown ? svgEye : svgEyeOff}</button>
-      ${dd('style', { invert: 'Inverse', border: 'Border', plain: 'Plain' }[d.newCourseStyle] || 'Plain', p === 'course',
-        [['invert', 'Inverse'], ['border', 'Border'], ['plain', 'Plain']].map(([v, l]) => ({ v, l, on: d.newCourseStyle === v })), 'Course header style', 'For the course header')}
-      ${(() => {
-        // ONE fixed arrow pair reorders lines: a part picked on the call-away
-        // slip moves the slip's sections; a movable docket part moves its
-        // whole block (standard format only — the other formats are fixed).
-        const svgUp = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 15l6-6 6 6"/></svg>`;
-        const svgDown = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
-        const arrow = (dir, glyph, title, can, act, why) =>
-          `<button type="button" class="dk-tb-btn${can ? '' : ' dk-tb-off'}"${can ? ` data-act="${act}" data-dir="${dir}"` : ` data-act="dk-why" data-why="${why}"`}>${glyph}</button>`;
-        const slipSeq = callawayOrder(d);
-        if (p && (p === 'callaway' || (state.dkSlip && slipSeq.includes(p)))) {
-          const i = slipSeq.indexOf(p);
-          return arrow('up', svgUp, 'Move up on the slip', i > 0, 'move-callaway-line', 'For the call-away lines')
-            + arrow('down', svgDown, 'Move down on the slip', i >= 0 && i < slipSeq.length - 1, 'move-callaway-line', 'For the call-away lines');
-        }
-        const blk = p ? DK_MOVE_BLOCK[p] : null;
-        const movable = blk && !['byseat', 'waitermate'].includes(d.layout);
-        const seq = docketLineOrder(d);
-        const i = movable ? seq.indexOf(blk) : -1;
-        const why = (edgeWhy) => !p ? whyNoPart : !blk ? 'This line rides its block' : !movable ? 'For the By course format' : edgeWhy;
-        return arrow('up', svgUp, 'Move up the docket', i > 0, 'move-docket-line', why('Already at the top'))
-          + arrow('down', svgDown, 'Move down the docket', i >= 0 && i < seq.length - 1, 'move-docket-line', why('Already at the bottom'));
-      })()}
     </div>`;
 }
 
@@ -28449,7 +28516,13 @@ function handleActClick(el, e) {
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'set-docket-layout') { setDocketOpt('layout', el.dataset.val); }
-      else if (act === 'toggle-docket-red') { const k = el.dataset.key; const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [k]: !cur[k] })); }
+      else if (act === 'toggle-docket-red') {
+        const k = el.dataset.key, cur = docketCfg().red || {};
+        // data-force lets the line panel's Black/Red pair SET the ink; without
+        // it (the old toolbar button) the control still toggles.
+        const f = el.dataset.force;
+        setDocketOpt('red', Object.assign({}, cur, { [k]: f === undefined ? !cur[k] : f === '1' }));
+      }
       else if (act === 'set-docket-size') {
         const k = el.dataset.key, v = el.dataset.val;
         const next = Object.assign({}, docketCfg().sizes || {});
@@ -28513,6 +28586,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'dk-why') { if (el.dataset.why) { state.toast = el.dataset.why; render(); armToastTimer(2200); } }
       else if (act === 'dk-menu-close') { state.dkMenu = null; render(); }
+      else if (act === 'dk-pop-close') { state.dkPart = null; state.dkMenu = null; render(); }
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
@@ -28521,6 +28595,7 @@ function handleActClick(el, e) {
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
         else if (m === 'style') { state.dkMenu = null; setDocketOpt('newCourseStyle', v); }
+        else if (m === 'docsize') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('fontScale', v); else setDocketOpt('fontScale', v); }
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;

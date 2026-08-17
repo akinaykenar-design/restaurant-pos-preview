@@ -4928,7 +4928,7 @@ app.put('/api/settings', (req, res) => {
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
         const out = {};
-        ['covers', 'staff'].forEach(k => { if (src && src[k]) out[k] = true; });
+        ['covers', 'staff', 'vip'].forEach(k => { if (src && src[k]) out[k] = true; });
         return out;
       })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
@@ -8444,7 +8444,17 @@ const DK_PARTS = {
   catime: { label: 'Call away time', show: 'showCaTime', red: true, align: true, size: true },
 };
 // Slip parts print big and centred by default, matching the pre-designer slip.
-const CA_DEFAULT_SIZE = { callaway: 2, cacourse: 2, catable: 2, catime: 1 };
+// No per-part default sizes anywhere: every line starts at the docket's own
+// text size, and only a size you pick moves it (owner, Aug '26).
+function dkBaseSize(d) { return d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1; }
+// The paper preview is scaled by the doc's base font, so a part's size has to
+// be expressed RELATIVE to that base — the printer's sizes are absolute
+// multiples, and 'Small' under a Large docket must still print 1x.
+const DK_SIZE_MULT = { 1: 1, 2: 1.45, 3: 2 };
+function dkSizeEm(n, d) {
+  const base = dkBaseSize(d);
+  return ((DK_SIZE_MULT[n] || 1) / (DK_SIZE_MULT[base] || 1)).toFixed(3) + 'em';
+}
 // Before the split, one red switch ('callaway') coloured the banner, the course
 // AND the table. Those three inherit it until each is set on its own.
 function caRed(d, k) {
@@ -8455,7 +8465,10 @@ function caRed(d, k) {
 const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 // Lines short enough to share the meta line. The order number and the time
 // already print there, so they are the line being joined TO, not joinable.
-const DK_JOINABLE = ['covers', 'staff'];
+// Lines short enough to ride the meta line. The order number and the time ARE
+// that line, so they are what gets joined TO; the table is the anchor the chef
+// finds the ticket by. Joining anything to anything needs the line model.
+const DK_JOINABLE = ['covers', 'staff', 'vip'];
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
 // banner and the course have been split apart. Only a full permutation counts;
@@ -8757,7 +8770,7 @@ function buildDocketDoc(ctx, edit) {
   // designer shows what the printer will do (Auto = no style).
   const stl = k => {
     const n = (d.sizes || {})[k], a = (d.align || {})[k];
-    const css = (n ? `font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;` : '') + (a ? `text-align:${a};` : '');
+    const css = (n ? `font-size:${dkSizeEm(n, d)};line-height:1.3;` : '') + (a ? `text-align:${a};` : '');
     return css ? ` style="${css}"` : '';
   };
   // Word-style part selection: tapping a styleable part picks it for the
@@ -8781,11 +8794,12 @@ function buildDocketDoc(ctx, edit) {
   if (ctx.timeLabel) meta.push(partW('time', d.showTime, esc(ctx.timeLabel)));
   if (joined.covers && ctx.covers) meta.push(partW('covers', d.showCovers, esc(coversInner)));
   if (joined.staff && ctx.staffName) meta.push(partW('staff', d.showStaff, esc(ctx.staffName)));
+  if (joined.vip && ctx.vip) meta.push(partW('vip', d.showVip, 'VIP: ' + esc(ctx.vip)));
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
   const staffHtml = (ctx.staffName && !joined.staff) ? partW('staff', d.showStaff, `<div class="print-sub"${stl('staff')}>${esc(ctx.staffName)}</div>`, true) : '';
   // Printable characters only — the printer has no emoji, so the preview
   // doesn't either (its star/warning glyphs never reached paper).
-  const vipHtml = ctx.vip ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
+  const vipHtml = (ctx.vip && !(d.joined || {}).vip) ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
@@ -9001,10 +9015,9 @@ function buildCallAwaySample() {
   const course = ((courseInfo(2) || {}).name || 'Mains').toUpperCase();
   // Each slip line carries its own size, alignment and red — the same grammar
   // the docket's parts use, so the toolbar drives them identically.
-  const em = { 1: '1em', 2: '1.45em', 3: '2em' };
   const caStl = (k, extra) => {
-    const n = (d.sizes || {})[k] || CA_DEFAULT_SIZE[k] || 1;
-    return ` style="font-size:${em[n]};line-height:1.3;text-align:${(d.align || {})[k] || 'center'};${extra || ''}"`;
+    const n = (d.sizes || {})[k] || dkBaseSize(d);
+    return ` style="font-size:${dkSizeEm(n, d)};line-height:1.3;text-align:${(d.align || {})[k] || 'center'};${extra || ''}"`;
   };
   // A line that's switched off stays visible but dimmed, so it can still be
   // tapped and switched back on — same behaviour as the docket's parts.
@@ -16436,8 +16449,7 @@ function dkToolbar(d) {
   // picking the layout's own default clears the override — stored nothing,
   // printed bytes identical, but the menu always answers with a real size.
   const dkBaseN = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
-  const dkSizeDefault = Object.assign({ table: 2, covers: 2, items: dkBaseN, subs: dkBaseN >= 3 ? 2 : 1 }, CA_DEFAULT_SIZE);
-  const defN = p ? (dkSizeDefault[p] || 1) : 1;
+  const defN = dkBaseN;
   const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
   const sizeLabel = station
     ? (stOv.fontScale ? SCALE_L[stOv.fontScale] : 'Inherit')
@@ -28574,9 +28586,8 @@ function handleActClick(el, e) {
           else if (pk && DK_PARTS[pk]) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
-            const defs = Object.assign({ table: 2, covers: 2, items: bN, subs: bN >= 3 ? 2 : 1 }, CA_DEFAULT_SIZE);
             const next = Object.assign({}, dcfg.sizes || {});
-            if (parseInt(v, 10) === (defs[pk] || 1)) delete next[pk]; else next[pk] = parseInt(v, 10);
+            if (parseInt(v, 10) === bN) delete next[pk]; else next[pk] = parseInt(v, 10);
             setDocketOpt('sizes', next);
           } else setDocketOpt('fontScale', v);
         }

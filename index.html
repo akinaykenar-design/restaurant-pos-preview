@@ -4924,6 +4924,13 @@ app.put('/api/settings', (req, res) => {
         if (src.every((k, i) => k === DEF[i])) return {};
         return { lineOrder: src.slice() };
       })(),
+      // Which short lines ride the meta line instead of taking one of their own.
+      joined: (() => {
+        const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
+        const out = {};
+        ['covers', 'staff'].forEach(k => { if (src && src[k]) out[k] = true; });
+        return out;
+      })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
       align: (() => {
         const src = dk.align !== undefined ? dk.align : (cur.align || {});
@@ -8407,7 +8414,7 @@ const DOCKET_DEFAULTS = {
   showSeats: true, showNotes: true, showBuild: true, showStationTag: true,
   showOrderNo: false, showTime: true, showCaTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
-  font: 'A', red: { callaway: true }, sizes: {}, align: {}, roundPrint: 'added',
+  font: 'A', red: { callaway: true }, sizes: {}, align: {}, joined: {}, roundPrint: 'added',
 };
 // The Word-style designer toolbar edits ONE docket part at a time — tap the
 // part on the paper, then use the toolbar. Each part declares what it can do:
@@ -8426,7 +8433,6 @@ const DK_PARTS = {
   time: { label: 'Time', show: 'showTime', red: false, align: false, size: false },
   orderno: { label: 'Order number', show: 'showOrderNo', red: false, align: false, size: false },
   seats: { label: 'Seats', show: 'showSeats', red: false, align: false, size: false },
-  station: { label: 'Station tag', show: 'showStationTag', red: false, align: false, size: false },
   staff: { label: 'Server', show: 'showStaff', red: true, align: true, size: true },
   // The call-away slip's lines are their OWN parts, not shares of the docket's.
   // They used to reuse 'table' and 'time', which meant tapping the slip's table
@@ -8447,6 +8453,9 @@ function caRed(d, k) {
   return (k === 'cacourse' || k === 'catable') ? !!r.callaway : false;
 }
 const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
+// Lines short enough to share the meta line. The order number and the time
+// already print there, so they are the line being joined TO, not joinable.
+const DK_JOINABLE = ['covers', 'staff'];
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
 // banner and the course have been split apart. Only a full permutation counts;
@@ -8762,14 +8771,18 @@ function buildDocketDoc(ctx, edit) {
   // around a block collapses to zero size, so taps would fall through to the
   // table header behind it.
   const coversInner = `${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}`;
-  const coversSeg = ctx.covers ? (edit
+  const coversSeg = (ctx.covers && !(d.joined || {}).covers) ? (edit
     ? `<div class="print-sub print-covers${selectable ? ' dk-part' : ''} ${d.showCovers ? '' : 'pp-off'}${selectable && state.dkPart === 'covers' ? ' dk-sel' : ''}"${stl('covers')}${selectable ? ' data-act="dk-pick-part" data-part="covers"' : ''}>${coversInner}</div>`
     : (d.showCovers ? `<div class="print-sub print-covers"${stl('covers')}>${coversInner}</div>` : '')) : '';
+  // A joined line rides the meta line instead of taking one of its own.
+  const joined = d.joined || {};
   const meta = [];
   if (ctx.orderNo != null) meta.push(partW('orderno', d.showOrderNo, `#${esc(String(ctx.orderNo))}`));
   if (ctx.timeLabel) meta.push(partW('time', d.showTime, esc(ctx.timeLabel)));
+  if (joined.covers && ctx.covers) meta.push(partW('covers', d.showCovers, esc(coversInner)));
+  if (joined.staff && ctx.staffName) meta.push(partW('staff', d.showStaff, esc(ctx.staffName)));
   const metaHtml = meta.filter(Boolean).length ? `<div class="print-sub">${meta.filter(Boolean).join(' · ')}</div>` : '';
-  const staffHtml = ctx.staffName ? partW('staff', d.showStaff, `<div class="print-sub"${stl('staff')}>${esc(ctx.staffName)}</div>`, true) : '';
+  const staffHtml = (ctx.staffName && !joined.staff) ? partW('staff', d.showStaff, `<div class="print-sub"${stl('staff')}>${esc(ctx.staffName)}</div>`, true) : '';
   // Printable characters only — the printer has no emoji, so the preview
   // doesn't either (its star/warning glyphs never reached paper).
   const vipHtml = ctx.vip ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
@@ -9031,15 +9044,15 @@ function sampleDocketCtx() {
     courses: [
       { name: c1.name, color: c1.color, isNew: true, lines: [
         { qty: 2, name: 'Garlic Bread' },
-        { qty: 1, name: 'Salt & Pepper Calamari', seat: 3, note: 'no aioli', tag: ' <b>[Kitchen]</b>' },
+        { qty: 1, name: 'Salt & Pepper Calamari', seat: 3, note: 'no aioli' },
       ] },
       { name: c2.name, color: c2.color, isNew: true, lines: [
-        { qty: 2, name: 'Ribeye Steak', seat: 1, note: 'med-rare', tag: ' <b>[Kitchen]</b>', build: { kept: [{ label: 'Fries' }, { label: 'Slaw' }], removed: [{ label: 'Peppercorn Sauce' }] } },
+        { qty: 2, name: 'Ribeye Steak', seat: 1, note: 'med-rare', build: { kept: [{ label: 'Fries' }, { label: 'Slaw' }], removed: [{ label: 'Peppercorn Sauce' }] } },
         { qty: 1, name: 'Pan-seared Sea Bass', seat: 2, note: 'no butter' },
         { qty: 1, name: 'Kids Nuggets & Chips' },
       ] },
       { name: c3.name, color: c3.color, isNew: true, lines: [
-        { qty: 2, name: 'Tiramisu', tag: ' <b>[Pass]</b>' },
+        { qty: 2, name: 'Tiramisu' },
         { qty: 1, name: 'Affogato', seat: 4 },
       ] },
     ],
@@ -16440,6 +16453,13 @@ function dkLinePop(d) {
   if (p === 'course') {
     out.push(row('Background', [['invert', 'Black bar'], ['border', 'Outline'], ['plain', 'None']]
       .map(([v, l]) => chip(d.newCourseStyle === v, 'dk-menu-opt', `data-menu="style" data-val="${v}"`, l)).join('')));
+  }
+  // Join to line: a small line can share the meta line instead of taking one
+  // of its own — "7:24 pm · Aylin" rather than two lines (owner, Aug '26).
+  if (DK_JOINABLE.includes(p)) {
+    const on = !!(d.joined || {})[p];
+    out.push(row('Line', chip(!on, 'set-docket-join', `data-key="${p}" data-val="0"`, 'Own line')
+      + chip(on, 'set-docket-join', `data-key="${p}" data-val="1"`, 'Join above')));
   }
   const DK_EDIT_FIELD = { header: 'docketHeader', table: 'tableWord' };
   if (DK_EDIT_FIELD[p]) {
@@ -28510,6 +28530,10 @@ function handleActClick(el, e) {
       else if (act === 'set-print-enabled') { saveTicketSetting({ printEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }
+      else if (act === 'set-docket-join') {
+        const cur = docketCfg().joined || {};
+        setDocketOpt('joined', Object.assign({}, cur, { [el.dataset.key]: el.dataset.val === '1' }));
+      }
       else if (act === 'set-docket-opt') { const v = el.dataset.val; setDocketOpt(el.dataset.key, v === 'true' ? true : v === 'false' ? false : v); }
       else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); schedulePsAutosave(); } }
       else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); schedulePsAutosave(); } }

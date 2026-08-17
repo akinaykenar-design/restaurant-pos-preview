@@ -1103,6 +1103,16 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
   height:3px;border-radius:2px;background:var(--text-primary);}
 .dk-tb-btn.dk-tb-ink.on:after{background:var(--red);}
 .dk-tb-btn.dk-tb-ink.on{color:var(--red);}
+/* Numbered index of the docket's rows. */
+.dk-index{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:10px;}
+.dk-ix{display:inline-flex;align-items:center;gap:6px;min-height:36px;padding:0 10px;
+  border:1px solid var(--steel-200);background:var(--surface);border-radius:var(--btn-radius);
+  font-size:var(--fs-xs);font-weight:700;color:var(--text-primary);cursor:pointer;font-family:inherit;}
+.dk-ix.on{background:var(--orange);border-color:var(--orange);color:#fff;}
+.dk-ix-n{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;
+  border-radius:5px;background:var(--steel-100);color:var(--charcoal-soft);font-size:var(--fs-xs);}
+.dk-ix.on .dk-ix-n{background:rgba(255,255,255,.28);color:#fff;}
+.dk-ix-total{font-size:var(--fs-xs);font-weight:700;color:var(--charcoal-soft);padding-left:4px;}
 /* Says which row the pick prints on, or how many lines an edit will touch. */
 .dk-tb-note{display:inline-flex;align-items:center;min-height:36px;padding:0 8px;
   font-size:var(--fs-xs);font-weight:700;color:var(--charcoal-soft);}
@@ -1115,10 +1125,11 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
    designer it shows a faint band you can actually tap; it prints as a feed. */
 .print-gap{height:14px;}
 .print-doc.dk .print-gap.dk-part{background:repeating-linear-gradient(45deg,var(--steel-100) 0 5px,transparent 5px 10px);border-radius:3px;}
-.print-rule{height:0;border-top:1px dashed #000;margin:4px 0;}
-.print-rule.rs-dotted{border-top-style:dotted;}
-.print-rule.rs-solid{border-top-style:solid;}
-.print-rule.rs-bold{border-top-style:solid;border-top-width:2.5px;}
+/* The characters the printer prints, not a CSS border — dashed and dotted
+   borders were near-identical on screen while '-' and '.' are obviously
+   different, and this is what comes out of the machine anyway. */
+.print-rule{white-space:pre;overflow:hidden;line-height:1;letter-spacing:0;margin:2px 0;}
+.print-rule.rs-bold{font-weight:800;}
 /* Names the line the controls after it act on. */
 .dk-tb-label{display:inline-flex;align-items:center;min-height:36px;padding:0 4px 0 10px;
   font-size:var(--fs-xs);font-weight:800;letter-spacing:.05em;text-transform:uppercase;
@@ -1137,7 +1148,8 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 .print-doc.dk-font-b{font-size:0.82em;letter-spacing:-0.02em;}
 /* Editable print sample: the paper is the form. Tappable bits get a dashed
    underline; hidden lines stay visible but struck through and dimmed. */
-.pp-edit{cursor:pointer;border-bottom:1.5px dashed #999;padding-bottom:1px;}
+.pp-edit{cursor:pointer;padding-bottom:1px;}
+.dk-part.dk-sel .pp-edit, .paper-preview .pp-edit.pp-empty{border-bottom:1.5px dashed #999;}
 /* A text slot INSIDE a selectable line is inert — tapping the line selects
    it, and the toolbar's pencil opens the typing (one interaction, owner
    call). Slots outside parts (footer note) still open on tap. */
@@ -1206,7 +1218,11 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-part{cursor:pointer;border-radius:4px;}
 .dk-part:active{background:rgba(54,146,231,.06);}
 .dk-part.pp-off{opacity:.42;text-decoration:line-through;}
-.dk-part.dk-sel{box-shadow:inset 0 0 0 2px #3692E7;background:rgba(54,146,231,.10);}
+/* Ring drawn OUTSIDE as well as inside: an inset-only ring disappears on a
+   dark block (the allergy line prints inverted), so selecting it looked like
+   nothing happened. */
+.dk-part.dk-sel{box-shadow:inset 0 0 0 2px #3692E7, 0 0 0 2px #3692E7;background:rgba(54,146,231,.10);}
+.print-doc .print-flag-block.dk-sel{box-shadow:0 0 0 3px #3692E7;}
 /* A chip whose edit popup is open keeps the sunk pressed look. */
 .seat-chip.chip-held{filter:brightness(.92);box-shadow:inset 0 2px 6px rgba(0,0,0,.28);}
 /* Rows expand inline on every screen — same simple collapse/expand
@@ -5005,6 +5021,11 @@ app.put('/api/settings', (req, res) => {
       courseRuleStyle: pick(dk.courseRuleStyle, ['dashed', 'dotted', 'solid', 'bold'], cur.courseRuleStyle || 'dashed'),
       itemRule: b(dk.itemRule, !!cur.itemRule),
       itemRuleStyle: pick(dk.itemRuleStyle, ['dashed', 'dotted', 'solid', 'bold'], cur.itemRuleStyle || 'dotted'),
+      // Spaces between the table word and its number.
+      tableGap: (() => {
+        const v = dk.tableGap !== undefined ? dk.tableGap : cur.tableGap;
+        return Number.isInteger(v) && v >= 0 && v <= 3 ? v : 1;
+      })(),
       // Underline, per line.
       under: (() => {
         const src = dk.under !== undefined ? dk.under : (cur.under || {});
@@ -8596,6 +8617,13 @@ function dkPickOrder(slip) {
     : docketLineOrder(d).concat(['course', 'items', 'subs', 'seats', 'notes', 'allergies', 'divider'])
       .filter((k, i, a) => a.indexOf(k) === i);
 }
+const DK_RULE_CHAR = { dashed: '-', dotted: '.', solid: '=', bold: '=' };
+// Same characters the printer lays down, across the same column count.
+function dkRuleHtml(style, cls, attrs) {
+  const cols = (state.settings || {}).paperWidth === '58' ? 32 : 42;
+  const ch = DK_RULE_CHAR[style] || '-';
+  return `<div class="print-rule${style === 'bold' ? ' rs-bold' : ''}${cls ? ' ' + cls : ''}"${attrs || ''}>${ch.repeat(cols)}</div>`;
+}
 function dkExtras(d) { return Array.isArray(d.extras) ? d.extras : []; }
 // Keyboard on the designer: ctrl/cmd+A takes every line, Escape drops the
 // selection. Ignored while typing, so editing the header text still works.
@@ -8970,6 +8998,8 @@ function buildDocketDoc(ctx, edit) {
   // be in the list or the preview and the paper disagree.
   const groups = [];
   for (const k of docketLineOrder(d).filter(x => x !== 'items')) {
+    const exg = dkExtraOf(d, k);
+    if (exg && exg.kind === 'gap') { groups.push([{ k, seg: { on: true, html: '' } }]); continue; }
     const seg = SEGS[k];
     if (!seg) continue;
     if (isJoined(k) && groups.length) groups[groups.length - 1].push({ k, seg });
@@ -8992,8 +9022,9 @@ function buildDocketDoc(ctx, edit) {
   // doesn't either (its star/warning glyphs never reached paper).
   // The docket's own divider: same element as an inserted one, so there is one
   // kind of divider rather than two that look different and behave differently.
-  const dividerHtml = d.showRule === false && !edit ? '' :
-    `<div class="print-rule rs-${esc(d.ruleStyle || 'dashed')}${selectable ? ' dk-part' : ''}${d.showRule === false ? ' pp-off' : ''}${selectable && dkIsSelected('divider') ? ' dk-sel' : ''}"${selectable ? ' data-act="dk-pick-part" data-part="divider"' : ''}></div>`;
+  const dividerHtml = d.showRule === false && !edit ? '' : dkRuleHtml(d.ruleStyle || 'dashed',
+    (selectable ? 'dk-part ' : '') + (d.showRule === false ? 'pp-off ' : '') + (selectable && dkIsSelected('divider') ? 'dk-sel' : ''),
+    selectable ? ' data-act="dk-pick-part" data-part="divider"' : '');
   const vipHtml = groupOf('vip') ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
@@ -9021,7 +9052,8 @@ function buildDocketDoc(ctx, edit) {
           // The WORD is typed right here (owner call — no option lists):
           // clear it for just the number, type anything for anything.
           const dispWord = w === undefined ? (d.layout === 'waitermate' ? 'Table' : 'TABLE') : (w === 'none' ? '' : w);
-          const sep = dispWord && !dispWord.endsWith('#') ? ' ' : '';
+          const gapN = d.tableGap === undefined ? 1 : d.tableGap;
+          const sep = dispWord && !dispWord.endsWith('#') ? '\u00A0'.repeat(gapN) : '';
           return `<h3 class="print-dockhead${rc('table')}${' dk-part' + (dkIsSelected('table') ? ' dk-sel' : '')}"${stl('table')} data-act="dk-pick-part" data-part="table">${sampleEditable('tableWord', dispWord, 'TABLE', '')}${sep}${esc(String(t))}${coversRider}</h3>`;
         }
         return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (dkIsSelected('table') ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}${coversRider}</h3>`;
@@ -9060,7 +9092,7 @@ function buildDocketDoc(ctx, edit) {
           ${c.lines.map(l => lineRow(l, '', true) + ((l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, `<div class="print-sub" style="padding-left:10px;">Cover (${esc(String(l.seat))})</div>`, true) : '')).join('')}
         </div>`).join('') + `<hr><div class="print-sub">${esc(new Date(Date.now()).toLocaleDateString('en-AU'))}  ${esc(fmtTime(Date.now()))}  No:1</div>`;
         }
-        const rule = (style) => `<div class="print-rule rs-${esc(style || 'dashed')}"></div>`;
+        const rule = (style) => dkRuleHtml(style || 'dashed');
         return ctx.courses.map((c, ci) => `
         ${ci && d.courseRule ? rule(d.courseRuleStyle) : ''}
         <div class="print-course ${c.isNew ? 'is-new' : 'is-old'}">
@@ -9090,8 +9122,14 @@ function buildDocketDoc(ctx, edit) {
     if (!ex) return '';
     const sel = selectable && dkIsSelected(k) ? ' dk-sel' : '';
     const pick = selectable ? ` data-act="dk-pick-part" data-part="${k}"` : '';
-    if (ex.kind === 'gap') return `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
-    return `<div class="print-rule rs-${esc(ex.style || 'dashed')}${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
+    if (ex.kind === 'gap') {
+      const g = groups.find(x => x[0].k === k);
+      const riders = g && g.length > 1 ? g.slice(1).map(({ k: rk, seg }) => partW(rk, seg.on, seg.html)).filter(Boolean).join(' · ') : '';
+      return riders
+        ? `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${pick}>${riders}</div>`
+        : `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
+    }
+    return dkRuleHtml(ex.style || 'dashed', (selectable ? 'dk-part' : '') + sel, pick);
   };
   const body = seq.map(k => {
     const ex = extraHtml(k);
@@ -16576,6 +16614,7 @@ function renderPrintersDocketTab() {
     <div class="settings-card wide" style="max-width:740px;">
       <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Docket designer<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-sample-docket">${SYS_PRINTER_SVG} Test docket</button></div>
       ${dkToolbar(d)}
+      ${dkLineIndex(d)}
       <div class="print-preview-grid" style="margin-top:12px;">
         <div>
           <div class="paper-preview">${buildDocketDoc(sampleDocketCtx(), true)}</div>
@@ -16645,6 +16684,11 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         bits.push(`<button type="button" class="dk-tb-btn${dkBoldOn(d, p) ? ' active' : ''}" data-act="toggle-docket-bold" data-key="${p}" style="font-weight:800;">B</button>`);
         bits.push(`<button type="button" class="dk-tb-btn${dkUnderOn(d, p) ? ' active' : ''}" data-act="toggle-docket-under" data-key="${p}" style="text-decoration:underline;font-weight:700;">U</button>`);
         if (meta.show) bits.push(`<button type="button" class="dk-tb-btn${shown ? ' active' : ''}" data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}">${shown ? svgEye : svgEyeOff}</button>`);
+        if (p === 'table') {
+          const gapN = d.tableGap === undefined ? 1 : d.tableGap;
+          bits.push(dd('tablegap', 'Gap ' + gapN, true,
+            [0, 1, 2, 3].map(v => ({ v, l: String(v), on: gapN === v })), 'Space before the number'));
+        }
         const FIELD = { header: 'docketHeader', table: 'tableWord' };
         if (FIELD[p]) bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${FIELD[p]}">${ACT_PENCIL_SVG}</button>`);
         if (p === 'course' || p === 'items') {
@@ -16676,6 +16720,29 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
           return bits.join('\n      ');
 }
 const FMT_L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef' };
+// A numbered index of the rows: how many lines the docket has, and a way to
+// reach any of them without hunting on the paper. Rows, not elements — an
+// element riding another line is shown against the row it prints on.
+function dkLineIndex(d) {
+  if (state.dkStation) return '';
+  const order = docketLineOrder(d);
+  const j = (k) => (d.joined || {})[k] !== undefined ? !!(d.joined || {})[k] : k === 'time';
+  const rows = [];
+  for (const k of order) {
+    const ex = dkExtraOf(d, k);
+    const label = ex ? (ex.kind === 'gap' ? 'Blank line' : 'Divider')
+      : k === 'items' ? 'Items' : (DK_PARTS[k] || {}).label || k;
+    if (!ex && k !== 'items' && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
+    rows.push({ k, parts: [{ k, label }] });
+  }
+  return `
+    <div class="dk-index">
+      ${rows.map((r, i) => `<button type="button" class="dk-ix${dkIsSelected(r.k) ? ' on' : ''}" data-act="dk-pick-part" data-part="${r.k}">
+        <span class="dk-ix-n">${i + 1}</span>${r.parts.map(x => esc(x.label)).join(' · ')}
+      </button>`).join('')}
+      <span class="dk-ix-total">${rows.length} lines</span>
+    </div>`;
+}
 function dkToolbar(d) {
   const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
   const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
@@ -28925,6 +28992,7 @@ function handleActClick(el, e) {
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
+        else if (m === 'tablegap') { state.dkMenu = null; setDocketOpt('tableGap', parseInt(v, 10)); }
         else if (m === 'dividerstyle') { state.dkMenu = null; setDocketOpt('ruleStyle', v); }
         else if (m === 'rulestyle') {
           state.dkMenu = null;

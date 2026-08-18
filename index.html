@@ -1254,7 +1254,10 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-tb-group{display:inline-flex;gap:4px;}
 .dk-red-A{position:relative;display:inline-block;padding-bottom:5px;}
 .dk-red-A::after{content:'';position:absolute;left:-2px;right:-2px;bottom:0;height:4px;border-radius:2px;background:#C0392B;}
-.dk-menu-scrim{position:fixed;inset:0;z-index:60;}
+/* Catches the tap that closes a menu, but must not trap the page: a full-screen
+   scrim with the default touch-action froze scrolling while any menu was open
+   (owner, Aug '26). pan-y lets the list under it move; the tap still lands. */
+.dk-menu-scrim{position:fixed;inset:0;z-index:60;touch-action:pan-y;}
 .dk-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:61;background:var(--surface);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:5px;min-width:150px;display:flex;flex-direction:column;gap:2px;max-height:56vh;overflow-y:auto;}
 .dk-menu-item{display:flex;align-items:center;gap:8px;border:none;background:none;padding:9px 12px;min-height:38px;border-radius:8px;font-size:var(--fs-sm);font-weight:600;color:var(--charcoal-soft);cursor:pointer;text-align:left;white-space:nowrap;}
 .dk-menu-item.active{background:var(--orange-dim);color:var(--orange);}
@@ -5115,13 +5118,25 @@ app.put('/api/settings', (req, res) => {
           }
         }
         // A removed line is absent by design, so only require the items block.
-        const extraIds = (Array.isArray(dk.extras) ? dk.extras : (cur.extras || [])).map(x => x && x.id);
-        const known = (k) => DEF.includes(k) || OPT.includes(k) || extraIds.includes(k);
+        const extraIds = (Array.isArray(dk.extras) ? dk.extras : (cur.extras || [])).map(x => x && x.id)
+          .concat((cur.v || 0) < 2 && cur.headerText ? ['hdrtext'] : [])
+          .concat((cur.v || 0) < 2 && cur.footerText ? ['ftrtext'] : []);
+        // 'header' is legacy: still accepted so an order saved with it is not
+        // thrown away before the migration below can turn it into a text line.
+        const known = (k) => k === 'header' || DEF.includes(k) || OPT.includes(k) || extraIds.includes(k);
         if (!Array.isArray(src) || !src.length || src.length > 40
             || !src.includes('items') || !src.every(known)) return {};
         // An order saved while the round rode the table line has no 'round' —
         // put it back where it printed. Once only, keyed off the schema mark
         // below: after that, an absent round means the owner removed it.
+        // 'header' becomes an ordinary text line the first time this runs, so a
+        // venue that had one keeps it — as a line it can now move and copy.
+        if ((cur.v || 0) < 2 && src.includes('header')) {
+          const at = src.indexOf('header');
+          src = src.slice(0, at).concat(cur.headerText ? ['hdrtext'] : []).concat(src.slice(at + 1));
+          // The footer sat after everything, so its text line does too.
+          if (cur.footerText && !src.includes('ftrtext')) src = src.concat(['ftrtext']);
+        }
         if (!cur.v && !src.includes('round')) {
           const i = src.indexOf('table');
           src = src.slice();
@@ -5155,10 +5170,19 @@ app.put('/api/settings', (req, res) => {
       })(),
       // Inserted blank lines and dividers, in the order they were added.
       extras: (() => {
-        const src = dk.extras !== undefined ? dk.extras : (cur.extras || []);
+        let src = dk.extras !== undefined ? dk.extras : (cur.extras || []);
+        // The header and footer were containers the venue types into, not POS
+        // data — so they become ordinary text lines the first time this runs,
+        // and a venue that had either keeps it (owner, Aug '26).
+        if ((cur.v || 0) < 2 && Array.isArray(src)) {
+          if (cur.headerText && !src.some(x => x && x.id === 'hdrtext')) src = [{ id: 'hdrtext', kind: 'text', text: cur.headerText }].concat(src);
+          if (cur.footerText && !src.some(x => x && x.id === 'ftrtext')) src = src.concat([{ id: 'ftrtext', kind: 'text', text: cur.footerText }]);
+        }
         if (!Array.isArray(src)) return [];
-        return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && (x.kind === 'gap' || x.kind === 'rule'))
+        return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
           .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
+            // A text line carries the venue's own wording.
+            text: x.kind === 'text' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
             style: ['dashed', 'dotted', 'solid', 'bold'].includes(x.style) ? x.style : null }));
       })(),
       // Which short lines ride the meta line instead of taking one of their own.
@@ -8843,12 +8867,23 @@ function dkKeydown(e) {
     state.dkSel = [...document.querySelectorAll('[data-act="dk-pick-part"]:not([data-slip])')]
       .map(x => x.dataset.part).filter((k, i, a) => a.indexOf(k) === i);
     state.dkPart = state.dkSel[0] || null; state.dkSlip = false; render();
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && state.dkPart) {
+    // The key does what the trash does (owner, Aug '26). Same guards: Items
+    // stays, and an inserted line is deleted rather than hidden.
+    e.preventDefault();
+    const btn = document.querySelector('.dk-tb-line [data-act="dk-remove-line"], .dk-tb-line [data-act="dk-hide-line"], .dk-tb-line [data-act="dk-del-line"]');
+    if (btn) btn.click(); else { state.toast = 'That line cannot be removed'; render(); armToastTimer(2000); }
   } else if (e.key === 'Escape' && dkSelection().length) {
     e.preventDefault();
     state.dkSel = []; state.dkPart = null; render();
   }
 }
 document.addEventListener('keydown', dkKeydown);
+// Scrolling away from an open designer menu closes it — the menu is anchored to
+// its button, so a scrolled page would leave it floating over nothing.
+document.addEventListener('scroll', () => {
+  if (state.dkMenu || state.rcMenu) { state.dkMenu = null; state.rcMenu = null; render(); }
+}, true);
 function dkExtraOf(d, k) { return dkExtras(d).find(x => x && x.id === k) || null; }
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
@@ -8874,6 +8909,8 @@ function callawayOrder(d) {
 // The docket's top blocks (standard format) reorder as whole units — items
 // carry their notices and dividing rule with them. Only a full permutation
 // counts; anything else falls back to the printed default.
+// 'header' is legacy: still in the order so existing header text keeps printing
+// until a save migrates it to a text line, but no longer offered as an element.
 const DOCKET_LINE_ORDER = ['header', 'table', 'round', 'covers', 'orderno', 'time', 'staff', 'items'];
 // Orders saved as the old five blocks expand to their parts, so an arrangement
 // made before this keeps printing the way it was left.
@@ -8882,7 +8919,7 @@ function docketLineOrder(d) {
   const o = d.topOrder;
   // A removed line is simply absent; the order is valid while it holds known
   // keys and still prints the items.
-  const known = (k) => DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
+  const known = (k) => k === 'header' || DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
   // Orders saved while the round rode the table line get it put back where it
   // printed, rather than losing it off the docket.
   const withRound = (a) => {
@@ -9017,8 +9054,8 @@ function buildReceiptDoc(order, edit) {
   // is tappable (dimmed when hidden); on a real print a hidden part is gone.
   const partR = (k, inner, block, styleAttr) => {
     const on = RC_PARTS[k].show ? rcShown(RC_PARTS[k].show) : true;
-    if (edit) return `<${block ? 'div' : 'span'} class="dk-part ${on ? '' : 'pp-off'}${state.rcPart === k ? ' dk-sel' : ''}"${styleAttr || ''} data-act="rc-pick-part" data-part="${k}">${inner}</${block ? 'div' : 'span'}>`;
     if (!on) return '';
+    if (edit) return `<${block ? 'div' : 'span'} class="dk-part${state.rcPart === k ? ' dk-sel' : ''}"${styleAttr || ''} data-act="rc-pick-part" data-part="${k}">${inner}</${block ? 'div' : 'span'}>`;
     return styleAttr ? `<${block ? 'div' : 'span'}${styleAttr}>${inner}</${block ? 'div' : 'span'}>` : inner;
   };
   // Per-part size → same inline scale the docket paper uses.
@@ -9324,7 +9361,7 @@ function buildDocketDoc(ctx, edit) {
   // The docket's own divider: same element as an inserted one, so there is one
   // kind of divider rather than two that look different and behave differently.
   const dividerHtml = d.showRule === false ? '' : dkRuleHtml(d.ruleStyle || 'dashed',
-    (selectable ? 'dk-part ' : '') + (d.showRule === false ? 'pp-off ' : '') + (selectable && dkIsSelected('divider') ? 'dk-sel' : ''),
+    (selectable ? 'dk-part ' : '') + (selectable && dkIsSelected('divider') ? 'dk-sel' : ''),
     selectable ? ' data-act="dk-pick-part" data-part="divider"' : '');
   const vipHtml = (ctx.vip && !isJoined('vip'))
     ? partW('vip', d.showVip, `<div class="print-flag pf-${dkBlockStyle(d, 'vip')}${rc('vip')}"${stl('vip')}>VIP: ${esc(ctx.vip)}</div>`, true) : '';
@@ -9487,6 +9524,10 @@ function buildDocketDoc(ctx, edit) {
         ? `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${pick}>${riders}</div>`
         : `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
     }
+    if (ex.kind === 'text') {
+      const inner = edit ? sampleEditable('dkText:' + k, ex.text || '', 'type here', '') : esc(ex.text || '');
+      return `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${stl(k)}${pick}>${inner}</div>`;
+    }
     return dkRuleHtml(ex.style || 'dashed', (selectable ? 'dk-part' : '') + sel, pick);
   };
   const body = seq.map(k => {
@@ -9502,7 +9543,7 @@ function buildDocketDoc(ctx, edit) {
       ${d.showFootRule === false ? '' : dkRuleHtml(dkRuleStyle(d.footRuleStyle || d.ruleStyle),
         (selectable ? 'dk-part ' : '') + (selectable && dkIsSelected('footrule') ? 'dk-sel' : ''),
         selectable ? ' data-act="dk-pick-part" data-part="footrule"' : '')}
-      ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
+      ${d.footerText ? `<div class="print-footer">${esc(d.footerText)}</div>` : ''}
     </div>`;
 }
 
@@ -9640,12 +9681,13 @@ function buildCallAwaySample() {
     const n = (d.sizes || {})[k] || dkBaseSize(d);
     return ` style="font-size:${dkSizeEm(n, d)};line-height:1.3;text-align:${(d.align || {})[k] || 'center'};${extra || ''}"`;
   };
-  // A line that's switched off stays visible but dimmed, so it can still be
-  // tapped and switched back on — same behaviour as the docket's parts.
+  // Off means GONE, the way it does on the docket — a struck-through ghost of
+  // a line that will not print is the preview showing paper the printer never
+  // produces (owner, Aug '26). The line list is the way back.
   const caPart = (k, inner, extra) => {
     const meta = DK_PARTS[k] || {};
-    const off = meta.show && d[meta.show] === false;
-    return `<div class="dk-part${off ? ' pp-off' : ''}${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
+    if (meta.show && d[meta.show] === false) return '';
+    return `<div class="dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
   };
   // Sections render in the stored order — the printed slip follows the same
   // list, so the preview stays WYSIWYG.
@@ -17184,14 +17226,6 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
           bits.push(dd('footrulestyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
             DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Line style'));
         }
-        // Which order-note types reach the kitchen. Nothing ticked = every
-        // type, so a type the venue adds later is not silently dropped.
-        bits.push(p === 'ordernotes' && (state.noteCategories || []).length
-          ? (() => { const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
-              return dd('notetypes', want.length ? want.length + (want.length === 1 ? ' type' : ' types') : 'All types', true,
-                (state.noteCategories || []).map(c => ({ v: c.id, l: esc(c.name), on: !want.length || want.includes(c.id) })),
-                'Which note types print'); })()
-          : off('All types', 'Only order notes have types', 'dk-tb-dd'));
         bits.push(DK_BG_PARTS.includes(p)
           ? (() => { const cur = dkBlockStyle(d, p);
               return dd('style', (DK_BLOCK_STYLES.find(x => x[0] === cur) || [])[1] || 'None', true,
@@ -17268,7 +17302,7 @@ function dkLineRows(d) {
   for (const k of order) {
     const ex = dkExtraOf(d, k);
     if (!ex && k === 'items') { bodyRows().forEach(r => rows.push(r)); continue; }
-    const label = ex ? (ex.kind === 'gap' ? 'Blank line' : 'Divider')
+    const label = ex ? (ex.kind === 'gap' ? 'Blank line' : ex.kind === 'text' ? (ex.text || 'Text line') : 'Divider')
       : (DK_PARTS[k] || {}).label || k;
     if (!ex && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
     rows.push({ k, parts: [{ k, label }] });
@@ -17305,12 +17339,24 @@ function dkAddMenu(d, dd) {
   // Listed the way the docket reads: its own lines top to bottom, the lines
   // inside the items block, then the elements it can be given.
   const inBlock = ['course', 'subs', 'seats', 'notes', 'ordernotes', 'allergies', 'vip'];
-  const keys = DOCKET_LINE_ORDER.filter(k => k !== 'items' && !DK_OPT_PARTS.includes(k))
+  // Header is gone from here: it was never POS data, just a line the venue
+  // types into — which is what "+ Text line" makes, as many as you like
+  // (owner, Aug '26). Existing header text migrates to one of those.
+  const keys = DOCKET_LINE_ORDER.filter(k => k !== 'items' && k !== 'header' && !DK_OPT_PARTS.includes(k))
     .concat(['divider']).concat(inBlock).concat(['footrule']).concat(DK_OPT_PARTS)
     .filter((k, i, a) => a.indexOf(k) === i && (k === 'divider' || DK_PARTS[k]));
-  return dd('addback', 'Elements', true,
-    keys.map(k => ({ v: k, l: k === 'divider' ? 'Divider' : DK_PARTS[k].label, on: isOn(k) })),
-    'What the docket carries');
+  // Order notes bring their types with them, indented under the line they
+  // belong to: everything about them answers in one place instead of a second
+  // dropdown somewhere else in the bar (owner, Aug '26).
+  const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
+  const items = [];
+  keys.forEach(k => {
+    items.push({ v: k, l: k === 'divider' ? 'Divider' : DK_PARTS[k].label, on: isOn(k) });
+    if (k === 'ordernotes' && isOn(k)) (state.noteCategories || []).forEach(c =>
+      items.push({ v: 'notetype:' + c.id, on: !want.length || want.includes(c.id),
+        l: `<span class="dk-mi-l dk-mi-sub">${esc(c.name)}</span>` }));
+  });
+  return dd('addback', 'Elements', true, items, 'What the docket carries');
 }
 function dkLinesMenu(d, dd) {
   // The call-away slip is its own paper: while one of ITS lines is picked the
@@ -17422,6 +17468,7 @@ function dkToolbar(d) {
       ${dd('spacing', 'Whole docket ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for the whole docket')}
       ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
+      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="text">+ Text line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>`;
 
@@ -17437,9 +17484,10 @@ function dkToolbar(d) {
       <button type="button" class="dk-tb-btn" data-act="dk-hide-line" data-key="showRule">${ACT_TRASH_SVG}</button>` };
     }
     if (ex) {
-      return { name: ex.kind === 'gap' ? 'Blank line' : 'Divider', bits: `
+      return { name: ex.kind === 'gap' ? 'Blank line' : ex.kind === 'text' ? 'Text line' : 'Divider', bits: `
       ${ex.kind === 'rule' ? dd('rulestyle', (DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed', true,
         DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (ex.style || 'dashed') === v })), 'Divider style') : ''}
+      ${ex.kind === 'text' ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="dkText:${state.dkPart}">${ACT_PENCIL_SVG}</button>` : ''}
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>
       <button type="button" class="dk-tb-btn" data-act="dk-del-line">${ACT_TRASH_SVG}</button>` };
@@ -28291,6 +28339,10 @@ function bindEvents() {
       else if (f === 'docketRoundWord') setDocketOpt('roundWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderWord') setDocketOpt('orderWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderNoteWord') setDocketOpt('orderNoteWord', sampleEditInput.value.replace(/^\s+/, ''));
+      else if (f.startsWith('dkText:')) {
+        const id = f.slice(7), v = sampleEditInput.value;
+        setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id ? { ...x, text: v } : x));
+      }
       else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
     });
   }
@@ -29667,6 +29719,17 @@ function handleActClick(el, e) {
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
+        else if (m === 'addback' && v.startsWith('notetype:')) {
+          const id = v.slice(9);
+          const cats = (state.noteCategories || []).map(c => c.id);
+          const cur = Array.isArray(docketCfg().noteTypes) && docketCfg().noteTypes.length
+            ? docketCfg().noteTypes.slice() : cats.slice();
+          const i = cur.indexOf(id);
+          if (i >= 0) cur.splice(i, 1); else cur.push(id);
+          // Every type ticked is the same as none: store the empty list so a
+          // type the venue adds later still prints.
+          setDocketOpt('noteTypes', cats.every(c => cur.includes(c)) ? [] : cur);
+        }
         else if (m === 'addback') {
           const dc = docketCfg();
           const inOrder = docketLineOrder(dc);
@@ -29693,6 +29756,15 @@ function handleActClick(el, e) {
             state.dkSel = [v]; state.dkPart = v;
             setDocketOpt('topOrder', order);
           }
+        }
+        // These four were written once and then lost when the Elements menu was
+        // rewritten around them — the menus stayed on screen and picking from
+        // them did nothing (owner, Aug '26: "cant change divider to dotted").
+        else if (m === 'dividerstyle') { state.dkMenu = null; setDocketOpt('ruleStyle', v); }
+        else if (m === 'footrulestyle') { state.dkMenu = null; setDocketOpt('footRuleStyle', v); }
+        else if (m === 'rulestyle') {
+          const id = state.dkPart; state.dkMenu = null;
+          setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id ? { ...x, style: v } : x));
         }
         else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'style') {

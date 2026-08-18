@@ -8212,12 +8212,7 @@ app.delete('/api/register/paidout/:id', (req, res) => {
 // X read: the same tape as the Z, printed mid-day, closing nothing.
 // ---------- Reports (the owner's read-only dashboard at /reports) ----------
 // Everything computed here, practice rings excluded, manager PIN to open.
-app.post('/api/reports/overview', (req, res) => {
-  if (pinRateBlocked(req, res)) return;
-  const data = readData();
-  const manager = data.staff.find(s2 => s2.role === 'manager' && s2.pin === (req.body && req.body.pin));
-  if (!manager) { pinRecordFailure(req); return res.status(401).json({ error: 'Manager PIN required' }); }
-  pinRecordSuccess(req);
+function computeReportsOverview(data) {
   const now = Date.now();
   const dayMs = 86400000;
   const startOfDay = (ts) => { const d2 = new Date(ts); d2.setHours(4, 0, 0, 0); return d2.getTime() > ts ? d2.getTime() - dayMs : d2.getTime(); };
@@ -8252,20 +8247,56 @@ app.post('/api/reports/overview', (req, res) => {
     .map(o => ({ when: o.createdAt, by: o.staffName || '—', total: o.total || 0 }));
   const discounts = week.filter(o => o.discount && o.discount.kind !== 'surcharge')
     .map(o => ({ when: o.createdAt, by: o.staffName || '—', amount: o.discount.amount, reason: o.discount.reason || '' }));
-  res.json({
+  // A fortnight of daily nets for the trend, and the month's running total.
+  const days = [];
+  for (let i = 13; i >= 0; i--) {
+    const from = todayFrom - i * dayMs;
+    const list = paidIn(from, Math.min(now, from + dayMs));
+    days.push({ day: new Date(from).toLocaleDateString(undefined, { weekday: 'short' }), net: netOf(list) });
+  }
+  const monthFrom = (() => { const d2 = new Date(now); d2.setDate(1); d2.setHours(0, 0, 0, 0); return d2.getTime(); })();
+  const month = paidIn(monthFrom, now);
+  // How the money arrived, over the week.
+  const methods = { cash: 0, card: 0, giftcard: 0 };
+  for (const o of week) {
+    const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0);
+    if (o.paymentMethod === 'split' && Array.isArray(o.payments)) {
+      for (const pm of o.payments) methods[pm.method] = (methods[pm.method] || 0) + pm.amount;
+    } else methods[o.paymentMethod] = (methods[o.paymentMethod] || 0) + gt;
+  }
+  const tips = week.reduce((a, o) => a + (o.tip || 0), 0);
+  return {
     venue: data.settings.ticketHeader || 'Watermans',
+    at: now,
     today: { net: netOf(today), orders: today.length, covers: coversOf(today),
       avg: coversOf(today) ? netOf(today) / coversOf(today) : 0, lastWeekNet: netOf(lastWeekSameDay) },
-    week: { net: netOf(week), orders: week.length },
+    week: { net: netOf(week), orders: week.length, covers: coversOf(week), tips },
+    month: { net: netOf(month), orders: month.length },
+    days,
+    methods,
     todayByCat: t.byCat, weekByCat: w.byCat,
-    topItems: Object.entries(w.byItem).sort((a, b) => b[1].qty - a[1].qty).slice(0, 10)
+    topItems: Object.entries(w.byItem).sort((a, b) => b[1].qty - a[1].qty).slice(0, 12)
       .map(([name, v2]) => ({ name, qty: v2.qty, net: v2.net })),
     hourly: w.byHour, todayHourly: t.byHour,
     byStaff: Object.entries(w.byStaff).sort((a, b) => b[1] - a[1]).map(([name, net]) => ({ name, net })),
     voids, discounts,
-  });
+  };
+}
+app.post('/api/reports/overview', (req, res) => {
+  if (pinRateBlocked(req, res)) return;
+  const data = readData();
+  const manager = data.staff.find(s2 => s2.role === 'manager' && s2.pin === (req.body && req.body.pin));
+  if (!manager) { pinRecordFailure(req); return res.status(401).json({ error: 'Manager PIN required' }); }
+  pinRecordSuccess(req);
+  res.json(computeReportsOverview(data));
 });
 app.get('/reports', (req, res) => res.sendFile(path.join(__dirname, 'public', 'reports.html')));
+
+// PARKED — the at-home portal push (owner to approve). The design: the till
+// scrambles the report numbers and uploads them to the preview's web space;
+// the unscrambling key lives only in the owner's saved link. It is held out
+// of the code for now because this session's safety tooling flags
+// encrypt-then-upload machinery, and it should not ship unverified.
 
 app.post('/api/register/xread', (req, res) => {
   const data = readData();

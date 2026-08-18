@@ -6682,6 +6682,13 @@ app.put('/api/printer-stations/:id', (req, res) => {
   if (req.body.paperWidth !== undefined) station.paperWidth = req.body.paperWidth === '58' ? '58' : req.body.paperWidth === '76' ? '76' : '80';
   if (req.body.kind !== undefined) station.kind = req.body.kind === 'impact' ? 'impact' : 'thermal';
   if (req.body.docket !== undefined) station.docket = cleanStationDocket(req.body.docket);
+  // A saved design assigned to this station, stored by ID so editing the design
+  // updates every station wearing it.
+  if (req.body.docketDesign !== undefined) {
+    const id = req.body.docketDesign;
+    const known = (data.settings.docketDesigns || []).some(x => x && x.id === id);
+    station.docketDesign = known ? String(id) : null;
+  }
   if (receipts !== undefined) station.receipts = !!receipts;
   if (labels !== undefined) station.labels = !!labels;
   if (paused !== undefined) {
@@ -17205,7 +17212,6 @@ function renderPrintersDocketTab() {
   const d = docketCfg();
   const dl = d.layout || 'standard';
   return `
-    ${myDesignsStrip('docket')}
     ${(state.printerStations || []).length ? `
     <div class="settings-card wide" style="max-width:740px;">
       <div class="th" style="margin-bottom:8px;">Printer</div>
@@ -17214,6 +17220,20 @@ function renderPrintersDocketTab() {
         ${(state.printerStations || []).map(st => `
         <div class="pay-opt ${state.dkStation === st.id ? 'active' : ''}" style="flex:none;" data-act="dk-station" data-val="${st.id}">${esc(st.name)}</div>`).join('')}
       </div>
+      ${(() => {
+        // A saved design can be given to a station: it prints that design and
+        // inherits anything the design does not set (owner, Aug '26). Stored by
+        // ID, so editing the design updates every station wearing it.
+        const st = (state.printerStations || []).find(x => x.id === state.dkStation);
+        if (!st) return '';
+        const designs = state.settings.docketDesigns || [];
+        if (!designs.length) return `<div class="ts" style="margin-top:10px;">Save a design to assign one here</div>`;
+        return `<div class="pay-options" style="flex-wrap:wrap;margin:10px 0 0;">
+          <div class="pay-opt ${st.docketDesign ? '' : 'active'}" style="flex:none;" data-act="set-station-design" data-id="${st.id}" data-val="">Same as all</div>
+          ${designs.map(dz => `
+          <div class="pay-opt ${st.docketDesign === dz.id ? 'active' : ''}" style="flex:none;" data-act="set-station-design" data-id="${st.id}" data-val="${esc(dz.id)}">${esc(dz.name)}</div>`).join('')}
+        </div>`;
+      })()}
     </div>` : ''}
     <div class="settings-card wide" style="max-width:740px;">
       <div class="th" style="margin-bottom:8px;">Docket</div>
@@ -17223,6 +17243,18 @@ function renderPrintersDocketTab() {
           ${docketMini(v)}
           <span>${l}</span>
         </div>`).join('')}
+        ${/* A design you saved is a preset like any other — it was in a card of
+              its own above, so picking a docket meant looking in two places
+              (owner, Aug '26: "saved designs should appear in docket presets"). */''}
+        ${(state.settings.docketDesigns || []).map(dz => `
+        <div class="pay-opt" style="flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:10px 12px;position:relative;" data-act="apply-design" data-kind="docket" data-id="${esc(dz.id)}">
+          ${docketMini((dz.cfg || {}).layout === 'byseat' ? 'byseat' : 'standard')}
+          <span>${esc(dz.name)}</span>
+          <button type="button" class="delete-icon-btn" style="position:absolute;top:2px;right:2px;padding:2px 6px;" data-act="delete-design" data-kind="docket" data-id="${esc(dz.id)}">${ACT_TRASH_SVG}</button>
+        </div>`).join('')}
+        ${state.designNaming === 'docket'
+          ? `<div class="pay-opt" style="flex:none;padding:10px 12px;"><input id="design-name-input" type="text" maxlength="24" placeholder="name this design" style="width:130px;"></div>`
+          : `<div class="pay-opt" style="flex:none;display:flex;align-items:center;justify-content:center;min-width:130px;padding:10px 12px;border-style:dashed;" data-act="name-design" data-kind="docket"><span style="font-size:12px;font-weight:700;">+ Save this design</span></div>`}
       </div>
     </div>
     <div class="settings-card wide" style="max-width:740px;">
@@ -29818,6 +29850,15 @@ function handleActClick(el, e) {
       else if (act === 'set-station-paper') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.paperWidth = el.dataset.val; render(); schedulePsAutosave(); } }
       else if (act === 'set-station-kind') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; m.kind = el.dataset.val; render(); schedulePsAutosave(); } }
       else if (act === 'set-station-docket') { const m = state.printerStationModal; if (m) { [...document.querySelectorAll('.ps-ip-input')].forEach(inp => { m.ips[parseInt(inp.dataset.idx)] = inp.value; }); const bk = document.getElementById('printer-station-backup-input'); if (bk) m.backupIp = bk.value; const d = Object.assign({}, m.docket); if (el.dataset.val === 'inherit') delete d[el.dataset.key]; else d[el.dataset.key] = el.dataset.val; m.docket = Object.keys(d).length ? d : null; render(); } }
+      else if (act === 'set-station-design') {
+        const id = el.dataset.id, val = el.dataset.val || null;
+        const st = (state.printerStations || []).find(x => x.id === id);
+        if (st) st.docketDesign = val;
+        render();
+        api(`/api/printer-stations/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docketDesign: val }) })
+          .then(() => { state.toast = val ? 'Station design set.' : 'Station follows the main docket.'; render(); armToastTimer(2000); })
+          .catch(() => { state.toast = 'Could not set the station design.'; render(); });
+      }
       else if (act === 'dk-station') { state.dkSel = []; state.dkPart = null; state.dkStation = el.dataset.val === 'all' ? null : el.dataset.val; render(); }
       else if (act === 'set-docket-layout') { state.dkSel = []; state.dkPart = null; setDocketOpt('layout', el.dataset.val); }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }

@@ -8209,6 +8209,27 @@ app.delete('/api/register/paidout/:id', (req, res) => {
   writeData(data);
   res.json({ ok: true });
 });
+// X read: the same tape as the Z, printed mid-day, closing nothing.
+app.post('/api/register/xread', (req, res) => {
+  const data = readData();
+  const closes = data.registerCloses || [];
+  const fromTs = closes.length ? closes[closes.length - 1].periodEnd : 0;
+  const summary = computePeriodSummary(data, fromTs, Date.now());
+  if (!(data.printerStations || []).some(s2 => s2.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
+  printing.printZReport(data, { ...summary, periodStart: fromTs }, 'x');
+  logAudit(data, req.header('X-Staff-Name') || '', 'Printed X read');
+  writeData(data);
+  res.json({ ok: true });
+});
+// Reprint a past Z read from its stored record.
+app.post('/api/register/closes/:id/print', (req, res) => {
+  const data = readData();
+  const rec = (data.registerCloses || []).find(c => String(c.id) === String(req.params.id));
+  if (!rec) return res.status(404).json({ error: 'No such close' });
+  if (!(data.printerStations || []).some(s2 => s2.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
+  printing.printZReport(data, rec, 'reprint');
+  res.json({ ok: true });
+});
 // The float: what the drawer starts the period with.
 app.put('/api/register/float', (req, res) => {
   const data = readData();
@@ -15686,7 +15707,7 @@ function renderRegisterAdmin() {
   const cashDiff = !isNaN(cashCounted) ? cashCounted - (cur.expectedCash !== undefined ? cur.expectedCash : cur.cashNet) : null;
   return `
   <div class="settings-card">
-    <div class="th" style="margin-bottom:4px;">Current period</div>
+    <div class="th" style="margin-bottom:4px;display:flex;align-items:center;">Current period<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-xread">${SYS_PRINTER_SVG} X read</button></div>
     <div class="ts" style="margin-bottom:14px;">Since ${cur.periodStart ? fmtDate(cur.periodStart) + ' ' + fmtTime(cur.periodStart) : 'the beginning'}</div>
     <div class="detail-line"><span>Orders</span><span>${cur.orderCount}</span></div>
     <div class="detail-line"><span>Voided</span><span>${cur.voidCount}</span></div>
@@ -15759,6 +15780,7 @@ function renderRegisterAdmin() {
         <div class="t1">${fmtDate(c.closedAt)} ${fmtTime(c.closedAt)} — ${c.closedBy}</div>
         <div class="t2">${c.orderCount} orders · net ${money(c.netTotal)}${c.cashDiff !== null ? ` · cash ${c.cashDiff >= 0 ? '+' : ''}${money(c.cashDiff)}` : ''}</div>
       </div>
+      <button class="icon-sq" data-act="reprint-z" data-id="${c.id}" aria-label="Reprint Z">${SYS_PRINTER_SVG}</button>
     </div>
   `).join('')}
   `;
@@ -30920,6 +30942,21 @@ function handleActClick(el, e) {
         });
       }
       else if (act === 'edit-float') { state.registerFloatEdit = true; render(); const i = document.getElementById('register-float-input'); if (i) { i.focus(); i.select(); } }
+      else if (act === 'print-xread') {
+        (async () => {
+          try { await api('/api/register/xread', { method: 'POST' }); state.toast = 'X read sent to the printer.'; }
+          catch (e2) { state.toast = e2.message || 'Could not print the X read.'; }
+          render(); armToastTimer(2800);
+        })();
+      }
+      else if (act === 'reprint-z') {
+        const id = el.dataset.id;
+        (async () => {
+          try { await api('/api/register/closes/' + id + '/print', { method: 'POST' }); state.toast = 'Z read reprinting.'; }
+          catch (e2) { state.toast = e2.message || 'Could not reprint it.'; }
+          render(); armToastTimer(2800);
+        })();
+      }
       else if (act === 'covers-inc') { incCovers(); }
       else if (act === 'covers-dec') { decCovers(); }
       else if (act === 'cycle-seat') { cycleSeat(parseInt(el.dataset.idx)); }

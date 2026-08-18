@@ -12941,6 +12941,15 @@ async function confirmPayment() {
       state.giftCardAppliedCode = '';
       state.mobileCartOpen = false;
       state.toast = `Tab closed — ${money(order.grandTotal)} paid`;
+      // Paid means done: the table goes back to the floor rather than the till
+      // sitting on a settled table until someone thinks to leave it (owner,
+      // Aug '26). Takeaway has no table to give back, so it stays put.
+      if (state.orderType === 'dine-in' && state.table) {
+        releaseTableLock(state.table);
+        state.table = null;
+        state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
+        state.showTablePicker = true;
+      }
       await refreshOrders();
       await refreshSummary();
       render();
@@ -17055,6 +17064,16 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   bits.push(p && meta
     ? `<button type="button" class="dk-tb-btn${dkUnderOn(d, p) ? ' active' : ''}" data-act="toggle-docket-under" data-key="${p}" style="text-decoration:underline;font-weight:700;">U</button>`
     : off('<span style="text-decoration:underline;font-weight:700;">U</span>', why));
+  // Line spacing sits with the other paragraph tools, where a word processor
+  // puts it (owner, Aug '26) — not down in the line's own actions.
+  if (!p || !meta) bits.push(off(DKT_SPACING_SVG, why, 'dk-tb-dd dk-tb-ico'));
+  else if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG, 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
+  else {
+    const cur = (d.gaps || {})[p];
+    bits.push(dd('linespacing', DKT_SPACING_SVG + (cur ? `<b>${esc(cur)}</b>` : ''), true,
+      [['auto', 'Same'], ['1', '1'], ['1.5', '1.5'], ['2', '2']].map(([v, l]) =>
+        ({ v, l, on: v === 'auto' ? !cur : cur === v })), 'Space under this line', '', true));
+  }
   return bits.join('\n      ');
 }
 function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN) {
@@ -17108,13 +17127,6 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // Spacing, for this line only. ESC 3 can be sent mid-docket, so one
         // line really can be given more room than the rest; "Same" clears the
         // override and it rides the docket's own spacing again.
-        if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG, 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
-        else {
-          const cur = (d.gaps || {})[p];
-          bits.push(dd('linespacing', DKT_SPACING_SVG + (cur ? `<b>${esc(cur)}</b>` : ''), true,
-            [['auto', 'Same'], ['1', '1'], ['1.5', '1.5'], ['2', '2']].map(([v, l]) =>
-              ({ v, l, on: v === 'auto' ? !cur : cur === v })), 'Space under this line', '', true));
-        }
         if (p === 'footrule') {
           const cur = dkRuleStyle(d.footRuleStyle || d.ruleStyle);
           bits.push(dd('footrulestyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
@@ -17355,7 +17367,7 @@ function dkToolbar(d) {
         { v: 'B', l: `${cols(true)} per line`, on: d.font === 'B' },
       ], 'Characters per line')}
       ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : ''}
-      ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing', '', true)}
+      ${dd('spacing', 'Whole docket ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for the whole docket')}
       ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
@@ -17382,16 +17394,22 @@ function dkToolbar(d) {
     }
     if (!meta) return null;
     const sel = dkSelection();
-    // Which row the pick prints on, and how many lines an edit will touch.
-    const rowOf = (k) => {
+    // The row as it PRINTS: "Table · Covers", the picked one marked. It used
+    // to read "Covers · on Table", which named a relationship rather than the
+    // line, and said nothing about the order the two come out in — which the
+    // arrows beside it change (owner, Aug '26).
+    const rowParts = (k) => {
       const order = docketLineOrder(d).filter(x => x !== 'items');
-      let lead = k;
-      for (let i = order.indexOf(k); i > 0 && dkJoinedOn(d, order[i]); i--) lead = order[i - 1];
-      return (DK_PARTS[lead] || {}).label || '';
+      let i = order.indexOf(k);
+      if (i < 0) return [k];
+      while (i > 0 && dkJoinedOn(d, order[i])) i--;
+      const out = [order[i]];
+      for (let x = i + 1; x < order.length && dkJoinedOn(d, order[x]); x++) out.push(order[x]);
+      return out;
     };
-    const row = rowOf(p);
+    const parts = rowParts(p);
     const name = sel.length > 1 ? sel.length + ' lines'
-      : meta.label + (row && row !== meta.label ? ' · on ' + row : '');
+      : parts.map(k => (DK_PARTS[k] || {}).label || k).join(' · ');
     return { name, bits: dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN) };
   })();
 
@@ -22061,9 +22079,15 @@ function openTransferPicker() { state.transferMode = true; openTablePicker(); }
 // with the switch/logout — "Close table" additionally clears the setup.
 function offerCloseEmptyTable(next) {
   const t = findTableById(state.table);
-  const hasOrder = t && state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+  const order = t && state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+  // A ticket with items on it is a live table — leave it alone. A ticket whose
+  // items have all been voided or moved off is a ZERO bill nobody has paid,
+  // and it used to hold the table open for the rest of service because "has an
+  // order" was all this asked (owner, Aug '26).
+  const liveOrder = !!(order && (order.items || []).length);
   const setUp = (state.covers || 0) > 0 || (state.allergies || []).length || state.vipType;
-  if (!t || hasOrder || (state.cart || []).length || !setUp) { next(); return; }
+  const emptyTicket = !!(order && !(order.items || []).length);
+  if (!t || liveOrder || (state.cart || []).length || (!setUp && !emptyTicket)) { next(); return; }
   openConfirm({
     message: `Table ${esc(String(t.label))} has nothing ordered — close it?`,
     confirmLabel: 'Close table',
@@ -22071,12 +22095,18 @@ function offerCloseEmptyTable(next) {
     onCancel: next,
   }, async () => {
     try {
+      // The empty ticket goes with the table: nothing was ordered and no money
+      // moved, so there is nothing to approve — but it is written to the log.
+      if (emptyTicket) await api(`/api/orders/${order.id}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Nothing ordered', note: 'Closed with the table', staffName: (state.currentStaff || {}).name || '' }) });
       await saveTableCovers(t.id, 0);
       await saveTableAllergies(t.id, []);
       await saveTableVip(t.id, '');
       releaseTableLock(t.id);
     } catch (e) {}
     state.covers = 0; state.allergies = []; state.vipType = '';
+    state.openOrderId = null;
+    await refreshOrders();
     next();
   });
 }

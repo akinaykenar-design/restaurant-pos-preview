@@ -5222,6 +5222,48 @@ app.put('/api/settings', (req, res) => {
     const src = Array.isArray(req.body.adminPins) ? req.body.adminPins : [];
     data.settings.adminPins = [...new Set(src.filter(k => typeof k === 'string' && k.length <= 32))].slice(0, 8);
   }
+  // The call-away slip's OWN design. It used to read the docket's config, so
+  // designing one moved the other and the slip could carry nothing the docket
+  // did not (owner, Aug '26).
+  if (req.body.callaway !== undefined && typeof req.body.callaway === 'object' && req.body.callaway) {
+    const ca = req.body.callaway, cur = data.settings.callaway || {};
+    const NATIVE = ['callaway', 'cacourse', 'catable', 'catime'];
+    const OPT = ['covers', 'orderno', 'staff', 'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
+    const pickOne = (v, allowed, def) => allowed.includes(v) ? v : def;
+    const src = (k) => (ca[k] !== undefined ? ca[k] : cur[k]) || {};
+    const extras = (() => {
+      const e = ca.extras !== undefined ? ca.extras : (cur.extras || []);
+      if (!Array.isArray(e)) return [];
+      return e.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
+        .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
+          text: x.kind !== 'rule' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
+          style: ['dashed', 'dotted', 'solid'].includes(x.style) ? x.style : null }));
+    })();
+    const KEYS = NATIVE.concat(OPT).concat(extras.map(x => x.id));
+    const flags = (o) => { const out = {}; KEYS.forEach(k => { if (o && o[k]) out[k] = true; }); return out; };
+    const order = (() => {
+      const raw = ca.order !== undefined ? ca.order : cur.order;
+      if (!Array.isArray(raw) || !raw.length || raw.length > 30) return null;
+      const seen = [];
+      raw.forEach(k => { if (KEYS.includes(k) && !seen.includes(k)) seen.push(k); });
+      return seen.length ? seen : null;
+    })();
+    data.settings.callaway = {
+      order,
+      extras,
+      banner: String(ca.banner !== undefined ? ca.banner : (cur.banner !== undefined ? cur.banner : 'CALL AWAY')).slice(0, 24),
+      font: pickOne(ca.font, ['A', 'B'], cur.font || 'A'),
+      fontScale: pickOne(ca.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'large'),
+      density: pickOne(ca.density, ['1', '1.5', '2'], cur.density || '1'),
+      show: (() => { const o = src('show'), out = {}; KEYS.forEach(k => { if (o[k] === false) out[k] = false; }); return out; })(),
+      sizes: (() => { const o = src('sizes'), out = {}; KEYS.forEach(k => { const v = o[k]; if (Number.isInteger(v) && v >= 1 && v <= 8) out[k] = v; }); return out; })(),
+      align: (() => { const o = src('align'), out = {}; KEYS.forEach(k => { if (['left', 'center', 'right'].includes(o[k])) out[k] = o[k]; }); return out; })(),
+      gaps: (() => { const o = src('gaps'), out = {}; KEYS.forEach(k => { if (['1', '1.5', '2'].includes(o[k])) out[k] = o[k]; }); return out; })(),
+      blockStyle: (() => { const o = src('blockStyle'), out = {}; KEYS.forEach(k => { if (['invert', 'border', 'plain'].includes(o[k])) out[k] = o[k]; }); return out; })(),
+      words: (() => { const o = src('words'), out = {}; KEYS.forEach(k => { if (typeof o[k] === 'string') out[k] = o[k].replace(/^\s+/, '').slice(0, 16); }); return out; })(),
+      red: flags(src('red')), bold: flags(src('bold')), under: flags(src('under')),
+    };
+  }
   if (req.body.receipt !== undefined && typeof req.body.receipt === 'object' && req.body.receipt) {
     const allowed = ['express', 'grouped', 'classic', 'bigtotal'];
     const cur = data.settings.receipt || {};
@@ -8776,6 +8818,13 @@ function dkSizeEm(n, d) {
 }
 // Before the split, one red switch ('callaway') coloured the banner, the course
 // AND the table. Those three inherit it until each is set on its own.
+// The slip's own ink: the banner, course and table shared one switch before
+// each was given its own, so those three inherit it until set.
+function caRedOn(c, k) {
+  const r = c.red || {};
+  if (r[k] !== undefined) return !!r[k];
+  return (k === 'cacourse' || k === 'catable') ? !!r.callaway : false;
+}
 function caRed(d, k) {
   const r = d.red || {};
   if (r[k] !== undefined) return !!r[k];
@@ -9681,36 +9730,117 @@ async function deleteDesign(kind, id) {
 // The call-away slip as its OWN paper in the designer — mirrors printing.js
 // callAwaySlip (rail-clip gap, loud banner, course, table, time). The banner
 // is the designable 'callaway' part: tap it, toggle red.
-function buildCallAwaySample() {
-  const d = docketCfg();
-  const word = d.tableWord;
-  const t = word === undefined ? 'TABLE 12' : ({ TABLE: 'TABLE 12', Table: 'Table 12', T: 'T 12', '#': '#12', none: '12' }[word] || 'TABLE 12');
+// The call-away slip's own config, its own elements, its own everything. It
+// used to read the docket's — one font, one size ladder, one order — so
+// designing either moved both, and the slip could carry nothing the docket
+// did not (owner, Aug '26, asked four times).
+const CA_DEFAULTS = {
+  order: null, show: {}, sizes: {}, align: {}, red: { callaway: true },
+  bold: {}, under: {}, blockStyle: {}, gaps: {}, extras: [],
+  font: 'A', fontScale: 'large', density: '1', banner: 'CALL AWAY', words: {},
+};
+function caCfg() {
+  const c = Object.assign({}, CA_DEFAULTS, (state.settings && state.settings.callaway) || {});
+  ['show', 'sizes', 'align', 'red', 'bold', 'under', 'blockStyle', 'gaps', 'words']
+    .forEach(k => { c[k] = Object.assign({}, CA_DEFAULTS[k], c[k] || {}); });
+  if (!Array.isArray(c.extras)) c.extras = [];
+  return c;
+}
+function setCaOpts(patch) {
+  const next = Object.assign({}, caCfg(), patch);
+  state.settings.callaway = next;
+  render();
+  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callaway: next }) })
+    .then(s => { state.settings = s; })
+    .catch(() => { state.toast = 'Could not save the slip.'; render(); });
+}
+function setCaOpt(key, val) { setCaOpts({ [key]: val }); }
+// Everything the slip can carry: its own four, then the same facts the docket
+// can be given.
+const CA_NATIVE = ['callaway', 'cacourse', 'catable', 'catime'];
+const CA_OPT = ['covers', 'orderno', 'staff', 'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
+const CA_LABEL = { callaway: 'Banner', cacourse: 'Course', catable: 'Table', catime: 'Time',
+  covers: 'Covers', orderno: 'Order number', staff: 'Server', ordertype: 'Order type', guest: 'Guest',
+  booked: 'Booked for', area: 'Area', station: 'Station', date: 'Date', count: 'Item count', phone: 'Phone' };
+function caExtraOf(c, k) { return (c.extras || []).find(x => x && x.id === k) || null; }
+function caOrder(c) {
+  const known = (k) => CA_NATIVE.includes(k) || CA_OPT.includes(k) || caExtraOf(c, k);
+  const raw = c.order;
+  if (!Array.isArray(raw) || !raw.length) return CA_NATIVE.slice();
+  const out = [];
+  raw.forEach(k => { const nk = ({ table: 'catable', time: 'catime' })[k] || k; if (known(nk) && !out.includes(nk)) out.push(nk); });
+  return out.length ? out : CA_NATIVE.slice();
+}
+function caBaseSize(c) { return c.fontScale === 'xlarge' ? 3 : c.fontScale === 'large' ? 2 : 1; }
+function caSizeEm(n, c) {
+  const base = caBaseSize(c);
+  return ((n || base) / base).toFixed(3) + 'em';
+}
+// A typed word on a slip line: an inline field, empty meaning empty.
+function caWordSlot(c, k, dflt) {
+  const v = c.words[k] !== undefined ? c.words[k] : dflt;
+  return state.printEdit === 'caWord:' + k
+    ? sampleEditable('caWord:' + k, v, dflt || 'word', '')
+    : esc(v);
+}
+function caSample(k, c) {
   const course = ((courseInfo(2) || {}).name || 'Mains').toUpperCase();
-  // Each slip line carries its own size, alignment and red — the same grammar
-  // the docket's parts use, so the toolbar drives them identically.
-  const caStl = (k, extra) => {
-    const n = (d.sizes || {})[k] || dkBaseSize(d);
-    return ` style="font-size:${dkSizeEm(n, d)};line-height:1.3;text-align:${(d.align || {})[k] || 'center'};${extra || ''}"`;
+  const w = (kk, dflt) => (c.words[kk] !== undefined ? c.words[kk] : dflt);
+  const ctx = sampleDocketCtx();
+  switch (k) {
+    // The typed bits render as fields on the paper, the way the docket's do.
+    case 'callaway': return state.printEdit === 'caBanner'
+      ? sampleEditable('caBanner', c.banner === undefined ? 'CALL AWAY' : c.banner, 'CALL AWAY', '')
+      : esc(c.banner === undefined ? 'CALL AWAY' : c.banner);
+    case 'cacourse': return esc(course);
+    case 'catable': return esc(ctx.subLabel.toUpperCase());
+    case 'catime': return esc(ctx.timeLabel);
+    case 'covers': return caWordSlot(c, 'covers', '') + esc(ctx.covers + ' covers');
+    case 'orderno': return caWordSlot(c, 'orderno', '#') + esc(String(ctx.orderNo));
+    case 'staff': return caWordSlot(c, 'staff', '') + esc(ctx.staffName);
+    case 'ordertype': return esc(String(ctx.orderType || 'dine-in').toUpperCase());
+    case 'guest': return esc(ctx.guest);
+    case 'booked': return caWordSlot(c, 'booked', 'Booked ') + esc(ctx.booked);
+    case 'area': return esc(ctx.area);
+    case 'station': return esc(ctx.stationName);
+    case 'date': return esc(ctx.dateLabel);
+    case 'count': return esc(ctx.itemCount);
+    case 'phone': return esc(ctx.phone);
+    default: return '';
+  }
+}
+function buildCallAwaySample() {
+  const c = caCfg();
+  const base = caBaseSize(c);
+  const caStl = (k) => {
+    const n = (c.sizes || {})[k] || base;
+    const bs = (c.blockStyle || {})[k] || (k === 'callaway' ? 'invert' : 'plain');
+    return ` style="font-size:${caSizeEm(n, c)};line-height:${({ '1.5': 1.95, '2': 2.6 })[(c.gaps || {})[k]] || 1.3};`
+      + `text-align:${(c.align || {})[k] || 'center'};`
+      + `font-weight:${(c.bold || {})[k] || k === 'callaway' || k === 'cacourse' ? 800 : 400};`
+      + ((c.under || {})[k] ? 'text-decoration:underline;' : '')
+      + (caRedOn(c, k) ? 'color:#C0392B;' : '')
+      + (bs === 'invert' ? 'background:#111;color:#fff;padding:1px 8px;' : '')
+      + (bs === 'border' ? 'border-top:1.5px solid #000;border-bottom:1.5px solid #000;' : '')
+      + '"';
   };
-  // Off means GONE, the way it does on the docket — a struck-through ghost of
-  // a line that will not print is the preview showing paper the printer never
-  // produces (owner, Aug '26). The line list is the way back.
-  const caPart = (k, inner, extra) => {
-    const meta = DK_PARTS[k] || {};
-    if (meta.show && d[meta.show] === false) return '';
-    return `<div class="dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k, extra)}>${inner}</div>`;
-  };
-  // Sections render in the stored order — the printed slip follows the same
-  // list, so the preview stays WYSIWYG.
-  const parts = {
-    callaway: caPart('callaway', `<span style="display:inline-block;padding:2px 12px;font-weight:800;background:${caRed(d, 'callaway') ? '#C0392B' : '#111'};color:#fff;">CALL AWAY</span>`, 'padding:2px 0 4px;'),
-    cacourse: caPart('cacourse', esc(course), `font-weight:800;${caRed(d, 'cacourse') ? 'color:#C0392B;' : ''}`),
-    catable: caPart('catable', esc(t), `font-weight:700;${caRed(d, 'catable') ? 'color:#C0392B;' : ''}`),
-    catime: caPart('catime', '7:41 pm', caRed(d, 'catime') ? 'color:#C0392B;' : ''),
-  };
-  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}">
+  const row = (k, inner) =>
+    `<div class="dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"${caStl(k)}>${inner}</div>`;
+  const body = caOrder(c).map(k => {
+    const ex = caExtraOf(c, k);
+    if (ex) {
+      if (ex.kind === 'rule') return dkRuleHtml(ex.style || 'dashed',
+        'dk-part' + (dkIsSelected(k) ? ' dk-sel' : ''), ` data-act="dk-pick-part" data-part="${k}" data-slip="1"`);
+      const inner = sampleEditable('caText:' + k, ex.text || '', '', '', true);
+      return inner ? row(k, inner) : `<div class="print-gap dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"></div>`;
+    }
+    if ((c.show || {})[k] === false) return '';
+    const inner = caSample(k, c);
+    return inner ? row(k, inner) : '';
+  }).filter(Boolean).join('\n    ');
+  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}${c.font === 'B' ? ' dk-font-b' : ''}">
     <div class="pp-railgap"></div>
-    ${callawayOrder(d).map(k => parts[k]).join('\n    ')}
+    ${body}
   </div>`;
 }
 function sampleDocketCtx() {
@@ -17332,8 +17462,16 @@ function dkLineRows(d) {
 // is selected — adding one element used to mean tapping Done before the next.
 function dkAddMenu(d, dd) {
   if (state.dkStation) return '';
-  // The slip's four lines are its whole design — there is nothing to add to it.
-  if (state.dkSlip) return `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="The slip has these four lines">Elements</button>`;
+  // The slip has its own inventory now — its four lines plus the same facts
+  // the docket can be given, each ticked when it is on ITS paper.
+  if (state.dkSlip) {
+    const c = caCfg();
+    const on = caOrder(c);
+    const keys = CA_NATIVE.concat(CA_OPT);
+    return dd('addback', 'Elements', true, keys.map(k => ({
+      v: 'ca:' + k, l: CA_LABEL[k] || k, on: on.includes(k) && (c.show || {})[k] !== false,
+    })), 'What the slip carries');
+  }
   const on = docketLineOrder(d);
   // A tick-list of everything the docket can carry, not a list of what is
   // missing: an element you just added stayed on the menu's conscience but
@@ -17375,11 +17513,13 @@ function dkLinesMenu(d, dd) {
   // being shown the table docket's lines was the bar answering about the wrong
   // piece of paper (owner, Aug '26).
   if (state.dkSlip) {
-    const seq = callawayOrder(d);
-    return dd('lines', `${seq.length} lines`, true, seq.map((k, i) => ({
-      v: k, on: dkIsSelected(k),
-      l: `<span class="dk-mi-n">${i + 1}</span><span class="dk-mi-l">${esc((DK_PARTS[k] || {}).label || k)}</span>`,
-    })), 'Call away slip');
+    const c = caCfg();
+    const seq = caOrder(c).filter(k => (c.show || {})[k] !== false);
+    return dd('lines', `${seq.length} lines`, true, seq.map((k, i) => {
+      const ex = caExtraOf(c, k);
+      return { v: k, on: dkIsSelected(k),
+        l: `<span class="dk-mi-n">${i + 1}</span><span class="dk-mi-l">${esc(ex ? (ex.kind === 'rule' ? 'Divider' : (ex.text || 'Line')) : (CA_LABEL[k] || k))}</span>` };
+    }), 'Call away slip');
   }
   const rows = dkLineRows(d);
   if (!rows.length) return '';
@@ -17393,9 +17533,22 @@ function dkLinesMenu(d, dd) {
   })));
   return dd('lines', `${rows.length} lines`, true, entries, 'Lines');
 }
-function dkToolbar(d) {
+// Which paper the bar is pointed at. Every keyed setting — size, alignment,
+// ink, weight, underline, background, spacing — goes to the slip's own config
+// when a slip line is picked, and the docket's otherwise. Without this the bar
+// LOOKED like it was editing the slip and wrote to the docket (owner, Aug '26).
+function dkKeyed(group, key, val) {
+  if (state.dkSlip) { const c = caCfg(); setCaOpt(group, Object.assign({}, c[group] || {}, { [key]: val })); return; }
+  const d = docketCfg();
+  setDocketOpt(group, Object.assign({}, d[group] || {}, { [key]: val }));
+}
+function dkPaper() { return state.dkSlip ? caCfg() : docketCfg(); }
+function dkToolbar(dIn) {
+  let d = dIn;
   const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
   const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
+  // The slip's own settings while one of its lines is picked.
+  if (state.dkSlip) d = caCfg();
   const p = !station && state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
   const meta = p ? DK_PARTS[p] : null;
   const shown = meta && meta.show ? d[meta.show] !== false : true;
@@ -17479,13 +17632,47 @@ function dkToolbar(d) {
       ${station ? dd('spacing', 'Spacing ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for this station') : ''}
       ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
-      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="text">+ Line</button>
-      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>`;
+      ${state.dkSlip
+        ? `<button type="button" class="dk-tb-btn" data-act="ca-add-line">+ Line</button>`
+        : `<button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="text">+ Line</button>`}
+      ${state.dkSlip ? '' : `<button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>`}`;
 
   // Row 2: the picked line. Inserted lines aren't in DK_PARTS, so they are
   // read from the selection itself rather than from `p`.
   const ex = state.dkPart ? dkExtraOf(d, state.dkPart) : null;
   const lineRow = (() => {
+    // A slip line answers with the SLIP's actions: its own trash, its own
+    // arrows, its own wording. The docket's would edit the wrong paper.
+    if (state.dkSlip) {
+      const c = caCfg(), k = state.dkPart;
+      const ex = caExtraOf(c, k);
+      const seq = caOrder(c), i = seq.indexOf(k);
+      const name = ex ? (ex.kind === 'rule' ? 'Divider' : (ex.text || 'Line')) : (CA_LABEL[k] || k);
+      const bitsCa = [];
+      bitsCa.push(`<button type="button" class="dk-tb-btn" data-act="ca-remove-line">${ACT_TRASH_SVG}</button>`);
+      const CAF = { callaway: 'caBanner' };
+      const f = ex ? 'caText:' + k : (CAF[k] || (['covers', 'orderno', 'staff', 'booked'].includes(k) ? 'caWord:' + k : null));
+      bitsCa.push(f
+        ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${f}">${ACT_PENCIL_SVG}</button>`
+        : `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="No wording on this line">${ACT_PENCIL_SVG}</button>`);
+      bitsCa.push(ex
+        ? dd('rulestyle', ex.kind === 'rule' ? ((DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed') : 'No line', true,
+            [{ v: 'none', l: 'No line', on: ex.kind !== 'rule' }].concat(
+              DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: ex.kind === 'rule' && (ex.style || 'dashed') === v }))), 'Line style')
+        : `<button type="button" class="dk-tb-btn dk-tb-dd dk-tb-off" data-act="dk-why" data-why="Only an added line draws a rule">No line</button>`);
+      {
+        const cur = (c.blockStyle || {})[k] || (k === 'callaway' ? 'invert' : 'plain');
+        bitsCa.push(dd('style', (DK_BLOCK_STYLES.find(x => x[0] === cur) || [])[1] || 'None', true,
+          DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Background'));
+      }
+      bitsCa.push(i > 0
+        ? `<button type="button" class="dk-tb-btn" data-act="ca-move-line" data-dir="up">${DKT_UP_SVG}</button>`
+        : `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Already at the top">${DKT_UP_SVG}</button>`);
+      bitsCa.push(i >= 0 && i < seq.length - 1
+        ? `<button type="button" class="dk-tb-btn" data-act="ca-move-line" data-dir="down">${DKT_DOWN_SVG}</button>`
+        : `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Already at the bottom">${DKT_DOWN_SVG}</button>`);
+      return { name, bits: bitsCa.join('\n      ') };
+    }
     if (state.dkPart === 'divider') {
       const cur = dkRuleStyle(d.ruleStyle);
       return { name: 'Divider', bits: `
@@ -28348,6 +28535,15 @@ function bindEvents() {
       else if (f === 'docketRoundWord') setDocketOpt('roundWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderWord') setDocketOpt('orderWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderNoteWord') setDocketOpt('orderNoteWord', sampleEditInput.value.replace(/^\s+/, ''));
+      else if (f === 'caBanner') setCaOpt('banner', sampleEditInput.value);
+      else if (f.startsWith('caWord:')) {
+        const k = f.slice(7);
+        setCaOpt('words', Object.assign({}, caCfg().words || {}, { [k]: sampleEditInput.value.replace(/^\s+/, '') }));
+      }
+      else if (f.startsWith('caText:')) {
+        const id = f.slice(7), v = sampleEditInput.value;
+        setCaOpt('extras', (caCfg().extras || []).map(x => x.id === id ? { ...x, text: v } : x));
+      }
       else if (f.startsWith('dkText:')) {
         const id = f.slice(7), v = sampleEditInput.value;
         setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id ? { ...x, text: v } : x));
@@ -29541,14 +29737,16 @@ function handleActClick(el, e) {
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }
       else if (act === 'toggle-docket-under') {
-        const dc = docketCfg(), on = !dkUnderOn(dc, el.dataset.key), next = Object.assign({}, dc.under || {});
+        const dc = dkPaper(), on = !(state.dkSlip ? !!(dc.under || {})[el.dataset.key] : dkUnderOn(dc, el.dataset.key));
+        const next = Object.assign({}, dc.under || {});
         dkSelection().forEach(k => { next[k] = on; });
-        setDocketOpt('under', next);
+        if (state.dkSlip) setCaOpt('under', next); else setDocketOpt('under', next);
       }
       else if (act === 'toggle-docket-bold') {
-        const dc = docketCfg(), on = !dkBoldOn(dc, el.dataset.key), next = Object.assign({}, dc.bold || {});
+        const dc = dkPaper(), on = !(state.dkSlip ? !!(dc.bold || {})[el.dataset.key] : dkBoldOn(dc, el.dataset.key));
+        const next = Object.assign({}, dc.bold || {});
         dkSelection().forEach(k => { next[k] = on; });
-        setDocketOpt('bold', next);
+        if (state.dkSlip) setCaOpt('bold', next); else setDocketOpt('bold', next);
       }
       else if (act === 'dk-add-line') {
         const d = docketCfg();
@@ -29571,6 +29769,25 @@ function handleActClick(el, e) {
       else if (act === 'dk-hide-line') {
         state.dkSel = []; state.dkPart = null;
         setDocketOpt(el.dataset.key, false);
+      }
+      else if (act === 'ca-remove-line') {
+        const c = caCfg(), k = state.dkPart;
+        state.dkSel = []; state.dkPart = null;
+        setCaOpts({ order: caOrder(c).filter(x => x !== k), extras: (c.extras || []).filter(x => x.id !== k) });
+      }
+      else if (act === 'ca-move-line') {
+        const c = caCfg(), step = el.dataset.dir === 'up' ? -1 : 1;
+        const seq = caOrder(c).slice(), i = seq.indexOf(state.dkPart);
+        const j = i + step;
+        if (i < 0 || j < 0 || j >= seq.length) return;
+        [seq[i], seq[j]] = [seq[j], seq[i]];
+        setCaOpt('order', seq);
+      }
+      else if (act === 'ca-add-line') {
+        const c = caCfg(), id = 'ca' + Date.now().toString(36);
+        state.dkPart = id; state.dkSlip = true; state.dkSel = [id]; state.dkMenu = null;
+        setCaOpts({ extras: (c.extras || []).concat([{ id, kind: 'text', text: '', style: null }]),
+          order: caOrder(c).concat([id]) });
       }
       else if (act === 'dk-del-line') {
         const d = docketCfg(), k = state.dkPart;
@@ -29605,22 +29822,22 @@ function handleActClick(el, e) {
       else if (act === 'set-docket-layout') { state.dkSel = []; state.dkPart = null; setDocketOpt('layout', el.dataset.val); }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') {
-        const cur = docketCfg().red || {}, f = el.dataset.force;
-        const on = f === undefined ? !cur[el.dataset.key] : f === '1';
+        const cur = dkPaper().red || {}, f = el.dataset.force;
+        const on = f === undefined ? !(state.dkSlip ? caRedOn(dkPaper(), el.dataset.key) : cur[el.dataset.key]) : f === '1';
         const next = Object.assign({}, cur);
         dkSelection().forEach(k => { next[k] = on; });
-        setDocketOpt('red', next);
+        if (state.dkSlip) setCaOpt('red', next); else setDocketOpt('red', next);
       }
       else if (act === 'set-docket-size') {
         const k = el.dataset.key, v = el.dataset.val;
-        const next = Object.assign({}, docketCfg().sizes || {});
+        const next = Object.assign({}, dkPaper().sizes || {});
         if (v === 'auto') delete next[k]; else next[k] = parseInt(v, 10);
-        setDocketOpt('sizes', next);
+        if (state.dkSlip) setCaOpt('sizes', next); else setDocketOpt('sizes', next);
       }
       else if (act === 'set-docket-align') {
-        const cur = docketCfg().align || {}, v = el.dataset.val, next = Object.assign({}, cur);
-        dkSelection().forEach(k => { if ((DK_PARTS[k] || {}).align) next[k] = v; });
-        setDocketOpt('align', next);
+        const cur = dkPaper().align || {}, v = el.dataset.val, next = Object.assign({}, cur);
+        dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align) next[k] = v; });
+        if (state.dkSlip) setCaOpt('align', next); else setDocketOpt('align', next);
       }
       else if (act === 'dk-pick-part') {
         // Parts nest (covers sits inside the table header, notes inside the
@@ -29732,16 +29949,26 @@ function handleActClick(el, e) {
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'linespacing') {
-          // Every picked line, so ctrl+A then spacing sets the whole docket —
+          // Every picked line, so ctrl+A then spacing sets the whole paper —
           // which is why there is no separate whole-docket spacing control.
           state.dkMenu = null;
-          const next = Object.assign({}, docketCfg().gaps || {});
+          const next = Object.assign({}, dkPaper().gaps || {});
           dkSelection().forEach(k => { next[k] = v === 'auto' ? undefined : v; });
-          setDocketOpt('gaps', next);
+          if (state.dkSlip) setCaOpt('gaps', next); else setDocketOpt('gaps', next);
         }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
+        else if (m === 'addback' && v.startsWith('ca:')) {
+          const k = v.slice(3), c = caCfg();
+          const on = caOrder(c);
+          if (on.includes(k) && (c.show || {})[k] !== false) {
+            setCaOpts({ order: on.filter(x => x !== k) });
+          } else {
+            const show = Object.assign({}, c.show); delete show[k];
+            setCaOpts({ order: on.includes(k) ? on : on.concat([k]), show });
+          }
+        }
         else if (m === 'addback' && v.startsWith('notetype:')) {
           const id = v.slice(9);
           const cats = (state.noteCategories || []).map(c => c.id);
@@ -29789,6 +30016,8 @@ function handleActClick(el, e) {
           // One added line, and this says whether it draws a rule. "No line"
           // takes it back to a plain line you type into.
           const id = state.dkPart; state.dkMenu = null;
+          if (state.dkSlip) { setCaOpt('extras', (caCfg().extras || []).map(x => x.id === id
+            ? (v === 'none' ? { ...x, kind: 'text', style: null } : { ...x, kind: 'rule', style: v }) : x)); return; }
           setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id
             ? (v === 'none' ? { ...x, kind: 'text', style: null } : { ...x, kind: 'rule', style: v })
             : x));
@@ -29797,6 +30026,7 @@ function handleActClick(el, e) {
         else if (m === 'style') {
           const k = state.dkPart;
           state.dkMenu = null;
+          if (state.dkSlip) { setCaOpt('blockStyle', Object.assign({}, caCfg().blockStyle || {}, { [k]: v })); return; }
           // Courses keep writing the legacy key as well, so a docket saved by
           // an older build still reads back the same background.
           setDocketOpts(Object.assign({ blockStyle: Object.assign({}, docketCfg().blockStyle || {}, { [k]: v }) },
@@ -29806,11 +30036,17 @@ function handleActClick(el, e) {
         // The docket's own spacing and letter width. Both menus were on screen
         // and neither was wired (owner, Aug '26: "cannot edit select").
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
-        else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v === 'B' ? 'B' : 'A'); }
+        else if (m === 'font') { state.dkMenu = null; if (state.dkSlip) setCaOpt('font', v === 'B' ? 'B' : 'A'); else setDocketOpt('font', v === 'B' ? 'B' : 'A'); }
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;
           if (state.dkStation) setDkStationOpt('fontScale', v);
+          else if (state.dkSlip) {
+            const c = caCfg(), bN = caBaseSize(c);
+            const next = Object.assign({}, c.sizes || {});
+            dkSelection().forEach((k) => { if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10); });
+            setCaOpt('sizes', next);
+          }
           else if (pk && DK_PARTS[pk]) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;

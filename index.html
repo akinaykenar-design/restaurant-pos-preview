@@ -1167,7 +1167,10 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 /* Typing on the paper should look like typing on the paper: no box, no fill,
    just the text and a caret where you are working. The cream box with the
    amber dashes read as a form field dropped onto a docket. */
-.pp-inline-input{font:inherit;color:inherit;background:transparent;border:none;
+/* !important earns its place: the global `input:not(...)` rule at the top of
+   this file carries five attribute selectors and outranks anything sane here,
+   so the field kept taking the app's dark surface onto a white docket. */
+.pp-inline-input{font:inherit;color:inherit;background:transparent !important;border:none;
   border-bottom:1.5px solid var(--orange);border-radius:0;padding:0 1px;
   text-align:inherit;max-width:100%;width:auto;caret-color:var(--orange);}
 .pp-inline-input:focus{outline:none;}
@@ -4948,6 +4951,9 @@ app.put('/api/settings', (req, res) => {
         const w = String(raw).replace(/^\s+/, '').slice(0, 14);
         return { tableWord: w === '' ? 'none' : w };
       })()),
+      // The word in front of an item note ('* ' by default). Not trimmed:
+      // the trailing space is the gap before the note, same as tableWord.
+      noteWord: String(dk.noteWord !== undefined ? dk.noteWord : (cur.noteWord !== undefined ? cur.noteWord : '* ')).slice(0, 10),
       fontScale: pick(dk.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'normal'),
       font: pick(dk.font, ['A', 'B'], cur.font || 'A'),
       density: pick(dk.density, ['1', '1.5', '2', 'tight', 'normal', 'roomy', '0.9', '1.15'], cur.density || 'normal'),
@@ -8544,6 +8550,8 @@ const DOCKET_DEFAULTS = {
   showOrderNo: false, showTime: true, showCaTime: true, headerText: '', footerText: '',
   newCourseStyle: 'invert', fontScale: 'normal', density: 'normal',
   font: 'A', red: { callaway: true }, sizes: {}, align: {}, joined: {}, roundPrint: 'added',
+  // The word in front of an item note — typed on the paper like the table word.
+  noteWord: '* ',
 };
 // The Word-style designer toolbar edits ONE docket part at a time — tap the
 // part on the paper, then use the toolbar. Each part declares what it can do:
@@ -8991,9 +8999,12 @@ function buildDocketDoc(ctx, edit) {
   // Word-style part selection: tapping a styleable part picks it for the
   // designer toolbar (its visibility moved to the toolbar's eye); a part
   // that's turned off stays visible but dimmed so it can still be picked.
-  const partW = (k, on, inner, block) => edit
-    ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${on ? '' : 'pp-off'}${selectable && dkIsSelected(k) ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
-    : (on ? inner : '');
+  const partW = (k, on, inner, block) => {
+    if (!on) return '';
+    return edit
+      ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${selectable && dkIsSelected(k) ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
+      : inner;
+  };
 
   // Covers gets its part attributes ON the line itself — an inline wrapper
   // around a block collapses to zero size, so taps would fall through to the
@@ -9032,7 +9043,7 @@ function buildDocketDoc(ctx, edit) {
   const groupOf = (k) => groups.find(g => g[0].k === k);
   const renderGroup = (k) => { const g = groupOf(k); return g ? lineHtml(g) : ''; };
   const coversJoined = isJoined('covers') && SEGS.covers;
-  const coversSeg = coversJoined ? '' : renderGroup('covers');
+  const coversSeg = (coversJoined || d.showCovers === false) ? '' : renderGroup('covers');
   const coversRider = coversJoined
     ? ' ' + partW('covers', d.showCovers, esc(coversInner))
     : '';
@@ -9042,10 +9053,11 @@ function buildDocketDoc(ctx, edit) {
   // doesn't either (its star/warning glyphs never reached paper).
   // The docket's own divider: same element as an inserted one, so there is one
   // kind of divider rather than two that look different and behave differently.
-  const dividerHtml = d.showRule === false && !edit ? '' : dkRuleHtml(d.ruleStyle || 'dashed',
+  const dividerHtml = d.showRule === false ? '' : dkRuleHtml(d.ruleStyle || 'dashed',
     (selectable ? 'dk-part ' : '') + (d.showRule === false ? 'pp-off ' : '') + (selectable && dkIsSelected('divider') ? 'dk-sel' : ''),
     selectable ? ' data-act="dk-pick-part" data-part="divider"' : '');
-  const vipHtml = groupOf('vip') ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
+  const vipHtml = (ctx.vip && !isJoined('vip'))
+    ? partW('vip', d.showVip, `<div class="print-flag">VIP — ${esc(ctx.vip)}</div>`, true) : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line" style="font-weight:800;"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
@@ -9080,14 +9092,38 @@ function buildDocketDoc(ctx, edit) {
         return `<h3 class="print-dockhead${rc('table')}${selectable ? ' dk-part' + (dkIsSelected('table') ? ' dk-sel' : '') : ''}"${stl('table')}${selectable ? ' data-act="dk-pick-part" data-part="table"' : ''}>${esc(headLabel)}${coversRider}</h3>`;
   })();
   const bodyHtml = (() => {
+        // The seat and the note print as their OWN indented sub-lines under the
+        // item (printing.js printItem) — the preview used to run them into the
+        // item line as "(Seat 3) — no butter", which no printer ever produced.
+        // Both words are typed right here: the seat word is the venue's seat
+        // prefix (the same one Settings edits, one door), the note word is the
+        // docket's own. Only the FIRST of each is a live field — one wording
+        // serves every line, and two inputs cannot share an id.
+        let seatEd = 0, noteEd = 0;
+        const seatSub = (l) => {
+          const raw = String(l.seat);
+          const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
+          const many = raw.indexOf(',') !== -1;
+          const parts = many ? raw.split(',').map(x => x.trim()).filter(Boolean) : [raw];
+          const joined = parts.length > 1 ? parts.slice(0, -1).join(', ') + ' & ' + parts[parts.length - 1] : parts[0];
+          const rest = prefix ? (many ? 's ' : ' ') + joined : joined;
+          const word = edit && !seatEd++ ? sampleEditable('seatPrefix', prefix, 'Seat', '') : esc(prefix);
+          return `<div class="print-build"${stl('subs')}><div class="pb-line">${word}${esc(rest)}</div></div>`;
+        };
+        const noteSub = (l) => {
+          const w = d.noteWord !== undefined ? d.noteWord : '* ';
+          const word = edit && !noteEd++ ? sampleEditable('docketNoteWord', w, '* ', '') : esc(w);
+          return `<div class="print-build"${stl('subs')}><div class="pb-line${rc('notes')}">${word}${esc(l.note)}</div></div>`;
+        };
         const lineRow = (l, pre, noSeat) => {
-          const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, ` <span style="white-space:nowrap;">(${esc(seatText(l.seat))})</span>`) : '';
+          const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, seatSub(l), true) : '';
           const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
-          const note = l.note ? partW('notes', d.showNotes, ` — <b class="${rc('notes').trim()}">${esc(l.note)}</b>`) : '';
+          const note = l.note ? partW('notes', d.showNotes, noteSub(l), true) : '';
           const build = (l.build && (l.build.kept.length || l.build.removed.length))
             ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">+ ${esc(x.label)}</div>`).join('')}${l.build.removed.map(x => `<div class="pb-line pb-no">NO ${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true)
             : '';
-          return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (dkIsSelected('items') ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items"' : ''}><span>${pre || ''}${l.qty}× ${esc(l.name)}${seat}${tag}${note}</span></div>${build}`;
+          // Same order the printer lays them down: item, seat, build, note.
+          return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (dkIsSelected('items') ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items"' : ''}><span>${pre || ''}${l.qty}× ${esc(l.name)}${tag}</span></div>${seat}${build}${note}`;
         };
         if (layout === 'byseat') {
           // Sections per seat, shared last — course rides each line as a
@@ -16707,9 +16743,13 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // A line IN the order is removed outright; one that lives inside the
         // items block (allergies, notes, course, seats) has nowhere to be
         // removed FROM, so it keeps its show/hide.
-        if (docketLineOrder(d).includes(p)) bits.push(`<button type="button" class="dk-tb-btn" data-act="dk-remove-line" data-key="${p}">Remove</button>`);
-        else if (meta.show) bits.push(`<button type="button" class="dk-tb-btn${shown ? ' active' : ''}" data-act="set-docket-opt" data-key="${meta.show}" data-val="${!shown}">${shown ? svgEye : svgEyeOff}</button>`);
-        const FIELD = { header: 'docketHeader', table: 'tableWord' };
+        if (docketLineOrder(d).includes(p)) bits.push(`<button type="button" class="dk-tb-btn" data-act="dk-remove-line" data-key="${p}">${ACT_TRASH_SVG}</button>`);
+        // Same trash, same outcome: the line goes and nothing stays selected.
+        // It used to leave the removed line selected, so the bar went on naming
+        // a line that was no longer on the paper — and "+ Line", which is the
+        // way back, only shows when nothing is selected.
+        else if (meta.show) bits.push(`<button type="button" class="dk-tb-btn${shown ? ' active' : ''}" data-act="dk-hide-line" data-key="${meta.show}">${ACT_TRASH_SVG}</button>`);
+        const FIELD = { header: 'docketHeader', table: 'tableWord', seats: 'seatPrefix', notes: 'docketNoteWord' };
         if (FIELD[p]) bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${FIELD[p]}">${ACT_PENCIL_SVG}</button>`);
         if (p === 'course' || p === 'items') {
           const key = p === 'course' ? 'courseRule' : 'itemRule';
@@ -16759,11 +16799,39 @@ function dkLineIndex(d) {
   const order = docketLineOrder(d);
   const j = (k) => (d.joined || {})[k] !== undefined ? !!(d.joined || {})[k] : k === 'time';
   const rows = [];
+  // "Items" is not one line — it is the course headings, every item, and the
+  // seat/build/note sub-lines under them. The index counted it as one, so the
+  // bulk of the docket had no number and no way in from here (owner, Aug '26).
+  const bodyRows = () => {
+    const ctx = sampleDocketCtx();
+    const out = [];
+    const add = (k, label) => out.push({ k, parts: [{ k, label }] });
+    if (ctx.vip && d.showVip !== false) add('vip', 'VIP — ' + ctx.vip);
+    if (d.showAllergies !== false) (ctx.allergies || []).forEach(a => add('allergies', '! ' + (a.seat ? seatText(a.seat) : 'Whole table') + ' ' + a.allergy));
+    if (d.showRule !== false) add('divider', 'Divider');
+    const layout = ['byseat', 'waitermate'].includes(d.layout) ? d.layout : 'standard';
+    const itemRows = (l) => {
+      add('items', l.qty + '× ' + l.name);
+      if (layout === 'standard' && d.showSeats !== false && l.seat && l.seat !== 'all') add('seats', seatText(l.seat));
+      if (d.showBuild !== false && l.build) {
+        (l.build.kept || []).forEach(x => add('subs', '+ ' + x.label));
+        (l.build.removed || []).forEach(x => add('subs', 'NO ' + String(x.label).toUpperCase()));
+      }
+      if (d.showNotes !== false && l.note) add('notes', (d.noteWord !== undefined ? d.noteWord : '* ') + l.note);
+    };
+    (ctx.courses || []).forEach((c, ci) => {
+      if (ci && d.courseRule) add('divider', 'Divider');
+      if (d.showCourseName !== false) add('course', c.name);
+      (c.lines || []).forEach((l, ii) => { if (ii && d.itemRule) add('divider', 'Divider'); itemRows(l); });
+    });
+    return out;
+  };
   for (const k of order) {
     const ex = dkExtraOf(d, k);
+    if (!ex && k === 'items') { bodyRows().forEach(r => rows.push(r)); continue; }
     const label = ex ? (ex.kind === 'gap' ? 'Blank line' : 'Divider')
-      : k === 'items' ? 'Items' : (DK_PARTS[k] || {}).label || k;
-    if (!ex && k !== 'items' && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
+      : (DK_PARTS[k] || {}).label || k;
+    if (!ex && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
     rows.push({ k, parts: [{ k, label }] });
   }
   return `
@@ -16855,7 +16923,7 @@ function dkToolbar(d) {
       <button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8 8 8"/></svg>Done</button>
       ${dd('dividerstyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
         DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Divider style')}
-      <button type="button" class="dk-tb-btn" data-act="set-docket-opt" data-key="showRule" data-val="false">Remove</button>
+      <button type="button" class="dk-tb-btn" data-act="dk-hide-line" data-key="showRule">${ACT_TRASH_SVG}</button>
     </div>`;
   }
   const ex = state.dkPart ? dkExtraOf(d, state.dkPart) : null;
@@ -16871,7 +16939,7 @@ function dkToolbar(d) {
         DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (ex.style || 'dashed') === v })), 'Divider style') : ''}
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>
-      <button type="button" class="dk-tb-btn" data-act="dk-del-line">Remove</button>
+      <button type="button" class="dk-tb-btn" data-act="dk-del-line">${ACT_TRASH_SVG}</button>
     </div>`;
   }
   if (meta) {
@@ -16920,8 +16988,12 @@ function dkToolbar(d) {
         const on = docketLineOrder(d);
         const missing = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
           && ['header', 'table', 'covers', 'orderno', 'time', 'staff'].includes(k));
-        return missing.length ? dd('addback', '+ Line', true,
-          missing.map(k => ({ v: k, l: DK_PARTS[k].label, on: false })), 'Put a line back') : '';
+        // Anything hidden inside the items block comes back the same way.
+        const hidden = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
+          && DK_PARTS[k].show && d[DK_PARTS[k].show] === false && !missing.includes(k));
+        const all = missing.concat(hidden).concat(d.showRule === false ? ['divider'] : []);
+        return all.length ? dd('addback', '+ Line', true,
+          all.map(k => ({ v: k, l: k === 'divider' ? 'Divider' : DK_PARTS[k].label, on: false })), 'Put a line back') : '';
       })()}
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>
@@ -27699,6 +27771,8 @@ function bindEvents() {
       else if (f === 'venueAddress') saveTicketSetting({ venueAddress: sampleEditInput.value.trim() });
       else if (f === 'venuePhone') saveTicketSetting({ venuePhone: sampleEditInput.value.trim() });
       else if (f === 'docketFooter') setDocketOpt('footerText', sampleEditInput.value.trim());
+      // Not trimmed at the end: the trailing space IS the gap before the note.
+      else if (f === 'docketNoteWord') setDocketOpt('noteWord', sampleEditInput.value.replace(/^\s+/, ''));
       else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
     });
   }
@@ -28915,6 +28989,10 @@ function handleActClick(el, e) {
         state.dkSel = []; state.dkPart = null;
         setDocketOpt('topOrder', docketLineOrder(dc).filter(x => !dkSelection0(k).includes(x)));
       }
+      else if (act === 'dk-hide-line') {
+        state.dkSel = []; state.dkPart = null;
+        setDocketOpt(el.dataset.key, false);
+      }
       else if (act === 'dk-add-back') {
         const dc = docketCfg(), k = el.dataset.val;
         const order = docketLineOrder(dc).slice();
@@ -29051,7 +29129,22 @@ function handleActClick(el, e) {
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
         else if (m === 'addback') {
-          const dc = docketCfg(), order = docketLineOrder(dc).slice();
+          const dc = docketCfg();
+          if (v === 'divider') {
+            state.dkMenu = null; state.dkSel = ['divider']; state.dkPart = 'divider';
+            setDocketOpt('showRule', true);
+            return;
+          }
+          const meta2 = DK_PARTS[v] || {};
+          // A part that lives inside the items block comes back by being shown
+          // again; a removed top line comes back by rejoining the order.
+          if (meta2.show && dc[meta2.show] === false && !docketLineOrder(dc).includes(v)
+              && !['header', 'table', 'covers', 'orderno', 'time', 'staff'].includes(v)) {
+            state.dkMenu = null; state.dkSel = [v]; state.dkPart = v;
+            setDocketOpt(meta2.show, true);
+            return;
+          }
+          const order = docketLineOrder(dc).slice();
           const at = order.indexOf('items');
           order.splice(at < 0 ? order.length : at, 0, v);
           state.dkMenu = null; state.dkSel = [v]; state.dkPart = v;

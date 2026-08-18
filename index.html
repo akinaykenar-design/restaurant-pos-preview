@@ -1003,6 +1003,7 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 /* Block backgrounds: the same three the courses offer, now on the allergy bar
    and VIP as well. Inverse is the printer's GS B, outline its rule above and
    below, none is just the text. */
+.print-doc .print-headnotes{padding:1px 0 3px 0;}
 .print-doc .print-flag-block{padding:2px 4px;margin:4px 0;}
 .print-doc .pf-invert{background:#000;color:#fff;padding:2px 4px;}
 .print-doc .pf-invert .print-line{color:#fff;}
@@ -4973,6 +4974,14 @@ app.put('/api/settings', (req, res) => {
       // The word in front of the server's name ("Server: "). Not trimmed at
       // the end — the trailing space is the gap before the name.
       staffWord: String(dk.staffWord !== undefined ? dk.staffWord : (cur.staffWord || '')).replace(/^\s+/, '').slice(0, 16),
+      // The word in front of the round number ("DOCKET #").
+      roundWord: String(dk.roundWord !== undefined ? dk.roundWord : (cur.roundWord !== undefined ? cur.roundWord : 'DOCKET #')).replace(/^\s+/, '').slice(0, 16),
+      // The closing rule under the items: its own switch and style.
+      // Docket schema mark. 1 = the round is its own line. Its only job is to
+      // tell a removed line apart from one that never existed.
+      v: 1,
+      showFootRule: b(dk.showFootRule, cur.showFootRule !== false),
+      footRuleStyle: ['dashed', 'dotted', 'solid', ''].includes(dk.footRuleStyle) ? dk.footRuleStyle : (cur.footRuleStyle || ''),
       // Which order-note types reach the kitchen. Empty = every type.
       noteTypes: (() => {
         const src = dk.noteTypes !== undefined ? dk.noteTypes : cur.noteTypes;
@@ -5037,7 +5046,7 @@ app.put('/api/settings', (req, res) => {
       // the five blocks is stored, and the default order is omitted so
       // untouched dockets keep printing the exact old bytes.
       ...(() => {
-        const DEF = ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'items'];
+        const DEF = ['header', 'table', 'round', 'covers', 'orderno', 'time', 'staff', 'items'];
         // Optional elements: real facts the POS already holds, off the docket
         // until the designer puts one on.
         const OPT = ['ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
@@ -5058,7 +5067,17 @@ app.put('/api/settings', (req, res) => {
         const known = (k) => DEF.includes(k) || OPT.includes(k) || extraIds.includes(k);
         if (!Array.isArray(src) || !src.length || src.length > 40
             || !src.includes('items') || !src.every(known)) return {};
-        if (src.every((k, i) => k === DEF[i])) return {};
+        // An order saved while the round rode the table line has no 'round' —
+        // put it back where it printed. Once only, keyed off the schema mark
+        // below: after that, an absent round means the owner removed it.
+        if (!cur.v && !src.includes('round')) {
+          const i = src.indexOf('table');
+          src = src.slice();
+          src.splice(i < 0 ? 0 : i + 1, 0, 'round');
+        }
+        // Length matters: ['header','table'] matched the default prefix and
+        // was stored as "default", which silently put every removed line back.
+        if (src.length === DEF.length && src.every((k, i) => k === DEF[i])) return {};
         return { topOrder: src.slice() };
       })(),
       // Bold is a highlight that costs no character width, unlike size.
@@ -5100,7 +5119,7 @@ app.put('/api/settings', (req, res) => {
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
         const out = {};
-        ['table', 'covers', 'orderno', 'time', 'staff', 'vip',
+        ['table', 'round', 'covers', 'orderno', 'time', 'staff', 'vip',
           'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone']
           .forEach(k => { if (src && src[k]) out[k] = true; });
         return out;
@@ -8597,7 +8616,7 @@ const DOCKET_DEFAULTS = {
   // inverse and VIP to nothing. Same three choices for all three now.
   blockStyle: {},
   // The word in front of the server's name, and which note types print.
-  staffWord: '', noteTypes: [],
+  staffWord: '', noteTypes: [], roundWord: 'DOCKET #', showFootRule: true, footRuleStyle: '',
 };
 // The Word-style designer toolbar edits ONE docket part at a time — tap the
 // part on the paper, then use the toolbar. Each part declares what it can do:
@@ -8617,6 +8636,12 @@ const DK_PARTS = {
   orderno: { label: 'Order number', show: 'showOrderNo', red: true, align: true, size: true },
   seats: { label: 'Seats', show: 'showSeats', red: false, align: false, size: false },
   staff: { label: 'Server', show: 'showStaff', red: true, align: true, size: true },
+  // The round printed welded to the table line — on the paper but not in the
+  // designer, so it could not be styled, moved or taken off (owner, Aug '26).
+  round: { label: 'Round', show: null, red: true, align: true, size: true },
+  // The table's own notes, as opposed to an item's. The printer has always
+  // governed both with one switch, so they share the part.
+  footrule: { label: 'Closing line', show: 'showFootRule', red: false, align: false, size: false },
   // Optional elements — real facts the POS already holds, off the docket until
   // the designer puts one on. Each prints nothing when there is nothing in it,
   // so an empty booking or a walk-in never leaves a blank line on the paper.
@@ -8669,7 +8694,15 @@ const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 // or the covers, and there was no reason it sat out (owner, Aug '26). Only
 // 'items' and the per-item bits stay out: they repeat, so there is no one line.
 const DK_OPT_PARTS = ['ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
-const DK_JOINABLE = ['table', 'covers', 'orderno', 'time', 'staff', 'vip'].concat(DK_OPT_PARTS);
+const DK_JOINABLE = ['table', 'round', 'covers', 'orderno', 'time', 'staff', 'vip'].concat(DK_OPT_PARTS);
+// Whether a line rides the one above. Time has always shared the order
+// number's line and the round the table's, so those are the defaults. One
+// definition: the preview, the toolbar and the line list each had their own
+// copy, and the list's went stale the moment the round was added.
+function dkJoinedOn(d, k) {
+  const j = d.joined || {};
+  return j[k] !== undefined ? !!j[k] : (k === 'time' || k === 'round');
+}
 // Blank lines and dividers are ordinary elements: they sit in the order list
 // like any other line, so they move, select and delete the same way.
 // Three, not four. 'Bold' laid down the SAME underscores as 'Solid' with the
@@ -8768,7 +8801,7 @@ function callawayOrder(d) {
 // The docket's top blocks (standard format) reorder as whole units — items
 // carry their notices and dividing rule with them. Only a full permutation
 // counts; anything else falls back to the printed default.
-const DOCKET_LINE_ORDER = ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'items'];
+const DOCKET_LINE_ORDER = ['header', 'table', 'round', 'covers', 'orderno', 'time', 'staff', 'items'];
 // Orders saved as the old five blocks expand to their parts, so an arrangement
 // made before this keeps printing the way it was left.
 const DK_BLOCK_PARTS = { header: ['header'], table: ['table', 'covers'], meta: ['orderno', 'time'], staff: ['staff'], items: ['items'] };
@@ -8777,17 +8810,26 @@ function docketLineOrder(d) {
   // A removed line is simply absent; the order is valid while it holds known
   // keys and still prints the items.
   const known = (k) => DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
-  if (Array.isArray(o) && o.length && o.includes('items') && o.every(known)) return o;
+  // Orders saved while the round rode the table line get it put back where it
+  // printed, rather than losing it off the docket.
+  const withRound = (a) => {
+    if (d.v || a.includes('round')) return a;
+    const out = a.slice(), i = out.indexOf('table');
+    out.splice(i < 0 ? 0 : i + 1, 0, 'round');
+    return out;
+  };
+  if (Array.isArray(o) && o.length && o.includes('items') && o.every(known)) return withRound(o);
   const legacy = d.lineOrder;
   if (Array.isArray(legacy)) {
     const out = [];
     for (const b of legacy) for (const k of (DK_BLOCK_PARTS[b] || [])) if (!out.includes(k)) out.push(k);
-    if (out.length === DOCKET_LINE_ORDER.length) return out;
+    // The five old blocks expand to seven parts; the round makes eight.
+    if (out.length === DOCKET_LINE_ORDER.length - 1) return withRound(out);
   }
   return DOCKET_LINE_ORDER;
 }
 // Every line moves on its own now — no part rides another's block.
-const DK_MOVE_BLOCK = { header: 'header', table: 'table', covers: 'covers', orderno: 'orderno', time: 'time', staff: 'staff', items: 'items' };
+const DK_MOVE_BLOCK = { header: 'header', table: 'table', round: 'round', covers: 'covers', orderno: 'orderno', time: 'time', staff: 'staff', items: 'items' };
 DK_OPT_PARTS.forEach(k => { DK_MOVE_BLOCK[k] = k; });
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
@@ -9095,12 +9137,17 @@ function buildDocketDoc(ctx, edit) {
   // four land on one line. A joined group wears its FIRST part's style,
   // because one printed line carries one size and one alignment.
   const joined = d.joined || {};
-  const isJoined = (k) => joined[k] !== undefined ? !!joined[k] : k === 'time';
+  const isJoined = (k) => dkJoinedOn(d, k);
   const SEGS = {
-    header: null, table: null,
+    // Header and table are drawn as their own blocks, but they still have to
+    // BE in the grouping — a line joining the table needs the table to be a
+    // group leader, and with these two null the round started its own line
+    // instead of riding the table's, exactly as it does not on paper.
+    header: { on: true, html: '' }, table: { on: true, html: '' },
     covers: ctx.covers ? { on: d.showCovers, html: esc(coversInner) } : null,
     orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: `#${esc(String(ctx.orderNo))}` } : null,
     time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
+    round: ctx.roundNo ? { on: true, html: (edit ? sampleEditable('docketRoundWord', d.roundWord !== undefined ? d.roundWord : 'DOCKET #', 'DOCKET #', '') : esc(d.roundWord !== undefined ? d.roundWord : 'DOCKET #')) + esc(String(ctx.roundNo)) } : null,
     staff: ctx.staffName ? { on: d.showStaff, html: (edit ? sampleEditable('docketStaffWord', d.staffWord || '', 'Server: ', '') : esc(d.staffWord || '')) + esc(ctx.staffName) } : null,
     vip: ctx.vip ? { on: d.showVip, html: 'VIP: ' + esc(ctx.vip) } : null,
     // The optional elements, mirroring kitchenDocket's SEG map exactly. A
@@ -9129,15 +9176,22 @@ function buildDocketDoc(ctx, edit) {
   }
   // Followers appended to their leader's line; a line absorbed into the one
   // above renders nothing of its own.
-  const followers = (g) => g.slice(1).map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean).join('');
-  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${partW(g[0].k, g[0].seg.on, g[0].seg.html)}${followers(g).split('<').length > 1 ? ' · ' + followers(g).split('</span>').filter(Boolean).map(x => x + '</span>').join(' · ') : ''}</div>`;
+  // Riders on a line, each still its own selectable part: " · a · b". One
+  // list built one way, so the table's riders and every other line's behave
+  // the same — the covers rider used to be hand-built and nothing else could
+  // ride the table at all.
+  const riderHtml = (g) => g.slice(1)
+    .map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean)
+    .map(x => ' · ' + x).join('');
+  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${partW(g[0].k, g[0].seg.on, g[0].seg.html)}${riderHtml(g)}</div>`;
   const groupOf = (k) => groups.find(g => g[0].k === k);
   const renderGroup = (k) => { const g = groupOf(k); return g ? lineHtml(g) : ''; };
   const coversJoined = isJoined('covers') && SEGS.covers;
   const coversSeg = (coversJoined || d.showCovers === false) ? '' : renderGroup('covers');
-  const coversRider = coversJoined
-    ? ' ' + partW('covers', d.showCovers, esc(coversInner))
-    : '';
+  // Whatever rides the TABLE line — the round by default, plus anything the
+  // owner joins to it. The h3 is drawn outside the group machinery, so its
+  // riders are fetched from the same groups everything else uses.
+  const coversRider = (() => { const g = groupOf('table'); return g ? riderHtml(g) : ''; })();
   const metaHtml = renderGroup('orderno') + renderGroup('time');
   const staffHtml = renderGroup('staff');
   // Printable characters only — the printer has no emoji, so the preview
@@ -9149,6 +9203,13 @@ function buildDocketDoc(ctx, edit) {
     selectable ? ' data-act="dk-pick-part" data-part="divider"' : '');
   const vipHtml = (ctx.vip && !isJoined('vip'))
     ? partW('vip', d.showVip, `<div class="print-flag pf-${dkBlockStyle(d, 'vip')}${rc('vip')}"${stl('vip')}>VIP: ${esc(ctx.vip)}</div>`, true) : '';
+  // The TABLE's notes ("* Birthday"), as opposed to an item's. They have
+  // always printed and the designer never drew them, so the note-type picker
+  // was changing something you could not see (owner, Aug '26).
+  const headNotesHtml = (ctx.noteLines && ctx.noteLines.length)
+    ? partW('notes', d.showNotes, `<div class="print-headnotes${rc('notes')}"${stl('notes')}>${ctx.noteLines.map(n =>
+        `<div class="pb-line">${esc(d.noteWord !== undefined ? d.noteWord : '* ')}${esc(n)}</div>`).join('')}</div>`, true)
+    : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
     : '';
@@ -9282,11 +9343,11 @@ function buildDocketDoc(ctx, edit) {
     orderno: metaHtml,
     time: '',
     staff: staffHtml,
-    items: vipHtml + '\n      ' + allergyHtml + '\n      ' + dividerHtml + '\n      ' + bodyHtml,
+    items: vipHtml + '\n      ' + allergyHtml + '\n      ' + headNotesHtml + '\n      ' + dividerHtml + '\n      ' + bodyHtml,
   };
   // The optional elements go through the SAME grouping as the built-in lines,
   // so joining and reordering behave identically for all of them.
-  DK_OPT_PARTS.forEach(k => { blocks[k] = renderGroup(k); });
+  DK_OPT_PARTS.concat(['round']).forEach(k => { blocks[k] = renderGroup(k); });
   const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
   // A joined table prints on the line above (kitchenDocket walks every top
   // line through the same grouping). The preview rendered header and table as
@@ -9327,6 +9388,9 @@ function buildDocketDoc(ctx, edit) {
     <div class="${docketDocClasses(stOv)}">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
       ${body}
+      ${d.showFootRule === false ? '' : dkRuleHtml(dkRuleStyle(d.footRuleStyle || d.ruleStyle),
+        (selectable ? 'dk-part ' : '') + (selectable && dkIsSelected('footrule') ? 'dk-sel' : ''),
+        selectable ? ' data-act="dk-pick-part" data-part="footrule"' : '')}
       ${edit || d.footerText ? `<div class="print-footer">${edit ? sampleEditable('docketFooter', d.footerText, 'add footer note', '') : esc(d.footerText)}</div>` : ''}
     </div>`;
 }
@@ -9515,6 +9579,8 @@ function sampleDocketCtx() {
     tableNo: 12,
     covers: 4,
     orderNo: 128,
+    roundNo: 1,
+    noteLines: ['Birthday', 'Rush'],
     timeLabel: '7:24 pm',
     staffName: 'Aylin',
     // The optional elements' sample values — a booked table on the inside
@@ -16890,7 +16956,12 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // A line IN the order is removed outright; one that lives inside the
         // items block (allergies, notes, course, seats) has nowhere to be
         // removed FROM, so it keeps its show/hide.
-        if (docketLineOrder(d).includes(p)) bits.push(`<button type="button" class="dk-tb-btn" data-act="dk-remove-line" data-key="${p}">${ACT_TRASH_SVG}</button>`);
+        // Items is the one line that cannot go: a docket with no items is not
+        // a docket, and both the printer and the server fall back to the
+        // default order without it — so the trash LOOKED like it worked and
+        // the line came straight back. Dimmed with a reason instead.
+        if (p === 'items') bits.push(`<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="A docket is its items">${ACT_TRASH_SVG}</button>`);
+        else if (docketLineOrder(d).includes(p)) bits.push(`<button type="button" class="dk-tb-btn" data-act="dk-remove-line" data-key="${p}">${ACT_TRASH_SVG}</button>`);
         // Same trash, same outcome: the line goes and nothing stays selected.
         // It used to leave the removed line selected, so the bar went on naming
         // a line that was no longer on the paper — and "+ Line", which is the
@@ -16900,7 +16971,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // pairs there — each wearing the word it edits, or there is no telling
         // them apart.
         const FIELD = { header: ['docketHeader'], table: ['tableWord'], seats: ['seatPrefix'],
-          notes: ['docketNoteWord'], subs: ['docketAddWord', 'docketNoWord'], staff: ['docketStaffWord'] };
+          notes: ['docketNoteWord'], subs: ['docketAddWord', 'docketNoWord'], staff: ['docketStaffWord'], round: ['docketRoundWord'] };
         const WORDNOW = { docketAddWord: d.addWord !== undefined ? d.addWord : '+ ', docketNoWord: d.noWord !== undefined ? d.noWord : 'NO ' };
         (FIELD[p] || []).forEach(f => bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${f}">${ACT_PENCIL_SVG}${WORDNOW[f] !== undefined ? esc(WORDNOW[f].trim() || '(none)') : ''}</button>`));
         if (p === 'course' || p === 'items') {
@@ -16913,6 +16984,11 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         }
         // Which order-note types reach the kitchen. Nothing ticked = every
         // type, so a new type the venue adds later is not silently dropped.
+        if (p === 'footrule') {
+          const cur = dkRuleStyle(d.footRuleStyle || d.ruleStyle);
+          bits.push(dd('footrulestyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
+            DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Line style'));
+        }
         if (p === 'notes' && (state.noteCategories || []).length) {
           const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
           bits.push(dd('notetypes', want.length ? want.length + (want.length === 1 ? ' type' : ' types') : 'All types', true,
@@ -16925,7 +17001,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
             DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Background'));
         }
         {
-          const jn = (k) => (d.joined || {})[k] !== undefined ? !!(d.joined || {})[k] : k === 'time';
+          const jn = (k) => dkJoinedOn(d, k);
           const order = docketLineOrder(d).filter(x => x !== 'items');
           const i = order.indexOf(p);
           // Riders sitting on this line: splitting from the leader frees them.
@@ -16960,7 +17036,7 @@ const FMT_L = { standard: 'By course', byseat: 'By seat', waitermate: 'Chef' };
 function dkLineRows(d) {
   if (state.dkStation) return [];
   const order = docketLineOrder(d);
-  const j = (k) => (d.joined || {})[k] !== undefined ? !!(d.joined || {})[k] : k === 'time';
+  const j = (k) => dkJoinedOn(d, k);
   const rows = [];
   // "Items" is not one line — it is the course headings, every item, and the
   // seat/build/note sub-lines under them. The index counted it as one, so the
@@ -16971,6 +17047,7 @@ function dkLineRows(d) {
     const add = (k, label, sub) => out.push({ k, sub, parts: [{ k, label }] });
     if (ctx.vip && d.showVip !== false) add('vip', 'VIP — ' + ctx.vip);
     if (d.showAllergies !== false) (ctx.allergies || []).forEach(a => add('allergies', '! ' + (a.seat ? seatText(a.seat) : 'Whole table') + ' ' + a.allergy));
+    if (d.showNotes !== false) (ctx.noteLines || []).forEach(n => add('notes', (d.noteWord !== undefined ? d.noteWord : '* ') + n));
     if (d.showRule !== false) add('divider', 'Divider');
     const layout = ['byseat', 'waitermate'].includes(d.layout) ? d.layout : 'standard';
     const itemRows = (l) => {
@@ -16997,6 +17074,8 @@ function dkLineRows(d) {
     if (!ex && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
     rows.push({ k, parts: [{ k, label }] });
   }
+  // The closing rule prints after everything, so it is listed last.
+  if (d.showFootRule !== false) rows.push({ k: 'footrule', parts: [{ k: 'footrule', label: 'Closing line' }] });
   return rows;
 }
 // The line list lives in the designer bar as one dropdown — as a panel of 28
@@ -17010,8 +17089,9 @@ function dkLineRows(d) {
 function dkAddMenu(d, dd) {
   if (state.dkStation) return '';
   const on = docketLineOrder(d);
-  const missing = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
-    && ['header', 'table', 'covers', 'orderno', 'time', 'staff'].includes(k));
+  // Derived, not listed: a line added to the docket's order is offered back
+  // the moment it is removed, without a second list to keep in step.
+  const missing = DOCKET_LINE_ORDER.filter(k => k !== 'items' && !on.includes(k));
   const optional = DK_OPT_PARTS.filter(k => !on.includes(k));
   const hidden = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
     && DK_PARTS[k].show && d[DK_PARTS[k].show] === false && !missing.includes(k));
@@ -17136,7 +17216,7 @@ function dkToolbar(d) {
     // Which row the pick prints on, and how many lines an edit will touch.
     const rowOf = (k) => {
       const order = docketLineOrder(d).filter(x => x !== 'items');
-      const j = (kk) => (d.joined || {})[kk] !== undefined ? !!(d.joined || {})[kk] : kk === 'time';
+      const j = (kk) => dkJoinedOn(d, kk);
       let lead = k;
       for (let i = order.indexOf(k); i > 0 && j(order[i]); i--) lead = order[i - 1];
       return (DK_PARTS[lead] || {}).label || '';
@@ -27958,6 +28038,7 @@ function bindEvents() {
       else if (f === 'docketAddWord') setDocketOpt('addWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketNoWord') setDocketOpt('noWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketStaffWord') setDocketOpt('staffWord', sampleEditInput.value.replace(/^\s+/, ''));
+      else if (f === 'docketRoundWord') setDocketOpt('roundWord', sampleEditInput.value.replace(/^\s+/, ''));
       else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
     });
   }
@@ -29344,6 +29425,7 @@ function handleActClick(el, e) {
         }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
+        else if (m === 'footrulestyle') { state.dkMenu = null; setDocketOpt('footRuleStyle', v); }
         else if (m === 'notetypes') {
           const cats = (state.noteCategories || []).map(c => c.id);
           const cur = Array.isArray(docketCfg().noteTypes) && docketCfg().noteTypes.length

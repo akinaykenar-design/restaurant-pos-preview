@@ -5020,7 +5020,7 @@ app.put('/api/settings', (req, res) => {
         if (cur.footerText && !src.some(x => x && x.id === 'ftrtext')) src = src.concat([{ id: 'ftrtext', kind: 'text', text: cur.footerText }]);
       }
       if (!Array.isArray(src)) return [];
-      return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
+      return src.filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind)).slice(0, 12)
         .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
           // A text line carries the venue's own wording.
           text: x.kind === 'text' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
@@ -5275,7 +5275,7 @@ app.put('/api/settings', (req, res) => {
     const extras = (() => {
       const e = ca.extras !== undefined ? ca.extras : (cur.extras || []);
       if (!Array.isArray(e)) return [];
-      return e.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
+      return e.filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind)).slice(0, 12)
         .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
           text: x.kind !== 'rule' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
           style: ['dashed', 'dotted', 'solid'].includes(x.style) ? x.style : null }));
@@ -8845,6 +8845,10 @@ const DK_PARTS = {
   // The table's own notes, as opposed to an item's. The printer has always
   // governed both with one switch, so they share the part.
   footrule: { label: 'Closing line', show: 'showFootRule', red: true, align: false, size: false },
+  // Selectable on the paper and given its own row of actions, but missing from
+  // this table — so every formatting control said "Tap a line on the paper
+  // first" while a line was plainly selected (owner, Aug '26).
+  divider: { label: 'Divider', show: 'showRule', red: true, align: false, size: false },
   // Optional elements — real facts the POS already holds, off the docket until
   // the designer puts one on. Each prints nothing when there is nothing in it,
   // so an empty booking or a walk-in never leaves a blank line on the paper.
@@ -8986,6 +8990,9 @@ function dkRuleHtml(style, cls, attrs) {
   return `<div class="print-rule${cls ? ' ' + cls : ''}"${attrs || ''}>${ch.repeat(cols)}</div>`;
 }
 function dkExtras(d) { return Array.isArray(d.extras) ? d.extras : []; }
+// How many added lines a paper keeps. Must match the server's slice() on both
+// the docket's and the slip's extras — over it, a line is silently discarded.
+const DK_MAX_EXTRAS = 12;
 // Keyboard on the designer: ctrl/cmd+A takes every line, Escape drops the
 // selection. Ignored while typing, so editing the header text still works.
 function dkKeydown(e) {
@@ -9012,9 +9019,17 @@ function dkKeydown(e) {
   }
 }
 document.addEventListener('keydown', dkKeydown);
+// render() puts every scrollable pane back where it was, and each of those
+// assignments fires a scroll event. It is indistinguishable from a real one, so
+// the handler below shut the menu the same frame it opened — on any page the
+// owner had scrolled at all, which is every page taller than the pane. Opening
+// a dropdown simply did nothing (owner, Aug '26: "text size elements still
+// dont work"). The restore raises this flag; a real scroll never does.
+let _scrollRestoring = 0;
 // Scrolling away from an open designer menu closes it — the menu is anchored to
 // its button, so a scrolled page would leave it floating over nothing.
 document.addEventListener('scroll', (e) => {
+  if (_scrollRestoring) return;
   if (!(state.dkMenu || state.rcMenu)) return;
   // Not the menu's own list — a long one scrolls, and closing it as soon as it
   // moved made the whole page feel twitchy (owner, Aug '26).
@@ -9092,21 +9107,29 @@ function docketDocClasses(ov) {
 // Several keys in ONE save. Two setDocketOpt calls in a row race each other:
 // the second builds its payload from the config the first has not stored yet,
 // so the first change is silently dropped.
+// Designer edits come in bursts — pick a size, then an alignment, then a
+// background, faster than the round trips come back. Each save answered with
+// the whole settings object and dropped it straight into state, so a SLOWER
+// EARLIER answer landing after a newer one put the older design back and the
+// last edit vanished. Only the newest save's answer is allowed to land.
+let _setSeq = 0;
+function saveSettingsPart(body, whenFail) {
+  const mine = ++_setSeq;
+  return api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    .then(s => { if (mine === _setSeq) state.settings = s; })
+    .catch(() => { state.toast = whenFail; render(); });
+}
 function setDocketOpts(patch) {
   const next = Object.assign({}, docketCfg(), patch);
   state.settings.docket = next;
   render();
-  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: next }) })
-    .then(s => { state.settings = s; })
-    .catch(() => { state.toast = 'Could not save docket layout.'; render(); });
+  saveSettingsPart({ docket: next }, 'Could not save docket layout.');
 }
 function setDocketOpt(key, value) {
   const next = Object.assign({}, docketCfg(), { [key]: value });
   state.settings.docket = next;
   render();
-  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: next }) })
-    .then(s => { state.settings = s; })
-    .catch(() => { state.toast = 'Could not save docket layout.'; render(); });
+  saveSettingsPart({ docket: next }, 'Could not save docket layout.');
 }
 
 // Receipt designer parts — same Word-style bar as the docket designer, on the
@@ -9174,9 +9197,7 @@ function setReceiptOpt(patch) {
   const next = Object.assign({}, receiptCfg(), patch);
   state.settings[which] = next;
   render();
-  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [which]: next }) })
-    .then(s => { state.settings = s; })
-    .catch(() => { state.toast = 'Could not save the layout.'; render(); });
+  saveSettingsPart({ [which]: next }, 'Could not save the layout.');
 }
 
 // `edit` renders the Settings sample: the header, footer and show/hide lines
@@ -9211,10 +9232,17 @@ function buildReceiptDoc(order, edit) {
     if (edit) return `<${block ? 'div' : 'span'} class="dk-part${state.rcPart === k ? ' dk-sel' : ''}"${styleAttr || ''} data-act="rc-pick-part" data-part="${k}">${inner}</${block ? 'div' : 'span'}>`;
     return styleAttr ? `<${block ? 'div' : 'span'}${styleAttr}>${inner}</${block ? 'div' : 'span'}>` : inner;
   };
-  // Per-part size → same inline scale the docket paper uses.
+  // Per-part size → same inline scale the docket paper uses. The venue name
+  // has always printed at double size with nothing stored, so an absent entry
+  // means Large there and Normal everywhere else — the menu ticks Large for it
+  // and picking Large must not read as "no size at all".
+  const rcSize = k => {
+    const n = r.sizes[k] || (k === 'header' ? 2 : 0);
+    return n ? `font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;` : '';
+  };
   const rstl = k => {
-    const n = r.sizes[k], a = (r.align || {})[k], rd = (r.red || {})[k];
-    const css = (n ? `font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;` : '')
+    const a = (r.align || {})[k], rd = (r.red || {})[k];
+    const css = rcSize(k)
       + (a ? `text-align:${a};` : '') + (rd ? 'color:#C0392B;' : '');
     return css ? ` style="${css}"` : '';
   };
@@ -9266,7 +9294,7 @@ function buildReceiptDoc(order, edit) {
       gstIncl: order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
       total: partR('totals', `<div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>`, true, rstl('totals')),
       tip: order.tip ? partR('totals', `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>`, true, rstl('totals')) : '',
-      payment: partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true),
+      payment: partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment')),
       staff: partR('staff', `<div class="print-line"${rstl('staff')}><span>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')}</span><span>${esc(order.staffName || '')}</span></div>`, true),
     };
     const seq = receiptLineOrder(r);
@@ -9302,11 +9330,11 @@ function buildReceiptDoc(order, edit) {
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div>` : ''}
       ${order.tax && taxLabelInclusive() ? `<div class="print-line"><span>Incl. ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>` : ''}
       ${layout === 'bigtotal'
-        ? partR('totals', `<div style="text-align:center;font-weight:800;"><div style="font-size:1.4em;">TOTAL</div><div style="font-size:2.7em;line-height:1.1;">${(order.grandTotal || order.total || 0).toFixed(2)}</div></div>`, true)
-        : partR('totals', `<div class="print-line" style="font-weight:700;"${rstl('totals')}><span>TOTAL</span><span>${money(order.grandTotal || order.total)}</span></div>`, true)}
+        ? partR('totals', `<div style="text-align:center;font-weight:800;${rcSize('totals')}"><div style="font-size:1.4em;">TOTAL</div><div style="font-size:2.7em;line-height:1.1;">${(order.grandTotal || order.total || 0).toFixed(2)}</div></div>`, true)
+        : partR('totals', `<div class="print-line" style="font-weight:700;${rcSize('totals')}"><span>TOTAL</span><span>${money(order.grandTotal || order.total)}</span></div>`, true)}
       ${partR('payment', layout === 'bigtotal'
         ? `<div style="text-align:center;">Paid · ${esc(order.paymentMethod)}</div>`
-        : `<div class="print-line"><span>Paid by</span><span>${esc(order.paymentMethod)}</span></div>`, true)}
+        : `<div class="print-line"><span>Paid by</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment'))}
       <hr>
       ${layout === 'bigtotal' && (edit || s.venueAddress) ? `<div class="print-sub">${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress)}</div>` : ''}
       <div class="print-footer">${edit ? sampleEditable('ticketFooter', s.ticketFooter, 'Thank you', '') : esc(s.ticketFooter || 'Thank you')}</div>`}
@@ -9604,7 +9632,7 @@ function buildDocketDoc(ctx, edit) {
         const noteSub = (l) => {
           const w = d.noteWord !== undefined ? d.noteWord : '* ';
           const word = edit && !noteEd++ ? sampleEditable('docketNoteWord', w, '* ', '', true) : esc(w);
-          return `<div class="print-build"${stl('subs')}><div class="pb-line${rc('notes')}">${word}${esc(l.note)}</div></div>`;
+          return `<div class="print-build"${stl('notes', 'subs')}><div class="pb-line${rc('notes')}">${word}${esc(l.note)}</div></div>`;
         };
         const lineRow = (l, pre, noSeat) => {
           const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, seatSub(l), true) : '';
@@ -9843,9 +9871,7 @@ function setCaOpts(patch) {
   const next = Object.assign({}, caCfg(), patch);
   state.settings.callaway = next;
   render();
-  api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ callaway: next }) })
-    .then(s => { state.settings = s; })
-    .catch(() => { state.toast = 'Could not save the slip.'; render(); });
+  saveSettingsPart({ callaway: next }, 'Could not save the slip.');
 }
 function setCaOpt(key, val) { setCaOpts({ [key]: val }); }
 // Everything the slip can carry: its own four, then the same facts the docket
@@ -13505,11 +13531,16 @@ function render() {
   bindEvents();
   oskMarkInputs();
   markAdminKeyboardFocusable();
+  // Flag up while the panes are put back, so the scroll events these
+  // assignments fire are not read as the owner scrolling away.
+  _scrollRestoring++;
   savedScroll.forEach(({ sel, top, left }) => {
     const el = document.querySelector(sel);
     if (el) { el.scrollTop = top; el.scrollLeft = left; }
   });
   if (savedWin) window.scrollTo(savedWin.x, savedWin.y);
+  // Cleared after the events these assignments queued have been delivered.
+  setTimeout(() => { _scrollRestoring = Math.max(0, _scrollRestoring - 1); }, 0);
   setToolbarHeightVar();
   animateExpansions(_prevExp);
   fitTileNames();
@@ -29938,6 +29969,7 @@ function handleActClick(el, e) {
       else if (act === 'dk-add-line') {
         const d = docketCfg();
         const kind = el.dataset.kind;
+        if (dkExtras(d).length >= DK_MAX_EXTRAS) { state.toast = `${DK_MAX_EXTRAS} added lines is the limit`; render(); armToastTimer(2400); return; }
         const id = kind + Date.now().toString(36);
         const extras = dkExtras(d).concat([{ id, kind, style: kind === 'rule' ? 'dashed' : null }]);
         // Dropped in just above the items, which is where a separator or a
@@ -29972,6 +30004,11 @@ function handleActClick(el, e) {
       }
       else if (act === 'ca-add-line') {
         const c = caCfg(), id = 'ca' + Date.now().toString(36);
+        // The server keeps twelve added lines per paper. The thirteenth used to
+        // be drawn, selected and then quietly thrown away on save — the line
+        // appeared, the bar acted on nothing, and it vanished on the next
+        // render (owner, Aug '26).
+        if ((c.extras || []).length >= DK_MAX_EXTRAS) { state.toast = `${DK_MAX_EXTRAS} added lines is the limit`; render(); armToastTimer(2400); return; }
         state.dkPart = id; state.dkSlip = true; state.dkSel = [id]; state.dkMenu = null;
         setCaOpts({ extras: (c.extras || []).concat([{ id, kind: 'text', text: '', style: null }]),
           order: caOrder(c).concat([id]) });

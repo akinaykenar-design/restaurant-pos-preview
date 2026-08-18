@@ -9517,15 +9517,36 @@ function buildDocketDoc(ctx, edit) {
   // label against its amount (printing.js flush). So the preview spreads the
   // row when anything on it is set right, and lists it with separators when
   // nothing is (owner, Aug '26).
-  const spread = (g) => g.length > 1 && g.some(({ k }) => (d.align || {})[k] === 'right');
+  // How many characters this paper fits — the same sum the printer does, so
+  // the screen only spreads a row the paper can actually spread. It used to
+  // spread anything, while the printer quietly gave up and printed the row as
+  // one run (owner, Aug '26: "inconsistent especially when changing
+  // alignment").
+  const dkCols = (() => {
+    const pw = (state.settings || {}).paperWidth;
+    const a = pw === '58' ? 32 : pw === '76' ? 33 : 42;
+    const bCols = pw === '58' ? 42 : pw === '76' ? 40 : 56;
+    return d.font === 'B' ? bCols : a;
+  })();
+  const rowFits = (g) => {
+    const n = (d.sizes || {})[g[0].k] || (d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1);
+    const plain = g.map(({ seg }) => String(seg.html || '').replace(/<[^>]*>/g, '')).filter(Boolean).join(' \u00b7 ');
+    return plain.length <= Math.floor(dkCols / (n || 1));
+  };
+  const spread = (g) => g.length > 1 && rowFits(g) && g.some(({ k }) => (d.align || {})[k] === 'right');
+  // The separator never ends a line: a row too long to fit breaks BETWEEN its
+  // elements, the way the paper does, instead of leaving a dot dangling.
+  const SEP_HTML = '\u00a0\u00b7 ';
   const cellFor = (k, seg) => partW(k, seg.on, seg.html, false, stlInk(k));
   const riderHtml = (g) => g.slice(1)
     .filter(({ seg }) => seg.html !== '')
     .map(({ k, seg }) => cellFor(k, seg)).filter(Boolean)
-    .map(x => ' · ' + x).join('');
+    .map(x => SEP_HTML + x).join('');
   const spreadHtml = (g) => {
+    // Inside a bucket the elements are touching, so the dot separates them;
+    // between buckets the gap does the separating and a dot would float in it.
     const bucket = (want) => g.filter(({ k, seg }) => seg.html !== '' && ((d.align || {})[k] || 'left') === want)
-      .map(({ k, seg }) => cellFor(k, seg)).filter(Boolean).join(' ');
+      .map(({ k, seg }) => cellFor(k, seg)).filter(Boolean).join(SEP_HTML);
     const L = bucket('left'), C = bucket('center'), R = bucket('right');
     return `<div class="print-spread"><span>${L}</span><span>${C}</span><span>${R}</span></div>`;
   };
@@ -13457,7 +13478,10 @@ function render() {
 
   // Every scrollable surface keeps its position across the full re-render —
   // otherwise any tap "snaps" panels back to their start.
-  const SCROLL_KEEP = ['.admin-content', '.menu-scroll', '.admin-sidebar', '.catrail', '.subcat-seg', '.qty-pad', '.ticket-items', '.course-tabs', '.pay-pane', '.kds-board', '.middle-view'];
+  // '.dk-menu': the Elements checklist stays open while the owner ticks, and
+  // every tick re-renders — without this the list snapped back to the top on
+  // each pick (owner, Aug '26: "screen should not auto scroll").
+  const SCROLL_KEEP = ['.admin-content', '.menu-scroll', '.admin-sidebar', '.catrail', '.subcat-seg', '.qty-pad', '.ticket-items', '.course-tabs', '.pay-pane', '.kds-board', '.middle-view', '.dk-menu'];
   const savedScroll = SCROLL_KEEP.map(sel => {
     const el = document.querySelector(sel);
     return el && (el.scrollTop || el.scrollLeft) ? { sel, top: el.scrollTop, left: el.scrollLeft } : null;
@@ -30122,9 +30146,10 @@ function handleActClick(el, e) {
         state.dkSlip = slip;
         state.dkMenu = null;
         render();
-        // Bring the controls to the line you just picked: on a tablet the bar
-        // is often scrolled off the top by the time you reach the paper
-        // (owner, Aug '26).
+        // Bring the controls to the line you just picked — but only when the
+        // pick was a tap ON THE PAPER. Picking from a dropdown must not move
+        // the page: the menu is already at the controls, and the jump pulled
+        // the screen away mid-choice (owner, Aug '26).
         if (state.dkPart) requestAnimationFrame(() => {
           const bar = document.querySelector('.dk-toolbar');
           if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -30219,6 +30244,15 @@ function handleActClick(el, e) {
             const show = Object.assign({}, c.show); delete show[k];
             setCaOpts({ order: on.includes(k) ? on : on.concat([k]), show });
           }
+        }
+        else if (m === 'addback' && v === 'ordernotes') {
+          // The parent row: off takes its whole section — the plain notes,
+          // Allergies and VIP — and on brings the section back (owner,
+          // Aug '26: "deselecting order notes still has vip and allergies
+          // selected"). The sub-rows still switch one at a time.
+          const dc = docketCfg();
+          const on = dc.showOrderNotes !== false;
+          setDocketOpts({ showOrderNotes: !on, showAllergies: !on, showVip: !on });
         }
         else if (m === 'addback' && v.startsWith('subline:')) {
           // The SAME switch the line's own trash flips — one door, reached

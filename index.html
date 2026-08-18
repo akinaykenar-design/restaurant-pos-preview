@@ -9499,10 +9499,19 @@ function buildDocketDoc(ctx, edit) {
   // are switched mid-line — so those, and only those, vary per element. The
   // preview drew riders with no styling at all, which is why bolding a joined
   // line did nothing on screen (owner, Aug '26).
-  const stlInk = k => {
+  const stlInk = (k, leadK) => {
+    // Ink, weight AND size vary per element on a joined row — size is a
+    // character attribute on the printer, so the screen mirrors it. The size
+    // is written RELATIVE to the row's leader: the rider's text nests inside
+    // the leader-sized line, so an absolute em would multiply by it.
+    const n = (d.sizes || {})[k];
+    const leadN = leadK ? ((d.sizes || {})[leadK] || dkBaseSize(d)) : null;
+    const rel = (n && leadN && n !== leadN)
+      ? ((DK_SIZE_MULT[n] || 1) / (DK_SIZE_MULT[leadN] || 1)).toFixed(3) + 'em' : null;
     const css = `font-weight:${dkBoldOn(d, k) ? 800 : 400};`
       + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
-      + ((d.red || {})[k] ? 'color:#C0392B;' : '');
+      + ((d.red || {})[k] ? 'color:#C0392B;' : '')
+      + (rel ? `font-size:${rel};vertical-align:baseline;` : '');
     return ` style="${css}"`;
   };
 
@@ -9604,16 +9613,16 @@ function buildDocketDoc(ctx, edit) {
   // The separator never ends a line: a row too long to fit breaks BETWEEN its
   // elements, the way the paper does, instead of leaving a dot dangling.
   const SEP_HTML = '\u00a0\u00b7 ';
-  const cellFor = (k, seg) => partW(k, seg.on, seg.html, false, stlInk(k));
+  const cellFor = (k, seg, leadK) => partW(k, seg.on, seg.html, false, stlInk(k, leadK));
   const riderHtml = (g) => g.slice(1)
     .filter(({ seg }) => seg.html !== '')
-    .map(({ k, seg }) => cellFor(k, seg)).filter(Boolean)
+    .map(({ k, seg }) => cellFor(k, seg, g[0].k)).filter(Boolean)
     .map(x => SEP_HTML + x).join('');
   const spreadHtml = (g) => {
     // Inside a bucket the elements are touching, so the dot separates them;
     // between buckets the gap does the separating and a dot would float in it.
     const bucket = (want) => g.filter(({ k, seg }) => seg.html !== '' && ((d.align || {})[k] || 'left') === want)
-      .map(({ k, seg }) => cellFor(k, seg)).filter(Boolean).join(SEP_HTML);
+      .map(({ k, seg }) => cellFor(k, seg, g[0].k)).filter(Boolean).join(SEP_HTML);
     const L = bucket('left'), C = bucket('center'), R = bucket('right');
     return `<div class="print-spread"><span>${L}</span><span>${C}</span><span>${R}</span></div>`;
   };
@@ -9647,14 +9656,28 @@ function buildDocketDoc(ctx, edit) {
   let onEd = 0;
   const noteShown = dkNoteLines(d, ctx);
   // Each note TYPE is its own tappable element on the paper (owner, Aug '26).
+  // One block per type, in the item grammar: count line, then each note's
+  // seat and starred text — the same shape the allergy block wears.
   const headNotesHtml = (noteShown.length && d.showOrderNotes)
-    ? noteShown.map(n => {
-        const kk = n.cat ? ntKey(n.cat) : 'ordernotes';
-        const word = edit && !onEd++ ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
-        const sel2 = selectable && dkIsSelected(kk) ? ' dk-sel' : '';
-        const pick2 = selectable ? ` data-act="dk-pick-part" data-part="${kk}"` : '';
-        return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">${word}${esc(n.text)}</div></div>`;
-      }).join('\n      ')
+    ? (() => {
+        const byType = [];
+        noteShown.forEach(n => {
+          let b = byType.find(x => x.cat === (n.cat || null));
+          if (!b) { b = { cat: n.cat || null, name: n.catName || 'Note', list: [] }; byType.push(b); }
+          b.list.push(n);
+        });
+        return byType.map(b => {
+          const kk = b.cat ? ntKey(b.cat) : 'ordernotes';
+          const sel2 = selectable && dkIsSelected(kk) ? ' dk-sel' : '';
+          const pick2 = selectable ? ` data-act="dk-pick-part" data-part="${kk}"` : '';
+          const lines = b.list.map(n => {
+            const word = edit && !onEd++ ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
+            return (n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : '')
+              + `<div class="pb-line">\u00a0 ${word}${esc(n.text)}</div>`;
+          }).join('');
+          return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">${b.list.length}\u00d7 ${esc(b.name)}</div>${lines}</div>`;
+        }).join('\n      ');
+      })()
     : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>`
@@ -10096,7 +10119,8 @@ function sampleDocketCtx() {
     // type off in Elements visibly drops its note from the paper. Two
     // hard-coded words meant the picker changed nothing you could see
     // (owner, Aug '26: "order notes still fucked").
-    noteLines: (state.noteCategories || []).map(c => ({ cat: c.id, text: (((c.presets || [])[0] || {}).name) || c.name })),
+    noteLines: (state.noteCategories || []).map((c, i) => ({ cat: c.id, catName: c.name,
+      text: (((c.presets || [])[0] || {}).name) || c.name, seat: i === 0 ? 2 : null })),
     timeLabel: '7:24 pm',
     staffName: 'Aylin',
     // The optional elements' sample values — a booked table on the inside
@@ -17559,16 +17583,16 @@ async function setDkStationOpt(key, val) {
 // display:contents there — and two rows on a phone, which is how the owner
 // asked for it (Aug '26). One list, so the two can never drift apart.
 function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
-  const rider = p && DK_JOINABLE.includes(p) && dkJoinedOn(d, p);
-  const why = !p ? 'Tap a line on the paper first'
-    : rider ? 'The whole row prints at one size' : '';
+  const why = !p ? 'Tap a line on the paper first' : '';
   // The dimmed twin wears the SAME classes as the live control, or the row
   // reflows the moment a line is picked.
   const off = (glyph, w, cls) => `<button type="button" class="dk-tb-btn${cls ? ' ' + cls : ''} dk-tb-off" data-act="dk-why" data-why="${w}">${glyph}</button>`;
   const place = [], bits = [];
-  bits.push(p && meta && meta.size && !rider
+  // A rider takes a size of its own — the printer sets size per CHARACTER,
+  // so one row can carry the table large and the round small (owner, Aug '26).
+  bits.push(p && meta && meta.size
     ? dd('size', DKT_TEXTSIZE_SVG + '<b>' + ((d.sizes || {})[p] || defN) + '</b>', true, sizeItems, 'Text size for this line', '', true)
-    : off(DKT_TEXTSIZE_SVG + '<b></b>', p ? (rider ? why : 'No size on this line') : why, 'dk-tb-dd dk-tb-ico'));
+    : off(DKT_TEXTSIZE_SVG + '<b></b>', p ? 'No size on this line' : why, 'dk-tb-dd dk-tb-ico'));
   // A rider CAN be placed — left, centre or right within its own row — because
   // padding does it where ESC a cannot. Size still cannot vary: one row, one
   // character size.

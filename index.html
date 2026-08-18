@@ -1270,6 +1270,28 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-mi-n{display:inline-flex;align-items:center;justify-content:center;min-width:20px;
   color:var(--charcoal-soft);font-variant-numeric:tabular-nums;flex:none;}
 .dk-mi-l{overflow:hidden;text-overflow:ellipsis;max-width:210px;}
+/* Phone: the ribbon keeps its three fixed rows and scrolls sideways instead of
+   wrapping into six stacked ones — a wrapped bar loses the "formatting lives
+   on its own row" promise the moment the screen narrows (owner, Aug '26:
+   "format designer bar so it looks good on mobile version as well"). */
+@media (max-width:768px){
+  .dk-toolbar{padding:7px 8px;gap:6px;}
+  .dk-tb-row{flex-wrap:nowrap;overflow-x:auto;overflow-y:hidden;
+    scrollbar-width:none;-ms-overflow-style:none;-webkit-overflow-scrolling:touch;}
+  .dk-tb-row::-webkit-scrollbar{display:none;}
+  .dk-tb-row > *{flex:none;}
+  .dk-tb-btn.dk-tb-dd{min-width:0;max-width:132px;}
+  .dk-tb-btn.dk-tb-dd .dk-dd-l{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .dk-tb-note{min-width:0;}
+  /* A menu inside a sideways-scrolling row would be clipped by it, so on a
+     phone it comes up from the bottom where a thumb already is. */
+  .dk-menu-scrim{background:rgba(0,0,0,.3);}
+  .dk-menu{position:fixed;top:auto;left:0;right:0;bottom:0;min-width:0;
+    border-radius:16px 16px 0 0;max-height:62vh;padding:8px 8px 14px;
+    box-shadow:0 -8px 30px rgba(0,0,0,.3);}
+  .dk-menu-item{min-height:44px;}
+  .dk-mi-l{max-width:none;}
+}
 .dk-mi-l.dk-mi-sub{padding-left:12px;font-weight:400;}
 /* A rider shares the line above it: no number of its own, and a tie mark so
    the pair reads as one printed line rather than two. */
@@ -4974,11 +4996,39 @@ app.put('/api/settings', (req, res) => {
     // times — red, sizes, bold, under, align — and the copies drifted: a new
     // element could be styled in the designer and the style was dropped here
     // without a word. Keep it in step with DK_PARTS in public/app.js.
+    // Inserted blank lines, dividers and text lines, in the order they were
+    // added. Built BEFORE the style maps because an added line is styleable
+    // like any other: its id has to be in DK_STYLE_KEYS or every size, ink and
+    // alignment set on it is dropped here without a word (owner, Aug '26:
+    // "font size mot working").
+    const dkExtras = (() => {
+      let src = dk.extras !== undefined ? dk.extras : (cur.extras || []);
+      // The header and footer were containers the venue types into, not POS
+      // data — so they become ordinary text lines the first time this runs,
+      // and a venue that had either keeps it (owner, Aug '26).
+      if ((cur.v || 0) < 2 && Array.isArray(src)) {
+        if (cur.headerText && !src.some(x => x && x.id === 'hdrtext')) src = [{ id: 'hdrtext', kind: 'text', text: cur.headerText }].concat(src);
+        if (cur.footerText && !src.some(x => x && x.id === 'ftrtext')) src = src.concat([{ id: 'ftrtext', kind: 'text', text: cur.footerText }]);
+      }
+      if (!Array.isArray(src)) return [];
+      return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
+        .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
+          // A text line carries the venue's own wording.
+          text: x.kind === 'text' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
+          style: ['dashed', 'dotted', 'solid', 'bold'].includes(x.style) ? x.style : null }));
+    })();
     const DK_STYLE_KEYS = ['header', 'table', 'round', 'covers', 'orderno', 'time', 'staff', 'vip',
       'course', 'items', 'subs', 'notes', 'ordernotes', 'allergies',
       'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone',
-      'callaway', 'cacourse', 'catable', 'catime'];
-    const flags = (src) => { const out = {}; DK_STYLE_KEYS.forEach(k => { if (src && src[k]) out[k] = true; }); return out; };
+      'callaway', 'cacourse', 'catable', 'catime',
+      // The closing rule, the divider and the seat lines print like any other
+      // line and are styled in the designer like any other — leaving them out
+      // here dropped their weight, ink, size and alignment on the floor.
+      'footrule', 'divider', 'seats'].concat(dkExtras.map(x => x.id));
+    // BOTH answers are stored, never just the true one: items, courses and
+    // allergies print bold by default, so "off" is a real choice and dropping
+    // it meant the button pressed and the docket did not move.
+    const flags = (src) => { const out = {}; DK_STYLE_KEYS.forEach(k => { if (src && src[k] !== undefined) out[k] = !!src[k]; }); return out; };
     const b = (v, def) => v === undefined ? def : !!v;
     const pick = (v, allowed, def) => allowed.includes(v) ? v : def;
     data.settings.docket = {
@@ -5034,7 +5084,7 @@ app.put('/api/settings', (req, res) => {
       gaps: (() => {
         const src = dk.gaps !== undefined ? dk.gaps : (cur.gaps || {});
         const out = {};
-        DK_STYLE_KEYS.concat(['footrule', 'divider', 'seats']).forEach(k => {
+        DK_STYLE_KEYS.forEach(k => {
           if (src && ['1', '1.5', '2'].includes(src[k])) out[k] = src[k];
         });
         return out;
@@ -5056,7 +5106,7 @@ app.put('/api/settings', (req, res) => {
         const src = dk.blockStyle !== undefined ? dk.blockStyle : (cur.blockStyle || {});
         const out = {};
         // Every line can carry a background, not just the three that used to.
-        DK_STYLE_KEYS.concat(['divider', 'footrule', 'seats']).forEach(k => {
+        DK_STYLE_KEYS.forEach(k => {
           if (src && ['invert', 'border', 'plain'].includes(src[k])) out[k] = src[k];
         });
         return out;
@@ -5125,9 +5175,7 @@ app.put('/api/settings', (req, res) => {
           }
         }
         // A removed line is absent by design, so only require the items block.
-        const extraIds = (Array.isArray(dk.extras) ? dk.extras : (cur.extras || [])).map(x => x && x.id)
-          .concat((cur.v || 0) < 2 && cur.headerText ? ['hdrtext'] : [])
-          .concat((cur.v || 0) < 2 && cur.footerText ? ['ftrtext'] : []);
+        const extraIds = dkExtras.map(x => x.id);
         // 'header' is legacy: still accepted so an order saved with it is not
         // thrown away before the migration below can turn it into a text line.
         const known = (k) => k === 'header' || DEF.includes(k) || OPT.includes(k) || extraIds.includes(k);
@@ -5175,23 +5223,7 @@ app.put('/api/settings', (req, res) => {
       under: (() => {
         return flags(dk.under !== undefined ? dk.under : (cur.under || {}));
       })(),
-      // Inserted blank lines and dividers, in the order they were added.
-      extras: (() => {
-        let src = dk.extras !== undefined ? dk.extras : (cur.extras || []);
-        // The header and footer were containers the venue types into, not POS
-        // data — so they become ordinary text lines the first time this runs,
-        // and a venue that had either keeps it (owner, Aug '26).
-        if ((cur.v || 0) < 2 && Array.isArray(src)) {
-          if (cur.headerText && !src.some(x => x && x.id === 'hdrtext')) src = [{ id: 'hdrtext', kind: 'text', text: cur.headerText }].concat(src);
-          if (cur.footerText && !src.some(x => x && x.id === 'ftrtext')) src = src.concat([{ id: 'ftrtext', kind: 'text', text: cur.footerText }]);
-        }
-        if (!Array.isArray(src)) return [];
-        return src.slice(0, 12).filter(x => x && typeof x.id === 'string' && ['gap', 'rule', 'text'].includes(x.kind))
-          .map(x => ({ id: String(x.id).slice(0, 24), kind: x.kind,
-            // A text line carries the venue's own wording.
-            text: x.kind === 'text' ? String(x.text === undefined ? '' : x.text).slice(0, 40) : undefined,
-            style: ['dashed', 'dotted', 'solid', 'bold'].includes(x.style) ? x.style : null }));
-      })(),
+      extras: dkExtras,
       // Which short lines ride the meta line instead of taking one of their own.
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
@@ -5240,7 +5272,7 @@ app.put('/api/settings', (req, res) => {
           style: ['dashed', 'dotted', 'solid'].includes(x.style) ? x.style : null }));
     })();
     const KEYS = NATIVE.concat(OPT).concat(extras.map(x => x.id));
-    const flags = (o) => { const out = {}; KEYS.forEach(k => { if (o && o[k]) out[k] = true; }); return out; };
+    const flags = (o) => { const out = {}; KEYS.forEach(k => { if (o && o[k] !== undefined) out[k] = !!o[k]; }); return out; };
     const order = (() => {
       const raw = ca.order !== undefined ? ca.order : cur.order;
       if (!Array.isArray(raw) || !raw.length || raw.length > 30) return null;
@@ -6588,7 +6620,7 @@ app.post('/api/printers/test', async (req, res) => {
 // its own overrides); receipt = the latest order on the receipt station.
 app.post('/api/printers/print-sample', (req, res) => {
   const data = readData();
-  const kind = req.body && req.body.kind === 'receipt' ? 'receipt' : 'docket';
+  const kind = ['receipt', 'callaway'].includes(req.body && req.body.kind) ? req.body.kind : 'docket';
   const orders = (data.orders || []).filter(o => o.items && o.items.length);
   const order = orders[orders.length - 1];
   if (!order) return res.status(400).json({ error: 'No orders yet to sample from' });
@@ -6600,6 +6632,10 @@ app.post('/api/printers/print-sample', (req, res) => {
   if (!(data.printerStations || []).length) return res.status(400).json({ error: 'Add a printer station first' });
   const course = Math.max(...order.items.map(i => i.course || 1));
   const items = order.items.filter(i => (i.course || 1) === course);
+  if (kind === 'callaway') {
+    printing.printCallAwaySlips(data, order, items, printing.courseNameOf(data.settings, course));
+    return res.json({ ok: true });
+  }
   printing.printDocketsForRound(data, order, items, 0);
   res.json({ ok: true });
 });
@@ -8838,6 +8874,10 @@ function caRed(d, k) {
   return (k === 'cacourse' || k === 'catable') ? !!r.callaway : false;
 }
 const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
+// True while the bar is pointed at the call-away slip — its native lines, its
+// optional elements and its added lines alike. Testing CA_PARTS alone missed
+// the last two, so an added slip line was styled as if it were on the docket.
+function isCaKey(k) { return !!state.dkSlip || CA_PARTS.includes(k); }
 // Lines short enough to share the meta line. The order number and the time
 // already print there, so they are the line being joined TO, not joinable.
 // Lines short enough to ride the meta line. The order number and the time ARE
@@ -8926,19 +8966,22 @@ function dkExtras(d) { return Array.isArray(d.extras) ? d.extras : []; }
 // Keyboard on the designer: ctrl/cmd+A takes every line, Escape drops the
 // selection. Ignored while typing, so editing the header text still works.
 function dkKeydown(e) {
-  if (!(state.view === 'admin' && state.adminTab === 'settings-printers' && state.printersTab === 'docket')) return;
+  if (!(state.view === 'admin' && state.adminTab === 'settings-printers' && ['docket', 'callaway'].includes(state.printersTab))) return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
   if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
     e.preventDefault();
-    state.dkSel = [...document.querySelectorAll('[data-act="dk-pick-part"]:not([data-slip])')]
+    // Every line on the paper the bar is pointed at — the slip's when the Call
+    // away tab is open, the docket's otherwise.
+    const sel = state.dkSlip ? '[data-act="dk-pick-part"][data-slip]' : '[data-act="dk-pick-part"]:not([data-slip])';
+    state.dkSel = [...document.querySelectorAll(sel)]
       .map(x => x.dataset.part).filter((k, i, a) => a.indexOf(k) === i);
-    state.dkPart = state.dkSel[0] || null; state.dkSlip = false; render();
+    state.dkPart = state.dkSel[0] || null; render();
   } else if ((e.key === 'Delete' || e.key === 'Backspace') && state.dkPart) {
     // The key does what the trash does (owner, Aug '26). Same guards: Items
     // stays, and an inserted line is deleted rather than hidden.
     e.preventDefault();
-    const btn = document.querySelector('.dk-tb-line [data-act="dk-remove-line"], .dk-tb-line [data-act="dk-hide-line"], .dk-tb-line [data-act="dk-del-line"]');
+    const btn = document.querySelector('.dk-tb-line [data-act="dk-remove-line"], .dk-tb-line [data-act="dk-hide-line"], .dk-tb-line [data-act="dk-del-line"], .dk-tb-line [data-act="ca-remove-line"]');
     if (btn) btn.click(); else { state.toast = 'That line cannot be removed'; render(); armToastTimer(2000); }
   } else if (e.key === 'Escape' && dkSelection().length) {
     e.preventDefault();
@@ -9309,6 +9352,7 @@ function buildDocketDoc(ctx, edit) {
       + (a ? `text-align:${a};` : '')
       + `font-weight:${dkBoldOn(d, k) ? 800 : 400};`
       + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
+      + ((d.red || {})[k] ? 'color:#C0392B;' : '')
       + (bs === 'invert' ? 'background:#000;color:#fff;padding:0 3px;' : '')
       + (bs === 'border' ? 'border-top:1.5px solid #000;border-bottom:1.5px solid #000;' : '');
     return css ? ` style="${css}"` : '';
@@ -9593,7 +9637,7 @@ function buildDocketDoc(ctx, edit) {
       const inner = own + (riders ? (own ? ' · ' : '') + riders : '');
       return inner
         ? `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${stl(k)}${pick}>${inner}</div>`
-        : `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
+        : `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${stl(k)}${pick}>&nbsp;</div>`;
     }
     return dkRuleHtml(ex.style || 'dashed', (selectable ? 'dk-part' : '') + sel, pick);
   };
@@ -9824,7 +9868,7 @@ function buildCallAwaySample() {
     const bs = (c.blockStyle || {})[k] || (k === 'callaway' ? 'invert' : 'plain');
     return ` style="font-size:${caSizeEm(n, c)};line-height:${({ '1.5': 1.95, '2': 2.6 })[(c.gaps || {})[k]] || 1.3};`
       + `text-align:${(c.align || {})[k] || 'center'};`
-      + `font-weight:${(c.bold || {})[k] || k === 'callaway' || k === 'cacourse' ? 800 : 400};`
+      + `font-weight:${(c.bold || {})[k] ? 800 : 400};`
       + ((c.under || {})[k] ? 'text-decoration:underline;' : '')
       + (caRedOn(c, k) ? 'color:#C0392B;' : '')
       + (bs === 'invert' ? 'background:#111;color:#fff;padding:1px 8px;' : '')
@@ -9920,7 +9964,7 @@ async function addFoundPrinter(ip) {
 // Proof prints: the current DESIGN on real paper (docket routes like a live
 // send; receipt goes to the receipt station).
 async function printSample(kind) {
-  state.toast = kind === 'receipt' ? 'Printing a sample receipt…' : 'Printing a sample docket…'; render();
+  state.toast = kind === 'receipt' ? 'Printing a sample receipt…' : kind === 'callaway' ? 'Printing a sample slip…' : 'Printing a sample docket…'; render();
   try {
     await api('/api/printers/print-sample', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind }) });
     state.toast = 'Sample sent — check the printer.';
@@ -17082,15 +17126,39 @@ async function terminalTestCharge() {
 // Kitchen dockets, and Customer receipts — picked via tabs at the top.
 function renderPrinterStationsSettingsAdmin() {
   const tab = state.printersTab || 'setup';
+  // The call-away slip is its own piece of paper, so it gets its own tab beside
+  // the docket rather than sitting in the docket's second column, where every
+  // edit meant hunting for the right paper first (owner, Aug '26).
+  const wantSlip = tab === 'callaway';
+  if (!!state.dkSlip !== wantSlip) { state.dkSlip = wantSlip; state.dkPart = null; state.dkSel = []; }
   return `
   <div style="max-width:720px;">
     <div class="seg" style="width:fit-content;margin-bottom:16px;">
       <button class="${tab === 'setup' ? 'active' : ''}" data-act="printers-tab" data-val="setup">Printers</button>
       <button class="${tab === 'docket' ? 'active' : ''}" data-act="printers-tab" data-val="docket">Docket</button>
+      <button class="${tab === 'callaway' ? 'active' : ''}" data-act="printers-tab" data-val="callaway">Call away</button>
       <button class="${tab === 'receipt' ? 'active' : ''}" data-act="printers-tab" data-val="receipt">Invoice</button>
     </div>
-    ${tab === 'setup' ? renderPrintersSetupTab() : tab === 'docket' ? renderPrintersDocketTab() : renderPrintersReceiptTab()}
+    ${tab === 'setup' ? renderPrintersSetupTab()
+      : tab === 'docket' ? renderPrintersDocketTab()
+      : tab === 'callaway' ? renderPrintersCallawayTab()
+      : renderPrintersReceiptTab()}
   </div>`;
+}
+
+// The call-away slip's own page: the same designer bar, pointed at the slip.
+function renderPrintersCallawayTab() {
+  return `
+    <div class="settings-card wide" style="max-width:740px;">
+      <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Call away designer<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-sample-callaway">${SYS_PRINTER_SVG} Test slip</button></div>
+      ${dkToolbar(caCfg())}
+      <div class="print-preview-grid" style="margin-top:12px;">
+        <div>
+          <div class="paper-preview">${buildCallAwaySample()}</div>
+        </div>
+      </div>
+    </div>
+  `;
 }
 
 // Settings → Devices: everything needed to put the POS on another screen.
@@ -17264,9 +17332,6 @@ function renderPrintersDocketTab() {
         <div>
           <div class="paper-preview">${buildDocketDoc(sampleDocketCtx(), true)}</div>
         </div>
-        <div>
-          <div class="paper-preview">${buildCallAwaySample()}</div>
-        </div>
       </div>
     </div>
   `;
@@ -17322,7 +17387,7 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
       : off(svgAlign(v), p ? 'No alignment on this line' : why)).join('')}</span>`);
   if (p && meta && meta.red) {
     // One button: the A's underline IS the state — black or red.
-    const on = CA_PARTS.includes(p) ? caRed(d, p) : !!(d.red || {})[p];
+    const on = isCaKey(p) ? caRed(d, p) : !!(d.red || {})[p];
     bits.push(`<button type="button" class="dk-tb-btn dk-tb-ink${on ? ' on' : ''}" data-act="toggle-docket-red" data-key="${p}">A</button>`);
   } else bits.push(off('A', p ? 'No red on this line' : why));
   bits.push(p && meta
@@ -17334,7 +17399,7 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   // Line spacing sits with the other paragraph tools, where a word processor
   // puts it (owner, Aug '26) — not down in the line's own actions.
   if (!p || !meta) bits.push(off(DKT_SPACING_SVG + '<b></b>', why, 'dk-tb-dd dk-tb-ico'));
-  else if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG + '<b></b>', 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
+  else if (isCaKey(p)) bits.push(off(DKT_SPACING_SVG + '<b></b>', 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
   else {
     const cur = (d.gaps || {})[p];
     bits.push(dd('linespacing', DKT_SPACING_SVG + `<b>${cur ? esc(cur) : ''}</b>`, true,
@@ -17581,8 +17646,14 @@ function dkToolbar(dIn) {
   const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
   // The slip's own settings while one of its lines is picked.
   if (state.dkSlip) d = caCfg();
-  const p = !station && state.dkPart && DK_PARTS[state.dkPart] ? state.dkPart : null;
-  const meta = p ? DK_PARTS[p] : null;
+  // An added line is a line: it takes a size, an alignment, ink, weight and a
+  // background like every other. Its key is a generated id, not a DK_PARTS
+  // entry, so without this the whole formatting row dimmed on it (owner,
+  // Aug '26: "font size mot working").
+  const exNow = state.dkPart ? (state.dkSlip ? caExtraOf(d, state.dkPart) : dkExtraOf(d, state.dkPart)) : null;
+  const EX_META = { label: 'Line', show: null, size: true, align: true, red: true };
+  const p = !station && state.dkPart && (DK_PARTS[state.dkPart] || exNow) ? state.dkPart : null;
+  const meta = p ? (DK_PARTS[p] || EX_META) : null;
   const shown = meta && meta.show ? d[meta.show] !== false : true;
   const menu = state.dkMenu || null;
   const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
@@ -17676,6 +17747,9 @@ function dkToolbar(dIn) {
     // A slip line answers with the SLIP's actions: its own trash, its own
     // arrows, its own wording. The docket's would edit the wrong paper.
     if (state.dkSlip) {
+      // Nothing picked: no line row at all, same as the docket. It used to draw
+      // an unnamed row of controls acting on no line.
+      if (!state.dkPart) return null;
       const c = caCfg(), k = state.dkPart;
       const ex = caExtraOf(c, k);
       const seq = caOrder(c), i = seq.indexOf(k);
@@ -17713,14 +17787,23 @@ function dkToolbar(dIn) {
       <button type="button" class="dk-tb-btn" data-act="dk-hide-line" data-key="showRule">${ACT_TRASH_SVG}</button>` };
     }
     if (ex) {
+      // Same run of controls as any other line — trash, wording, rule,
+      // background, move — so an added line reads and behaves like one.
+      const exBg = dkBlockStyle(d, state.dkPart);
       return { name: ex.kind === 'rule' ? 'Divider' : (ex.text || 'Line'), bits: `
+      <button type="button" class="dk-tb-btn" data-act="dk-del-line">${ACT_TRASH_SVG}</button>
+      ${ex.kind !== 'rule'
+        ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="dkText:${state.dkPart}">${ACT_PENCIL_SVG}</button>`
+        : `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="A divider has no wording">${ACT_PENCIL_SVG}</button>`}
       ${dd('rulestyle', ex.kind === 'rule' ? ((DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed') : 'No line', true,
         [{ v: 'none', l: 'No line', on: ex.kind !== 'rule' }].concat(
           DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: ex.kind === 'rule' && (ex.style || 'dashed') === v }))), 'Line style')}
-      ${ex.kind !== 'rule' ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="dkText:${state.dkPart}">${ACT_PENCIL_SVG}</button>` : ''}
+      ${ex.kind === 'rule'
+        ? `<button type="button" class="dk-tb-btn dk-tb-dd dk-tb-off" data-act="dk-why" data-why="A rule is its own mark">None</button>`
+        : dd('style', (DK_BLOCK_STYLES.find(x => x[0] === exBg) || [])[1] || 'None', true,
+            DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: exBg === v })), 'Background')}
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>
-      <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>
-      <button type="button" class="dk-tb-btn" data-act="dk-del-line">${ACT_TRASH_SVG}</button>` };
+      <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>` };
     }
     if (!meta) return null;
     const sel = dkSelection();
@@ -29877,7 +29960,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'set-docket-align') {
         const cur = dkPaper().align || {}, v = el.dataset.val, next = Object.assign({}, cur);
-        dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align) next[k] = v; });
+        dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align || dkExtraOf(docketCfg(), k)) next[k] = v; });
         if (state.dkSlip) setCaOpt('align', next); else setDocketOpt('align', next);
       }
       else if (act === 'dk-pick-part') {
@@ -29987,7 +30070,7 @@ function handleActClick(el, e) {
       else if (act === 'dk-pop-close') { state.dkPart = null; state.dkMenu = null; render(); }
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
-        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
+        if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'linespacing') {
           // Every picked line, so ctrl+A then spacing sets the whole paper —
@@ -30063,7 +30146,7 @@ function handleActClick(el, e) {
             ? (v === 'none' ? { ...x, kind: 'text', style: null } : { ...x, kind: 'rule', style: v })
             : x));
         }
-        else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = CA_PARTS.includes(v); render(); }
+        else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; render(); }
         else if (m === 'style') {
           const k = state.dkPart;
           state.dkMenu = null;
@@ -30088,12 +30171,15 @@ function handleActClick(el, e) {
             dkSelection().forEach((k) => { if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10); });
             setCaOpt('sizes', next);
           }
-          else if (pk && DK_PARTS[pk]) {
+          else if (pk && (DK_PARTS[pk] || dkExtraOf(docketCfg(), pk))) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
             const next = Object.assign({}, dcfg.sizes || {});
             dkSelection().forEach((k) => {
-              if (!(DK_PARTS[k] || {}).size) return;
+              // An added line takes a size like any other; it just isn't in
+              // DK_PARTS, so asking DK_PARTS whether it can sent the number to
+              // the docket's own scale instead (owner: "font size mot working").
+              if (DK_PARTS[k] ? !DK_PARTS[k].size : !dkExtraOf(dcfg, k)) return;
               if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10);
             });
             setDocketOpt('sizes', next);
@@ -30144,6 +30230,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'add-found-printer') { addFoundPrinter(el.dataset.ip); }
       else if (act === 'print-sample-docket') { printSample('docket'); }
+      else if (act === 'print-sample-callaway') { printSample('callaway'); }
       else if (act === 'print-sample-receipt') { printSample('receipt'); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }
       else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) printReceipt(o); }

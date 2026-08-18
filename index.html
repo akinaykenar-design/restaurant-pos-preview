@@ -8210,6 +8210,63 @@ app.delete('/api/register/paidout/:id', (req, res) => {
   res.json({ ok: true });
 });
 // X read: the same tape as the Z, printed mid-day, closing nothing.
+// ---------- Reports (the owner's read-only dashboard at /reports) ----------
+// Everything computed here, practice rings excluded, manager PIN to open.
+app.post('/api/reports/overview', (req, res) => {
+  if (pinRateBlocked(req, res)) return;
+  const data = readData();
+  const manager = data.staff.find(s2 => s2.role === 'manager' && s2.pin === (req.body && req.body.pin));
+  if (!manager) { pinRecordFailure(req); return res.status(401).json({ error: 'Manager PIN required' }); }
+  pinRecordSuccess(req);
+  const now = Date.now();
+  const dayMs = 86400000;
+  const startOfDay = (ts) => { const d2 = new Date(ts); d2.setHours(4, 0, 0, 0); return d2.getTime() > ts ? d2.getTime() - dayMs : d2.getTime(); };
+  const todayFrom = startOfDay(now);
+  const paidIn = (from, to) => data.orders.filter(o => o.status === 'paid' && !o.practice && o.createdAt > from && o.createdAt <= to);
+  const netOf = (list) => list.reduce((a, o) => a + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0)), 0);
+  const coversOf = (list) => list.reduce((a, o) => a + (o.covers || 0), 0);
+  const menuById = new Map(data.menu.map(m => [m.id, m]));
+  const catOfItem = (it) => { const m = it.menuItemId ? menuById.get(it.menuItemId) : null; return (m && m.category) || 'Other'; };
+  const sum = (list) => {
+    const byCat = {}, byItem = {}, byHour = {}, byStaff = {};
+    for (const o of list) {
+      const who = o.staffName || '—';
+      byStaff[who] = (byStaff[who] || 0) + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0));
+      const h = new Date(o.createdAt).getHours();
+      byHour[h] = (byHour[h] || 0) + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0));
+      for (const it of o.items || []) {
+        const line = (it.price || 0) * (it.qty || 1);
+        const cat = catOfItem(it);
+        byCat[cat] = (byCat[cat] || 0) + line;
+        if (!byItem[it.name]) byItem[it.name] = { qty: 0, net: 0 };
+        byItem[it.name].qty += it.qty || 1; byItem[it.name].net += line;
+      }
+    }
+    return { byCat, byItem, byHour, byStaff };
+  };
+  const today = paidIn(todayFrom, now);
+  const week = paidIn(now - 7 * dayMs, now);
+  const lastWeekSameDay = paidIn(todayFrom - 7 * dayMs, todayFrom - 7 * dayMs + (now - todayFrom));
+  const t = sum(today), w = sum(week);
+  const voids = data.orders.filter(o => o.status === 'void' && !o.practice && o.createdAt > now - 7 * dayMs)
+    .map(o => ({ when: o.createdAt, by: o.staffName || '—', total: o.total || 0 }));
+  const discounts = week.filter(o => o.discount && o.discount.kind !== 'surcharge')
+    .map(o => ({ when: o.createdAt, by: o.staffName || '—', amount: o.discount.amount, reason: o.discount.reason || '' }));
+  res.json({
+    venue: data.settings.ticketHeader || 'Watermans',
+    today: { net: netOf(today), orders: today.length, covers: coversOf(today),
+      avg: coversOf(today) ? netOf(today) / coversOf(today) : 0, lastWeekNet: netOf(lastWeekSameDay) },
+    week: { net: netOf(week), orders: week.length },
+    todayByCat: t.byCat, weekByCat: w.byCat,
+    topItems: Object.entries(w.byItem).sort((a, b) => b[1].qty - a[1].qty).slice(0, 10)
+      .map(([name, v2]) => ({ name, qty: v2.qty, net: v2.net })),
+    hourly: w.byHour, todayHourly: t.byHour,
+    byStaff: Object.entries(w.byStaff).sort((a, b) => b[1] - a[1]).map(([name, net]) => ({ name, net })),
+    voids, discounts,
+  });
+});
+app.get('/reports', (req, res) => res.sendFile(path.join(__dirname, 'public', 'reports.html')));
+
 app.post('/api/register/xread', (req, res) => {
   const data = readData();
   const closes = data.registerCloses || [];

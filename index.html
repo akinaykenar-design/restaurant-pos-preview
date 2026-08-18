@@ -5103,6 +5103,9 @@ app.put('/api/settings', (req, res) => {
       // The mark in front of the order number ('#').
       orderWord: String(dk.orderWord !== undefined ? dk.orderWord : (cur.orderWord !== undefined ? cur.orderWord : '#')).replace(/^\s+/, '').slice(0, 16),
       orderNoteWord: String(dk.orderNoteWord !== undefined ? dk.orderNoteWord : (cur.orderNoteWord !== undefined ? cur.orderNoteWord : '* ')).replace(/^\s+/, '').slice(0, 10),
+      // The word after the covers number ("covers", "guests", "pax").
+      ...(dk.coversWord !== undefined || cur.coversWord !== undefined
+        ? { coversWord: String(dk.coversWord !== undefined ? dk.coversWord : cur.coversWord).trim().slice(0, 16) } : {}),
       // Extra room under one line, on top of the docket's own spacing.
       gaps: (() => {
         const src = dk.gaps !== undefined ? dk.gaps : (cur.gaps || {});
@@ -9262,8 +9265,8 @@ function setReceiptOpt(patch) {
 // `edit` renders the Settings sample: the header, footer and show/hide lines
 // become tappable right on the paper, so the sample IS the form — and because
 // the same builder does the real print, what you edit is exactly what prints.
-function sampleEditable(field, value, placeholder, cls, inline) {
-  if (state.printEdit === field) {
+function sampleEditable(field, value, placeholder, cls, inline, idx) {
+  if (state.printEdit === field && (idx === undefined || String(state.printEditIdx ?? '') === String(idx))) {
     // Sized to the text, never the browser's default 20 characters — a wide
     // empty box on the paper reads as spaces that are never going to print.
     const size = Math.max(2, Math.min(40, (value ? String(value) : String(placeholder || '')).length));
@@ -9275,7 +9278,7 @@ function sampleEditable(field, value, placeholder, cls, inline) {
   // (owner, Aug '26 — "dot dot where is left? but cant edit?"). The pencil in
   // the bar is the way in, which is true of every word inside a part anyway.
   if (inline && !value) return '';
-  return `<span class="pp-edit ${value ? '' : 'pp-empty'}" data-act="print-sample-edit" data-field="${field}">${value ? esc(value) : ''}</span>`;
+  return `<span class="pp-edit ${value ? '' : 'pp-empty'}" data-act="print-sample-edit" data-field="${field}"${idx !== undefined ? ` data-idx="${idx}"` : ''}>${value ? esc(value) : ''}</span>`;
 }
 function sampleToggleLine(on, act, inner) {
   return `<div class="print-line pp-toggle ${on ? '' : 'pp-off'}" data-act="${act}" data-val="${!on}">${inner}</div>`;
@@ -9518,7 +9521,11 @@ function buildDocketDoc(ctx, edit) {
   // Covers gets its part attributes ON the line itself — an inline wrapper
   // around a block collapses to zero size, so taps would fall through to the
   // table header behind it.
-  const coversInner = `${ctx.covers} cover${ctx.covers === 1 ? '' : 's'}`;
+  // The word after the number is the venue's to write ("covers", "guests",
+  // "pax") — it was the one wording on the top lines with no pencil (owner,
+  // Aug '26: "i want to edit covers").
+  const coversWordNow = d.coversWord !== undefined ? d.coversWord : (ctx.covers === 1 ? 'cover' : 'covers');
+  const coversInner = `${ctx.covers} ${edit ? sampleEditable('docketCoversWord', coversWordNow, 'covers', '', true) : esc(coversWordNow)}`;
   // Mirrors kitchenDocket exactly: the top lines are a list of segments, and a
   // segment flagged "join" prints on the line above — chaining, so three or
   // four land on one line. A joined group wears its FIRST part's style,
@@ -9544,7 +9551,7 @@ function buildDocketDoc(ctx, edit) {
     // group leader, and with these two null the round started its own line
     // instead of riding the table's, exactly as it does not on paper.
     header: { on: true, html: '' }, table: { on: true, html: tableInner },
-    covers: ctx.covers ? { on: d.showCovers, html: esc(coversInner) } : null,
+    covers: ctx.covers ? { on: d.showCovers, html: coversInner } : null,
     orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: (edit ? sampleEditable('docketOrderWord', d.orderWord !== undefined ? d.orderWord : '#', '#', '', true) : esc(d.orderWord !== undefined ? d.orderWord : '#')) + esc(String(ctx.orderNo)) } : null,
     time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
     round: ctx.roundNo ? { on: true, html: (edit ? sampleEditable('docketRoundWord', d.roundWord !== undefined ? d.roundWord : 'DOCKET #', 'DOCKET #', '', true) : esc(d.roundWord !== undefined ? d.roundWord : 'DOCKET #')) + esc(String(ctx.roundNo)) } : null,
@@ -9670,8 +9677,15 @@ function buildDocketDoc(ctx, edit) {
           const kk = b.cat ? ntKey(b.cat) : 'ordernotes';
           const sel2 = selectable && dkIsSelected(kk) ? ' dk-sel' : '';
           const pick2 = selectable ? ` data-act="dk-pick-part" data-part="${kk}"` : '';
+          // One entry: everything on the header line — "1× Type: text" — with
+          // the seat underneath (owner, Aug '26). Several entries keep their
+          // own starred lines so each seat sits beside its note.
+          if (b.list.length === 1) {
+            const n = b.list[0];
+            return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">1\u00d7 ${esc(b.name)}: ${esc(n.text)}</div>${n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : ''}</div>`;
+          }
           const lines = b.list.map(n => {
-            const word = edit && !onEd++ ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
+            const word = edit ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true, onEd++) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
             return (n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : '')
               + `<div class="pb-line">\u00a0 ${word}${esc(n.text)}</div>`;
           }).join('');
@@ -9681,9 +9695,12 @@ function buildDocketDoc(ctx, edit) {
     : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>`
-        + `<div class="pb-line">${ctx.allergies.length}\u00d7 ${ctx.allergies.length === 1 ? 'Allergy' : 'Allergies'}</div>`
-        + ctx.allergies.map(a => (a.seat ? `<div class="pb-line">\u00a0 ${esc(seatText(a.seat))}</div>` : '')
-          + `<div class="pb-line">\u00a0 ${esc(d.noteWord !== undefined ? d.noteWord : '* ')}${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</div>`).join('')
+        + (ctx.allergies.length === 1
+          ? `<div class="pb-line">1\u00d7 Allergy: ${esc(ctx.allergies[0].allergy)}${ctx.allergies[0].notes ? ' (' + esc(ctx.allergies[0].notes) + ')' : ''}</div>`
+            + (ctx.allergies[0].seat ? `<div class="pb-line">\u00a0 ${esc(seatText(ctx.allergies[0].seat))}</div>` : '')
+          : `<div class="pb-line">${ctx.allergies.length}\u00d7 Allergies</div>`
+            + ctx.allergies.map((a, ai) => (a.seat ? `<div class="pb-line">\u00a0 ${esc(seatText(a.seat))}</div>` : '')
+              + `<div class="pb-line">\u00a0 ${edit ? sampleEditable('docketNoteWord', d.noteWord !== undefined ? d.noteWord : '* ', '* ', '', true, 'alg' + ai) : esc(d.noteWord !== undefined ? d.noteWord : '* ')}${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</div>`).join(''))
         + `</div>`, true)
     : '';
 
@@ -9753,7 +9770,7 @@ function buildDocketDoc(ctx, edit) {
         };
         const noteSub = (l) => {
           const w = d.noteWord !== undefined ? d.noteWord : '* ';
-          const word = edit && !noteEd++ ? sampleEditable('docketNoteWord', w, '* ', '', true) : esc(w);
+          const word = edit ? sampleEditable('docketNoteWord', w, '* ', '', true, noteEd++) : esc(w);
           return `<div class="print-build"${stl('notes', 'subs')}><div class="pb-line${rc('notes')}">${word}${esc(l.note)}</div></div>`;
         };
         const lineRow = (l, pre, noSeat) => {
@@ -10119,8 +10136,11 @@ function sampleDocketCtx() {
     // type off in Elements visibly drops its note from the paper. Two
     // hard-coded words meant the picker changed nothing you could see
     // (owner, Aug '26: "order notes still fucked").
-    noteLines: (state.noteCategories || []).map((c, i) => ({ cat: c.id, catName: c.name,
-      text: (((c.presets || [])[0] || {}).name) || c.name, seat: i === 0 ? 2 : null })),
+    noteLines: (state.noteCategories || []).flatMap((c, i) => {
+      const names = (c.presets || []).map(p => p && p.name).filter(Boolean);
+      const take = i === (state.noteCategories.length - 1) ? names.slice(0, 2) : names.slice(0, 1);
+      return (take.length ? take : [c.name]).map((t, j) => ({ cat: c.id, catName: c.name, text: t, seat: i === 0 && j === 0 ? 2 : null }));
+    }),
     timeLabel: '7:24 pm',
     staffName: 'Aylin',
     // The optional elements' sample values — a booked table on the inside
@@ -17660,7 +17680,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         else bits.push(off(ACT_TRASH_SVG, 'This line always prints'));
         // Sub-lines carry TWO words (kept and removed), so the pencil comes in
         // pairs there — each wearing the word it edits.
-        const FIELD = { header: ['docketHeader'], table: ['tableWord'], seats: ['seatPrefix'],
+        const FIELD = { header: ['docketHeader'], table: ['tableWord'], seats: ['seatPrefix'], covers: ['docketCoversWord'],
           notes: ['docketNoteWord'], subs: ['docketAddWord', 'docketNoWord'], staff: ['docketStaffWord'], round: ['docketRoundWord'], orderno: ['docketOrderWord'], ordernotes: ['docketOrderNoteWord'] };
         const WORDNOW = { docketAddWord: d.addWord !== undefined ? d.addWord : '+ ', docketNoWord: d.noWord !== undefined ? d.noWord : 'NO ' };
         if (FIELD[p]) FIELD[p].forEach(f => bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${f}">${ACT_PENCIL_SVG}${WORDNOW[f] !== undefined ? esc(WORDNOW[f].trim() || '(none)') : ''}</button>`));
@@ -18056,8 +18076,13 @@ function dkToolbar(dIn) {
       return { name, bits: bitsCa.join('\n      ') };
     }
     if (ntNow) {
+      const kk2 = 'nt:' + ntNow.id;
+      const curBg = (d.blockStyle || {})[kk2] !== undefined ? (d.blockStyle || {})[kk2]
+        : ((d.blockStyle || {}).ordernotes || 'plain');
       return { name: ntNow.name, bits: `
       <button type="button" class="dk-tb-btn" data-act="dk-nt-off" data-id="${esc(ntNow.id)}">${ACT_TRASH_SVG}</button>
+      ${dd('style', (DK_BLOCK_STYLES.find(x => x[0] === curBg) || [])[1] || 'None', true,
+        DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: curBg === v })), 'Background')}
       <button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Notes print in type order">${DKT_UP_SVG}</button>
       <button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Notes print in type order">${DKT_DOWN_SVG}</button>` };
     }
@@ -28952,6 +28977,7 @@ function bindEvents() {
       else if (f === 'docketRoundWord') setDocketOpt('roundWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderWord') setDocketOpt('orderWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketOrderNoteWord') setDocketOpt('orderNoteWord', sampleEditInput.value.replace(/^\s+/, ''));
+      else if (f === 'docketCoversWord') setDocketOpt('coversWord', sampleEditInput.value.trim());
       else if (f === 'caBanner') setCaOpt('banner', sampleEditInput.value);
       else if (f.startsWith('caWord:')) {
         const k = f.slice(7);
@@ -30149,7 +30175,7 @@ function handleActClick(el, e) {
       else if (act === 'set-takeaway-enabled') { saveTicketSetting({ takeawayEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-delivery-enabled') { saveTicketSetting({ deliveryEnabled: el.dataset.val === 'true' }); }
       else if (act === 'printers-tab') { state.printersTab = el.dataset.val; state.printEdit = null; render(); }
-      else if (act === 'print-sample-edit') { state.printEdit = el.dataset.field; render(); }
+      else if (act === 'print-sample-edit') { state.printEdit = el.dataset.field; state.printEditIdx = el.dataset.idx !== undefined ? el.dataset.idx : undefined; render(); }
       else if (act === 'set-print-enabled') { saveTicketSetting({ printEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-auto-print-receipt') { saveTicketSetting({ autoPrintReceipt: el.dataset.val === 'true' }); }
       else if (act === 'set-paper-width') { saveTicketSetting({ paperWidth: el.dataset.val }); }

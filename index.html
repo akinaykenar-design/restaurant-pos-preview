@@ -980,6 +980,16 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 /* Kitchen docket header: table + covers only — no restaurant name (the kitchen
    knows where it is). Big and centred so the station reads it at a glance. */
 .print-doc h3.print-dockhead{font-size:19px;margin:0 0 8px;font-weight:inherit;}
+/* THE DOCKET TELLS THE TRUTH (screen-vs-paper hunt, Aug '26): no forced caps —
+   the paper prints words as typed; no italic or 11px footer; no invented gaps
+   between lines the printer feeds back to back; flags sit left like ESC a
+   leaves them. Receipts keep their own look until their pass. */
+.print-doc.dk h3{text-transform:none;}
+.print-doc.dk .print-dockmini{text-transform:none;letter-spacing:0;}
+.print-doc.dk .print-footer{font-style:normal;font-size:1em;margin-top:0;}
+.print-doc.dk .print-sub{font-size:1em;margin-bottom:0;}
+.print-doc.dk .print-course{margin:0;padding:0 0 2px;}
+.print-doc.dk .print-flag{text-align:left;}
 .print-doc .print-sub{text-align:center;font-size:11px;margin-bottom:10px;}
 .print-doc .print-line{display:flex;justify-content:space-between;gap:8px;padding:2px 0;}
 /* Default docket components ("pluses"): the standard build, and loud removals —
@@ -1033,8 +1043,10 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 .print-doc .print-coursename{text-align:left;}
 /* Text size — scales the whole docket via em-based children. */
 .print-doc.dk{font-size:13px;}
-.print-doc.dk.dk-fs-large{font-size:15.5px;}
-.print-doc.dk.dk-fs-xlarge{font-size:19px;}
+/* The printer's own multiples: Large IS 2x, Huge IS 3x — 15.5/19px understated
+   what comes off the roll (screen-vs-paper hunt, Aug '26). */
+.print-doc.dk.dk-fs-large{font-size:26px;}
+.print-doc.dk.dk-fs-xlarge{font-size:39px;}
 .print-doc.dk .print-line{font-size:1em;}
 /* Big-font dockets wrap by WHOLE words — never split a word mid-letters onto
    the next line (owner: "a word gets halved"). A long word drops whole to the
@@ -5143,6 +5155,9 @@ app.put('/api/settings', (req, res) => {
         return out;
       })(),
       fontScale: pick(dk.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'normal'),
+      // The docket's base size as a number (1..8); the words above are legacy.
+      ...(() => { const v = dk.baseSize !== undefined ? dk.baseSize : cur.baseSize;
+        return Number.isInteger(v) && v >= 1 && v <= 8 ? { baseSize: v } : {}; })(),
       font: pick(dk.font, ['A', 'B'], cur.font || 'A'),
       density: pick(dk.density, ['1', '1.5', '2', 'tight', 'normal', 'roomy', '0.9', '1.15'], cur.density || 'normal'),
       // Red accents for 2-colour (impact/red-black thermal) printers.
@@ -5317,6 +5332,8 @@ app.put('/api/settings', (req, res) => {
       banner: String(ca.banner !== undefined ? ca.banner : (cur.banner !== undefined ? cur.banner : 'CALL AWAY')).slice(0, 24),
       font: pickOne(ca.font, ['A', 'B'], cur.font || 'A'),
       fontScale: pickOne(ca.fontScale, ['normal', 'large', 'xlarge'], cur.fontScale || 'large'),
+      ...(() => { const v = ca.baseSize !== undefined ? ca.baseSize : cur.baseSize;
+        return Number.isInteger(v) && v >= 1 && v <= 8 ? { baseSize: v } : {}; })(),
       density: pickOne(ca.density, ['1', '1.5', '2'], cur.density || '1'),
       show: (() => { const o = src('show'), out = {}; KEYS.forEach(k => { if (o[k] === false) out[k] = false; }); return out; })(),
       sizes: (() => { const o = src('sizes'), out = {}; KEYS.forEach(k => { const v = o[k]; if (Number.isInteger(v) && v >= 1 && v <= 8) out[k] = v; }); return out; })(),
@@ -6709,6 +6726,7 @@ const cleanStationDocket = (dk) => {
   const out = {};
   if (['standard', 'byseat'].includes(dk.layout)) out.layout = dk.layout;
   if (['normal', 'large', 'xlarge'].includes(dk.fontScale)) out.fontScale = dk.fontScale;
+  if (Number.isInteger(dk.baseSize) && dk.baseSize >= 1 && dk.baseSize <= 8) out.baseSize = dk.baseSize;
   if (['tight', 'normal', 'roomy', '0.9', '1.15', '1.5', '2'].includes(dk.density)) out.density = dk.density;
   return Object.keys(out).length ? out : null;
 };
@@ -8898,7 +8916,9 @@ const DK_PARTS = {
 // Slip parts print big and centred by default, matching the pre-designer slip.
 // No per-part default sizes anywhere: every line starts at the docket's own
 // text size, and only a size you pick moves it (owner, Aug '26).
-function dkBaseSize(d) { return d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1; }
+// The docket's base size is a NUMBER like every line's — the words Normal/
+// Large/Huge are legacy spellings of 1/2/3 (owner, Aug '26: "wtf is LARGE").
+function dkBaseSize(d) { return d.baseSize || (d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1); }
 // The paper preview is scaled by the doc's base font, so a part's size has to
 // be expressed RELATIVE to that base — the printer's sizes are absolute
 // multiples, and 'Small' under a Large docket must still print 1x.
@@ -9013,8 +9033,13 @@ function dkPickOrder(slip) {
 const DK_RULE_CHAR = { dashed: '-', dotted: '\u00b7', solid: '\u2500', bold: '\u2500' };
 function dkRuleStyle(v) { return v === 'bold' ? 'solid' : (DK_RULE_CHAR[v] ? v : 'dashed'); }
 // Same characters the printer lays down, across the same column count.
-function dkRuleHtml(style, cls, attrs) {
-  const cols = (state.settings || {}).paperWidth === '58' ? 32 : 42;
+function dkRuleHtml(style, cls, attrs, colsOverride) {
+  // The paper's REAL column count — narrow letters and 76mm rolls draw wider
+  // rules than the 42 this hard-coded (screen-vs-paper hunt, Aug '26).
+  const pw = (state.settings || {}).paperWidth;
+  const fontB = (docketCfg().font || 'A') === 'B';
+  const cols = colsOverride || (fontB ? (pw === '58' ? 42 : pw === '76' ? 40 : 56)
+    : (pw === '58' ? 32 : pw === '76' ? 33 : 42));
   const ch = DK_RULE_CHAR[style] || '-';
   return `<div class="print-rule${cls ? ' ' + cls : ''}"${attrs || ''}>${ch.repeat(cols)}</div>`;
 }
@@ -9150,7 +9175,7 @@ function docketLineOrder(d) {
   const o = d.topOrder;
   // A removed line is simply absent; the order is valid while it holds known
   // keys and still prints the items.
-  const known = (k) => k === 'header' || DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
+  const known = (k) => k === 'header' || k === 'count' || DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
   // Orders saved while the round rode the table line get it put back where it
   // printed, rather than losing it off the docket.
   const withRound = (a) => {
@@ -9500,7 +9525,7 @@ function buildDocketDoc(ctx, edit) {
     // course names ~18% below their true printed size (owner, Aug '26:
     // "both bold size 2, look different"). The paper never shrank them.
     const css = `font-size:${dkSizeEm(n || dkBaseSize(d), d)};line-height:${g || 1.3};`
-      + (a ? `text-align:${a};` : '')
+      + (a ? `text-align:${a};` : (bs === 'border' ? 'text-align:center;' : ''))
       + `font-weight:${dkBoldOn(d, k) ? 800 : 400};`
       + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
       + ((d.red || {})[k] ? 'color:#C0392B;' : '')
@@ -9573,7 +9598,9 @@ function buildDocketDoc(ctx, edit) {
     header: { on: true, html: '' }, table: { on: true, html: tableInner },
     covers: ctx.covers ? { on: d.showCovers, html: coversInner } : null,
     orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: (edit ? sampleEditable('docketOrderWord', d.orderWord !== undefined ? d.orderWord : '#', '#', '', true) : esc(d.orderWord !== undefined ? d.orderWord : '#')) + esc(String(ctx.orderNo)) } : null,
-    time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
+    // The paper prints date AND time (24h when set) — the screen showed a
+    // bare 12h time (hunt, Aug '26).
+    time: ctx.timeLabel ? { on: d.showTime, html: esc(`${ctx.dateLabel || ''} ${d.time24 ? '19:24' : ctx.timeLabel}`.trim()) } : null,
     round: ctx.roundNo ? { on: true, html: (edit ? sampleEditable('docketRoundWord', d.roundWord !== undefined ? d.roundWord : 'DOCKET #', 'DOCKET #', '', true) : esc(d.roundWord !== undefined ? d.roundWord : 'DOCKET #')) + esc(String(ctx.roundNo)) } : null,
     staff: ctx.staffName ? { on: d.showStaff, html: (edit ? sampleEditable('docketStaffWord', d.staffWord || '', 'Server: ', '', true) : esc(d.staffWord || '')) + esc(ctx.staffName) } : null,
     vip: ctx.vip ? { on: d.showVip, html: 'VIP: ' + esc(ctx.vip) } : null,
@@ -9595,7 +9622,7 @@ function buildDocketDoc(ctx, edit) {
   const groups = [];
   for (const k of docketLineOrder(d).filter(x => x !== 'items')) {
     const exg = dkExtraOf(d, k);
-    if (exg && exg.kind === 'gap') { groups.push([{ k, seg: { on: true, html: '' } }]); continue; }
+    if (exg && (exg.kind === 'gap' || exg.kind === 'text')) { groups.push([{ k, seg: { on: true, html: '' } }]); continue; }
     // A row is decided by the ORDER, exactly as the printer decides it: a
     // leader with nothing to show still starts its row, so its riders never
     // glue onto the line above and drag a separator with them (owner,
@@ -9702,23 +9729,23 @@ function buildDocketDoc(ctx, edit) {
           // own starred lines so each seat sits beside its note.
           if (b.list.length === 1) {
             const n = b.list[0];
-            return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">1\u00d7 ${esc(b.name)}: ${esc(n.text)}</div>${n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : ''}</div>`;
+            return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">1 x ${esc(b.name)}: ${esc(n.text)}</div>${n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : ''}</div>`;
           }
           const lines = b.list.map(n => {
             const word = edit ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true, onEd++) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
             return (n.seat != null ? `<div class="pb-line">\u00a0 ${esc(seatText(n.seat))}</div>` : '')
               + `<div class="pb-line">\u00a0 ${word}${esc(n.text)}</div>`;
           }).join('');
-          return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">${b.list.length}\u00d7 ${esc(b.name)}</div>${lines}</div>`;
+          return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">${b.list.length} x ${esc(b.name)}</div>${lines}</div>`;
         }).join('\n      ');
       })()
     : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
     ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>`
         + (ctx.allergies.length === 1
-          ? `<div class="pb-line">1\u00d7 Allergy: ${esc(ctx.allergies[0].allergy)}${ctx.allergies[0].notes ? ' (' + esc(ctx.allergies[0].notes) + ')' : ''}</div>`
+          ? `<div class="pb-line">1 x Allergy: ${esc(ctx.allergies[0].allergy)}${ctx.allergies[0].notes ? ' (' + esc(ctx.allergies[0].notes) + ')' : ''}</div>`
             + (ctx.allergies[0].seat ? `<div class="pb-line">\u00a0 ${esc(seatText(ctx.allergies[0].seat))}</div>` : '')
-          : `<div class="pb-line">${ctx.allergies.length}\u00d7 Allergies</div>`
+          : `<div class="pb-line">${ctx.allergies.length} x Allergies</div>`
             + ctx.allergies.map((a, ai) => (a.seat ? `<div class="pb-line">\u00a0 ${esc(seatText(a.seat))}</div>` : '')
               + `<div class="pb-line">\u00a0 ${edit ? sampleEditable('docketNoteWord', d.noteWord !== undefined ? d.noteWord : '* ', '* ', '', true, 'alg' + ai) : esc(d.noteWord !== undefined ? d.noteWord : '* ')}${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</div>`).join(''))
         + `</div>`, true)
@@ -9795,15 +9822,16 @@ function buildDocketDoc(ctx, edit) {
         };
         const lineRow = (l, pre, noSeat) => {
           const seat = (!noSeat && l.seat && l.seat !== 'all') ? partW('seats', d.showSeats, seatSub(l), true) : '';
-          const tag = l.tag ? partW('station', d.showStationTag, l.tag) : '';
+          const tag = '';  // the paper prints no per-item station tag (hunt)
           const note = l.note ? partW('notes', d.showNotes, noteSub(l), true) : '';
           const build = ((l.build && l.build.kept.length)
               ? partW('subs', d.showBuild, `<div class="print-build"${stl('subs')}>${l.build.kept.map(x => `<div class="pb-line pb-add">${addW()}${esc(x.label)}</div>`).join('')}</div>`, true) : '')
             + ((l.build && l.build.removed.length)
               ? partW('subsno', d.showBuild, `<div class="print-build"${stl('subsno', 'subs')}>${l.build.removed.map(x => `<div class="pb-line pb-no${dkBoldOn(d, 'subsno') ? '' : ' pb-thin'}${rc('subsno')}">${noW()}${esc(x.label).toUpperCase()}</div>`).join('')}</div>`, true) : '');
           // Same order the printer lays them down: item, seat, build, note.
-          const qw = d.qtyWord !== undefined ? d.qtyWord : '\u00d7 ';
-          const qword = edit ? sampleEditable('docketQtyWord', qw, '\u00d7 ', '', true, qtyEd++) : esc(qw);
+          // The paper's default mark is ' x ' — the screen showed '×' (hunt).
+          const qw = d.qtyWord !== undefined ? d.qtyWord : ' x ';
+          const qword = edit ? sampleEditable('docketQtyWord', qw, ' x ', '', true, qtyEd++) : esc(qw);
           return `<div class="print-line${rc('items')}${selectable ? ' dk-part' + (dkIsSelected('items') ? ' dk-sel' : '') : ''}"${stl('items')}${selectable ? ' data-act="dk-pick-part" data-part="items"' : ''}><span>${pre || ''}${l.qty}${qword}${esc(l.name)}${tag}</span></div>${seat}${build}${note}`;
         };
         if (layout === 'byseat') {
@@ -9863,7 +9891,7 @@ function buildDocketDoc(ctx, edit) {
     // same job (owner, Aug '26). 'gap' is the legacy kind, drawn the same way.
     if (ex.kind === 'gap' || ex.kind === 'text') {
       const g = groups.find(x => x.length && x[0].k === k);
-      const riders = g && g.length > 1 ? g.slice(1).map(({ k: rk, seg }) => partW(rk, seg.on, seg.html)).filter(Boolean).join(' · ') : '';
+      const riders = g && g.length > 1 ? g.slice(1).map(({ k: rk, seg }) => partW(rk, seg.on, seg.html, false, stlInk(rk, k))).filter(Boolean).join(SEP_HTML) : '';
       const own = edit ? sampleEditable('dkText:' + k, ex.text || '', '', '', true) : esc(ex.text || '');
       const inner = own + (riders ? (own ? ' · ' : '') + riders : '');
       return inner
@@ -9879,13 +9907,14 @@ function buildDocketDoc(ctx, edit) {
     return (g || blocks[k]) ? g + (blocks[k] || '') : '';
   }).filter(Boolean).join('\n      ');
   return `
-    <div class="${docketDocClasses(stOv)}">
+    <div class="${docketDocClasses(stOv)}" style="font-size:${(13 * (DK_SIZE_MULT[dkBaseSize(Object.assign({}, d, stOv || {}))] || 1)).toFixed(1)}px;">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
       ${body}
       ${d.showFootRule === false ? '' : dkRuleHtml(dkRuleStyle(d.footRuleStyle || d.ruleStyle),
         (selectable ? 'dk-part ' : '') + (selectable && dkIsSelected('footrule') ? 'dk-sel' : ''),
         selectable ? ' data-act="dk-pick-part" data-part="footrule"' : '')}
       ${d.footerText ? `<div class="print-footer">${esc(d.footerText)}</div>` : ''}
+      ${d.showStationTag !== false && ctx.stationName ? `<div class="print-sub">${esc(ctx.stationName)}</div>` : ''}
     </div>`;
 }
 
@@ -10052,7 +10081,7 @@ function caOrder(c) {
   raw.forEach(k => { const nk = ({ table: 'catable', time: 'catime' })[k] || k; if (known(nk) && !out.includes(nk)) out.push(nk); });
   return out.length ? out : CA_NATIVE.slice();
 }
-function caBaseSize(c) { return c.fontScale === 'xlarge' ? 3 : c.fontScale === 'large' ? 2 : 1; }
+function caBaseSize(c) { return c.baseSize || (c.fontScale === 'xlarge' ? 3 : c.fontScale === 'large' ? 2 : 1); }
 function caSizeEm(n, c) {
   const base = caBaseSize(c);
   return ((n || base) / base).toFixed(3) + 'em';
@@ -10074,8 +10103,13 @@ function caSample(k, c) {
       ? sampleEditable('caBanner', c.banner === undefined ? 'CALL AWAY' : c.banner, 'CALL AWAY', '')
       : esc(c.banner === undefined ? 'CALL AWAY' : c.banner);
     case 'cacourse': return esc(course);
-    case 'catable': return esc(ctx.subLabel.toUpperCase());
-    case 'catime': return esc(ctx.timeLabel);
+    // The paper uses the venue's own table word, as typed — the screen
+    // forced 'TABLE 12' caps (hunt).
+    case 'catable': {
+      const tw = (state.settings.docket || {}).tableWord;
+      return esc(`${tw !== undefined ? tw : 'TABLE '}${ctx.tableNo != null ? ctx.tableNo : ''}`);
+    }
+    case 'catime': return esc(`${ctx.dateLabel || ''} ${(state.settings.docket || {}).time24 ? '19:24' : ctx.timeLabel}`.trim());
     case 'covers': return caWordSlot(c, 'covers', '') + esc(ctx.covers + ' covers');
     case 'orderno': return caWordSlot(c, 'orderno', '#') + esc(String(ctx.orderNo));
     case 'staff': return caWordSlot(c, 'staff', '') + esc(ctx.staffName);
@@ -10111,7 +10145,8 @@ function buildCallAwaySample() {
     const ex = caExtraOf(c, k);
     if (ex) {
       if (ex.kind === 'rule') return dkRuleHtml(ex.style || 'dashed',
-        'dk-part' + (dkIsSelected(k) ? ' dk-sel' : ''), ` data-act="dk-pick-part" data-part="${k}" data-slip="1"`);
+        'dk-part' + (dkIsSelected(k) ? ' dk-sel' : ''), ` data-act="dk-pick-part" data-part="${k}" data-slip="1"`,
+        (() => { const pw = (state.settings || {}).paperWidth; return c.font === 'B' ? (pw === '58' ? 42 : pw === '76' ? 40 : 56) : (pw === '58' ? 32 : pw === '76' ? 33 : 42); })());
       const inner = sampleEditable('caText:' + k, ex.text || '', '', '', true);
       return inner ? row(k, inner) : `<div class="print-gap dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"></div>`;
     }
@@ -10119,7 +10154,10 @@ function buildCallAwaySample() {
     const inner = caSample(k, c);
     return inner ? row(k, inner) : '';
   }).filter(Boolean).join('\n    ');
-  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}${c.font === 'B' ? ' dk-font-b' : ''}">
+  // The slip's own scale on the container: its default is Large, which the
+  // printer doubles — the preview drew every line at HALF the printed size
+  // (screen-vs-paper hunt, Aug '26).
+  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}${c.font === 'B' ? ' dk-font-b' : ''}" style="font-size:${(13 * (DK_SIZE_MULT[caBaseSize(c)] || 1)).toFixed(1)}px;">
     <div class="pp-railgap"></div>
     ${body}
   </div>`;
@@ -17641,9 +17679,13 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   const place = [], bits = [];
   // A rider takes a size of its own — the printer sets size per CHARACTER,
   // so one row can carry the table large and the round small (owner, Aug '26).
+  // Nothing picked = the whole paper: the size button sets the docket's BASE
+  // number, the size every line prints at until given its own (owner,
+  // Aug '26: numbers everywhere, no Large/Huge words).
   bits.push(p && meta && meta.size
     ? dd('size', DKT_TEXTSIZE_SVG + '<b>' + ((d.sizes || {})[p] || defN) + '</b>', true, sizeItems, 'Text size for this line', '', true)
-    : off(DKT_TEXTSIZE_SVG + '<b></b>', p ? 'No size on this line' : why, 'dk-tb-dd dk-tb-ico'));
+    : (!p ? dd('size', DKT_TEXTSIZE_SVG + '<b>' + defN + '</b>', true, sizeItems, 'Base size for the whole paper', '', true)
+      : off(DKT_TEXTSIZE_SVG + '<b></b>', 'No size on this line', 'dk-tb-dd dk-tb-ico')));
   // A rider CAN be placed — left, centre or right within its own row — because
   // padding does it where ESC a cannot. Size still cannot vary: one row, one
   // character size.
@@ -18014,21 +18056,21 @@ function dkToolbar(dIn) {
   // No 'Auto' (owner: confusing): the menu shows the RESOLVED size ticked;
   // picking the layout's own default clears the override — stored nothing,
   // printed bytes identical, but the menu always answers with a real size.
-  const dkBaseN = d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1;
-  const defN = dkBaseN;
-  const SCALE_L = { normal: 'Normal', large: 'Large', xlarge: 'Huge' };
+  const defN = dkBaseSize(d);
+  const stBase = stOv.baseSize || (stOv.fontScale === 'xlarge' ? 3 : stOv.fontScale === 'large' ? 2 : stOv.fontScale === 'normal' ? 1 : undefined);
+  // One ladder, numbers only — the docket's own size, a station's and a
+  // line's all speak 1..8 (owner, Aug '26: "wtf is LARGE").
   const sizeLabel = station
-    ? (stOv.fontScale ? SCALE_L[stOv.fontScale] : 'Inherit')
+    ? (stBase !== undefined ? String(stBase) : 'Inherit')
     : p
-      ? (meta.size ? { 1: 'Small', 2: 'Large', 3: 'Huge' }[partSize || defN] : '\u2014')
-      : (SCALE_L[d.fontScale] || 'Normal');
+      ? (meta.size ? String(partSize || defN) : '\u2014')
+      : String(defN);
+  const NUMS = ['1', '2', '3', '4', '5', '6', '7', '8'];
   const sizeItems = station
-    ? [['inherit', 'Inherit'], ['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) =>
-        ({ v, l, on: v === 'inherit' ? stOv.fontScale === undefined : stOv.fontScale === v }))
+    ? [{ v: 'inherit', l: 'Inherit', on: stBase === undefined }].concat(NUMS.map((v) => ({ v, l: v, on: stBase === parseInt(v) })))
     : p
-      ? ['1', '2', '3', '4', '5', '6', '7', '8'].map((v) =>
-          ({ v, l: v, on: (partSize || defN) === parseInt(v) }))
-      : [['normal', 'Normal'], ['large', 'Large'], ['xlarge', 'Huge']].map(([v, l]) => ({ v, l, on: d.fontScale === v }));
+      ? NUMS.map((v) => ({ v, l: v, on: (partSize || defN) === parseInt(v) }))
+      : NUMS.map((v) => ({ v, l: v, on: defN === parseInt(v) }));
   // Word-style numbers (owner call), mapped to real printer line feeds.
   // Legacy tight/roomy read as their numeric neighbours.
   // Three steps, as multiples of the printer's own line height (owner ask):
@@ -30553,7 +30595,7 @@ function handleActClick(el, e) {
           setDocketOpts(Object.assign({ blockStyle: Object.assign({}, docketCfg().blockStyle || {}, { [k]: v }) },
             k === 'course' ? { newCourseStyle: v } : {}));
         }
-        else if (m === 'docsize') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('fontScale', v); else setDocketOpt('fontScale', v); }
+        else if (m === 'docsize') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('baseSize', v === 'inherit' ? 'inherit' : parseInt(v, 10)); else setDocketOpt('baseSize', parseInt(v, 10)); }
         // The docket's own spacing and letter width. Both menus were on screen
         // and neither was wired (owner, Aug '26: "cannot edit select").
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
@@ -30561,16 +30603,19 @@ function handleActClick(el, e) {
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;
-          if (state.dkStation) setDkStationOpt('fontScale', v);
+          if (state.dkStation) setDkStationOpt('baseSize', v === 'inherit' ? 'inherit' : parseInt(v, 10));
           else if (state.dkSlip) {
             const c = caCfg(), bN = caBaseSize(c);
-            const next = Object.assign({}, c.sizes || {});
-            dkSelection().forEach((k) => { if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10); });
-            setCaOpt('sizes', next);
+            if (!dkSelection().length) { setCaOpt('baseSize', parseInt(v, 10)); }
+            else {
+              const next = Object.assign({}, c.sizes || {});
+              dkSelection().forEach((k) => { if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10); });
+              setCaOpt('sizes', next);
+            }
           }
           else if (pk && (DK_PARTS[pk] || dkExtraOf(docketCfg(), pk) || /^nt:/.test(pk))) {
             const dcfg = docketCfg();
-            const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
+            const bN = dkBaseSize(dcfg);
             const next = Object.assign({}, dcfg.sizes || {});
             dkSelection().forEach((k) => {
               // An added line takes a size like any other; it just isn't in
@@ -30580,7 +30625,7 @@ function handleActClick(el, e) {
               if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10);
             });
             setDocketOpt('sizes', next);
-          } else setDocketOpt('fontScale', v);
+          } else setDocketOpt('baseSize', parseInt(v, 10));
         }
         // Red extras are checkable toggles — the menu stays open like Word's.
         else if (m === 'red') { const cur = docketCfg().red || {}; setDocketOpt('red', Object.assign({}, cur, { [v]: !cur[v] })); }

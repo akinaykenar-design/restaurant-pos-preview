@@ -1276,6 +1276,12 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-mi-n{display:inline-flex;align-items:center;justify-content:center;min-width:20px;
   color:var(--charcoal-soft);font-variant-numeric:tabular-nums;flex:none;}
 .dk-mi-l{overflow:hidden;text-overflow:ellipsis;max-width:210px;}
+/* Element groups: a bold row with a count and a caret; its lines indent. */
+.dk-mi-grp{font-weight:800;}
+.dk-mi-count{margin-left:auto;font-weight:600;color:var(--charcoal-soft);opacity:.65;font-variant-numeric:tabular-nums;}
+.dk-mi-caret{width:14px;text-align:right;flex:none;}
+.dk-mi-sub{padding-left:14px;}
+.dk-mi-sub2{padding-left:28px;}
 /* Phone: the ribbon keeps its three fixed rows and scrolls sideways instead of
    wrapping into six stacked ones — a wrapped bar loses the "formatting lives
    on its own row" promise the moment the screen narrows (owner, Aug '26:
@@ -17491,10 +17497,16 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   // A rider CAN be placed — left, centre or right within its own row — because
   // padding does it where ESC a cannot. Size still cannot vary: one row, one
   // character size.
-  place.push(`<span class="dk-tb-group">${['left', 'center', 'right'].map(v =>
-    p && meta && meta.align
-      ? `<button type="button" class="dk-tb-btn${(d.align || {})[p] === v ? ' active' : ''}" data-act="set-docket-align" data-key="${p}" data-val="${v}">${svgAlign(v)}</button>`
-      : off(svgAlign(v), p ? 'No alignment on this line' : why)).join('')}</span>`);
+  // ONE icon, not three: the button wears the current placement and the
+  // choices drop down under it (owner, Aug '26: "make into one icon").
+  {
+    const curA = p ? (d.align || {})[p] : null;
+    place.push(p && meta && meta.align
+      ? dd('align', svgAlign(curA || 'center'), true,
+          [['left', 'Left'], ['center', 'Centre'], ['right', 'Right']].map(([v, l]) => ({ v, l, on: curA === v })),
+          'Placement', '', true)
+      : off(svgAlign('center'), p ? 'No alignment on this line' : why, 'dk-tb-dd dk-tb-ico'));
+  }
   if (p && meta && meta.red) {
     // One button: the A's underline IS the state — black or red.
     const on = isCaKey(p) ? caRed(d, p) : !!(d.red || {})[p];
@@ -17601,14 +17613,31 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         const slipSeq = callawayOrder(d);
         const onSlip = slipSeq.includes(p);
         const seq = onSlip ? slipSeq : docketLineOrder(d);
-        const idx = onSlip ? slipSeq.indexOf(p)
-          : (d.layout !== 'byseat' && DK_MOVE_BLOCK[p] ? seq.indexOf(DK_MOVE_BLOCK[p]) : -1);
         const mAct = onSlip ? 'move-callaway-line' : 'move-docket-line';
         const whyStuck = d.layout === 'byseat' ? 'This format has a fixed order' : 'This line moves with the items';
-        if (idx > 0) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="up">${DKT_UP_SVG}</button>`);
-        else bits.push(off(DKT_UP_SVG, idx === 0 ? 'Already at the top' : whyStuck));
-        if (idx >= 0 && idx < seq.length - 1) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="down">${DKT_DOWN_SVG}</button>`);
-        else bits.push(off(DKT_DOWN_SVG, idx >= 0 ? 'Already at the bottom' : whyStuck));
+        // Lit or dim comes from the SAME row maths the move performs — the two
+        // used different sums, so an arrow could sit dim over a move that
+        // worked (owner, Aug '26: "cannot push time up").
+        let canUp = false, canDown = false;
+        if (onSlip) { const i2 = slipSeq.indexOf(p); canUp = i2 > 0; canDown = i2 >= 0 && i2 < slipSeq.length - 1; }
+        else if (d.layout !== 'byseat' && (DK_MOVE_BLOCK[p] || dkExtraOf(d, p))) {
+          const mrows = [];
+          for (const k of seq) {
+            if (k !== 'items' && dkJoinedOn(d, k) && mrows.length && mrows[mrows.length - 1][0] !== 'items') mrows[mrows.length - 1].push(k);
+            else mrows.push([k]);
+          }
+          const ri = mrows.findIndex(r => r.includes(p));
+          if (ri >= 0) {
+            const ki = mrows[ri].indexOf(p);
+            canUp = ki > 0 || ri > 0;
+            canDown = (ki > 0 && ki < mrows[ri].length - 1) || (ki === 0 && ri < mrows.length - 1);
+          }
+        }
+        const stuck = d.layout === 'byseat' || (!DK_MOVE_BLOCK[p] && !dkExtraOf(d, p));
+        if (canUp) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="up">${DKT_UP_SVG}</button>`);
+        else bits.push(off(DKT_UP_SVG, stuck ? whyStuck : 'Already at the top'));
+        if (canDown) bits.push(`<button type="button" class="dk-tb-btn" data-act="${mAct}" data-dir="down">${DKT_DOWN_SVG}</button>`);
+        else bits.push(off(DKT_DOWN_SVG, stuck ? whyStuck : 'Already at the bottom'));
           return bits.join('\n      ');
 }
 const FMT_L = { standard: 'By course', byseat: 'By seat' };
@@ -17701,9 +17730,16 @@ function dkAddMenu(d, dd) {
   // A header, a divider and the closing rule are design choices, not facts, so
   // they were never elements (owner, Aug '26). Rules come from "+ Divider" and
   // are taken off by tapping the rule on the paper; a header is "+ Line".
-  const keys = DOCKET_LINE_ORDER.filter(k => k !== 'items' && k !== 'header' && !DK_OPT_PARTS.includes(k))
-    .concat(inBlock).concat(DK_OPT_PARTS)
-    .filter((k, i, a) => a.indexOf(k) === i && DK_PARTS[k] && k !== 'footrule' && k !== 'divider');
+  // Three short groups instead of one 23-row list (owner, Aug '26: "elements
+  // too long, categorise"). A group row opens its lines under it.
+  const topKeys = DOCKET_LINE_ORDER.filter(k => k !== 'items' && k !== 'header' && !DK_OPT_PARTS.includes(k))
+    .filter(k => DK_PARTS[k] && k !== 'footrule' && k !== 'divider');
+  const GROUPS = [
+    { id: 'top', label: 'Top lines', keys: topKeys },
+    { id: 'block', label: 'With the items', keys: inBlock.filter(k => DK_PARTS[k]) },
+    { id: 'facts', label: 'Order facts', keys: DK_OPT_PARTS.filter(k => DK_PARTS[k]) },
+  ];
+  const openG = state.dkElemOpen || (state.dkElemOpen = {});
   // Order notes bring their types with them, indented under the line they
   // belong to: everything about them answers in one place instead of a second
   // dropdown somewhere else in the bar (owner, Aug '26).
@@ -17713,23 +17749,29 @@ function dkAddMenu(d, dd) {
   const live = (state.noteCategories || []).map(c => c.id);
   const want = (Array.isArray(d.noteTypes) ? d.noteTypes : []).filter(id => live.includes(id));
   const items = [];
-  keys.forEach(k => {
-    items.push({ v: k, l: DK_PARTS[k].label, on: isOn(k) });
+  GROUPS.forEach(g => {
+    const nOn = g.keys.filter(isOn).length;
+    items.push({ v: 'group:' + g.id, on: false,
+      l: `<span class="dk-mi-grp">${g.label}</span><span class="dk-mi-count">${nOn}/${g.keys.length}</span><span class="dk-mi-caret">${openG[g.id] ? '\u25be' : '\u25b8'}</span>` });
+    if (!openG[g.id]) return;
+    g.keys.forEach(k => {
+    items.push({ v: k, on: isOn(k), l: `<span class="dk-mi-l dk-mi-sub">${esc(DK_PARTS[k].label)}</span>` });
     if (k === 'ordernotes' && isOn(k)) {
       // The Order notes section, whole: everything it can print, listed under
       // it, each ticked on its own — Allergies, VIP, then the venue's note
       // types by name, read live so a rename shows and a deleted one is gone.
       // Untick the parent and the section collapses with it (owner, Aug '26).
-      const sub = (v, label, on) => items.push({ v, on, l: `<span class="dk-mi-l dk-mi-sub">${esc(label)}</span>` });
+      const sub = (v, label, on) => items.push({ v, on, l: `<span class="dk-mi-l dk-mi-sub dk-mi-sub2">${esc(label)}</span>` });
       sub('subline:allergies', DK_PARTS.allergies.label, d.showAllergies !== false);
       sub('subline:vip', DK_PARTS.vip.label, d.showVip !== false);
       const cats = state.noteCategories || [];
-      if (!cats.length) items.push({ v: 'notetype:none', on: false, l: `<span class="dk-mi-l dk-mi-sub">No note types yet</span>` });
+      if (!cats.length) items.push({ v: 'notetype:none', on: false, l: `<span class="dk-mi-l dk-mi-sub dk-mi-sub2">No note types yet</span>` });
       else {
         const shown = want.length ? want : cats.map(c => c.id);
         cats.forEach(c => sub('notetype:' + c.id, c.name, shown.includes(c.id)));
       }
     }
+    });
   });
   return dd('addback', 'Elements', true, items, 'What the docket carries');
 }
@@ -17950,8 +17992,9 @@ function dkToolbar(dIn) {
       return out;
     };
     const parts = rowParts(p);
-    const name = sel.length > 1 ? sel.length + ' lines'
-      : parts.map(k => (DK_PARTS[k] || {}).label || k).join(' · ');
+    // The chip names ONE thing: the picked line. Spelling out the whole row
+    // ("Order number · Time") read as a second control (owner, Aug '26).
+    const name = sel.length > 1 ? sel.length + ' lines' : ((DK_PARTS[p] || {}).label || p);
     return { name, bits: dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN) };
   })();
 
@@ -18014,7 +18057,9 @@ function rcToolbar() {
   const shown = meta && meta.show ? rcShown(meta.show) : true;
   const menu = state.rcMenu || null;
   const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
-    const svgSpacing = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v20"/><path d="M2 5l3-3 3 3"/><path d="M2 19l3 3 3-3"/><path d="M11 4h11M11 12h11M11 20h11"/></svg>`;
+    // The one spacing glyph the whole app uses — this bar drew its own,
+    // thinner one, so the same tool looked different per paper (owner ask).
+    const svgSpacing = DKT_SPACING_SVG;
   const svgEye = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
   const svgEyeOff = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M1 1l22 22"/></svg>`;
     const svgAlign = v => v === 'center' ? DKT_ALIGN_C_SVG : v === 'right' ? DKT_ALIGN_R_SVG : DKT_ALIGN_L_SVG;
@@ -30236,6 +30281,12 @@ function handleActClick(el, e) {
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
+        else if (m === 'align') {
+          state.dkMenu = null;
+          const cur = dkPaper().align || {}, next = Object.assign({}, cur);
+          dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align || dkExtraOf(docketCfg(), k)) next[k] = v; });
+          if (state.dkSlip) setCaOpt('align', next); else setDocketOpt('align', next);
+        }
         else if (m === 'addback' && v.startsWith('ca:')) {
           const k = v.slice(3), c = caCfg();
           const on = caOrder(c);
@@ -30254,6 +30305,11 @@ function handleActClick(el, e) {
           const dc = docketCfg();
           const on = dc.showOrderNotes !== false;
           setDocketOpts({ showOrderNotes: !on, showAllergies: !on, showVip: !on });
+        }
+        else if (m === 'addback' && v.startsWith('group:')) {
+          const gid = v.slice(6);
+          state.dkElemOpen = Object.assign({}, state.dkElemOpen, { [gid]: !(state.dkElemOpen || {})[gid] });
+          render();
         }
         else if (m === 'addback' && v.startsWith('subline:')) {
           // The SAME switch the line's own trash flips — one door, reached

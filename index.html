@@ -5123,9 +5123,13 @@ app.put('/api/settings', (req, res) => {
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
         const out = {};
+        // Both answers are stored, not just "joined". Time rides the order
+        // number by default and the round the table, so dropping `false` on
+        // the floor meant those two could never be SPLIT — the button saved
+        // nothing and the default put them straight back (owner, Aug '26).
         ['table', 'round', 'covers', 'orderno', 'time', 'staff', 'vip',
           'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone']
-          .forEach(k => { if (src && src[k]) out[k] = true; });
+          .forEach(k => { if (src && (src[k] === true || src[k] === false)) out[k] = src[k]; });
         return out;
       })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
@@ -9128,11 +9132,22 @@ function buildDocketDoc(ctx, edit) {
   // Word-style part selection: tapping a styleable part picks it for the
   // designer toolbar (its visibility moved to the toolbar's eye); a part
   // that's turned off stays visible but dimmed so it can still be picked.
-  const partW = (k, on, inner, block) => {
+  const partW = (k, on, inner, block, styleAttr) => {
     if (!on) return '';
     return edit
-      ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${selectable && dkIsSelected(k) ? ' dk-sel' : ''}"${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
-      : inner;
+      ? `<${block ? 'div' : 'span'} class="${selectable ? 'dk-part ' : ''}${selectable && dkIsSelected(k) ? ' dk-sel' : ''}"${styleAttr || ''}${selectable ? ` data-act="dk-pick-part" data-part="${k}"` : ''}>${inner}</${block ? 'div' : 'span'}>`
+      : `<span${styleAttr || ''}>${inner}</span>`;
+  };
+  // What a rider can carry on its own. One printed line has ONE size and ONE
+  // alignment (the printer sets them per line), but ink, weight and underline
+  // are switched mid-line — so those, and only those, vary per element. The
+  // preview drew riders with no styling at all, which is why bolding a joined
+  // line did nothing on screen (owner, Aug '26).
+  const stlInk = k => {
+    const css = `font-weight:${dkBoldOn(d, k) ? 800 : 400};`
+      + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
+      + ((d.red || {})[k] ? 'color:#C0392B;' : '');
+    return ` style="${css}"`;
   };
 
   // Covers gets its part attributes ON the line itself — an inline wrapper
@@ -9188,9 +9203,9 @@ function buildDocketDoc(ctx, edit) {
   // the same — the covers rider used to be hand-built and nothing else could
   // ride the table at all.
   const riderHtml = (g) => g.slice(1)
-    .map(({ k, seg }) => partW(k, seg.on, seg.html)).filter(Boolean)
+    .map(({ k, seg }) => partW(k, seg.on, seg.html, false, stlInk(k))).filter(Boolean)
     .map(x => ' · ' + x).join('');
-  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${partW(g[0].k, g[0].seg.on, g[0].seg.html)}${riderHtml(g)}</div>`;
+  const lineHtml = (g) => `<div class="print-sub"${stl(g[0].k)}>${partW(g[0].k, g[0].seg.on, g[0].seg.html, false, g.length > 1 ? stlInk(g[0].k) : '')}${riderHtml(g)}</div>`;
   const groupOf = (k) => groups.find(g => g[0].k === k);
   const renderGroup = (k) => { const g = groupOf(k); return g ? lineHtml(g) : ''; };
   const coversJoined = isJoined('covers') && SEGS.covers;
@@ -16935,8 +16950,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
   // Riding another line? Size and alignment belong to the ROW, so they are not
   // offered here — one printed row carries one of each. Ink and weight CAN
   // differ per element, and do.
-  const rider = DK_JOINABLE.includes(p) && ((d.joined || {})[p] !== undefined
-    ? !!(d.joined || {})[p] : p === 'time');
+  const rider = DK_JOINABLE.includes(p) && dkJoinedOn(d, p);
 
         // Per-line controls. A control that cannot apply to this line is NOT
         // drawn — a greyed button can't say why it's dead, and the bar used to

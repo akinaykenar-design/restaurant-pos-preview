@@ -4970,6 +4970,15 @@ app.put('/api/settings', (req, res) => {
       // The build words: what the dish keeps and what comes off.
       addWord: String(dk.addWord !== undefined ? dk.addWord : (cur.addWord !== undefined ? cur.addWord : '+ ')).slice(0, 10),
       noWord: String(dk.noWord !== undefined ? dk.noWord : (cur.noWord !== undefined ? cur.noWord : 'NO ')).slice(0, 10),
+      // The word in front of the server's name ("Server: "). Not trimmed at
+      // the end — the trailing space is the gap before the name.
+      staffWord: String(dk.staffWord !== undefined ? dk.staffWord : (cur.staffWord || '')).replace(/^\s+/, '').slice(0, 16),
+      // Which order-note types reach the kitchen. Empty = every type.
+      noteTypes: (() => {
+        const src = dk.noteTypes !== undefined ? dk.noteTypes : cur.noteTypes;
+        if (!Array.isArray(src)) return [];
+        return src.filter(x => typeof x === 'string').slice(0, 30);
+      })(),
       // Background per block — courses, the allergy bar and VIP.
       blockStyle: (() => {
         const src = dk.blockStyle !== undefined ? dk.blockStyle : (cur.blockStyle || {});
@@ -5029,6 +5038,9 @@ app.put('/api/settings', (req, res) => {
       // untouched dockets keep printing the exact old bytes.
       ...(() => {
         const DEF = ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'items'];
+        // Optional elements: real facts the POS already holds, off the docket
+        // until the designer puts one on.
+        const OPT = ['ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
         const BLOCKS = { header: ['header'], table: ['table', 'covers'], meta: ['orderno', 'time'], staff: ['staff'], items: ['items'] };
         let src = dk.topOrder !== undefined ? dk.topOrder : cur.topOrder;
         // A five-block order saved before lines became individually movable is
@@ -5043,7 +5055,7 @@ app.put('/api/settings', (req, res) => {
         }
         // A removed line is absent by design, so only require the items block.
         const extraIds = (Array.isArray(dk.extras) ? dk.extras : (cur.extras || [])).map(x => x && x.id);
-        const known = (k) => DEF.includes(k) || extraIds.includes(k);
+        const known = (k) => DEF.includes(k) || OPT.includes(k) || extraIds.includes(k);
         if (!Array.isArray(src) || !src.length || src.length > 40
             || !src.includes('items') || !src.every(known)) return {};
         if (src.every((k, i) => k === DEF[i])) return {};
@@ -5088,7 +5100,9 @@ app.put('/api/settings', (req, res) => {
       joined: (() => {
         const src = dk.joined !== undefined ? dk.joined : (cur.joined || {});
         const out = {};
-        ['table', 'covers', 'orderno', 'time', 'staff', 'vip'].forEach(k => { if (src && src[k]) out[k] = true; });
+        ['table', 'covers', 'orderno', 'time', 'staff', 'vip',
+          'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone']
+          .forEach(k => { if (src && src[k]) out[k] = true; });
         return out;
       })(),
       // Per-part alignment: a missing part = Auto (the layout's own placement).
@@ -8582,6 +8596,8 @@ const DOCKET_DEFAULTS = {
   // Background per block: courses had one, the allergy bar was welded to
   // inverse and VIP to nothing. Same three choices for all three now.
   blockStyle: {},
+  // The word in front of the server's name, and which note types print.
+  staffWord: '', noteTypes: [],
 };
 // The Word-style designer toolbar edits ONE docket part at a time — tap the
 // part on the paper, then use the toolbar. Each part declares what it can do:
@@ -8601,6 +8617,17 @@ const DK_PARTS = {
   orderno: { label: 'Order number', show: 'showOrderNo', red: true, align: true, size: true },
   seats: { label: 'Seats', show: 'showSeats', red: false, align: false, size: false },
   staff: { label: 'Server', show: 'showStaff', red: true, align: true, size: true },
+  // Optional elements — real facts the POS already holds, off the docket until
+  // the designer puts one on. Each prints nothing when there is nothing in it,
+  // so an empty booking or a walk-in never leaves a blank line on the paper.
+  ordertype: { label: 'Order type', show: null, red: true, align: true, size: true },
+  guest: { label: 'Guest', show: null, red: true, align: true, size: true },
+  booked: { label: 'Booked for', show: null, red: true, align: true, size: true },
+  area: { label: 'Area', show: null, red: true, align: true, size: true },
+  station: { label: 'Station', show: null, red: true, align: true, size: true },
+  date: { label: 'Date', show: null, red: true, align: true, size: true },
+  count: { label: 'Item count', show: null, red: true, align: true, size: true },
+  phone: { label: 'Phone', show: null, red: true, align: true, size: true },
   // The call-away slip's lines are their OWN parts, not shares of the docket's.
   // They used to reuse 'table' and 'time', which meant tapping the slip's table
   // lit the docket's too and sent the edit to the wrong paper. Separate keys,
@@ -8641,7 +8668,8 @@ const CA_PARTS = ['callaway', 'cacourse', 'catable', 'catime'];
 // The table can join too — it is the line most venues want beside the header
 // or the covers, and there was no reason it sat out (owner, Aug '26). Only
 // 'items' and the per-item bits stay out: they repeat, so there is no one line.
-const DK_JOINABLE = ['table', 'covers', 'orderno', 'time', 'staff', 'vip'];
+const DK_OPT_PARTS = ['ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone'];
+const DK_JOINABLE = ['table', 'covers', 'orderno', 'time', 'staff', 'vip'].concat(DK_OPT_PARTS);
 // Blank lines and dividers are ordinary elements: they sit in the order list
 // like any other line, so they move, select and delete the same way.
 // Three, not four. 'Bold' laid down the SAME underscores as 'Solid' with the
@@ -8748,7 +8776,7 @@ function docketLineOrder(d) {
   const o = d.topOrder;
   // A removed line is simply absent; the order is valid while it holds known
   // keys and still prints the items.
-  const known = (k) => DOCKET_LINE_ORDER.includes(k) || dkExtras(d).some(x => x && x.id === k);
+  const known = (k) => DOCKET_LINE_ORDER.includes(k) || DK_OPT_PARTS.includes(k) || dkExtras(d).some(x => x && x.id === k);
   if (Array.isArray(o) && o.length && o.includes('items') && o.every(known)) return o;
   const legacy = d.lineOrder;
   if (Array.isArray(legacy)) {
@@ -8760,6 +8788,7 @@ function docketLineOrder(d) {
 }
 // Every line moves on its own now — no part rides another's block.
 const DK_MOVE_BLOCK = { header: 'header', table: 'table', covers: 'covers', orderno: 'orderno', time: 'time', staff: 'staff', items: 'items' };
+DK_OPT_PARTS.forEach(k => { DK_MOVE_BLOCK[k] = k; });
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
 function docketDocClasses(ov) {
@@ -9072,8 +9101,19 @@ function buildDocketDoc(ctx, edit) {
     covers: ctx.covers ? { on: d.showCovers, html: esc(coversInner) } : null,
     orderno: ctx.orderNo != null ? { on: d.showOrderNo, html: `#${esc(String(ctx.orderNo))}` } : null,
     time: ctx.timeLabel ? { on: d.showTime, html: esc(ctx.timeLabel) } : null,
-    staff: ctx.staffName ? { on: d.showStaff, html: esc(ctx.staffName) } : null,
+    staff: ctx.staffName ? { on: d.showStaff, html: (edit ? sampleEditable('docketStaffWord', d.staffWord || '', 'Server: ', '') : esc(d.staffWord || '')) + esc(ctx.staffName) } : null,
     vip: ctx.vip ? { on: d.showVip, html: 'VIP: ' + esc(ctx.vip) } : null,
+    // The optional elements, mirroring kitchenDocket's SEG map exactly. A
+    // segment with nothing in it is null, so it leaves no blank line here
+    // either — the same emptiness the paper shows.
+    ordertype: { on: true, html: esc(String(ctx.orderType || 'dine-in').toUpperCase()) },
+    guest: ctx.guest ? { on: true, html: esc(ctx.guest) } : null,
+    booked: ctx.booked ? { on: true, html: 'Booked ' + esc(ctx.booked) } : null,
+    area: ctx.area ? { on: true, html: esc(ctx.area) } : null,
+    station: ctx.stationName ? { on: true, html: esc(ctx.stationName) } : null,
+    date: { on: true, html: esc(ctx.dateLabel || '') },
+    count: { on: true, html: esc(ctx.itemCount || '') },
+    phone: ctx.phone ? { on: true, html: esc(ctx.phone) } : null,
   };
   // Groups are built over the same order the printer walks, header and table
   // included — joining Covers means joining the TABLE line, so the table has to
@@ -9244,6 +9284,9 @@ function buildDocketDoc(ctx, edit) {
     staff: staffHtml,
     items: vipHtml + '\n      ' + allergyHtml + '\n      ' + dividerHtml + '\n      ' + bodyHtml,
   };
+  // The optional elements go through the SAME grouping as the built-in lines,
+  // so joining and reordering behave identically for all of them.
+  DK_OPT_PARTS.forEach(k => { blocks[k] = renderGroup(k); });
   const seq = layout === 'standard' ? docketLineOrder(d) : DOCKET_LINE_ORDER;
   // A joined table prints on the line above (kitchenDocket walks every top
   // line through the same grouping). The preview rendered header and table as
@@ -9448,17 +9491,7 @@ function sampleDocketCtx() {
   // Fake dishes on purpose; the venue's own course names when it has them.
   const cname = (n, fb, fc) => { const c = courseInfo(n) || {}; return { name: c.name || fb, color: c.color || fc }; };
   const c1 = cname(1, 'Entrees', '#fffbcc'), c2 = cname(2, 'Mains', '#E0A72E'), c3 = cname(3, 'Desserts', '#e8c7f0');
-  return {
-    headerText: state.settings.ticketHeader || '',
-    subLabel: 'Table 12',
-    tableNo: 12,
-    covers: 4,
-    orderNo: 128,
-    timeLabel: '7:24 pm',
-    staffName: 'Aylin',
-    vip: (((state.vipPresets || [])[0] || {}).name || 'Food Critic'),
-    allergies: [{ seat: 2, allergy: (((state.allergyPresets || [])[0] || {}).name || 'Shellfish'), notes: 'severe' }],
-    courses: [
+  const courses = [
       { name: c1.name, color: c1.color, isNew: true, lines: [
         { qty: 2, name: 'Garlic Bread' },
         { qty: 1, name: 'Salt & Pepper Calamari', seat: 3, note: 'no aioli' },
@@ -9472,7 +9505,31 @@ function sampleDocketCtx() {
         { qty: 2, name: 'Tiramisu' },
         { qty: 1, name: 'Affogato', seat: 4 },
       ] },
-    ],
+  ];
+  // Counted off this very paper, not written in — the docket says how many
+  // items it is carrying, so a made-up number would be the first thing wrong.
+  const nItems = courses.reduce((a, c) => a + c.lines.reduce((b, l) => b + (l.qty || 1), 0), 0);
+  return {
+    headerText: state.settings.ticketHeader || '',
+    subLabel: 'Table 12',
+    tableNo: 12,
+    covers: 4,
+    orderNo: 128,
+    timeLabel: '7:24 pm',
+    staffName: 'Aylin',
+    // The optional elements' sample values — a booked table on the inside
+    // plan, so every element has something real-looking to show.
+    orderType: 'dine-in',
+    guest: 'Nguyen',
+    booked: '7:00 pm',
+    area: (((state.floorPlans || [])[0] || {}).name || 'Inside'),
+    stationName: (((state.printerStations || [])[0] || {}).name || 'Kitchen'),
+    dateLabel: (() => { const x = new Date(); return `${x.getDate()}/${x.getMonth() + 1}/${x.getFullYear()}`; })(),
+    itemCount: `${nItems} item${nItems === 1 ? '' : 's'}`,
+    phone: '0412 345 678',
+    vip: (((state.vipPresets || [])[0] || {}).name || 'Food Critic'),
+    allergies: [{ seat: 2, allergy: (((state.allergyPresets || [])[0] || {}).name || 'Shellfish'), notes: 'severe' }],
+    courses,
   };
 }
 // One-tap setup from the found list: create a station carrying everything the
@@ -16843,7 +16900,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // pairs there — each wearing the word it edits, or there is no telling
         // them apart.
         const FIELD = { header: ['docketHeader'], table: ['tableWord'], seats: ['seatPrefix'],
-          notes: ['docketNoteWord'], subs: ['docketAddWord', 'docketNoWord'] };
+          notes: ['docketNoteWord'], subs: ['docketAddWord', 'docketNoWord'], staff: ['docketStaffWord'] };
         const WORDNOW = { docketAddWord: d.addWord !== undefined ? d.addWord : '+ ', docketNoWord: d.noWord !== undefined ? d.noWord : 'NO ' };
         (FIELD[p] || []).forEach(f => bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${f}">${ACT_PENCIL_SVG}${WORDNOW[f] !== undefined ? esc(WORDNOW[f].trim() || '(none)') : ''}</button>`));
         if (p === 'course' || p === 'items') {
@@ -16853,6 +16910,14 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
           bits.push(`<button type="button" class="dk-tb-btn${on ? ' active' : ''}" data-act="set-docket-opt" data-key="${key}" data-val="${!on}">Split ${p === 'course' ? 'courses' : 'items'}</button>`);
           if (on) bits.push(dd(styleKey, (DK_RULE_STYLES.find(r => r[0] === (d[styleKey] || 'dashed')) || [])[1] || 'Dashed', true,
             DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (d[styleKey] || 'dashed') === v })), 'Divider style'));
+        }
+        // Which order-note types reach the kitchen. Nothing ticked = every
+        // type, so a new type the venue adds later is not silently dropped.
+        if (p === 'notes' && (state.noteCategories || []).length) {
+          const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
+          bits.push(dd('notetypes', want.length ? want.length + (want.length === 1 ? ' type' : ' types') : 'All types', true,
+            (state.noteCategories || []).map(c => ({ v: c.id, l: esc(c.name), on: !want.length || want.includes(c.id) })),
+            'Which note types print'));
         }
         if (DK_BG_PARTS.includes(p)) {
           const cur = dkBlockStyle(d, p);
@@ -16937,6 +17002,23 @@ function dkLineRows(d) {
 // The line list lives in the designer bar as one dropdown — as a panel of 28
 // numbered chips above the paper it was the biggest thing on the screen and
 // buried the docket it was describing (owner, Aug '26).
+// ONE menu for "put something on the docket": lines taken off, lines hidden
+// inside the items block, and the elements the POS can supply but the docket
+// has never carried. Two menus for one job was two doors, and the second had
+// nothing the first could not hold. It sits in the bar whether or not a line
+// is selected — adding one element used to mean tapping Done before the next.
+function dkAddMenu(d, dd) {
+  if (state.dkStation) return '';
+  const on = docketLineOrder(d);
+  const missing = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
+    && ['header', 'table', 'covers', 'orderno', 'time', 'staff'].includes(k));
+  const optional = DK_OPT_PARTS.filter(k => !on.includes(k));
+  const hidden = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
+    && DK_PARTS[k].show && d[DK_PARTS[k].show] === false && !missing.includes(k));
+  const all = missing.concat(hidden).concat(d.showRule === false ? ['divider'] : []).concat(optional);
+  return all.length ? dd('addback', '+ Element', true,
+    all.map(k => ({ v: k, l: k === 'divider' ? 'Divider' : DK_PARTS[k].label, on: false })), 'Put a line on the docket') : '';
+}
 function dkLinesMenu(d, dd) {
   const rows = dkLineRows(d);
   if (!rows.length) return '';
@@ -17025,6 +17107,7 @@ function dkToolbar(d) {
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
       <button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8 8 8"/></svg>Done</button>
       ${dkLinesMenu(d, dd)}
+      ${dkAddMenu(d, dd)}
       ${dd('dividerstyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
         DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Divider style')}
       <button type="button" class="dk-tb-btn" data-act="dk-hide-line" data-key="showRule">${ACT_TRASH_SVG}</button>
@@ -17040,6 +17123,7 @@ function dkToolbar(d) {
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
       <button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8 8 8"/></svg>Done</button>
       ${dkLinesMenu(d, dd)}
+      ${dkAddMenu(d, dd)}
       ${ex.kind === 'rule' ? dd('rulestyle', (DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed', true,
         DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (ex.style || 'dashed') === v })), 'Divider style') : ''}
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>
@@ -17065,6 +17149,7 @@ function dkToolbar(d) {
       ${menu ? `<div class="dk-menu-scrim" data-act="dk-menu-close"></div>` : ''}
       <button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4l-8 8 8 8"/></svg>Done</button>
       ${dkLinesMenu(d, dd)}
+      ${dkAddMenu(d, dd)}
       ${note ? `<span class="dk-tb-note">${esc(note)}</span>` : ''}
       ${dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItems, defN)}
     </div>`;
@@ -17090,17 +17175,7 @@ function dkToolbar(d) {
       ], 'Letter shape')}
       ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : ''}
       ${dd('spacing', svgSpacing, true, spacingItems, 'Line spacing', '', true)}
-      ${(() => {
-        const on = docketLineOrder(d);
-        const missing = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
-          && ['header', 'table', 'covers', 'orderno', 'time', 'staff'].includes(k));
-        // Anything hidden inside the items block comes back the same way.
-        const hidden = Object.keys(DK_PARTS).filter(k => !CA_PARTS.includes(k) && !on.includes(k)
-          && DK_PARTS[k].show && d[DK_PARTS[k].show] === false && !missing.includes(k));
-        const all = missing.concat(hidden).concat(d.showRule === false ? ['divider'] : []);
-        return all.length ? dd('addback', '+ Line', true,
-          all.map(k => ({ v: k, l: k === 'divider' ? 'Divider' : DK_PARTS[k].label, on: false })), 'Put a line back') : '';
-      })()}
+      ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>
@@ -27882,6 +27957,7 @@ function bindEvents() {
       else if (f === 'docketNoteWord') setDocketOpt('noteWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketAddWord') setDocketOpt('addWord', sampleEditInput.value.replace(/^\s+/, ''));
       else if (f === 'docketNoWord') setDocketOpt('noWord', sampleEditInput.value.replace(/^\s+/, ''));
+      else if (f === 'docketStaffWord') setDocketOpt('staffWord', sampleEditInput.value.replace(/^\s+/, ''));
       else saveTicketSetting({ [f]: sampleEditInput.value.trim() });
     });
   }
@@ -29268,6 +29344,16 @@ function handleActClick(el, e) {
         }
         else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v); }
         else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
+        else if (m === 'notetypes') {
+          const cats = (state.noteCategories || []).map(c => c.id);
+          const cur = Array.isArray(docketCfg().noteTypes) && docketCfg().noteTypes.length
+            ? docketCfg().noteTypes.slice() : cats.slice();
+          const i = cur.indexOf(v);
+          if (i >= 0) cur.splice(i, 1); else cur.push(v);
+          // Every type ticked is the same as none: store the empty list so a
+          // type added later still prints.
+          setDocketOpt('noteTypes', cats.every(c => cur.includes(c)) ? [] : cur);
+        }
         else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = false; render(); }
         else if (m === 'style') {
           const k = state.dkPart;

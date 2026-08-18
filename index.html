@@ -5045,7 +5045,9 @@ app.put('/api/settings', (req, res) => {
       // The closing rule, the divider and the seat lines print like any other
       // line and are styled in the designer like any other — leaving them out
       // here dropped their weight, ink, size and alignment on the floor.
-      'footrule', 'divider', 'seats'].concat(dkExtras.map(x => x.id));
+      'footrule', 'divider', 'seats'].concat(dkExtras.map(x => x.id))
+      // Every note type is a styleable element of its own: nt:<type id>.
+      .concat((data.noteCategories || []).map(c => 'nt:' + c.id));
     // BOTH answers are stored, never just the true one: items, courses and
     // allergies print bold by default, so "off" is a real choice and dropping
     // it meant the button pressed and the docket did not move.
@@ -9054,12 +9056,46 @@ document.addEventListener('scroll', (e) => {
 function dkExtraOf(d, k) { return dkExtras(d).find(x => x && x.id === k) || null; }
 // The sample's order notes, filtered by the SAME type choice the printer
 // honours: ticked types show, and an empty choice means all of them.
+// One tick, one type. What is stored is the list of types to SHOW; an empty
+// list means all of them, so a type the venue adds later prints without
+// another visit. Used by the Elements row AND the picked line's trash — one
+// mechanism, two doors onto it.
+function dkToggleNoteType(id) {
+  const cats = (state.noteCategories || []).map(c => c.id);
+  const stored = (Array.isArray(docketCfg().noteTypes) ? docketCfg().noteTypes : []).filter(x => cats.includes(x));
+  const shown = stored.length ? stored : cats.slice();
+  let next;
+  if (shown.includes(id)) {
+    next = shown.filter(x => x !== id);
+    // The last type does not untick — the parent row is the off switch for
+    // the whole section, and a silently empty list would read as "all".
+    if (!next.length) { state.toast = 'Untick Order notes to hide them all'; render(); armToastTimer(2600); return; }
+  } else next = shown.concat([id]);
+  setDocketOpt('noteTypes', cats.every(c => next.includes(c)) ? [] : next);
+}
 function dkNoteLines(d, ctx) {
   const live = (state.noteCategories || []).map(c => c.id);
   const want = (Array.isArray(d.noteTypes) ? d.noteTypes : []).filter(id => live.includes(id));
   return (ctx.noteLines || [])
     .filter(n => typeof n === 'string' || !want.length || want.includes(n.cat))
-    .map(n => typeof n === 'string' ? n : n.text);
+    .map(n => typeof n === 'string' ? { text: n, cat: null } : n);
+}
+// A note type's own style, each property falling back to the Order-notes
+// styles until the type is given one — same resolution the printer runs.
+function ntKey(cat) { return 'nt:' + cat; }
+const DK_GAP_EM = { '1': 1.3, '1.5': 1.95, '2': 2.6 };
+function ntStl(d, kk) {
+  const g = (m) => { const o = d[m] || {}; return o[kk] !== undefined ? o[kk] : o.ordernotes; };
+  const n = g('sizes'), a = g('align'), gp = DK_GAP_EM[g('gaps')];
+  const bs = ['invert', 'border', 'plain'].includes(g('blockStyle')) ? g('blockStyle') : 'plain';
+  const css = (n ? `font-size:${dkSizeEm(n, d)};` : '') + `line-height:${gp || 1.3};`
+    + (a ? `text-align:${a};` : '')
+    + `font-weight:${(d.bold || {})[kk] ? 800 : 400};`
+    + ((d.under || {})[kk] ? 'text-decoration:underline;' : '')
+    + ((d.red || {})[kk] ? 'color:#C0392B;' : '')
+    + (bs === 'invert' ? 'background:#000;color:#fff;padding:0 3px;' : '')
+    + (bs === 'border' ? 'border:1.5px solid #000;padding:0 5px;' : '');
+  return ` style="${css}"`;
 }
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
 // The call-away slip's section order — four independent lines now that the
@@ -9433,7 +9469,7 @@ function buildDocketDoc(ctx, edit) {
   // designer shows what the printer will do (Auto = no style).
   // Per-line spacing shows as the line's own line-height, the same way the
   // printer gives that one row more dots (printing.js al()).
-  const DK_GAP_EM = { '1': 1.3, '1.5': 1.95, '2': 2.6 };
+  // (DK_GAP_EM is module-level — ntStl needs it too.)
   // `szFb` is a second key to read the SIZE from when this line has none of
   // its own — the seat line rides the sub-lines' size until it is given one,
   // exactly as the printer does.
@@ -9610,12 +9646,22 @@ function buildDocketDoc(ctx, edit) {
   // was changing something you could not see (owner, Aug '26).
   let onEd = 0;
   const noteShown = dkNoteLines(d, ctx);
-  const headNotesHtml = (noteShown.length)
-    ? partW('ordernotes', d.showOrderNotes, `<div class="print-headnotes${rc('ordernotes')}"${stl('ordernotes')}>${noteShown.map(n =>
-        `<div class="pb-line">${edit && !onEd++ ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ')}${esc(n)}</div>`).join('')}</div>`, true)
+  // Each note TYPE is its own tappable element on the paper (owner, Aug '26).
+  const headNotesHtml = (noteShown.length && d.showOrderNotes)
+    ? noteShown.map(n => {
+        const kk = n.cat ? ntKey(n.cat) : 'ordernotes';
+        const word = edit && !onEd++ ? sampleEditable('docketOrderNoteWord', d.orderNoteWord !== undefined ? d.orderNoteWord : '* ', '* ', '', true) : esc(d.orderNoteWord !== undefined ? d.orderNoteWord : '* ');
+        const sel2 = selectable && dkIsSelected(kk) ? ' dk-sel' : '';
+        const pick2 = selectable ? ` data-act="dk-pick-part" data-part="${kk}"` : '';
+        return `<div class="print-headnotes${selectable ? ' dk-part' : ''}${sel2}"${ntStl(d, kk)}${pick2}><div class="pb-line">${word}${esc(n.text)}</div></div>`;
+      }).join('\n      ')
     : '';
   const allergyHtml = (ctx.allergies && ctx.allergies.length)
-    ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>${ctx.allergies.map(a => `<div class="print-line"><span>! ${a.seat ? esc(seatText(a.seat)) : 'Whole table'}</span><span>${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</span></div>`).join('')}</div>`, true)
+    ? partW('allergies', d.showAllergies, `<div class="print-flag-block pf-${dkBlockStyle(d, 'allergies')}${rc('allergies')}"${stl('allergies')}>`
+        + `<div class="pb-line">${ctx.allergies.length}\u00d7 ${ctx.allergies.length === 1 ? 'Allergy' : 'Allergies'}</div>`
+        + ctx.allergies.map(a => (a.seat ? `<div class="pb-line">\u00a0 ${esc(seatText(a.seat))}</div>` : '')
+          + `<div class="pb-line">\u00a0 ${esc(d.noteWord !== undefined ? d.noteWord : '* ')}${esc(a.allergy)}${a.notes ? ' (' + esc(a.notes) + ')' : ''}</div>`).join('')
+        + `</div>`, true)
     : '';
 
   // The paper renders the SELECTED STYLE (By course / By seat / Chef), so
@@ -17687,7 +17733,7 @@ function dkLineRows(d) {
     const add = (k, label, sub) => out.push({ k, sub, parts: [{ k, label }] });
     if (ctx.vip && d.showVip !== false) add('vip', 'VIP — ' + ctx.vip);
     if (d.showAllergies !== false) (ctx.allergies || []).forEach(a => add('allergies', '! ' + (a.seat ? seatText(a.seat) : 'Whole table') + ' ' + a.allergy));
-    if (d.showOrderNotes !== false) dkNoteLines(d, ctx).forEach(n => add('ordernotes', (d.orderNoteWord !== undefined ? d.orderNoteWord : '* ') + n));
+    if (d.showOrderNotes !== false) dkNoteLines(d, ctx).forEach(n => add(n.cat ? ntKey(n.cat) : 'ordernotes', (d.orderNoteWord !== undefined ? d.orderNoteWord : '* ') + n.text));
     if (d.showRule !== false) add('divider', 'Divider');
     const layout = d.layout === 'byseat' ? 'byseat' : 'standard';
     const itemRows = (l) => {
@@ -17855,8 +17901,11 @@ function dkToolbar(dIn) {
   // Aug '26: "font size mot working").
   const exNow = state.dkPart ? (state.dkSlip ? caExtraOf(d, state.dkPart) : dkExtraOf(d, state.dkPart)) : null;
   const EX_META = { label: 'Line', show: null, size: true, align: true, red: true };
-  const p = !station && state.dkPart && (DK_PARTS[state.dkPart] || exNow) ? state.dkPart : null;
-  const meta = p ? (DK_PARTS[p] || EX_META) : null;
+  // A note type is an element of its own — the key is nt:<type id>.
+  const ntNow = state.dkPart && /^nt:/.test(state.dkPart)
+    ? (state.noteCategories || []).find(c => 'nt:' + c.id === state.dkPart) : null;
+  const p = !station && state.dkPart && (DK_PARTS[state.dkPart] || exNow || ntNow) ? state.dkPart : null;
+  const meta = p ? (DK_PARTS[p] || (ntNow ? { label: ntNow.name, show: null, size: true, align: true, red: true } : EX_META)) : null;
   const shown = meta && meta.show ? d[meta.show] !== false : true;
   const menu = state.dkMenu || null;
   const caret = `<svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>`;
@@ -17981,6 +18030,12 @@ function dkToolbar(dIn) {
         ? `<button type="button" class="dk-tb-btn" data-act="ca-move-line" data-dir="down">${DKT_DOWN_SVG}</button>`
         : `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Already at the bottom">${DKT_DOWN_SVG}</button>`);
       return { name, bits: bitsCa.join('\n      ') };
+    }
+    if (ntNow) {
+      return { name: ntNow.name, bits: `
+      <button type="button" class="dk-tb-btn" data-act="dk-nt-off" data-id="${esc(ntNow.id)}">${ACT_TRASH_SVG}</button>
+      <button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Notes print in type order">${DKT_UP_SVG}</button>
+      <button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="Notes print in type order">${DKT_DOWN_SVG}</button>` };
     }
     if (state.dkPart === 'divider') {
       const cur = dkRuleStyle(d.ruleStyle);
@@ -30086,6 +30141,7 @@ function handleActClick(el, e) {
         dkSelection().forEach(k => { next[k] = on; });
         if (state.dkSlip) setCaOpt('bold', next); else setDocketOpt('bold', next);
       }
+      else if (act === 'dk-nt-off') { state.dkPart = null; state.dkSel = []; dkToggleNoteType(el.dataset.id); }
       else if (act === 'dk-add-line') {
         const d = docketCfg();
         const kind = el.dataset.kind;
@@ -30316,7 +30372,7 @@ function handleActClick(el, e) {
         else if (m === 'align') {
           state.dkMenu = null;
           const cur = dkPaper().align || {}, next = Object.assign({}, cur);
-          dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align || dkExtraOf(docketCfg(), k)) next[k] = v; });
+          dkSelection().forEach(k => { if (state.dkSlip || (DK_PARTS[k] || {}).align || dkExtraOf(docketCfg(), k) || /^nt:/.test(k)) next[k] = v; });
           if (state.dkSlip) setCaOpt('align', next); else setDocketOpt('align', next);
         }
         else if (m === 'addback' && v.startsWith('ca:')) {
@@ -30352,24 +30408,9 @@ function handleActClick(el, e) {
           setDocketOpt(key, dc[key] === false);
         }
         else if (m === 'addback' && v.startsWith('notetype:')) {
-          // One tick, one type. What is stored is the list of types to SHOW;
-          // an empty list means all of them, so a type the venue adds later
-          // prints without another visit here. Stale ids from deleted types
-          // are dropped before anything is decided on top of them.
           const id = v.slice(9);
           if (id === 'none') { state.toast = 'Add note types in Settings'; render(); armToastTimer(2400); return; }
-          const cats = (state.noteCategories || []).map(c => c.id);
-          const stored = (Array.isArray(docketCfg().noteTypes) ? docketCfg().noteTypes : []).filter(x => cats.includes(x));
-          const shown = stored.length ? stored : cats.slice();
-          let next;
-          if (shown.includes(id)) {
-            next = shown.filter(x => x !== id);
-            // The last type does not untick — the parent row is the off
-            // switch for the whole section, and a silently empty list would
-            // read as "all" and put everything back.
-            if (!next.length) { state.toast = 'Untick Order notes to hide them all'; render(); armToastTimer(2600); return; }
-          } else next = shown.concat([id]);
-          setDocketOpt('noteTypes', cats.every(c => next.includes(c)) ? [] : next);
+          dkToggleNoteType(id);
         }
         else if (m === 'addback') {
           const dc = docketCfg();
@@ -30438,7 +30479,7 @@ function handleActClick(el, e) {
             dkSelection().forEach((k) => { if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10); });
             setCaOpt('sizes', next);
           }
-          else if (pk && (DK_PARTS[pk] || dkExtraOf(docketCfg(), pk))) {
+          else if (pk && (DK_PARTS[pk] || dkExtraOf(docketCfg(), pk) || /^nt:/.test(pk))) {
             const dcfg = docketCfg();
             const bN = dcfg.fontScale === 'xlarge' ? 3 : dcfg.fontScale === 'large' ? 2 : 1;
             const next = Object.assign({}, dcfg.sizes || {});
@@ -30446,7 +30487,7 @@ function handleActClick(el, e) {
               // An added line takes a size like any other; it just isn't in
               // DK_PARTS, so asking DK_PARTS whether it can sent the number to
               // the docket's own scale instead (owner: "font size mot working").
-              if (DK_PARTS[k] ? !DK_PARTS[k].size : !dkExtraOf(dcfg, k)) return;
+              if (DK_PARTS[k] ? !DK_PARTS[k].size : !(dkExtraOf(dcfg, k) || /^nt:/.test(k))) return;
               if (parseInt(v, 10) === bN) delete next[k]; else next[k] = parseInt(v, 10);
             });
             setDocketOpt('sizes', next);

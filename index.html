@@ -1234,7 +1234,10 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 /* One width, number or no number: the size button grew the moment a line was
    picked and shoved the row along (owner, Aug '26). The slot is reserved. */
 .dk-tb-btn.dk-tb-ico{width:46px;min-width:46px;justify-content:center;padding:0;gap:3px;}
-.dk-tb-btn.dk-tb-dd.dk-tb-ico b{font-size:var(--fs-sm);font-weight:800;}
+/* The number keeps its slot whether or not there is a number in it, so the
+   glyph beside it never shifts (owner, Aug '26: "annoying it changes shape"). */
+.dk-tb-btn.dk-tb-dd.dk-tb-ico b{font-size:var(--fs-sm);font-weight:800;
+  min-width:9px;display:inline-block;text-align:left;}
 .dk-tb-part{font-size:12px;font-weight:700;color:var(--charcoal-soft);min-width:92px;}
 /* One size across the whole designer bar. It ran to four — 15px buttons, a
    raw 12px on the dropdowns, 13.5 on their numbers and 12.5 on the line name
@@ -5049,7 +5052,8 @@ app.put('/api/settings', (req, res) => {
       blockStyle: (() => {
         const src = dk.blockStyle !== undefined ? dk.blockStyle : (cur.blockStyle || {});
         const out = {};
-        ['course', 'allergies', 'vip'].forEach(k => {
+        // Every line can carry a background, not just the three that used to.
+        DK_STYLE_KEYS.concat(['divider', 'footrule', 'seats']).forEach(k => {
           if (src && ['invert', 'border', 'plain'].includes(src[k])) out[k] = src[k];
         });
         return out;
@@ -8811,7 +8815,11 @@ function dkUnderOn(d, k) { return !!((d.under || {})[k]); }
 // One background mechanism for every block that has one. `newCourseStyle` is
 // the old key for courses and still wins when nothing newer is set.
 const DK_BLOCK_STYLES = [['invert', 'Black bar'], ['border', 'Outline'], ['plain', 'None']];
-const DK_BG_PARTS = ['course', 'allergies', 'vip'];
+// Every line can carry a background: GS B inverts anything and a rule brackets
+// anything, so there was never a reason only three could (owner, Aug '26).
+// Courses, allergies and VIP pad the text inside theirs, which is why the
+// printer keeps drawing those three itself.
+const DK_BG_PARTS = null;
 const DK_BLOCK_DEFAULT = { course: 'invert', allergies: 'invert', vip: 'plain' };
 function dkBlockStyle(d, k) {
   const b = d.blockStyle || {};
@@ -8881,8 +8889,13 @@ function dkKeydown(e) {
 document.addEventListener('keydown', dkKeydown);
 // Scrolling away from an open designer menu closes it — the menu is anchored to
 // its button, so a scrolled page would leave it floating over nothing.
-document.addEventListener('scroll', () => {
-  if (state.dkMenu || state.rcMenu) { state.dkMenu = null; state.rcMenu = null; render(); }
+document.addEventListener('scroll', (e) => {
+  if (!(state.dkMenu || state.rcMenu)) return;
+  // Not the menu's own list — a long one scrolls, and closing it as soon as it
+  // moved made the whole page feel twitchy (owner, Aug '26).
+  const t = e.target;
+  if (t && t.closest && t.closest('.dk-menu')) return;
+  state.dkMenu = null; state.rcMenu = null; render();
 }, true);
 function dkExtraOf(d, k) { return dkExtras(d).find(x => x && x.id === k) || null; }
 function docketCfg() { return Object.assign({}, DOCKET_DEFAULTS, state.settings && state.settings.docket ? state.settings.docket : {}); }
@@ -9232,10 +9245,13 @@ function buildDocketDoc(ctx, edit) {
   const DK_GAP_EM = { '1': 1.3, '1.5': 1.95, '2': 2.6 };
   const stl = k => {
     const n = (d.sizes || {})[k], a = (d.align || {})[k], g = DK_GAP_EM[(d.gaps || {})[k]];
+    const bs = dkBlockStyle(d, k);
     const css = (n ? `font-size:${dkSizeEm(n, d)};` : '') + `line-height:${g || 1.3};`
       + (a ? `text-align:${a};` : '')
       + `font-weight:${dkBoldOn(d, k) ? 800 : 400};`
-      + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '');
+      + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
+      + (bs === 'invert' ? 'background:#000;color:#fff;padding:0 3px;' : '')
+      + (bs === 'border' ? 'border-top:1.5px solid #000;border-bottom:1.5px solid #000;' : '');
     return css ? ` style="${css}"` : '';
   };
   // Word-style part selection: tapping a styleable part picks it for the
@@ -9517,16 +9533,17 @@ function buildDocketDoc(ctx, edit) {
     if (!ex) return '';
     const sel = selectable && dkIsSelected(k) ? ' dk-sel' : '';
     const pick = selectable ? ` data-act="dk-pick-part" data-part="${k}"` : '';
-    if (ex.kind === 'gap') {
+    // One kind of added line: it holds whatever was typed, and nothing typed is
+    // a blank line. "+ Blank line" and "+ Text line" sat side by side doing the
+    // same job (owner, Aug '26). 'gap' is the legacy kind, drawn the same way.
+    if (ex.kind === 'gap' || ex.kind === 'text') {
       const g = groups.find(x => x[0].k === k);
       const riders = g && g.length > 1 ? g.slice(1).map(({ k: rk, seg }) => partW(rk, seg.on, seg.html)).filter(Boolean).join(' · ') : '';
-      return riders
-        ? `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${pick}>${riders}</div>`
+      const own = edit ? sampleEditable('dkText:' + k, ex.text || '', '', '', true) : esc(ex.text || '');
+      const inner = own + (riders ? (own ? ' · ' : '') + riders : '');
+      return inner
+        ? `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${stl(k)}${pick}>${inner}</div>`
         : `<div class="print-gap${selectable ? ' dk-part' : ''}${sel}"${pick}></div>`;
-    }
-    if (ex.kind === 'text') {
-      const inner = edit ? sampleEditable('dkText:' + k, ex.text || '', 'type here', '') : esc(ex.text || '');
-      return `<div class="print-sub${selectable ? ' dk-part' : ''}${sel}"${stl(k)}${pick}>${inner}</div>`;
     }
     return dkRuleHtml(ex.style || 'dashed', (selectable ? 'dk-part' : '') + sel, pick);
   };
@@ -17139,7 +17156,7 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   const bits = [];
   bits.push(p && meta && meta.size && !rider
     ? dd('size', DKT_TEXTSIZE_SVG + '<b>' + ((d.sizes || {})[p] || defN) + '</b>', true, sizeItems, 'Text size for this line', '', true)
-    : off(DKT_TEXTSIZE_SVG, p ? (rider ? why : 'No size on this line') : why, 'dk-tb-dd dk-tb-ico'));
+    : off(DKT_TEXTSIZE_SVG + '<b></b>', p ? (rider ? why : 'No size on this line') : why, 'dk-tb-dd dk-tb-ico'));
   // A rider CAN be placed — left, centre or right within its own row — because
   // padding does it where ESC a cannot. Size still cannot vary: one row, one
   // character size.
@@ -17160,11 +17177,11 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
     : off('<span style="text-decoration:underline;font-weight:700;">U</span>', why));
   // Line spacing sits with the other paragraph tools, where a word processor
   // puts it (owner, Aug '26) — not down in the line's own actions.
-  if (!p || !meta) bits.push(off(DKT_SPACING_SVG, why, 'dk-tb-dd dk-tb-ico'));
-  else if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG, 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
+  if (!p || !meta) bits.push(off(DKT_SPACING_SVG + '<b></b>', why, 'dk-tb-dd dk-tb-ico'));
+  else if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG + '<b></b>', 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
   else {
     const cur = (d.gaps || {})[p];
-    bits.push(dd('linespacing', DKT_SPACING_SVG + (cur ? `<b>${esc(cur)}</b>` : ''), true,
+    bits.push(dd('linespacing', DKT_SPACING_SVG + `<b>${cur ? esc(cur) : ''}</b>`, true,
       [['auto', 'Same'], ['1', '1'], ['1.5', '1.5'], ['2', '2']].map(([v, l]) =>
         ({ v, l, on: v === 'auto' ? !cur : cur === v })), 'Space under this line', '', true));
   }
@@ -17226,7 +17243,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
           bits.push(dd('footrulestyle', (DK_RULE_STYLES.find(r => r[0] === cur) || [])[1] || 'Dashed', true,
             DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Line style'));
         }
-        bits.push(DK_BG_PARTS.includes(p)
+        bits.push(p
           ? (() => { const cur = dkBlockStyle(d, p);
               return dd('style', (DK_BLOCK_STYLES.find(x => x[0] === cur) || [])[1] || 'None', true,
                 DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Background'); })()
@@ -17302,7 +17319,7 @@ function dkLineRows(d) {
   for (const k of order) {
     const ex = dkExtraOf(d, k);
     if (!ex && k === 'items') { bodyRows().forEach(r => rows.push(r)); continue; }
-    const label = ex ? (ex.kind === 'gap' ? 'Blank line' : ex.kind === 'text' ? (ex.text || 'Text line') : 'Divider')
+    const label = ex ? (ex.kind === 'rule' ? 'Divider' : (ex.text || 'Blank line'))
       : (DK_PARTS[k] || {}).label || k;
     if (!ex && j(k) && rows.length) { rows[rows.length - 1].parts.push({ k, label }); continue; }
     rows.push({ k, parts: [{ k, label }] });
@@ -17460,16 +17477,15 @@ function dkToolbar(d) {
       ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
         ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'], ['waitermate', 'Chef'],
       ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
-      ${dd('font', `${cols(d.font === 'B')} per line`, !station, [
-        { v: 'A', l: `${cols(false)} per line`, on: (d.font || 'A') === 'A' },
-        { v: 'B', l: `${cols(true)} per line`, on: d.font === 'B' },
-      ], 'Characters per line')}
+      ${dd('font', d.font === 'B' ? 'Narrow' : 'Wide', !station, [
+        { v: 'A', l: `Wide — ${cols(false)} a line`, on: (d.font || 'A') === 'A' },
+        { v: 'B', l: `Narrow — ${cols(true)} a line`, on: d.font === 'B' },
+      ], 'Letter width')}
       ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : ''}
-      ${dd('spacing', 'Whole docket ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for the whole docket')}
+      ${station ? dd('spacing', 'Spacing ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for this station') : ''}
       ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
-      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="text">+ Text line</button>
-      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="gap">+ Blank line</button>
+      <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="text">+ Line</button>
       <button type="button" class="dk-tb-btn" data-act="dk-add-line" data-kind="rule">+ Divider</button>`;
 
   // Row 2: the picked line. Inserted lines aren't in DK_PARTS, so they are
@@ -17484,10 +17500,11 @@ function dkToolbar(d) {
       <button type="button" class="dk-tb-btn" data-act="dk-hide-line" data-key="showRule">${ACT_TRASH_SVG}</button>` };
     }
     if (ex) {
-      return { name: ex.kind === 'gap' ? 'Blank line' : ex.kind === 'text' ? 'Text line' : 'Divider', bits: `
-      ${ex.kind === 'rule' ? dd('rulestyle', (DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed', true,
-        DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (ex.style || 'dashed') === v })), 'Divider style') : ''}
-      ${ex.kind === 'text' ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="dkText:${state.dkPart}">${ACT_PENCIL_SVG}</button>` : ''}
+      return { name: ex.kind === 'rule' ? 'Divider' : (ex.text || 'Line'), bits: `
+      ${dd('rulestyle', ex.kind === 'rule' ? ((DK_RULE_STYLES.find(r => r[0] === (ex.style || 'dashed')) || [])[1] || 'Dashed') : 'No line', true,
+        [{ v: 'none', l: 'No line', on: ex.kind !== 'rule' }].concat(
+          DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: ex.kind === 'rule' && (ex.style || 'dashed') === v }))), 'Line style')}
+      ${ex.kind !== 'rule' ? `<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="dkText:${state.dkPart}">${ACT_PENCIL_SVG}</button>` : ''}
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="up">${up}</button>
       <button type="button" class="dk-tb-btn" data-act="move-docket-line" data-dir="down">${down}</button>
       <button type="button" class="dk-tb-btn" data-act="dk-del-line">${ACT_TRASH_SVG}</button>` };
@@ -29645,6 +29662,13 @@ function handleActClick(el, e) {
         state.dkSlip = slip;
         state.dkMenu = null;
         render();
+        // Bring the controls to the line you just picked: on a tablet the bar
+        // is often scrolled off the top by the time you reach the paper
+        // (owner, Aug '26).
+        if (state.dkPart) requestAnimationFrame(() => {
+          const bar = document.querySelector('.dk-toolbar');
+          if (bar && bar.getBoundingClientRect().top < 0) bar.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        });
       }
       else if (act === 'dk-menu') { state.dkMenu = state.dkMenu === el.dataset.menu ? null : el.dataset.menu; render(); }
       else if (act === 'apply-design') { applyDesign(el.dataset.kind, el.dataset.id); }
@@ -29715,7 +29739,14 @@ function handleActClick(el, e) {
         const m = el.dataset.menu, v = el.dataset.val;
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
-        else if (m === 'linespacing') { state.dkMenu = null; setDocketOpt('gaps', Object.assign({}, docketCfg().gaps || {}, { [state.dkPart]: v === 'auto' ? undefined : v })); }
+        else if (m === 'linespacing') {
+          // Every picked line, so ctrl+A then spacing sets the whole docket —
+          // which is why there is no separate whole-docket spacing control.
+          state.dkMenu = null;
+          const next = Object.assign({}, docketCfg().gaps || {});
+          dkSelection().forEach(k => { next[k] = v === 'auto' ? undefined : v; });
+          setDocketOpt('gaps', next);
+        }
         else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
@@ -29763,8 +29794,12 @@ function handleActClick(el, e) {
         else if (m === 'dividerstyle') { state.dkMenu = null; setDocketOpt('ruleStyle', v); }
         else if (m === 'footrulestyle') { state.dkMenu = null; setDocketOpt('footRuleStyle', v); }
         else if (m === 'rulestyle') {
+          // One added line, and this says whether it draws a rule. "No line"
+          // takes it back to a plain line you type into.
           const id = state.dkPart; state.dkMenu = null;
-          setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id ? { ...x, style: v } : x));
+          setDocketOpt('extras', dkExtras(docketCfg()).map(x => x.id === id
+            ? (v === 'none' ? { ...x, kind: 'text', style: null } : { ...x, kind: 'rule', style: v })
+            : x));
         }
         else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'style') {
@@ -29776,6 +29811,10 @@ function handleActClick(el, e) {
             k === 'course' ? { newCourseStyle: v } : {}));
         }
         else if (m === 'docsize') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('fontScale', v); else setDocketOpt('fontScale', v); }
+        // The docket's own spacing and letter width. Both menus were on screen
+        // and neither was wired (owner, Aug '26: "cannot edit select").
+        else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
+        else if (m === 'font') { state.dkMenu = null; setDocketOpt('font', v === 'B' ? 'B' : 'A'); }
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;

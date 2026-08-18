@@ -971,6 +971,7 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 /* Paper roll width (also used at real size in the on-screen preview). */
 .print-doc.pw80{width:80mm;}
 .print-doc.pw58{width:58mm;}
+.print-doc.pw76{width:76mm;}
 .print-doc.fs-large{font-size:15px;}
 .print-doc.fs-large .print-sub{font-size:12.5px;}
 /* One font on paper. The printer owns a single mono face — the preview must
@@ -1005,6 +1006,11 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 .print-doc .print-build .pb-no.pb-thin{font-weight:400;}
 .print-doc hr{border:none;border-top:1px dashed #000;margin:8px 0;}
 .print-doc .print-footer{text-align:center;font-style:italic;font-size:11px;margin-top:10px;}
+/* The customer papers (.rc): the printer lays every unsized line down at full
+   size, upright, verbatim — the 11px/italic/uppercase styling was a lie. */
+.print-doc.rc .print-sub{font-size:1em;}
+.print-doc.rc .print-footer{font-style:normal;font-size:1em;}
+.print-doc.rc h3{text-transform:none;font-size:2em;}
 /* Kitchen-docket flags + courses */
 /* VIP prints as a plain line, not a box. */
 .print-doc .print-flag{padding:2px 0;margin:2px 0;text-align:center;}
@@ -1301,6 +1307,16 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-mi-caret{width:14px;text-align:right;flex:none;}
 .dk-mi-sub{padding-left:14px;}
 .dk-mi-sub2{padding-left:28px;}
+/* Drawer count: one tappable cell per note/coin — tap adds one, − takes one. */
+.denom-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px;}
+.denom-cell{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  min-height:52px;border-radius:9px;background:var(--steel-100);cursor:pointer;user-select:none;}
+.denom-cell.has{background:var(--orange-dim);}
+.denom-label{font-weight:800;font-size:var(--fs-sm);color:var(--text-primary);}
+.denom-count{font-size:var(--fs-md);font-weight:700;color:var(--orange);min-height:18px;}
+.denom-minus{position:absolute;top:2px;right:2px;width:22px;height:22px;border:none;border-radius:6px;
+  background:var(--surface);color:var(--text-primary);font-weight:800;cursor:pointer;}
+body[data-theme="dark"] .denom-cell{background:var(--steel-200);}
 /* Phone: the ribbon keeps its three fixed rows and scrolls sideways instead of
    wrapping into six stacked ones — a wrapped bar loses the "formatting lives
    on its own row" promise the moment the screen narrows (owner, Aug '26:
@@ -8101,7 +8117,9 @@ app.get('/api/summary', (req, res) => {
 
 // ---------- Register / Z-report ----------
 function computePeriodSummary(data, fromTs, toTs) {
-  const orders = data.orders.filter(o => o.createdAt > fromTs && o.createdAt <= toTs);
+  // Practice rings never reach the till's money. They printed nothing and
+  // they count nothing (owner rule: a trainee cannot spoil the cash-up).
+  const orders = data.orders.filter(o => o.createdAt > fromTs && o.createdAt <= toTs && !o.practice);
   const paid = orders.filter(o => o.status === 'paid');
   const voidCount = orders.filter(o => o.status === 'void').length;
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
@@ -8114,6 +8132,16 @@ function computePeriodSummary(data, fromTs, toTs) {
   const netTotal = grandTotal - refunds;
   let cashNet = 0;
   let cardNet = 0;
+  let giftNet = 0;
+  // Who took what — the owner's per-terminal view: every order knows the
+  // staff member who rang it.
+  const byStaff = {};
+  paid.forEach(o => {
+    const gtS = (o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0);
+    const who = o.staffName || '—';
+    if (!byStaff[who]) byStaff[who] = { orders: 0, net: 0 };
+    byStaff[who].orders += 1; byStaff[who].net += gtS;
+  });
   paid.forEach(o => {
     const gt = o.grandTotal !== undefined ? o.grandTotal : o.total;
     const refunded = o.refundedTotal || 0;
@@ -8127,8 +8155,14 @@ function computePeriodSummary(data, fromTs, toTs) {
       cashNet += gt - refunded;
     } else if (o.paymentMethod === 'card') {
       cardNet += gt - refunded;
+    } else if (o.paymentMethod === 'giftcard') {
+      giftNet += gt - refunded;
     }
   });
+  // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
+  // cash, the lime run) — logged, and owed against the expected count.
+  const paidOuts = (data.paidOuts || []).filter(p => p.ts > fromTs && p.ts <= toTs);
+  const paidOutTotal = paidOuts.reduce((a, p) => a + p.amount, 0);
   return {
     orderCount: paid.length,
     voidCount,
@@ -8142,8 +8176,49 @@ function computePeriodSummary(data, fromTs, toTs) {
     netTotal,
     cashNet,
     cardNet,
+    giftNet,
+    byStaff,
+    paidOuts,
+    paidOutTotal,
+    // The whole drawer story: what it started with, what cash came in, what
+    // left as paid-outs — the number the counted drawer must answer to.
+    float: data.registerFloat || 0,
+    expectedCash: (data.registerFloat || 0) + cashNet - paidOutTotal,
   };
 }
+
+// A paid-out: cash leaving the drawer with a reason attached.
+app.post('/api/register/paidout', (req, res) => {
+  const data = readData();
+  const amount = parseFloat(req.body && req.body.amount);
+  const reason = String((req.body && req.body.reason) || '').trim().slice(0, 60);
+  if (!(amount > 0) || amount > 10000) return res.status(400).json({ error: 'Enter the amount taken out' });
+  if (!reason) return res.status(400).json({ error: 'Say what it was for' });
+  const rec = { id: Date.now().toString(36), ts: Date.now(), amount: Math.round(amount * 100) / 100, reason, by: req.header('X-Staff-Name') || '' };
+  data.paidOuts = [...(data.paidOuts || []), rec];
+  logAudit(data, rec.by, `Paid out ${rec.amount.toFixed(2)} — ${reason}`);
+  writeData(data);
+  res.json(rec);
+});
+app.delete('/api/register/paidout/:id', (req, res) => {
+  const data = readData();
+  const rec = (data.paidOuts || []).find(p => p.id === req.params.id);
+  if (!rec) return res.status(404).json({ error: 'Not found' });
+  data.paidOuts = data.paidOuts.filter(p => p.id !== req.params.id);
+  logAudit(data, req.header('X-Staff-Name') || '', `Removed paid-out ${rec.amount.toFixed(2)} — ${rec.reason}`);
+  writeData(data);
+  res.json({ ok: true });
+});
+// The float: what the drawer starts the period with.
+app.put('/api/register/float', (req, res) => {
+  const data = readData();
+  const amount = parseFloat(req.body && req.body.amount);
+  if (isNaN(amount) || amount < 0 || amount > 100000) return res.status(400).json({ error: 'Enter the float amount' });
+  data.registerFloat = Math.round(amount * 100) / 100;
+  logAudit(data, req.header('X-Staff-Name') || '', `Set float to ${data.registerFloat.toFixed(2)}`);
+  writeData(data);
+  res.json({ float: data.registerFloat });
+});
 
 app.get('/api/register/current', (req, res) => {
   const data = readData();
@@ -8166,7 +8241,10 @@ app.post('/api/register/close', (req, res) => {
   const toTs = Date.now();
   const summary = computePeriodSummary(data, fromTs, toTs);
   const counted = parseFloat(cashCounted);
-  const cashDiff = !isNaN(counted) ? counted - summary.cashNet : null;
+  // The drawer answers for float + cash sales - paid-outs, not cash sales
+  // alone — counting against cashNet called every drawer with a float Short.
+  const cashDiff = !isNaN(counted) ? counted - summary.expectedCash : null;
+  const nextFloat = parseFloat(req.body.nextFloat);
   const record = {
     id: closes.length + 1,
     closedAt: toTs,
@@ -8174,11 +8252,20 @@ app.post('/api/register/close', (req, res) => {
     periodEnd: toTs,
     closedBy: staffName || 'Unknown',
     ...summary,
-    cashExpected: summary.cashNet,
+    cashExpected: summary.expectedCash,
     cashCounted: isNaN(counted) ? null : counted,
+    // The note-and-coin count the total came from, kept for the record.
+    denominations: (req.body.denominations && typeof req.body.denominations === 'object')
+      ? Object.fromEntries(Object.entries(req.body.denominations)
+          .filter(([k, v]) => Number.isInteger(v) && v >= 0 && v <= 5000).slice(0, 16))
+      : null,
     cashDiff,
   };
   data.registerCloses = [...closes, record];
+  // The period's paid-outs are settled by this close; tomorrow starts clean,
+  // with whatever float the manager left in the drawer.
+  data.paidOuts = (data.paidOuts || []).filter(p => p.ts > toTs);
+  if (!isNaN(nextFloat) && nextFloat >= 0 && nextFloat <= 100000) data.registerFloat = Math.round(nextFloat * 100) / 100;
   logAudit(data, record.closedBy, `Closed register — ${summary.orderCount} orders, net ${summary.netTotal.toFixed(2)}${cashDiff !== null ? `, cash ${cashDiff >= 0 ? '+' : ''}${cashDiff.toFixed(2)}` : ''}`);
   writeData(data);
   // End of day: print the Z-report on the receipt printer and snapshot the data.
@@ -8812,6 +8899,12 @@ function elapsedMinLabel(ts) {
 }
 function fmtTime(ts) { return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
 function fmtDate(ts) { return new Date(ts).toLocaleDateString([], { month: 'short', day: 'numeric' }); }
+// The receipt paper's date+time, same shape fmtWhen lays down (printing.js).
+function rcWhen(ts) {
+  const d = new Date(ts);
+  return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([],
+    { hour: '2-digit', minute: '2-digit', hour12: !((state.settings || {}).docket || {}).time24 });
+}
 
 // The browser's print dialog exists ONLY for the "Plain paper · colour" print
 // type (a normal office printer). In thermal mode every print goes straight to
@@ -8834,7 +8927,7 @@ function openPrintArea(html) {
 function printDocClasses() {
   const s = state.settings || {};
   return 'print-doc'
-    + (s.paperWidth === '58' ? ' pw58' : ' pw80')
+    + (s.paperWidth === '58' ? ' pw58' : s.paperWidth === '76' ? ' pw76' : ' pw80')
     + (s.printColorMode === 'color' ? ' mode-color' : ' mode-thermal')
     + (s.printFontScale === 'large' ? ' fs-large' : ' fs-normal');
 }
@@ -9269,7 +9362,10 @@ function receiptCfg() {
   return {
     title: rcTitleOf(r, which),
     layout: r.layout || 'classic', show: r.show || {}, sizes: r.sizes || {},
-    density: (r.density === 'tight' || r.density === 'roomy') ? r.density : 'normal',
+    // 1/1.5/2 are the printer's spacing tiers (DENSITY_DOTS); tight/roomy are
+    // the legacy pair. Sanitizing 1.5/2 away made the menu change the PAPER
+    // but never the screen (Aug '26).
+    density: ['tight', 'roomy', '1', '1.5', '2'].includes(r.density) ? r.density : 'normal',
     font: r.font === 'B' ? 'B' : 'A', align: r.align || {}, red: r.red || {},
     staffLabel: r.staffLabel || '',
     ...(Array.isArray(r.lineOrder) ? { lineOrder: r.lineOrder } : {}),
@@ -9335,32 +9431,37 @@ function buildReceiptDoc(order, edit) {
     if (edit) return `<${block ? 'div' : 'span'} class="dk-part${state.rcPart === k ? ' dk-sel' : ''}"${styleAttr || ''} data-act="rc-pick-part" data-part="${k}">${inner}</${block ? 'div' : 'span'}>`;
     return styleAttr ? `<${block ? 'div' : 'span'}${styleAttr}>${inner}</${block ? 'div' : 'span'}>` : inner;
   };
-  // Per-part size → same inline scale the docket paper uses. The venue name
-  // has always printed at double size with nothing stored, so an absent entry
-  // means Large there and Normal everywhere else — the menu ticks Large for it
-  // and picking Large must not read as "no size at all".
+  // Per-part size — ALWAYS the resolved size, like the docket's stl: the
+  // printer's multiples are 1x/2x/3x and an unset part prints at BODY size,
+  // so page CSS (the 11px print-sub) must never undercut it (Aug '26).
+  // The venue name has always printed at double size with nothing stored.
   const rcSize = k => {
-    const n = r.sizes[k] || (k === 'header' ? 2 : 0);
-    return n ? `font-size:${n === 3 ? '2em' : n === 2 ? '1.45em' : '1em'};line-height:1.3;` : '';
+    const n = r.sizes[k] || (k === 'header' ? 2 : 1);
+    return `font-size:${n === 3 ? '3em' : n === 2 ? '2em' : '1em'};line-height:1.3;`;
   };
-  const rstl = k => {
+  const rstl = (k, extra) => {
     const a = (r.align || {})[k], rd = (r.red || {})[k];
-    const css = rcSize(k)
-      + (a ? `text-align:${a};` : '') + (rd ? 'color:#C0392B;' : '');
-    return css ? ` style="${css}"` : '';
+    return ` style="${rcSize(k)}${extra || ''}${a ? `text-align:${a};` : ''}${rd ? 'color:#C0392B;' : ''}"`;
   };
   // The paper renders the SELECTED LAYOUT (Express / Grouped / Classic /
   // Big total), so picking a preset above changes what you're editing.
   const layout = ['express', 'grouped', 'bigtotal'].includes(r.layout) ? r.layout : 'classic';
+  // The paper's real column count (paperCols in printing.js) — the rules are
+  // CHARACTER rows like the docket's, and the big total sizes itself to fit.
+  const pw = (s || {}).paperWidth;
+  const rcCols = r.font === 'B' ? (pw === '58' ? 42 : pw === '76' ? 40 : 56)
+    : (pw === '58' ? 32 : pw === '76' ? 33 : 42);
+  const ruleHtml = dkRuleHtml('dashed', '', '', rcCols);
+  const rcPct = () => Math.round(taxCfg().ratePercent * 10) / 10;
   const coversOn = s.showCoversOnTicket !== false;
-  const coversSeg = order.covers ? (edit
-    ? `<span class="pp-toggle ${coversOn ? '' : 'pp-off'}" data-act="set-show-covers-ticket" data-val="${!coversOn}"> · ${order.covers} covers</span>`
-    : (coversOn ? ' · ' + order.covers + ' covers' : '')) : '';
   const headerInner = edit ? sampleEditable('ticketHeader', s.ticketHeader, 'Add header', '') : esc(s.ticketHeader);
-  const abnInner = edit ? ('ABN: ' + sampleEditable('venueAbn', s.venueAbn, 'add ABN', '')) : (s.venueAbn ? 'ABN: ' + esc(s.venueAbn) : 'ABN: ______________');
+  // 22 blanks, the count the paper lays down.
+  const abnInner = edit ? ('ABN: ' + sampleEditable('venueAbn', s.venueAbn, 'add ABN', '')) : (s.venueAbn ? 'ABN: ' + esc(s.venueAbn) : 'ABN: ______________________');
   const whereLine = order.orderType === 'dine-in' ? 'Table ' + esc(order.table) : esc(order.customerName || order.orderType);
   // Grouped: items under SALES CATEGORY headings, like the printed slip.
-  const itemLine = (i) => `<div class="print-line"><span>${i.qty}× ${esc(i.name)}${i.seat ? ' <span style="white-space:nowrap;">(' + esc(seatText(i.seat)) + ')</span>' : ''}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`;
+  // ' x ' as the paper types it; no note/seat fragments — the paper never
+  // prints them on a customer slip (Aug '26).
+  const itemLine = (i) => `<div class="print-line"><span>${i.qty} x ${esc(i.name)}</span><span>${money(i.price * i.qty)}</span></div>`;
   const itemsHtml = layout === 'grouped'
     ? (() => {
         const byCat = new Map((state.salesCategories || []).map(c => [c.id, []]));
@@ -9384,61 +9485,81 @@ function buildReceiptDoc(order, edit) {
   // fixed designs and keep their own template below.
   const classicHtml = layout !== 'classic' ? '' : (() => {
     const chunks = {
-      taxlabel: partR('taxlabel', `<div class="print-sub" style="font-weight:800;letter-spacing:.06em;">${edit ? sampleEditable('rcTitle', r.title, r.title, '') : esc(r.title)}</div>`, true),
+      taxlabel: partR('taxlabel', `<div class="print-sub"${rstl('taxlabel', 'font-weight:800;')}>${edit ? sampleEditable('rcTitle', r.title, r.title, '') : esc(r.title)}</div>`, true),
       header: cHeader, abn: cAbn, address: cAddress, phone: cPhone,
-      orderinfo: partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true),
-      table: partR('table', `<div class="print-sub">${whereLine}${coversSeg}</div>`, true),
+      // Two lines, as the paper prints them: the order number, then the date.
+      orderinfo: partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id}<br>${rcWhen(order.createdAt)}</div>`, true),
+      // Classic has never printed the table line or the server — the screen
+      // drew both over nothing (Aug '26). The other layouts keep theirs.
+      table: '',
+      staff: '',
       // The dividing rules ride with the items block wherever it lands.
-      items: `<hr>${partR('items', itemsHtml, true, rstl('items'))}<hr>`,
+      items: `${ruleHtml}${partR('items', itemsHtml, true, rstl('items'))}${ruleHtml}`,
       subtotal: partR('subtotal', `
       <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
-      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${order.discount.reason ? ' (' + esc(order.discount.reason) + ')' : ''}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}`, true, rstl('subtotal')),
-      gstExcl: order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
-      gstIncl: order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line" style="font-size:.92em;"><span>Total includes ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
-      total: partR('totals', `<div class="print-line" style="${order.tip ? '' : 'font-weight:700;'}"><span>Total</span><span>${money(order.total)}</span></div>`, true, rstl('totals')),
-      tip: order.tip ? partR('totals', `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div><div class="print-line" style="font-weight:700;"><span>Total incl. tip</span><span>${money(order.grandTotal)}</span></div>`, true, rstl('totals')) : '',
-      payment: partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments) ? order.payments.map(p => `<div class="print-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="print-line"><span>Payment</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment')),
-      staff: partR('staff', `<div class="print-line"${rstl('staff')}><span>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')}</span><span>${esc(order.staffName || '')}</span></div>`, true),
+      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.kind === 'surcharge' ? '+' : '-'}${order.discount.amount.toFixed(2)}</span></div>` : ''}`, true, rstl('subtotal')),
+      gstExcl: order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
+      gstIncl: order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>Total includes ${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
+      // Tip rides above the TOTAL, plain; TOTAL is the grand total, bold and
+      // uppercase — exactly the rows the paper prints, in its order.
+      tip: order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div>` : '',
+      total: partR('totals', `<div class="print-line" style="font-weight:700;"><span>TOTAL</span><span>${money(order.grandTotal || order.total)}</span></div>`, true, rstl('totals')),
+      // No payment method (the unpaid bill) = no row at all, like the paper.
+      // Split prints as ONE row — the method reads 'split' (Aug '26).
+      payment: order.paymentMethod ? partR('payment', `<div class="print-line"><span>Paid by</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment')) : '',
     };
     const seq = receiptLineOrder(r);
     // Default keeps the legacy arrangement (GST rides its tax-mode slot
-    // around the Total, tip after); a stored order groups each part whole —
-    // exactly like the printed classic invoice.
+    // around the TOTAL, tip before it); a stored order groups each part
+    // whole — exactly like the printed classic invoice.
     const body = seq.some((k, i) => k !== RECEIPT_LINE_ORDER[i])
-      ? seq.map(k => k === 'gst' ? chunks.gstExcl + chunks.gstIncl : k === 'totals' ? chunks.total + chunks.tip : chunks[k]).join('\n      ')
-      : [chunks.taxlabel, chunks.header, chunks.abn, chunks.address, chunks.phone, chunks.orderinfo, chunks.table, chunks.items,
-        chunks.subtotal, chunks.gstExcl, chunks.total, chunks.gstIncl, chunks.tip, chunks.payment, chunks.staff].join('\n      ');
-    return body + '\n      ' + (edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : ''));
+      ? seq.map(k => k === 'gst' ? chunks.gstExcl + chunks.gstIncl : k === 'totals' ? chunks.tip + chunks.total : chunks[k]).join('\n      ')
+      : [chunks.taxlabel, chunks.header, chunks.abn, chunks.address, chunks.phone, chunks.orderinfo, chunks.items,
+        chunks.subtotal, chunks.gstExcl, chunks.tip, chunks.total, chunks.gstIncl, chunks.payment].join('\n      ');
+    // The paper always rules off above the footer, footer or not.
+    return body + '\n      ' + ruleHtml + (edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : ''));
   })();
   return `
-    <div class="${printDocClasses()}${r.font === 'B' ? ' dk-font-b' : ''}"${(() => {
-      // Designer line spacing mirrors the ESC 3 tiers; express runs tight by
-      // default unless the designer says otherwise.
-      const lh = ({ tight: '1.2', '0.9': '1.2', '1.15': '1.55', '1.5': '1.9', roomy: '1.9', '2': '2.4' })[r.density] || (layout === 'express' ? '1.35' : '');
-      return lh ? ` style="line-height:${lh};"` : '';
+    <div class="${printDocClasses()} rc${r.font === 'B' ? ' dk-font-b' : ''}"${(() => {
+      // Designer line spacing mirrors the ESC 3 tiers the paper obeys:
+      // default 30 dots ≈ 1.3, 45 ≈ 1.95, 60 ≈ 2.6; express runs a shade
+      // tighter (28 dots) unless the designer says otherwise.
+      const lh = ({ '1.5': '1.95', roomy: '1.95', '2': '2.6' })[r.density] || (layout === 'express' ? '1.2' : '1.3');
+      return ` style="line-height:${lh};"`;
     })()}>
       ${layout === 'classic' ? classicHtml : `
       ${cHeader}
       ${cAbn}
-      ${cAddress}
-      ${cPhone}
+      ${layout === 'express' ? cAddress : ''}
       ${layout === 'grouped' && (edit || s.venueAddress) ? `<div class="print-sub">${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress)}</div>` : ''}
-      ${partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>${whereLine} · ${fmtDate(order.createdAt)} ${fmtTime(order.createdAt)}</div>`, true)}
-      ${layout === 'grouped' && order.covers ? partR('table', `<div class="print-sub">${order.covers} covers${s.showStaffOnTicket && order.staffName ? ' · Served by ' + esc(order.staffName) : ''}</div>`, true) : ''}
-      <hr>
+      ${cPhone}
+      ${partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>${whereLine} · ${rcWhen(order.createdAt)}</div>`, true)}
+      ${layout === 'grouped' && order.covers && (edit || coversOn) ? partR('table', edit
+        ? `<div class="print-sub pp-toggle ${coversOn ? '' : 'pp-off'}" data-act="set-show-covers-ticket" data-val="${!coversOn}">${order.covers} cover${order.covers === 1 ? '' : 's'}</div>`
+        : `<div class="print-sub">${order.covers} cover${order.covers === 1 ? '' : 's'}</div>`, true) : ''}
+      ${layout === 'grouped' && order.staffName ? partR('staff', `<div class="print-sub"${rstl('staff')}>${edit ? sampleEditable('staffLabel', (r.staffLabel || 'Served by'), 'Served by', '') : esc(r.staffLabel || 'Served by')} ${esc(order.staffName)}</div>`, true) : ''}
+      ${ruleHtml}
       ${partR('items', itemsHtml, true, rstl('items'))}
-      <hr>
-      ${order.discount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.amount < 0 ? '+' : '-'}${money(Math.abs(order.discount.amount))}</span></div>` : ''}
-      ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxLabel())}</span><span>${money(order.tax)}</span></div>` : ''}
+      ${ruleHtml}
+      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.kind === 'surcharge' ? '+' : '-'}${order.discount.amount.toFixed(2)}</span></div>` : ''}
+      ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>` : ''}
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div>` : ''}
-      ${order.tax && taxLabelInclusive() ? `<div class="print-line"><span>Incl. ${esc(taxCfg().name)} (${taxCfg().ratePercent}%)</span><span>${money(order.tax)}</span></div>` : ''}
+      ${order.tax && taxLabelInclusive() ? `<div class="print-line"><span>Incl. ${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>` : ''}
       ${layout === 'bigtotal'
-        ? partR('totals', `<div style="text-align:center;font-weight:800;${rcSize('totals')}"><div style="font-size:1.4em;">TOTAL</div><div style="font-size:2.7em;line-height:1.1;">${(order.grandTotal || order.total || 0).toFixed(2)}</div></div>`, true)
+        ? partR('totals', (() => {
+            // Same clamp the paper computes: the amount fills the columns
+            // left, 2x floor, 8x cap; the word TOTAL rides at 2x.
+            const amt = (order.grandTotal || order.total || 0).toFixed(2);
+            const n = Math.max(2, Math.min(8, Math.floor(rcCols / amt.length)));
+            return `<div style="text-align:center;font-weight:800;"><div style="font-size:2em;">TOTAL</div><div style="font-size:${n}em;line-height:1.1;">${amt}</div></div>`;
+          })(), true)
         : partR('totals', `<div class="print-line" style="font-weight:700;${rcSize('totals')}"><span>TOTAL</span><span>${money(order.grandTotal || order.total)}</span></div>`, true)}
-      ${partR('payment', layout === 'bigtotal'
-        ? `<div style="text-align:center;">Paid · ${esc(order.paymentMethod)}</div>`
-        : `<div class="print-line"><span>Paid by</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment'))}
-      <hr>
+      ${!order.paymentMethod ? '' : partR('payment', order.paymentMethod === 'split' && Array.isArray(order.payments)
+        ? order.payments.map(p => `<div class="print-line"><span>Paid (${esc(p.method)})</span><span>${money(p.amount || 0)}</span></div>`).join('')
+        : layout === 'bigtotal'
+          ? `<div style="text-align:center;">Paid · ${esc(order.paymentMethod)}</div>`
+          : `<div class="print-line"><span>Paid by</span><span>${esc(order.paymentMethod)}</span></div>`, true, rstl('payment'))}
+      ${ruleHtml}
       ${layout === 'bigtotal' && (edit || s.venueAddress) ? `<div class="print-sub">${edit ? sampleEditable('venueAddress', s.venueAddress, 'add address', '') : esc(s.venueAddress)}</div>` : ''}
       <div class="print-footer">${edit ? sampleEditable('ticketFooter', s.ticketFooter, 'Thank you', '') : esc(s.ticketFooter || 'Thank you')}</div>`}
     </div>`;
@@ -11628,7 +11749,6 @@ function renderFreezeOverlay() {
       ${s.venueName ? `<div class="lg-venue">${esc(s.venueName)}</div>` : ''}
       <div class="lg-clock">${esc(time)}</div>
       <div class="fz-held"><svg viewBox="0 0 24 24" class="fz-lock" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>Held by ${esc(f.name)}</div>
-      <div class="fz-sub">Their PIN — or a manager's — unlocks it</div>
     </div>
     <div class="lg-right">
       <div class="pin-dots lg${state.frozenErr === 'shake' ? ' shake' : ''}">
@@ -11827,6 +11947,7 @@ async function loadRegisterData() {
     state.registerCloses = await api('/api/register/closes');
   } catch (e) {}
   state.registerCashCounted = '';
+  state.registerDenoms = {};
   render();
 }
 async function closeRegister() {
@@ -11835,7 +11956,17 @@ async function closeRegister() {
       await api('/api/register/close', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cashCounted: state.registerCashCounted, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+        body: JSON.stringify({
+          cashCounted: (() => {
+            if (state.registerCashCounted !== '' && state.registerCashCounted !== undefined) return state.registerCashCounted;
+            const D = [['100', 100], ['50', 50], ['20', 20], ['10', 10], ['5', 5], ['2', 2], ['1', 1], ['50c', 0.5], ['20c', 0.2], ['10c', 0.1], ['5c', 0.05]];
+            const t = D.reduce((a2, [k, v]) => a2 + ((state.registerDenoms || {})[k] || 0) * v, 0);
+            return t ? t.toFixed(2) : '';
+          })(),
+          denominations: state.registerDenoms || null,
+          nextFloat: (document.getElementById('register-next-float-input') || {}).value,
+          staffName: state.currentStaff ? state.currentStaff.name : 'Unknown',
+        }),
       });
       await loadRegisterData();
       state.toast = 'Register closed.';
@@ -15548,8 +15679,11 @@ function renderRegisterAdmin() {
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
   const cur = state.registerCurrent;
   if (!cur) return `<div class="empty-hist">Loading…</div>`;
-  const cashCounted = parseFloat(state.registerCashCounted);
-  const cashDiff = !isNaN(cashCounted) ? cashCounted - cur.cashNet : null;
+  const DENOMS_V = [['100', 100], ['50', 50], ['20', 20], ['10', 10], ['5', 5], ['2', 2], ['1', 1], ['50c', 0.5], ['20c', 0.2], ['10c', 0.1], ['5c', 0.05]];
+  const denomT = DENOMS_V.reduce((a, [k, v]) => a + ((state.registerDenoms || {})[k] || 0) * v, 0);
+  const cashCounted = state.registerCashCounted !== '' && state.registerCashCounted !== undefined
+    ? parseFloat(state.registerCashCounted) : (denomT || NaN);
+  const cashDiff = !isNaN(cashCounted) ? cashCounted - (cur.expectedCash !== undefined ? cur.expectedCash : cur.cashNet) : null;
   return `
   <div class="settings-card">
     <div class="th" style="margin-bottom:4px;">Current period</div>
@@ -15565,13 +15699,57 @@ function renderRegisterAdmin() {
     <div class="detail-line" style="font-weight:700;font-size:15px;"><span>Net total</span><span>${money(cur.netTotal)}</span></div>
     <div class="detail-line"><span>Card</span><span>${money(cur.cardNet)}</span></div>
     <div class="detail-line"><span>Cash</span><span>${money(cur.cashNet)}</span></div>
+    ${cur.giftNet ? `<div class="detail-line"><span>Gift cards</span><span>${money(cur.giftNet)}</span></div>` : ''}
+  </div>
+  ${(cur.byStaff && Object.keys(cur.byStaff).length) ? `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:10px;">Takings by staff</div>
+    ${Object.entries(cur.byStaff).sort((a, b) => b[1].net - a[1].net).map(([name, t]) => `
+    <div class="detail-line"><span>${esc(name)} · ${t.orders} order${t.orders === 1 ? '' : 's'}</span><span>${money(t.net)}</span></div>`).join('')}
+  </div>` : ''}
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:10px;display:flex;align-items:center;">Paid-outs<span style="flex:1;"></span><button class="btn-add inline" data-act="open-paidout">+ Paid out</button></div>
+    ${state.paidoutOpen ? `
+    <div style="display:flex;gap:8px;margin-bottom:10px;">
+      <input id="paidout-amount" type="number" min="0" step="0.01" placeholder="0.00" style="width:90px;">
+      <input id="paidout-reason" type="text" maxlength="60" placeholder="what for" style="flex:1;">
+      <button class="btn-secondary sm" data-act="save-paidout">Add</button>
+    </div>` : ''}
+    ${(cur.paidOuts || []).length === 0 ? `<div class="ts">Nothing taken from the drawer.</div>`
+      : (cur.paidOuts || []).map(po => `
+      <div class="detail-line"><span>${esc(po.reason)}${po.by ? ' · ' + esc(po.by) : ''}</span><span>-${money(po.amount)}<button class="delete-icon-btn" style="margin-left:8px;" data-act="del-paidout" data-id="${esc(po.id)}">${ACT_TRASH_SVG}</button></span></div>`).join('')
+      + `<div class="detail-line" style="font-weight:700;"><span>Total out</span><span>-${money(cur.paidOutTotal || 0)}</span></div>`}
   </div>
   ${isManager ? `
   <div class="settings-card">
-    <div class="th" style="margin-bottom:10px;">Cash reconciliation</div>
-    <label>Cash counted in drawer</label>
-    <input id="register-cash-counted-input" type="number" min="0" step="0.01" value="${state.registerCashCounted}" placeholder="0.00">
-    ${cashDiff !== null ? `<div class="change-due" style="background:${cashDiff === 0 ? 'var(--green-dim)' : (cashDiff > 0 ? 'var(--green-dim)' : '#F5DDD8')};color:${cashDiff === 0 ? 'var(--green)' : (cashDiff > 0 ? 'var(--green)' : 'var(--red)')};"><span>${cashDiff === 0 ? 'Matches expected' : (cashDiff > 0 ? 'Over' : 'Short')}</span><span>${cashDiff >= 0 ? '+' : ''}${money(cashDiff)}</span></div>` : ''}
+    <div class="th" style="margin-bottom:10px;">Drawer count</div>
+    <div class="detail-line"><span>Float${state.registerFloatEdit ? '' : ` <button class="dk-tb-btn" style="min-height:28px;min-width:28px;" data-act="edit-float">${ACT_PENCIL_SVG}</button>`}</span>
+      <span>${state.registerFloatEdit ? `<input id="register-float-input" type="number" min="0" step="0.01" value="${cur.float || 0}" style="width:90px;">` : money(cur.float || 0)}</span></div>
+    <div class="detail-line"><span>Cash sales</span><span>${money(cur.cashNet)}</span></div>
+    ${cur.paidOutTotal ? `<div class="detail-line"><span>Paid-outs</span><span>-${money(cur.paidOutTotal)}</span></div>` : ''}
+    <div class="detail-line" style="font-weight:700;"><span>Drawer should hold</span><span>${money(cur.expectedCash)}</span></div>
+    ${(() => {
+      // Tap-count the drawer: how many of each note and coin. The total does
+      // its own arithmetic — nobody adds up a drawer in their head at close.
+      const DENOMS = [['100', 100], ['50', 50], ['20', 20], ['10', 10], ['5', 5], ['2', 2], ['1', 1], ['50c', 0.5], ['20c', 0.2], ['10c', 0.1], ['5c', 0.05]];
+      const counts = state.registerDenoms || {};
+      const denomTotal = DENOMS.reduce((a, [k, v]) => a + (counts[k] || 0) * v, 0);
+      return `
+    <div class="denom-grid">
+      ${DENOMS.map(([k, v]) => `
+      <div class="denom-cell${counts[k] ? ' has' : ''}" data-act="denom-plus" data-k="${k}">
+        <span class="denom-label">${v >= 1 ? '$' + k : k}</span>
+        <span class="denom-count">${counts[k] || ''}</span>
+        ${counts[k] ? `<button class="denom-minus" data-act="denom-minus" data-k="${k}">−</button>` : ''}
+      </div>`).join('')}
+    </div>
+    <div class="detail-line" style="margin-top:8px;"><span>Counted by notes & coins</span><span>${denomTotal ? money(denomTotal) : '—'}</span></div>
+    <label style="margin-top:8px;">Or type the counted total</label>
+    <input id="register-cash-counted-input" type="number" min="0" step="0.01" value="${state.registerCashCounted || (denomTotal ? denomTotal.toFixed(2) : '')}" placeholder="0.00">`;
+    })()}
+    ${cashDiff !== null ? `<div class="change-due" style="background:${Math.abs(cashDiff) < 0.005 ? 'var(--green-dim)' : '#F5DDD8'};color:${Math.abs(cashDiff) < 0.005 ? 'var(--green)' : 'var(--red)'};"><span>${Math.abs(cashDiff) < 0.005 ? 'Drawer matches' : (cashDiff > 0 ? 'Over' : 'Short')}</span><span>${cashDiff >= 0 ? '+' : ''}${money(cashDiff)}</span></div>` : ''}
+    <label style="margin-top:8px;">Float to leave for tomorrow</label>
+    <input id="register-next-float-input" type="number" min="0" step="0.01" value="${cur.float || 0}" placeholder="0.00">
     <button class="btn-send" style="width:100%;margin-top:14px;" data-act="close-register">Close register</button>
   </div>` : ''}
   <div class="th" style="margin-bottom:10px;">Past closes</div>
@@ -18300,10 +18478,15 @@ function rcToolbar() {
         { v: 'A', l: 'Standard', on: (r.font || 'A') === 'A' },
         { v: 'B', l: 'Compact — more per line', on: r.font === 'B' },
       ], 'Print style')}
-      ${dd('size', sizeLabel, !!(meta && meta.size), [['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
-        ({ v, l, on: (partSize || (p === 'header' ? 2 : 1)) === parseInt(v) })), 'Text size', p ? 'No size for this part' : whyNoPart)}
-      ${dd('spacing', svgSpacing, true, [['0.9', '0.9'], ['normal', '1.0'], ['1.15', '1.15'], ['1.5', '1.5'], ['2', '2.0']].map(([v, l]) =>
-        ({ v, l, on: (r.density === 'tight' ? '0.9' : r.density === 'roomy' ? '1.5' : r.density) === v })), 'Line spacing')}
+      ${(() => {
+        // Bigtotal sizes its own TOTAL to fill the paper — a size set there
+        // changes nothing, so the control says so instead of pretending.
+        const bigTotals = (r.layout === 'bigtotal') && p === 'totals';
+        return dd('size', sizeLabel, !!(meta && meta.size) && !bigTotals, [['1', 'Small'], ['2', 'Large'], ['3', 'Huge']].map(([v, l]) =>
+        ({ v, l, on: (partSize || (p === 'header' ? 2 : 1)) === parseInt(v) })), 'Text size', bigTotals ? 'Fills the paper on this layout' : (p ? 'No size for this part' : whyNoPart));
+      })()}
+      ${dd('spacing', svgSpacing, true, [['1', '1.0'], ['1.5', '1.5'], ['2', '2.0']].map(([v, l]) =>
+        ({ v, l, on: (r.density === 'roomy' ? '1.5' : r.density === '1.5' || r.density === '2' ? r.density : '1') === v })), 'Line spacing')}
       ${(() => {
         const RC_EDIT_FIELD = { header: 'ticketHeader', abn: 'venueAbn', address: 'venueAddress', phone: 'venuePhone', staff: 'staffLabel' };
         const f = p && RC_EDIT_FIELD[p];
@@ -28450,6 +28633,19 @@ function bindEvents() {
       });
     });
   }
+  const registerFloatInput = document.getElementById('register-float-input');
+  if (registerFloatInput) {
+    const saveFloat = async () => {
+      const v = parseFloat(registerFloatInput.value);
+      state.registerFloatEdit = false;
+      if (!isNaN(v) && v >= 0) {
+        try { await api('/api/register/float', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount: v }) }); } catch (e) {}
+      }
+      await loadRegisterData(); render();
+    };
+    registerFloatInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveFloat(); });
+    registerFloatInput.addEventListener('blur', saveFloat);
+  }
   const refundReasonInput = document.getElementById('refund-reason-input');
   if (refundReasonInput) refundReasonInput.addEventListener('input', (e) => { state.refundModal.reason = e.target.value; });
   const motdInput = document.getElementById('motd-input');
@@ -30692,6 +30888,38 @@ function handleActClick(el, e) {
       else if (act === 'download-backup') { downloadDataFile(); }
       else if (act === 'import-data') { const inp = document.getElementById('import-data-input'); if (inp) inp.click(); }
       else if (act === 'close-register') { closeRegister(); }
+      else if (act === 'denom-plus') {
+        const k = el.dataset.k;
+        state.registerDenoms = Object.assign({}, state.registerDenoms, { [k]: ((state.registerDenoms || {})[k] || 0) + 1 });
+        state.registerCashCounted = ''; render();
+      }
+      else if (act === 'denom-minus') {
+        e.stopPropagation();
+        const k = el.dataset.k, n = ((state.registerDenoms || {})[k] || 0) - 1;
+        state.registerDenoms = Object.assign({}, state.registerDenoms, { [k]: Math.max(0, n) });
+        state.registerCashCounted = ''; render();
+      }
+      else if (act === 'open-paidout') { state.paidoutOpen = !state.paidoutOpen; render(); const i = document.getElementById('paidout-amount'); if (i) i.focus(); }
+      else if (act === 'save-paidout') {
+        const amt = parseFloat((document.getElementById('paidout-amount') || {}).value);
+        const reason = ((document.getElementById('paidout-reason') || {}).value || '').trim();
+        (async () => {
+          try {
+            await api('/api/register/paidout', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ amount: amt, reason }) });
+            state.paidoutOpen = false;
+            await loadRegisterData(); render();
+          } catch (e2) { state.toast = e2.message || 'Could not save the paid-out.'; render(); armToastTimer(2600); }
+        })();
+      }
+      else if (act === 'del-paidout') {
+        const id = el.dataset.id;
+        openConfirm({ message: 'Remove this paid-out?', confirmLabel: 'Remove', danger: true }, async () => {
+          try { await api('/api/register/paidout/' + id, { method: 'DELETE' }); await loadRegisterData(); render(); }
+          catch (e2) { state.toast = 'Could not remove it.'; render(); armToastTimer(2400); }
+        });
+      }
+      else if (act === 'edit-float') { state.registerFloatEdit = true; render(); const i = document.getElementById('register-float-input'); if (i) { i.focus(); i.select(); } }
       else if (act === 'covers-inc') { incCovers(); }
       else if (act === 'covers-dec') { decCovers(); }
       else if (act === 'cycle-seat') { cycleSeat(parseInt(el.dataset.idx)); }

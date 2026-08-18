@@ -1111,7 +1111,10 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 .dk-tb-btn.dk-tb-ink.on:after{background:var(--red);}
 .dk-tb-btn.dk-tb-ink.on{color:var(--red);}
 /* Says which row the pick prints on, or how many lines an edit will touch. */
+/* Fixed width: the name changes with every pick, and a box that resizes with
+   it shoved the whole row along (owner, Aug '26). */
 .dk-tb-note{display:inline-flex;align-items:center;min-height:36px;padding:0 8px;
+  width:150px;min-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
   font-size:var(--fs-xs);font-weight:700;color:var(--charcoal-soft);}
 /* Leaving a line is a back action, not a setting — so it does not wear the
    same chip as the dropdowns beside it. */
@@ -1217,8 +1220,9 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 /* Square icon button on the bar — join/split is one glyph in two states, so
    it gets a shape of its own rather than a pill sized by its wording. */
 .dk-tb-btn.dk-tb-sq{width:38px;min-width:38px;padding:0;justify-content:center;border-radius:9px;}
-.dk-tb-btn.dk-tb-dd.dk-tb-ico{min-width:38px;justify-content:center;padding:0;gap:3px;}
-.dk-tb-btn.dk-tb-dd.dk-tb-ico:has(b){min-width:46px;}
+/* One width, number or no number: the size button grew the moment a line was
+   picked and shoved the row along (owner, Aug '26). The slot is reserved. */
+.dk-tb-btn.dk-tb-ico{width:46px;min-width:46px;justify-content:center;padding:0;gap:3px;}
 .dk-tb-btn.dk-tb-dd.dk-tb-ico b{font-size:var(--fs-sm);font-weight:800;}
 .dk-tb-part{font-size:12px;font-weight:700;color:var(--charcoal-soft);min-width:92px;}
 .dk-tb-btn{display:flex;align-items:center;justify-content:center;min-width:38px;min-height:38px;border:none;border-radius:8px;background:var(--surface);color:var(--charcoal-soft);cursor:pointer;font-weight:800;font-size:var(--fs-md);}
@@ -5869,7 +5873,7 @@ app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
 app.get('/api/staff', (req, res) => {
   const data = readData();
   // Never send PINs to the browser - only what's needed to show the login grid.
-  const safeStaff = data.staff.map(({ id, name, role, tipShare, payRate }) => ({ id, name, role, tipShare: tipShare || 'full', payRate: payRate || 0 }));
+  const safeStaff = data.staff.map(({ id, name, role, tipShare, payRate, trainee }) => ({ id, name, role, tipShare: tipShare || 'full', payRate: payRate || 0, trainee: !!trainee }));
   res.json(safeStaff);
 });
 
@@ -5903,7 +5907,7 @@ app.post('/api/staff/verify-pin', (req, res) => {
     return res.status(401).json({ error: 'Incorrect PIN' });
   }
   pinRecordSuccess(req);
-  res.json({ id: staff.id, name: staff.name, role: staff.role });
+  res.json({ id: staff.id, name: staff.name, role: staff.role, trainee: !!staff.trainee });
 });
 
 app.post('/api/staff/verify-manager-pin', (req, res) => {
@@ -5938,7 +5942,7 @@ app.post('/api/staff', (req, res) => {
   if (data.staff.some(s => s.pin === pin)) {
     return res.status(400).json({ error: 'That PIN is already in use by another staff member' });
   }
-  const newStaff = { id: 'st' + Date.now(), name, pin, role: STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0) };
+  const newStaff = { id: 'st' + Date.now(), name, pin, role: STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0), trainee: !!req.body.trainee };
   data.staff.push(newStaff);
   logAudit(data, staffFromReq(req), `Added staff member: ${newStaff.name} (${newStaff.role})`);
   writeData(data);
@@ -5967,6 +5971,12 @@ app.put('/api/staff/:id', (req, res) => {
     changes.push(`tip share to ${req.body.tipShare}`); staff.tipShare = req.body.tipShare;
   }
   if (req.body.payRate !== undefined) { const pr = Math.max(0, parseFloat(req.body.payRate) || 0); if (pr !== staff.payRate) { changes.push(`pay rate to ${pr}`); staff.payRate = pr; } }
+  // Trainee: this person's orders never print and never count. It is money-path
+  // and easy to leave on, so it is always audited.
+  if (req.body.trainee !== undefined && !!req.body.trainee !== !!staff.trainee) {
+    changes.push(req.body.trainee ? 'set to TRAINEE (orders do not print or count)' : 'no longer a trainee');
+    staff.trainee = !!req.body.trainee;
+  }
   if (changes.length) logAudit(data, staffFromReq(req), `Updated staff member ${staff.name}: changed ${changes.join(', ')}`);
   writeData(data);
   res.json(staff);
@@ -7402,7 +7412,9 @@ function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal) {
 app.post('/api/practice/purge', (req, res) => {
   const data = readData();
   const before = (data.orders || []).length;
-  data.orders = (data.orders || []).filter(o => !o.practice);
+  // A trainee clears their OWN practice; a manager with no id clears the lot.
+  const only = req.body && req.body.staffId;
+  data.orders = (data.orders || []).filter(o => !o.practice || (only && o.staffId !== only));
   const removed = before - data.orders.length;
   tableLocks.clear(); // practice tables release with their orders
   if (removed) logAudit(data, staffFromReq(req), `Cleared ${removed} practice order${removed === 1 ? '' : 's'}`);
@@ -7421,10 +7433,12 @@ app.post('/api/orders', (req, res) => {
     return res.status(400).json({ error: 'Order has no items' });
   }
   const items = (rawItems || []).map(i => ({ ...i, status: i.status || 'ordered' }));
-  // Practice till: stamp the order so sales/reports skip it and the purge can
-  // find it. Never inferred later — an order is practice only if it was rung
-  // up while the switch was on.
-  const isPractice = !!(data.settings && data.settings.practiceMode);
+  // Practice: stamp the order so sales/reports skip it and the purge can find
+  // it. Never inferred later — an order is practice only if the person who
+  // rang it up was a trainee at the time. It was a whole-venue switch, which
+  // meant nobody could trade while anybody learned (owner, Aug '26).
+  const ringer = (data.staff || []).find(x => x.id === staffId);
+  const isPractice = !!(ringer && ringer.trainee) || !!(data.settings && data.settings.practiceMode);
 
   const subtotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
 
@@ -13391,18 +13405,26 @@ function renderLoginScreen() {
 // A whole-till sandbox: nothing prints (guarded server-side in printing.js),
 // every order is stamped practice:true, and leaving wipes them. The banner is
 // the ONE door out — entering is a manager setting, leaving is where you are.
+function isTrainee() {
+  const me = state.currentStaff;
+  if (!me) return false;
+  const rec = (state.staffList || []).find(x => x.id === me.id);
+  return !!((rec && rec.trainee) || me.trainee);
+}
 function renderPracticeBanner() {
-  if (!state.settings.practiceMode) return '';
+  if (!isTrainee()) return '';
   return `<div class="practice-bar">
     <span class="practice-dot"></span>
-    <span>PRACTICE — nothing prints, no real sales</span>
+    <span>TRAINEE — nothing prints, no real sales</span>
     <button class="fp-chip" data-act="practice-exit">Finish &amp; clear</button>
   </div>`;
 }
 async function exitPracticeMode() {
   try {
-    const r = await api('/api/practice/purge', { method: 'POST' });
-    await saveTicketSetting({ practiceMode: false });
+    // A trainee clears their OWN practice orders; they stay a trainee until a
+    // manager says otherwise, so finishing is not a way out of the flag.
+    const r = await api('/api/practice/purge', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ staffId: (state.currentStaff || {}).id }) });
     state.cart = []; state.firedCourses = {}; state.table = null; state.openOrderId = null;
     state.showTablePicker = true;
     await loadInitial();
@@ -13992,7 +14014,6 @@ const SYS_SORT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke=
 // Stroke 2 to match the trash and pencil they sit next to; DESIGN.md says 1.5
 // and 69 of the app's icons say 2, which is a sweep of its own.
 const DKT_SPACING_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 2v20"/><path d="M2 5l3-3 3 3"/><path d="M2 19l3 3 3-3"/><path d="M11 3h11M11 12h11M11 21h11"/></svg>`;
-const DKT_BACK_SVG = `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2L7 12l10 10"/></svg>`;
 const DKT_TEXTSIZE_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5V2h9v3M6.5 2v20M4 22h5"/><path d="M13 12V9h9v3M17.5 9v13M15 22h5"/></svg>`;
 const DKT_UP_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 17l10-10 10 10"/></svg>`;
 const DKT_DOWN_SVG = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 7l10 10 10-10"/></svg>`;
@@ -17012,11 +17033,13 @@ function dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN) {
   const rider = p && DK_JOINABLE.includes(p) && dkJoinedOn(d, p);
   const why = !p ? 'Tap a line on the paper first'
     : rider ? 'The whole row shares one size and one alignment' : '';
-  const off = (glyph, w) => `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="${w}">${glyph}</button>`;
+  // The dimmed twin wears the SAME classes as the live control, or the row
+  // reflows the moment a line is picked.
+  const off = (glyph, w, cls) => `<button type="button" class="dk-tb-btn${cls ? ' ' + cls : ''} dk-tb-off" data-act="dk-why" data-why="${w}">${glyph}</button>`;
   const bits = [];
   bits.push(p && meta && meta.size && !rider
     ? dd('size', DKT_TEXTSIZE_SVG + '<b>' + ((d.sizes || {})[p] || defN) + '</b>', true, sizeItems, 'Text size for this line', '', true)
-    : off(DKT_TEXTSIZE_SVG, p ? (rider ? why : 'No size on this line') : why));
+    : off(DKT_TEXTSIZE_SVG, p ? (rider ? why : 'No size on this line') : why, 'dk-tb-dd dk-tb-ico'));
   bits.push(`<span class="dk-tb-group">${['left', 'center', 'right'].map(v =>
     p && meta && meta.align && !rider
       ? `<button type="button" class="dk-tb-btn${(d.align || {})[p] === v ? ' active' : ''}" data-act="set-docket-align" data-key="${p}" data-val="${v}">${svgAlign(v)}</button>`
@@ -17054,7 +17077,7 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         // dimmed and says why on tap (owner, Aug '26: "all icons should be
         // present if uneditable it should be dimmed") — a bar whose buttons
         // come and go cannot be learned, and a missing button explains nothing.
-        const off = (glyph, why) => `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="${why}">${glyph}</button>`;
+        const off = (glyph, why, cls) => `<button type="button" class="dk-tb-btn${cls ? ' ' + cls : ''} dk-tb-off" data-act="dk-why" data-why="${why}">${glyph}</button>`;
         // Trash: a line IN the order goes outright; one inside the items block
         // (allergies, notes, course, seats) has nowhere to be removed FROM, so
         // it hides instead. Items is the one line a docket cannot lose.
@@ -17069,18 +17092,24 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         const WORDNOW = { docketAddWord: d.addWord !== undefined ? d.addWord : '+ ', docketNoWord: d.noWord !== undefined ? d.noWord : 'NO ' };
         if (FIELD[p]) FIELD[p].forEach(f => bits.push(`<button type="button" class="dk-tb-btn" data-act="print-sample-edit" data-field="${f}">${ACT_PENCIL_SVG}${WORDNOW[f] !== undefined ? esc(WORDNOW[f].trim() || '(none)') : ''}</button>`));
         else bits.push(off(ACT_PENCIL_SVG, 'No wording on this line'));
-        if (p === 'course' || p === 'items') {
-          const key = p === 'course' ? 'courseRule' : 'itemRule';
+        // A rule between every course, or between every item. Present on every
+        // line so the row never reflows; dimmed where it means nothing.
+        {
+          const key = p === 'course' ? 'courseRule' : p === 'items' ? 'itemRule' : null;
           const styleKey = p === 'course' ? 'courseRuleStyle' : 'itemRuleStyle';
-          const on = !!d[key];
-          bits.push(`<button type="button" class="dk-tb-btn${on ? ' active' : ''}" data-act="set-docket-opt" data-key="${key}" data-val="${!on}">Split ${p === 'course' ? 'courses' : 'items'}</button>`);
-          if (on) bits.push(dd(styleKey, (DK_RULE_STYLES.find(r => r[0] === (d[styleKey] || 'dashed')) || [])[1] || 'Dashed', true,
-            DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (d[styleKey] || 'dashed') === v })), 'Divider style'));
+          const on = key ? !!d[key] : false;
+          if (key) bits.push(`<button type="button" class="dk-tb-btn${on ? ' active' : ''}" data-act="set-docket-opt" data-key="${key}" data-val="${!on}">Split ${p === 'course' ? 'courses' : 'items'}</button>`);
+          else bits.push(off('Split', 'Only courses and items repeat'));
+          bits.push(on
+            ? dd(styleKey, (DK_RULE_STYLES.find(r => r[0] === (d[styleKey] || 'dashed')) || [])[1] || 'Dashed', true,
+                DK_RULE_STYLES.map(([v, l]) => ({ v, l, on: (d[styleKey] || 'dashed') === v })), 'Divider style')
+            : off('Dashed', key ? 'Turn Split on first' : 'Only courses and items repeat', 'dk-tb-dd'));
         }
         // Spacing, for this line only. ESC 3 can be sent mid-docket, so one
         // line really can be given more room than the rest; "Same" clears the
         // override and it rides the docket's own spacing again.
-        {
+        if (CA_PARTS.includes(p)) bits.push(off(DKT_SPACING_SVG, 'The slip prints at one spacing', 'dk-tb-dd dk-tb-ico'));
+        else {
           const cur = (d.gaps || {})[p];
           bits.push(dd('linespacing', DKT_SPACING_SVG + (cur ? `<b>${esc(cur)}</b>` : ''), true,
             [['auto', 'Same'], ['1', '1'], ['1.5', '1.5'], ['2', '2']].map(([v, l]) =>
@@ -17093,17 +17122,17 @@ function dkLineBits(d, p, meta, shown, dd, svgAlign, svgEye, svgEyeOff, sizeItem
         }
         // Which order-note types reach the kitchen. Nothing ticked = every
         // type, so a type the venue adds later is not silently dropped.
-        if (p === 'notes' && (state.noteCategories || []).length) {
-          const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
-          bits.push(dd('notetypes', want.length ? want.length + (want.length === 1 ? ' type' : ' types') : 'All types', true,
-            (state.noteCategories || []).map(c => ({ v: c.id, l: esc(c.name), on: !want.length || want.includes(c.id) })),
-            'Which note types print'));
-        }
-        if (DK_BG_PARTS.includes(p)) {
-          const cur = dkBlockStyle(d, p);
-          bits.push(dd('style', (DK_BLOCK_STYLES.find(x => x[0] === cur) || [])[1] || 'None', true,
-            DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Background'));
-        }
+        bits.push(p === 'notes' && (state.noteCategories || []).length
+          ? (() => { const want = Array.isArray(d.noteTypes) ? d.noteTypes : [];
+              return dd('notetypes', want.length ? want.length + (want.length === 1 ? ' type' : ' types') : 'All types', true,
+                (state.noteCategories || []).map(c => ({ v: c.id, l: esc(c.name), on: !want.length || want.includes(c.id) })),
+                'Which note types print'); })()
+          : off('All types', 'Only the notes line has types', 'dk-tb-dd'));
+        bits.push(DK_BG_PARTS.includes(p)
+          ? (() => { const cur = dkBlockStyle(d, p);
+              return dd('style', (DK_BLOCK_STYLES.find(x => x[0] === cur) || [])[1] || 'None', true,
+                DK_BLOCK_STYLES.map(([v, l]) => ({ v, l, on: cur === v })), 'Background'); })()
+          : off('None', 'No background on this line', 'dk-tb-dd'));
         // Join / split: one square icon in two states, dimmed on a line that
         // has nothing above it to join.
         {
@@ -17194,6 +17223,8 @@ function dkLineRows(d) {
 // is selected — adding one element used to mean tapping Done before the next.
 function dkAddMenu(d, dd) {
   if (state.dkStation) return '';
+  // The slip's four lines are its whole design — there is nothing to add to it.
+  if (state.dkSlip) return `<button type="button" class="dk-tb-btn dk-tb-off" data-act="dk-why" data-why="The slip has these four lines">Elements</button>`;
   const on = docketLineOrder(d);
   // A tick-list of everything the docket can carry, not a list of what is
   // missing: an element you just added stayed on the menu's conscience but
@@ -17218,6 +17249,17 @@ function dkAddMenu(d, dd) {
     'What the docket carries');
 }
 function dkLinesMenu(d, dd) {
+  // The call-away slip is its own paper: while one of ITS lines is picked the
+  // list is the slip's four, not the docket's thirty. Picking a slip line and
+  // being shown the table docket's lines was the bar answering about the wrong
+  // piece of paper (owner, Aug '26).
+  if (state.dkSlip) {
+    const seq = callawayOrder(d);
+    return dd('lines', `${seq.length} lines`, true, seq.map((k, i) => ({
+      v: k, on: dkIsSelected(k),
+      l: `<span class="dk-mi-n">${i + 1}</span><span class="dk-mi-l">${esc((DK_PARTS[k] || {}).label || k)}</span>`,
+    })), 'Call away slip');
+  }
   const rows = dkLineRows(d);
   if (!rows.length) return '';
   // One entry per PART, not per row: two elements sharing a printed line get
@@ -17297,7 +17339,6 @@ function dkToolbar(d) {
   // Two different panels for one job read as two different tools (owner,
   // Aug '26). The docket row is always there; the picked line's row appears
   // under it, so nothing you were looking at moves or disappears.
-  const back = `<button type="button" class="dk-tb-btn dk-tb-back" data-act="dk-pick-none">${DKT_BACK_SVG}Done</button>`;
   const up = DKT_UP_SVG, down = DKT_DOWN_SVG;
 
   // Row 1: the docket itself. Never moves, whatever is picked.
@@ -17360,7 +17401,6 @@ function dkToolbar(d) {
       <div class="dk-tb-row">${docRow}</div>
       <div class="dk-tb-row dk-tb-fmt">${dkFormatBits(d, p, meta, dd, svgAlign, sizeItems, defN)}</div>
       ${lineRow ? `<div class="dk-tb-row dk-tb-line">
-      ${back}
       <span class="dk-tb-note">${esc(lineRow.name)}</span>
       ${lineRow.bits}
       </div>` : ''}
@@ -18826,13 +18866,6 @@ function renderVenueSettingsAdmin() {
   const logo = (s.venueLogo && s.venueLogo !== 'default') ? s.venueLogo : '';
   return `
   <div class="settings-card">
-    <div class="th" style="margin-bottom:4px;">Practice till</div>
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-      <div class="ts">Train without printing or counting sales</div>
-      ${togglePill(!!s.practiceMode, 'set-practice-mode')}
-    </div>
-  </div>
-  <div class="settings-card">
     <div class="th" style="margin-bottom:4px;">Venue</div>
     <div>
       <label class="field-label">Name</label>
@@ -19000,6 +19033,10 @@ function renderStaffAdmin() {
                   ${TIP_SHARE_OPTIONS.map(o => `<option value="${o.key}" ${(s.tipShare || 'full') === o.key ? 'selected' : ''}>${o.label}</option>`).join('')}
                 </select>
               </div>` : ''}
+              <div style="display:flex;flex-direction:column;max-width:200px;">
+                <label class="field-label">Trainee</label>
+                <div style="display:flex;align-items:center;min-height:36px;">${togglePill(!!s.trainee, 'set-staff-trainee', `data-id="${s.id}"`)}</div>
+              </div>
               <div style="display:flex;flex-direction:column;max-width:150px;">
                 <label class="field-label">Pay rate ($/hr)</label>
                 <input type="number" min="0" step="0.5" class="staff-payrate-quick-edit" data-id="${s.id}" value="${s.payRate || ''}" placeholder="0.00" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);" onchange="saveStaffPayRate('${s.id}', this.value)">
@@ -25795,6 +25832,18 @@ async function saveStaffTipShare(id, tipShare) {
   }
   render();
 }
+// Trainee: this person's orders never print and never count. Money-path, so
+// the toast says exactly what it means rather than "saved".
+async function saveStaffTrainee(id, on) {
+  try {
+    await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ trainee: on }) });
+    state.staffList = await api('/api/staff');
+    state.toast = on ? 'Trainee — their orders will not print or count.' : 'No longer a trainee.';
+  } catch (e) {
+    state.toast = 'Could not change that.';
+  }
+  render(); armToastTimer(3000);
+}
 async function saveStaffPayRate(id, val) {
   try {
     await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payRate: parseFloat(val) || 0 }) });
@@ -29389,7 +29438,6 @@ function handleActClick(el, e) {
         setDocketOpt('extras', dkExtras(d).map(x => x.id === k ? { ...x, style: el.dataset.val } : x));
         state.dkMenu = null;
       }
-      else if (act === 'dk-pick-none') { state.dkPart = null; state.dkSlip = false; state.dkMenu = null; render(); }
       else if (act === 'dk-toggle-join') {
         const k = el.dataset.key, cur = docketCfg().joined || {};
         const now = cur[k] !== undefined ? !!cur[k] : k === 'time';
@@ -29479,15 +29527,42 @@ function handleActClick(el, e) {
         setDocketOpt('callawayOrder', next);
       }
       else if (act === 'move-docket-line') {
-        // Swap the selected part's BLOCK with its neighbour on the docket.
+        // Lines move by ROW, not by element. A joined element carries a flag
+        // rather than a position, so a plain swap tore its row apart — moving
+        // the round above the table left the round joined to whatever was now
+        // above it, and the table alone (owner, Aug '26).
+        //   a rider  → reorders inside its own row
+        //   a leader → takes its whole row with it
+        const dc = docketCfg();
         const step = el.dataset.dir === 'up' ? -1 : 1;
-        const blk = DK_MOVE_BLOCK[state.dkPart] || (dkExtraOf(docketCfg(), state.dkPart) ? state.dkPart : null);
-        const next = docketLineOrder(docketCfg()).slice();
-        const i = blk ? next.indexOf(blk) : -1;
-        if (i < 0) return;
-        const j = (i + step + next.length) % next.length;
-        [next[i], next[j]] = [next[j], next[i]];
-        setDocketOpt('topOrder', next);
+        const key = DK_MOVE_BLOCK[state.dkPart] || (dkExtraOf(dc, state.dkPart) ? state.dkPart : null);
+        if (!key) return;
+        const order = docketLineOrder(dc);
+        // The order, cut into printed rows.
+        const rows = [];
+        for (const k of order) {
+          if (k !== 'items' && dkJoinedOn(dc, k) && rows.length && rows[rows.length - 1][0] !== 'items') rows[rows.length - 1].push(k);
+          else rows.push([k]);
+        }
+        const ri = rows.findIndex(r => r.includes(key));
+        if (ri < 0) return;
+        const ki = rows[ri].indexOf(key);
+        if (ki > 0 || (ki === 0 && rows[ri].length > 1 && step > 0 && false)) {
+          // A rider: swap with its neighbour inside the row.
+          const kj = ki + step;
+          if (kj < 0 || kj >= rows[ri].length) return;
+          [rows[ri][ki], rows[ri][kj]] = [rows[ri][kj], rows[ri][ki]];
+        } else {
+          // A leader: the whole row moves.
+          const rj = ri + step;
+          if (rj < 0 || rj >= rows.length) return;
+          [rows[ri], rows[rj]] = [rows[rj], rows[ri]];
+        }
+        // Rebuild, then read the flags off the new order: whichever element
+        // leads a row is not a rider, the rest of the row are.
+        const next = [], jn = {};
+        rows.forEach(r => r.forEach((k, i) => { next.push(k); jn[k] = i > 0; }));
+        setDocketOpts({ topOrder: next, joined: jn });
       }
       else if (act === 'move-receipt-line') {
         // Swap the selected invoice line with its neighbour (Classic layout).
@@ -29536,7 +29611,7 @@ function handleActClick(el, e) {
             setDocketOpt('topOrder', order);
           }
         }
-        else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = false; render(); }
+        else if (m === 'lines') { state.dkMenu = null; state.dkSel = [v]; state.dkPart = v; state.dkSlip = CA_PARTS.includes(v); render(); }
         else if (m === 'style') {
           const k = state.dkPart;
           state.dkMenu = null;
@@ -29649,7 +29724,7 @@ function handleActClick(el, e) {
       else if (act === 'pane-escape') { escapeMiddlePane(); } // popup scrim tap — keeps the unsaved-input guard
       else if (act === 'clear-fired-course') { clearFiredCourse(parseInt(el.dataset.val)); }
       else if (act === 'practice-exit') { exitPracticeMode(); }
-      else if (act === 'set-practice-mode') { saveTicketSetting({ practiceMode: state.settings.practiceMode !== true }); }
+      else if (act === 'set-staff-trainee') { saveStaffTrainee(el.dataset.id, el.dataset.val === 'true'); }
       else if (act === 'coach-ok') { coachDismiss(el.dataset.val); }
       else if (act === 'clear-fired-all') { state.firedCourses = {}; state.toast = 'Call-away cleared'; render(); armToastTimer(1800); }
       else if (act === 'switch-notes-tab') { switchNotesTab(el.dataset.val); }

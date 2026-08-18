@@ -5003,6 +5003,18 @@ app.put('/api/settings', (req, res) => {
     if (v === '') data.settings.venueLogo = v;
     else if (typeof v === 'string' && /^data:image\/(png|jpe?g|webp);base64,/.test(v) && v.length <= 300000) data.settings.venueLogo = v;
   }
+  // The same logo packed down to printer dots — one bit a dot, made by the
+  // browser at upload. '' clears it alongside the picture.
+  if (req.body.venueLogoRaster !== undefined) {
+    const r = req.body.venueLogoRaster;
+    if (r === '' || r === null) data.settings.venueLogoRaster = null;
+    else if (r && typeof r === 'object'
+      && Number.isInteger(r.w) && r.w > 0 && r.w <= 1024
+      && Number.isInteger(r.h) && r.h > 0 && r.h <= 1024
+      && typeof r.d === 'string' && r.d.length <= 300000 && /^[A-Za-z0-9+/=]*$/.test(r.d)) {
+      data.settings.venueLogoRaster = { w: r.w, h: r.h, d: r.d };
+    }
+  }
   if (tableMode !== undefined) data.settings.tableMode = tableMode === 'simple' ? 'simple' : 'floorplan';
   if (simpleTableCount !== undefined) {
     const n = parseInt(simpleTableCount);
@@ -5368,10 +5380,10 @@ app.put('/api/settings', (req, res) => {
     const showSrc = (src.show !== undefined ? src.show : cur.show) || {};
     const show = {};
     ['taxlabel', 'abn', 'orderinfo', 'table', 'payment', 'subtotal', 'staff'].forEach(k => { if (showSrc[k] === false) show[k] = false; });
-    ['address', 'phone'].forEach(k => { if (showSrc[k] === true) show[k] = true; });
+    ['address', 'phone', 'logo'].forEach(k => { if (showSrc[k] === true) show[k] = true; });
     const sizeSrc = (src.sizes !== undefined ? src.sizes : cur.sizes) || {};
     const sizes = {};
-    ['header', 'items', 'totals', 'abn', 'orderinfo', 'payment', 'subtotal', 'gst', 'staff', 'address', 'phone', 'taxlabel'].forEach(k => { const v = sizeSrc[k]; if (v === 1 || v === 2 || v === 3) sizes[k] = v; });
+    ['header', 'items', 'totals', 'abn', 'orderinfo', 'payment', 'subtotal', 'gst', 'staff', 'address', 'phone', 'taxlabel', 'logo'].forEach(k => { const v = sizeSrc[k]; if (v === 1 || v === 2 || v === 3) sizes[k] = v; });
     // Line spacing: stored only when it differs from the printer default, so
     // untouched papers keep printing byte-identical.
     const den = src.density !== undefined ? src.density : cur.density;
@@ -5408,8 +5420,11 @@ app.put('/api/settings', (req, res) => {
       // stored, and the default order is omitted so untouched papers keep
       // printing the exact old bytes.
       ...(() => {
-        const DEF = ['taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
-        const o = src.lineOrder !== undefined ? src.lineOrder : cur.lineOrder;
+        const DEF = ['logo', 'taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
+        const PRE = DEF.slice(1);
+        let o = src.lineOrder !== undefined ? src.lineOrder : cur.lineOrder;
+        // Saved before the logo existed: keep the venue's arrangement, logo first.
+        if (Array.isArray(o) && o.length === PRE.length && PRE.every(k => o.includes(k))) o = ['logo'].concat(o);
         if (!Array.isArray(o) || o.length !== DEF.length || DEF.some(k => !o.includes(k))) return {};
         if (o.every((k, i) => k === DEF[i])) return {};
         return { lineOrder: o.slice() };
@@ -9441,6 +9456,7 @@ function setDocketOpt(key, value) {
 // customer receipt. Text pieces (venue name, footer) stay editable in place;
 // covers/staff keep their on-paper tap-toggles.
 const RC_PARTS = {
+  logo: { label: 'Logo', show: 'logo', size: true, align: true, red: false },
   taxlabel: { label: 'Tax invoice label', show: 'taxlabel', size: false, align: true, red: true },
   header: { label: 'Venue name', show: null, size: true, align: true, red: true },
   abn: { label: 'ABN', show: 'abn', size: true, align: true, red: true },
@@ -9482,9 +9498,13 @@ function receiptCfg() {
 }
 // The classic invoice's line order — same rule as the docket blocks: only a
 // full permutation counts, the default order is never stored.
-const RECEIPT_LINE_ORDER = ['taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
+const RECEIPT_LINE_ORDER = ['logo', 'taxlabel', 'header', 'abn', 'address', 'phone', 'orderinfo', 'table', 'items', 'subtotal', 'totals', 'gst', 'payment', 'staff'];
 function receiptLineOrder(r) {
-  const o = r.lineOrder;
+  // An order saved before the logo part existed is one short: keep the
+  // venue's arrangement and put the logo at the top of it.
+  const PRE = RECEIPT_LINE_ORDER.slice(1);
+  const o = (Array.isArray(r.lineOrder) && r.lineOrder.length === PRE.length && PRE.every(k => r.lineOrder.includes(k)))
+    ? ['logo'].concat(r.lineOrder) : r.lineOrder;
   return Array.isArray(o) && o.length === RECEIPT_LINE_ORDER.length && RECEIPT_LINE_ORDER.every(k => o.includes(k))
     ? o : RECEIPT_LINE_ORDER;
 }
@@ -9494,7 +9514,7 @@ function rcShown(k) {
   if (k === 'staff') return rcWhich() === 'bill' ? receiptCfg().show.staff !== false : state.settings.showStaffOnTicket !== false;
   // Address/phone are OPT-IN: venues stored an address long before the
   // receipt could print it, so an untouched receipt must not grow lines.
-  if (k === 'address' || k === 'phone') return receiptCfg().show[k] === true;
+  if (k === 'address' || k === 'phone' || k === 'logo') return receiptCfg().show[k] === true;
   return receiptCfg().show[k] !== false;
 }
 // Persist customer-paper designer options — into settings.bill on the Bill
@@ -9595,6 +9615,7 @@ function buildReceiptDoc(order, edit) {
   const classicHtml = layout !== 'classic' ? '' : (() => {
     const chunks = {
       taxlabel: partR('taxlabel', `<div class="print-sub"${rstl('taxlabel', 'font-weight:800;')}>${edit ? sampleEditable('rcTitle', r.title, r.title, '') : esc(r.title)}</div>`, true),
+      logo: partR('logo', `<div${rstl('logo')}>${rcLogoImg(r.sizes.logo || 2)}</div>`, true),
       header: cHeader, abn: cAbn, address: cAddress, phone: cPhone,
       // Two lines, as the paper prints them: the order number, then the date.
       orderinfo: partR('orderinfo', `<div class="print-sub"${rstl('orderinfo')}>Order #${order.id}<br>${rcWhen(order.createdAt)}</div>`, true),
@@ -9623,7 +9644,7 @@ function buildReceiptDoc(order, edit) {
     // whole — exactly like the printed classic invoice.
     const body = seq.some((k, i) => k !== RECEIPT_LINE_ORDER[i])
       ? seq.map(k => k === 'gst' ? chunks.gstExcl + chunks.gstIncl : k === 'totals' ? chunks.tip + chunks.total : chunks[k]).join('\n      ')
-      : [chunks.taxlabel, chunks.header, chunks.abn, chunks.address, chunks.phone, chunks.orderinfo, chunks.items,
+      : [chunks.logo, chunks.taxlabel, chunks.header, chunks.abn, chunks.address, chunks.phone, chunks.orderinfo, chunks.items,
         chunks.subtotal, chunks.gstExcl, chunks.tip, chunks.total, chunks.gstIncl, chunks.payment].join('\n      ');
     // The paper always rules off above the footer, footer or not.
     return body + '\n      ' + ruleHtml + (edit ? `<div class="print-footer">${sampleEditable('ticketFooter', s.ticketFooter, 'Add footer message', '')}</div>` : (s.ticketFooter ? `<div class="print-footer">${esc(s.ticketFooter)}</div>` : ''));
@@ -9637,6 +9658,7 @@ function buildReceiptDoc(order, edit) {
       return ` style="line-height:${lh};"`;
     })()}>
       ${layout === 'classic' ? classicHtml : `
+      ${partR('logo', `<div${rstl('logo')}>${rcLogoImg(r.sizes.logo || 2)}</div>`, true)}
       ${cHeader}
       ${cAbn}
       ${layout === 'express' ? cAddress : ''}
@@ -20029,6 +20051,85 @@ function saveVenueAddress() {
   if (inp) saveVenueSettings({ venueAddress: inp.value.trim() });
 }
 
+// A receipt printer has no greys — every dot is black or it is nothing. So
+// the logo gets packed here, once, into one bit per dot: the picture is drawn
+// at full paper width, turned to grey, then error-diffused (Floyd-Steinberg)
+// so solid areas stay solid and soft areas break into a fine stipple instead
+// of a mud blob. The printer just replays the bits.
+const LOGO_PACK_W = 576; // the 80mm head, full width
+function packLogoRaster(img) {
+  const w = LOGO_PACK_W;
+  const h = Math.max(1, Math.min(1024, Math.round(img.height * w / img.width)));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const cx = c.getContext('2d');
+  // Paper is white, and a transparent PNG must land on white, not on black.
+  cx.fillStyle = '#fff'; cx.fillRect(0, 0, w, h);
+  cx.drawImage(img, 0, 0, w, h);
+  const px = cx.getImageData(0, 0, w, h).data;
+  const grey = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const r = px[i * 4], g = px[i * 4 + 1], b = px[i * 4 + 2], a = px[i * 4 + 3] / 255;
+    // Un-drawn corners count as paper.
+    grey[i] = (0.299 * r + 0.587 * g + 0.114 * b) * a + 255 * (1 - a);
+  }
+  const row = Math.ceil(w / 8);
+  const out = new Uint8Array(row * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const old = grey[i];
+      const nw = old < 128 ? 0 : 255;
+      const err = old - nw;
+      if (nw === 0) out[y * row + (x >> 3)] |= 0x80 >> (x & 7); // a set bit burns
+      if (x + 1 < w) grey[i + 1] += err * 7 / 16;
+      if (y + 1 < h) {
+        if (x > 0) grey[i + w - 1] += err * 3 / 16;
+        grey[i + w] += err * 5 / 16;
+        if (x + 1 < w) grey[i + w + 1] += err * 1 / 16;
+      }
+    }
+  }
+  let bin = '';
+  for (let i = 0; i < out.length; i++) bin += String.fromCharCode(out[i]);
+  return { w, h, d: btoa(bin) };
+}
+function loadImg(src) {
+  return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = src; });
+}
+// Draw the packed dots back out, so the designer shows the paper's truth and
+// not a tidied-up version of it.
+function rcLogoImg(n) {
+  const r = state.settings && state.settings.venueLogoRaster;
+  if (!r || !r.w || !r.h || !r.d) {
+    // A logo uploaded before the printer could use it: pack it now, once.
+    const src = state.settings && state.settings.venueLogo;
+    if (src && src !== 'default' && !rcLogoImg._packing) {
+      rcLogoImg._packing = true;
+      loadImg(src).then(im => saveVenueSettings({ venueLogoRaster: packLogoRaster(im) })).catch(() => {});
+    }
+    return '<span class="pp-empty" style="font-size:var(--fs-sm);">no logo yet</span>';
+  }
+  const pct = n === 1 ? 40 : n === 3 ? 100 : 70;
+  const key = r.w + 'x' + r.h + ':' + r.d.length;
+  if (rcLogoImg._key !== key) {
+    const bin = atob(r.d), row = Math.ceil(r.w / 8);
+    const c = document.createElement('canvas');
+    c.width = r.w; c.height = r.h;
+    const cx = c.getContext('2d');
+    const im = cx.createImageData(r.w, r.h);
+    for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) {
+      const on = (bin.charCodeAt(y * row + (x >> 3)) >> (7 - (x & 7))) & 1;
+      const i = (y * r.w + x) * 4;
+      im.data[i] = im.data[i + 1] = im.data[i + 2] = on ? 0 : 255;
+      im.data[i + 3] = on ? 255 : 0; // paper shows through, dark mode included
+    }
+    cx.putImageData(im, 0, 0);
+    rcLogoImg._key = key; rcLogoImg._url = c.toDataURL('image/png');
+  }
+  return `<img src="${rcLogoImg._url}" alt="" style="width:${pct}%;image-rendering:pixelated;display:inline-block;">`;
+}
+
 function pickVenueLogo() {
   const inp = document.createElement('input');
   inp.type = 'file';
@@ -20038,7 +20139,11 @@ function pickVenueLogo() {
     if (!f) return;
     // PNG keeps transparency, so venue marks sit cleanly on the dark lock screen.
     const dataUrl = await resizeImageFile(f, 256, 0.9, 'image/png');
-    saveVenueSettings({ venueLogo: dataUrl });
+    // Packed from the ORIGINAL file, not the 256px screen copy — the printer
+    // gets every dot the picture had.
+    let raster = null;
+    try { raster = packLogoRaster(await loadImg(URL.createObjectURL(f))); } catch (e) { raster = null; }
+    saveVenueSettings(raster ? { venueLogo: dataUrl, venueLogoRaster: raster } : { venueLogo: dataUrl });
   };
   inp.click();
 }
@@ -29833,7 +29938,7 @@ function handleActClick(el, e) {
       else if (act === 'toggle-staff-expand') { toggleStaffExpand(el.dataset.id); }
       else if (act === 'save-staff-pin') { saveStaffPin(el.dataset.id); }
       else if (act === 'toggle-staff-pin-view') { toggleStaffPinView(el.dataset.id); }
-      else if (act === 'venue-logo-none') { saveVenueSettings({ venueLogo: '' }); }
+      else if (act === 'venue-logo-none') { saveVenueSettings({ venueLogo: '', venueLogoRaster: '' }); }
       else if (act === 'venue-logo-upload') { pickVenueLogo(); }
       else if (act === 'clear-staff-selection') { state.selectedStaffIds = []; render(); }
       else if (act === 'delete-selected-staff') { deleteSelectedStaff(); }

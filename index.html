@@ -1238,6 +1238,9 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
   color:var(--charcoal-soft);font-variant-numeric:tabular-nums;flex:none;}
 .dk-mi-l{overflow:hidden;text-overflow:ellipsis;max-width:210px;}
 .dk-mi-l.dk-mi-sub{padding-left:12px;font-weight:400;}
+/* A rider shares the line above it: no number of its own, and a tie mark so
+   the pair reads as one printed line rather than two. */
+.dk-mi-l.dk-mi-rider::before{content:'·';padding-right:6px;color:var(--charcoal-soft);}
 /* No hover tint — the venue runs on touch, and a yellow flash read as "this
    is highlighted/special". Selection (dk-sel) is the only highlight. */
 .dk-part{cursor:pointer;border-radius:4px;}
@@ -4934,6 +4937,15 @@ app.put('/api/settings', (req, res) => {
   if (printFontScale !== undefined) data.settings.printFontScale = printFontScale === 'large' ? 'large' : 'normal';
   if (req.body.docket !== undefined && typeof req.body.docket === 'object' && req.body.docket) {
     const dk = req.body.docket, cur = data.settings.docket || {};
+    // ONE list of the docket's styleable lines. It used to be written out five
+    // times — red, sizes, bold, under, align — and the copies drifted: a new
+    // element could be styled in the designer and the style was dropped here
+    // without a word. Keep it in step with DK_PARTS in public/app.js.
+    const DK_STYLE_KEYS = ['header', 'table', 'round', 'covers', 'orderno', 'time', 'staff', 'vip',
+      'course', 'items', 'subs', 'notes', 'allergies',
+      'ordertype', 'guest', 'booked', 'area', 'station', 'date', 'count', 'phone',
+      'callaway', 'cacourse', 'catable', 'catime'];
+    const flags = (src) => { const out = {}; DK_STYLE_KEYS.forEach(k => { if (src && src[k]) out[k] = true; }); return out; };
     const b = (v, def) => v === undefined ? def : !!v;
     const pick = (v, allowed, def) => allowed.includes(v) ? v : def;
     data.settings.docket = {
@@ -5004,8 +5016,7 @@ app.put('/api/settings', (req, res) => {
       red: (() => {
         const r = dk.red !== undefined ? dk.red : (cur.red || {});
         const out = {};
-        ['header', 'table', 'course', 'items', 'notes', 'allergies',
-          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => { out[k] = !!(r && r[k]); });
+        DK_STYLE_KEYS.forEach(k => { out[k] = !!(r && r[k]); });
         if (dk.red === undefined && cur.red === undefined) out.callaway = true; // sensible default
         return out;
       })(),
@@ -5014,8 +5025,7 @@ app.put('/api/settings', (req, res) => {
       sizes: (() => {
         const src = dk.sizes !== undefined ? dk.sizes : (cur.sizes || {});
         const out = {};
-        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies',
-          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => {
+        DK_STYLE_KEYS.forEach(k => {
           const v = src && src[k];
           if (Number.isInteger(v) && v >= 1 && v <= 8) out[k] = v;
         });
@@ -5082,10 +5092,7 @@ app.put('/api/settings', (req, res) => {
       })(),
       // Bold is a highlight that costs no character width, unlike size.
       bold: (() => {
-        const src = dk.bold !== undefined ? dk.bold : (cur.bold || {});
-        const out = {};
-        ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'vip', 'course', 'items', 'notes', 'allergies'].forEach(k => { if (src && src[k]) out[k] = true; });
-        return out;
+        return flags(dk.bold !== undefined ? dk.bold : (cur.bold || {}));
       })(),
       // The docket's own divider is styled and hidden like an inserted one.
       ruleStyle: pick(dk.ruleStyle, ['dashed', 'dotted', 'solid', 'bold'], cur.ruleStyle || 'dashed'),
@@ -5102,10 +5109,7 @@ app.put('/api/settings', (req, res) => {
       })(),
       // Underline, per line.
       under: (() => {
-        const src = dk.under !== undefined ? dk.under : (cur.under || {});
-        const out = {};
-        ['header', 'table', 'covers', 'orderno', 'time', 'staff', 'vip', 'course', 'items', 'subs', 'notes', 'allergies'].forEach(k => { if (src && src[k]) out[k] = true; });
-        return out;
+        return flags(dk.under !== undefined ? dk.under : (cur.under || {}));
       })(),
       // Inserted blank lines and dividers, in the order they were added.
       extras: (() => {
@@ -5128,8 +5132,7 @@ app.put('/api/settings', (req, res) => {
       align: (() => {
         const src = dk.align !== undefined ? dk.align : (cur.align || {});
         const out = {};
-        ['header', 'table', 'covers', 'course', 'items', 'subs', 'notes', 'allergies',
-          'callaway', 'cacourse', 'catable', 'catime'].forEach(k => {
+        DK_STYLE_KEYS.forEach(k => {
           const v = src && src[k];
           if (v === 'left' || v === 'center' || v === 'right') out[k] = v;
         });
@@ -8750,7 +8753,11 @@ function dkPickOrder(slip) {
     : docketLineOrder(d).concat(['course', 'items', 'subs', 'seats', 'notes', 'allergies', 'divider'])
       .filter((k, i, a) => a.indexOf(k) === i);
 }
-const DK_RULE_CHAR = { dashed: '-', dotted: '.', solid: '_', bold: '_' };
+// The characters the printer actually lays down (CP437, see printing.js
+// RULE_BYTE): a middle dot for dotted and a box-drawing horizontal for solid.
+// Full stops sat on the baseline and read as a sparse line; underscores read
+// as a low line with gaps (owner, Aug '26).
+const DK_RULE_CHAR = { dashed: '-', dotted: '\u00b7', solid: '\u2500', bold: '\u2500' };
 function dkRuleStyle(v) { return v === 'bold' ? 'solid' : (DK_RULE_CHAR[v] ? v : 'dashed'); }
 // Same characters the printer lays down, across the same column count.
 function dkRuleHtml(style, cls, attrs) {
@@ -17102,10 +17109,15 @@ function dkAddMenu(d, dd) {
 function dkLinesMenu(d, dd) {
   const rows = dkLineRows(d);
   if (!rows.length) return '';
-  return dd('lines', `${rows.length} lines`, true, rows.map((r, i) => ({
-    v: r.k, on: dkIsSelected(r.k),
-    l: `<span class="dk-mi-n">${i + 1}</span><span class="dk-mi-l${r.sub ? ' dk-mi-sub' : ''}">${r.parts.map(x => esc(x.label)).join(' · ')}</span>`,
-  })), 'Lines');
+  // One entry per PART, not per row: two elements sharing a printed line get
+  // the same number and an entry each, so either can be picked. As one entry
+  // per row, a joined line could only ever select its leader (owner, Aug '26).
+  const entries = [];
+  rows.forEach((r, i) => r.parts.forEach((x, j) => entries.push({
+    v: x.k, on: dkIsSelected(x.k),
+    l: `<span class="dk-mi-n">${j ? '' : i + 1}</span><span class="dk-mi-l${r.sub ? ' dk-mi-sub' : ''}${j ? ' dk-mi-rider' : ''}">${esc(x.label)}</span>`,
+  })));
+  return dd('lines', `${rows.length} lines`, true, entries, 'Lines');
 }
 function dkToolbar(d) {
   const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;

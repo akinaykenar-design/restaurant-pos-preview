@@ -1013,7 +1013,8 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 .print-doc .print-flag-block{padding:2px 4px;margin:4px 0;}
 .print-doc .pf-invert{background:#000;color:#fff;padding:2px 4px;}
 .print-doc .pf-invert .print-line{color:#fff;}
-.print-doc .pf-border{border-top:1.5px solid #000;border-bottom:1.5px solid #000;padding:1px 0;}
+/* A real box, matching the printed corners-and-sides outline. */
+.print-doc .pf-border{border:1.5px solid #000;padding:1px 5px;}
 .print-doc .print-flag.pf-invert{display:block;}
 .print-doc .print-course{margin:6px 0;padding:6px;}
 .print-doc .print-course.is-old{opacity:0.55;}
@@ -9423,7 +9424,7 @@ function buildDocketDoc(ctx, edit) {
       + (dkUnderOn(d, k) ? 'text-decoration:underline;' : '')
       + ((d.red || {})[k] ? 'color:#C0392B;' : '')
       + (bs === 'invert' ? 'background:#000;color:#fff;padding:0 3px;' : '')
-      + (bs === 'border' ? 'border-top:1.5px solid #000;border-bottom:1.5px solid #000;' : '');
+      + (bs === 'border' ? 'border:1.5px solid #000;padding:0 5px;' : '');
     return css ? ` style="${css}"` : '';
   };
   // Word-style part selection: tapping a styleable part picks it for the
@@ -9961,7 +9962,7 @@ function buildCallAwaySample() {
       + ((c.under || {})[k] ? 'text-decoration:underline;' : '')
       + (caRedOn(c, k) ? 'color:#C0392B;' : '')
       + (bs === 'invert' ? 'background:#111;color:#fff;padding:1px 8px;' : '')
-      + (bs === 'border' ? 'border-top:1.5px solid #000;border-bottom:1.5px solid #000;' : '')
+      + (bs === 'border' ? 'border:1.5px solid #000;padding:0 5px;' : '')
       + '"';
   };
   const row = (k, inner) =>
@@ -17714,19 +17715,19 @@ function dkAddMenu(d, dd) {
   const items = [];
   keys.forEach(k => {
     items.push({ v: k, l: DK_PARTS[k].label, on: isOn(k) });
-    if (k === 'ordernotes') {
-      // Allergies and VIP are always listed, whether or not the plain order
-      // notes are on — they print on their own, so hiding them with the
-      // parent would leave no way to turn them back on.
+    if (k === 'ordernotes' && isOn(k)) {
+      // The Order notes section, whole: everything it can print, listed under
+      // it, each ticked on its own — Allergies, VIP, then the venue's note
+      // types by name, read live so a rename shows and a deleted one is gone.
+      // Untick the parent and the section collapses with it (owner, Aug '26).
       const sub = (v, label, on) => items.push({ v, on, l: `<span class="dk-mi-l dk-mi-sub">${esc(label)}</span>` });
       sub('subline:allergies', DK_PARTS.allergies.label, d.showAllergies !== false);
       sub('subline:vip', DK_PARTS.vip.label, d.showVip !== false);
-      // The venue's own note types, read live: rename one in Settings and the
-      // new name shows here; delete one and it is simply gone.
-      if (isOn(k)) {
-        const cats = state.noteCategories || [];
-        if (!cats.length) items.push({ v: 'notetype:none', on: false, l: `<span class="dk-mi-l dk-mi-sub">No note types yet</span>` });
-        cats.forEach(c => sub('notetype:' + c.id, c.name, !want.length || want.includes(c.id)));
+      const cats = state.noteCategories || [];
+      if (!cats.length) items.push({ v: 'notetype:none', on: false, l: `<span class="dk-mi-l dk-mi-sub">No note types yet</span>` });
+      else {
+        const shown = want.length ? want : cats.map(c => c.id);
+        cats.forEach(c => sub('notetype:' + c.id, c.name, shown.includes(c.id)));
       }
     }
   });
@@ -30263,16 +30264,24 @@ function handleActClick(el, e) {
           setDocketOpt(key, dc[key] === false);
         }
         else if (m === 'addback' && v.startsWith('notetype:')) {
+          // One tick, one type. What is stored is the list of types to SHOW;
+          // an empty list means all of them, so a type the venue adds later
+          // prints without another visit here. Stale ids from deleted types
+          // are dropped before anything is decided on top of them.
           const id = v.slice(9);
           if (id === 'none') { state.toast = 'Add note types in Settings'; render(); armToastTimer(2400); return; }
           const cats = (state.noteCategories || []).map(c => c.id);
-          const cur = Array.isArray(docketCfg().noteTypes) && docketCfg().noteTypes.length
-            ? docketCfg().noteTypes.slice() : cats.slice();
-          const i = cur.indexOf(id);
-          if (i >= 0) cur.splice(i, 1); else cur.push(id);
-          // Every type ticked is the same as none: store the empty list so a
-          // type the venue adds later still prints.
-          setDocketOpt('noteTypes', cats.every(c => cur.includes(c)) ? [] : cur);
+          const stored = (Array.isArray(docketCfg().noteTypes) ? docketCfg().noteTypes : []).filter(x => cats.includes(x));
+          const shown = stored.length ? stored : cats.slice();
+          let next;
+          if (shown.includes(id)) {
+            next = shown.filter(x => x !== id);
+            // The last type does not untick — the parent row is the off
+            // switch for the whole section, and a silently empty list would
+            // read as "all" and put everything back.
+            if (!next.length) { state.toast = 'Untick Order notes to hide them all'; render(); armToastTimer(2600); return; }
+          } else next = shown.concat([id]);
+          setDocketOpt('noteTypes', cats.every(c => next.includes(c)) ? [] : next);
         }
         else if (m === 'addback') {
           const dc = docketCfg();

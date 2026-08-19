@@ -3043,6 +3043,14 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
   height:56px;display:flex;align-items:center;justify-content:flex-end;padding:0 14px;margin-bottom:10px;
   font-family:var(--font-mono);font-size:24px;font-weight:700;color:var(--text-secondary);max-width:330px;}
 .cash-read.filled{color:var(--text-primary);}
+/* The amount is a field you TAP — the pad pops over it, the same pad every
+   other number in the app uses. The dollar sign is drawn, not typed. */
+.pay-amount-row{position:relative;max-width:330px;margin-bottom:10px;}
+.pay-amount-row::before{content:'$';position:absolute;left:14px;top:0;height:56px;display:flex;align-items:center;
+  font-family:var(--font-mono);font-size:24px;font-weight:700;color:var(--text-primary);pointer-events:none;}
+input.cash-read{width:100%;display:block;text-align:right;margin-bottom:0;cursor:pointer;
+  -moz-appearance:textfield;appearance:textfield;}
+input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
 
 
 /* ---- Splitting a bill into parts. One row per part, same field and button
@@ -11813,9 +11821,13 @@ function openNumPad(el) {
   });
 }
 document.addEventListener('pointerdown', (e) => {
-  if (!oskEligible()) return;
   const t = e.target;
   if (!t || !t.matches || !t.matches('input[type="number"]') || t.disabled || t.readOnly) return;
+  // The pay screen's amounts ALWAYS get the pad — a caret box on the money
+  // screen invites typos, and it is the pad staff already know from covers
+  // and quantities (owner-asked, Aug '26). Everything else keeps the
+  // touch-till rule.
+  if (!t.classList.contains('pay-amount') && !oskEligible()) return;
   e.preventDefault(); // the pad IS the caret here — block the focus the tap would give
   openNumPad(t);
 }, true);
@@ -16398,7 +16410,7 @@ function renderCheckoutMiddle() {
           ${CARD_TYPES.map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${c.label}</div>`).join('')}
         </div>
         <label>Taken on this card</label>
-        <div class="cash-read filled">${money(cardTakenAmount())}</div>
+        <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
         <div class="pay-options" style="margin-bottom:10px;">
           <div class="pay-opt ${state.cardAmount === '' ? 'active' : ''}" data-act="card-quick" data-val="">All of it</div>
           ${cardQuickAmounts(amountOwing()).map(n => `<div class="pay-opt ${state.cardAmount === n.toFixed(2) ? 'active' : ''}" data-act="card-quick" data-val="${n.toFixed(2)}">${money(n)}</div>`).join('')}
@@ -16416,24 +16428,16 @@ function renderCheckoutMiddle() {
             <b>${money(amountOwing() - cardTakenAmount())} still owing after this</b>
             <div class="co-sub">Take it, then the next card goes on top.</div>
           </div>` : ''}
-        <div class="covers-pad-grid" style="max-width:330px;">
-          ${['1','2','3','4','5','6','7','8','9','.','0','back'].map(k =>
-            `<button type="button" class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="card-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
-        </div>
         ${splitPaidTotal() > 0.005 ? `
           <div class="tot-row" style="margin-top:12px;"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
           <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(amountOwing())}</span></div>` : ''}
       ` : ''}
       ${state.paymentMethod === 'cash' ? `
         <label>Cash received</label>
-        <div class="cash-read ${state.cashGiven ? 'filled' : ''}">${state.cashGiven ? money(parseFloat(state.cashGiven) || 0) : '0.00'}</div>
+        <div class="pay-amount-row"><input id="cash-given-input" class="cash-read ${state.cashGiven ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${esc(String(state.cashGiven))}"></div>
         <div class="pay-options" style="margin-bottom:10px;">
           ${cashQuickNotes(grandTotal).map(n => `<div class="pay-opt" data-act="cash-quick" data-val="${n}">${money(n)}</div>`).join('')}
           <div class="pay-opt" data-act="cash-quick" data-val="${grandTotal.toFixed(2)}">Exact</div>
-        </div>
-        <div class="covers-pad-grid" style="max-width:330px;">
-          ${['1','2','3','4','5','6','7','8','9','.','0','back'].map(k =>
-            `<button type="button" class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="cash-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
         </div>
         ${change !== null ? `<div class="change-due"><span>Change due</span><span>${money(change)}</span></div>` : ''}
       ` : ''}
@@ -29784,6 +29788,19 @@ function bindEvents() {
       });
     });
   }
+  const cardAmountInput = document.getElementById('card-amount-input');
+  if (cardAmountInput) {
+    cardAmountInput.addEventListener('change', (e) => {
+      const v = String(e.target.value || '');
+      // Blank means "whatever is owing", which is what it opened with.
+      state.cardAmount = v === '' ? '' : v;
+      render();
+    });
+  }
+  const cashGivenInput = document.getElementById('cash-given-input');
+  if (cashGivenInput) {
+    cashGivenInput.addEventListener('change', (e) => { state.cashGiven = String(e.target.value || ''); render(); });
+  }
   const tipCustomInput = document.getElementById('tip-custom-input');
   if (tipCustomInput) {
     tipCustomInput.addEventListener('input', (e) => {
@@ -30703,29 +30720,10 @@ function handleActClick(el, e) {
       // same doors, reached from where the hand already is.
       // The cash pad writes the same field the old text box did, so nothing
       // downstream of it changes.
-      else if (act === 'cash-key') {
-        const k = el.dataset.key;
-        let v = String(state.cashGiven || '');
-        if (k === 'back') v = v.slice(0, -1);
-        else if (k === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
-        else if (/^[0-9]$/.test(k)) { if (!(v.includes('.') && v.split('.')[1].length >= 2)) v += k; }
-        state.cashGiven = v;
-        render();
-      }
       else if (act === 'cash-quick') { state.cashGiven = String(el.dataset.val); render(); }
       // ---- Paying by card ---------------------------------------------------
       else if (act === 'card-type') { state.cardType = state.cardType === el.dataset.val ? null : el.dataset.val; render(); }
       else if (act === 'card-quick') { state.cardAmount = String(el.dataset.val); render(); }
-      else if (act === 'card-key') {
-        const k = el.dataset.key;
-        // The pad starts from whatever is showing, so a correction is one tap.
-        let v = state.cardAmount === '' ? amountOwing().toFixed(2) : String(state.cardAmount);
-        if (k === 'back') v = v.slice(0, -1);
-        else if (k === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
-        else if (/^[0-9]$/.test(k)) { if (!(v.includes('.') && v.split('.')[1].length >= 2)) v += k; }
-        state.cardAmount = v;
-        render();
-      }
       else if (act === 'card-tip-yes') {
         // The extra is money the terminal took — it goes on as a tip, which
         // makes the amount typed and the bill agree again.

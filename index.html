@@ -12407,7 +12407,11 @@ function splitRemaining() { return cartGrandTotal() - splitTendersSum(); }
 function openBillSplit() {
   const order = activeOpenOrder();
   if (!order && !state.cart.length) return;
-  state.showCheckout = false;
+  // Splitting is part of paying, so the pay rail STAYS with Split lit — the
+  // nav must never vanish out from under them (owner-asked, Aug '26).
+  state.showCheckout = true;
+  state.discountModal = null;
+  state.payRailVouchers = false;
   // How the bill is being divided is kept ON THE ORDER, so coming back to the
   // table — on this till or another one — shows the same parts, with the ones
   // already paid still paid (owner-asked, Aug '26).
@@ -12421,9 +12425,13 @@ function openBillSplit() {
   render();
 }
 function closeBillSplit() {
-  // Safe to walk away now: every part taken is recorded on the order, so the
-  // table keeps showing what it still owes and Pay comes straight back here.
+  // Safe to walk away: every part taken is recorded on the order, so the table
+  // keeps showing what it still owes and Pay comes straight back here. Once
+  // money HAS been taken the plain pay screen would offer the whole bill
+  // again, so backing out leaves paying altogether.
+  const partPaid = splitPaidList().length > 0;
   state.billSplit = null;
+  if (partPaid) state.showCheckout = false;
   render();
 }
 // Every part already PAID on this table, straight from the order.
@@ -12563,9 +12571,6 @@ function renderSplitMiddle() {
       <div class="tot-row grand" style="margin-top:${takenSoFar > 0.005 ? '0' : '14px'};${outstanding <= 0.005 ? '' : 'color:var(--red);'}">
         <span>${outstanding <= 0.005 ? 'All parts paid' : 'Still to pay'}</span><span>${money(outstanding)}</span>
       </div>
-    </div>
-    <div class="pane-actions">
-      <button class="icon-action discard" data-act="close-split">${ACT_CROSS_SVG}<span class="ia-label">Back</span></button>
     </div>
   </div>`;
 }
@@ -13637,6 +13642,10 @@ function pickDiscountPreset(id) {
   state.discountModal.type = p.type;
   state.discountModal.value = p.value;
   state.discountModal.reason = p.name;
+  // Money OFF goes on with one tap — there is nothing to confirm. Money ON is
+  // the customer's bill going UP, so a surcharge still gets a deliberate
+  // Apply (owner-asked, Aug '26).
+  if (p.kind !== 'surcharge') { saveDiscountModal(); return; }
   render();
 }
 function saveDiscountModal() {
@@ -13754,7 +13763,7 @@ function openCheckout() {
   state.attachedCustomerId = (openOrder && openOrder.customerId) || null;
   render();
 }
-function closeCheckout() { state.showCheckout = false; state.paySeat = null; state.evenSplit = null; render(); }
+function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.paySeat = null; state.evenSplit = null; render(); }
 
 // Items whose ordered quantity exceeds the tracked stock count — the "inventory
 // vs actual stock don't align" case. Soft: warned, never blocked.
@@ -14192,6 +14201,8 @@ async function runTerminalPurchase(amount) {
 }
 
 async function confirmPayment() {
+  // A bill being split is settled part by part, never in one lump.
+  if (state.billSplit) return;
   const grandTotal = cartGrandTotal();
   const tipAmount = cartTipAmount();
   // Card + integrated terminal: charge the terminal first; only a real
@@ -15028,17 +15039,20 @@ function renderOrderView() {
     // same rail (owner, Aug '26). Split sits with them because splitting is
     // decided at the same moment as how they're paying (owner-asked, Aug '26)
     // — it opens the SAME split screen as the docket's split button.
+    // Once part of the bill is paid the only live row is Split — nothing else
+    // may offer the whole amount again.
+    const partPaid = splitPaidList().length > 0;
     const rows = [
-      { key: 'card', label: 'Card', icon: '💳', on: state.paymentMethod === 'card' },
-      { key: 'cash', label: 'Cash', icon: '💵', on: state.paymentMethod === 'cash' },
-      { key: 'vouchers', label: 'Vouchers', icon: '🎁', on: state.paymentMethod === 'giftcard' || state.payRailVouchers },
+      { key: 'card', label: 'Card', icon: '💳', on: !partPaid && !state.billSplit && state.paymentMethod === 'card' },
+      { key: 'cash', label: 'Cash', icon: '💵', on: !partPaid && !state.billSplit && state.paymentMethod === 'cash' },
+      { key: 'vouchers', label: 'Vouchers', icon: '🎁', on: !partPaid && !state.billSplit && (state.paymentMethod === 'giftcard' || state.payRailVouchers) },
       { key: 'split', label: 'Split', icon: '✂️', on: !!state.billSplit },
       { key: 'discount', label: 'Discount', icon: '🏷️', on: !!state.discountModal },
     ];
     return `
     <div class="catrail">
       ${rows.filter(r => !r.hide).map(r => `
-        <button class="cat-btn ${r.on ? 'active' : ''}" data-act="pay-rail" data-val="${r.key}">
+        <button class="cat-btn ${r.on ? 'active' : ''}" data-act="pay-rail" data-val="${r.key}" ${partPaid && r.key !== 'split' ? 'disabled' : ''}>
           <span class="ico-g" style="font-size:var(--rail-icon,20px);">${r.icon}</span>${r.label}
         </button>`).join('')}
     </div>`;
@@ -15348,7 +15362,6 @@ const SYS_HASH_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke=
 const SYS_USERS_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.84" cy="6.47" r="3.68"/><path d="M2 21.21v-1.05c0 -3.58 2.74 -6.32 6.84 -6.32s6.84 2.74 6.84 6.32v1.05"/><path d="M16.21 3.32a3.68 3.68 0 0 1 0 7.37"/><path d="M18.11 14.16c2.53 0.84 3.89 2.95 3.89 6v1.05"/></svg>`;
 const SYS_SPARK_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.33 2l2.11 5.67L18.11 9.78l-5.67 2.11L10.33 17.56l-2.11 -5.67L2.56 9.78l5.67 -2.11z"/><path d="M18.11 15.33l0.89 2.44L21.44 18.67l-2.44 0.89L18.11 22l-0.89 -2.44L14.78 18.67l2.44 -0.89z"/></svg>`;
 // Splitting a bill: one line, two ways to go. 20 units tall in the 24 grid.
-const SYS_SPLIT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M8 8 4 12l4 4"/><path d="M16 8l4 4-4 4"/></svg>`;
 const SYS_GIFT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.07" y="7.66" width="19.86" height="4.41"/><path d="M12 7.66v14.34"/><path d="M4.28 12.07v9.93h15.44v-9.93"/><path d="M7.04 4.57A2.54 2.54 0 0 1 12 3.8 2.54 2.54 0 0 1 16.96 4.57C16.96 6.56 15.31 7.66 12 7.66s-4.96 -1.1 -4.96 -3.09z"/></svg>`;
 const SYS_CAMERA_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.25h3l2 -2.5h6L17 6.25h3a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2H4a2 2 0 0 1 -2 -2V8.25a2 2 0 0 1 2 -2z"/><circle cx="12" cy="13.25" r="3.5"/></svg>`;
 const SYS_IMAGE_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.22"/><circle cx="8.67" cy="8.67" r="2.22"/><path d="M22 15.33l-5 -5L5.33 22"/></svg>`;
@@ -15525,11 +15538,14 @@ function renderBillPanel() {
       ${tip ? `<div class="tot-row"><span>Tip</span><span>${money(tip)}</span></div>` : ''}
       <div class="tot-row grand"><span>Total</span><span>${money(grand)}</span></div>
       ${tax && t.mode === 'inclusive' ? `<div class="tot-row bill-note"><span>Includes ${esc(taxCfg().name)}</span><span>${money(tax)}</span></div>` : ''}
+      ${splitPaidList().length ? `
+        <div class="tot-row"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
+        <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(Math.max(0, grand - splitPaidTotal()))}</span></div>` : ''}
     </div>
     <div class="ticket-actions">
       <div class="action-icons">
         <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>
+        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
       </div>
     </div>
     ${state.settings.ticketFooter ? `<div class="ticket-footer-msg">${esc(state.settings.ticketFooter)}</div>` : ''}
@@ -15589,7 +15605,6 @@ function renderTicketPanel() {
           ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.customerPane ? 'active held-open' : state.attachedCustomerId ? 'active' : ''}" data-act="acct-go" data-target="open-customer-pane">${DKT_CUSTOMER_SVG}</button>` : ''}
           ${sc.reprint === true ? `<button class="tkt-icon-btn lg glyph-btn" data-act="acct-go" data-target="reprint-docket">${SYS_PRINTER_SVG}</button>` : ''}
           ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.moveItems ? 'active held-open' : ''}" data-act="acct-go" data-target="open-move-items">${SYS_SWAP_SVG}</button>` : ''}
-          ${sc.split !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.billSplit ? 'active held-open' : ''}" data-act="open-split" aria-label="Split the bill">${SYS_SPLIT_SVG}</button>` : ''}
         </div>`;
       })() : ''}
       ${state.orderType === 'dine-in' ? `
@@ -15782,7 +15797,7 @@ function renderTicketPanel() {
            ordering actions stand down. Same buttons, same family. -->
       <div class="action-icons">
         <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>
+        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
       </div>` : `
       <div class="action-icons">
         <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
@@ -22329,7 +22344,6 @@ function renderScreenMockup() {
         if (sc.notes !== false) ic.push(['notes', 'Notes', DKT_NOTE_SVG]);
         if (sc.quickNote !== false) ic.push(['quickNote', 'Quick note', DKT_BOLT_SVG]);
         if (sc.callAway !== false) ic.push(['callAway', 'Call away', DKT_FLAME_SVG]);
-        if (sc.split !== false) ic.push(['split', 'Split', SYS_SPLIT_SVG]);
         return ic.length ? `<div class="mk-tkt-icons">${ic.map(([k, n, svg]) => `<span class="mk-ti" data-mkel="shortcut:${k}" data-mkname="${n}">${svg}</span>`).join('')}</div>` : '';
       })()}
       ${mkCourses.length > 1 ? `<div class="course-tabs" data-act="mock-jump" data-target="ctl-courses" data-mkname="Courses" style="cursor:pointer;">${mkCourses.map((c, i) => `<button class="course-tab ${i === 0 ? 'active' : ''}" style="pointer-events:none;">${esc(c.name)}</button>`).join('')}</div>` : ''}
@@ -30525,8 +30539,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'cash-quick') { state.cashGiven = String(el.dataset.val); render(); }
       // ---- Splitting a bill -------------------------------------------------
-      else if (act === 'open-split') { openBillSplit(); }
-      else if (act === 'close-split') { closeBillSplit(); }
       else if (act === 'split-way') {
         if (splitPaidList().length) { state.toast = 'A part has been paid — finish it.'; render(); return; }
         state.billSplit.way = el.dataset.val;
@@ -30542,7 +30554,6 @@ function handleActClick(el, e) {
         render(); saveSplitPlan();
       }
       else if (act === 'split-part-method') { state.billSplit.methods[el.dataset.key] = el.dataset.val; render(); }
-      else if (act === 'close-split') { closeBillSplit(); }
       else if (act === 'split-print') { printSplitPart(el.dataset.key); }
       else if (act === 'split-pay') { paySplitPart(el.dataset.key); }
       else if (act === 'split-tender-rest') {
@@ -30555,10 +30566,15 @@ function handleActClick(el, e) {
       else if (act === 'pay-rail') {
         const k = el.dataset.val;
         if (k === 'split') {
-          // One door: the same split screen the docket's split button opens.
           if (state.discountModal) closeDiscountModal();
           state.payRailVouchers = false;
-          openBillSplit();
+          // Tapping it again backs out, like every other row on this rail.
+          if (state.billSplit) closeBillSplit(); else openBillSplit();
+        } else if (splitPaidList().length) {
+          // Part of this bill is already paid — no row may offer the whole
+          // amount a second time. Finishing happens in the split.
+          state.toast = 'This bill is in parts — finish it there.';
+          render();
         } else if (k === 'discount') {
           // Tapping it again backs out, like every other row on this rail —
           // it was a one-way door and Cancel was the only escape.

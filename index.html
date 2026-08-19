@@ -3034,6 +3034,14 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 .vt-hi{font-size:var(--fs-xl);font-weight:800;color:var(--text-primary);margin-bottom:2px;}
 .vt-why{font-size:var(--fs-md);color:var(--text-secondary);margin-bottom:16px;}
 
+
+/* ---- Cash pad read-out. Same corner and field colours as every input; the
+   figure is mono so digits don't jump as they're typed. ------------------- */
+.cash-read{background:var(--surface);border:1px solid var(--steel-300);border-radius:var(--btn-radius);
+  height:56px;display:flex;align-items:center;justify-content:flex-end;padding:0 14px;margin-bottom:10px;
+  font-family:var(--font-mono);font-size:24px;font-weight:700;color:var(--text-secondary);max-width:330px;}
+.cash-read.filled{color:var(--text-primary);}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -8879,6 +8887,7 @@ let state = {
   tipPercent: null,
   tipCustomAmount: '',
   splitMode: false,
+  payRailSplit: false, // the pay rail's Split is chosen but no kind picked yet
   splitTenders: [], // [{ method: 'card'|'cash', amount }]
   paySeat: null,    // split-by-seat: { methods: {seat: 'card'|'cash'}, paid: {seat: true} }
   evenSplit: null,  // split-evenly: { n, methods: {key: 'card'|'cash'}, paid: {key: true} }
@@ -13325,6 +13334,7 @@ function openCheckout() {
   state.tipPercent = null;
   state.tipCustomAmount = '';
   state.splitMode = false;
+  state.payRailSplit = false;
   state.splitTenders = [];
   state.paySeat = null;
   state.evenSplit = null;
@@ -14602,10 +14612,35 @@ function renderOrderView() {
       }).join('')}
     </div>`;
 
+  // Paying keeps the SAME furniture: the rail stays a rail and swaps what it
+  // offers, the docket stays where it is. Staff never lose their bearings, and
+  // the buttons are the app's own `.cat-btn`, so they carry its size and corner
+  // without a number being written here (owner-asked, Aug '26).
+  const payRailHtml = () => {
+    const openForSeats = activeOpenOrder();
+    const seatSplitAvailable = (state.covers || 0) > 1
+      || [...(openForSeats ? openForSeats.items : []), ...state.cart].some(i => typeof i.seat === 'number');
+    const splitOn = !!(state.splitMode || state.paySeat || state.evenSplit);
+    const rows = [
+      { key: 'card', label: 'Card', icon: SYS_CARD_SVG, on: !splitOn && state.paymentMethod === 'card' },
+      { key: 'cash', label: 'Cash', icon: SYS_CASH_SVG, on: !splitOn && state.paymentMethod === 'cash' },
+      { key: 'split', label: 'Split', icon: SYS_SPLIT_SVG, on: splitOn, hide: !seatSplitAvailable && (state.covers || 0) <= 1 && false },
+      { key: 'giftcard', label: 'Gift card', icon: SYS_GIFT_SVG, on: !splitOn && state.paymentMethod === 'giftcard' },
+      { key: 'discount', label: 'Discount', icon: SYS_TAG_SVG, on: !!state.discountModal },
+    ];
+    return `
+    <div class="catrail">
+      ${rows.filter(r => !r.hide).map(r => `
+        <button class="cat-btn ${r.on ? 'active' : ''}" data-act="pay-rail" data-val="${r.key}">
+          <span class="ico-g" style="font-size:var(--rail-icon,20px);">${r.icon}</span>${r.label}
+        </button>`).join('')}
+    </div>`;
+  };
+
   // Three panels in one row. Nothing spans above them, so the docket runs the
   // full height of the screen on its own — and all three stay orderable via
   // settings.panelOrder.
-  const shell = (middle) => catrailHtml + middle + renderTicketPanel();
+  const shell = (middle) => (state.showCheckout ? payRailHtml() : catrailHtml) + middle + renderTicketPanel();
 
   // Call-away is a floating popup (renderCallAwayPop), NOT a middle-pane
   // takeover — so on phones the docket panel stays put behind it.
@@ -14904,6 +14939,8 @@ const SYS_MAP_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="
 const SYS_HASH_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.11 8.67h17.78"/><path d="M3.11 15.33h17.78"/><path d="M9.78 2 7.56 22"/><path d="M16.44 2l-2.22 20"/></svg>`;
 const SYS_USERS_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.84" cy="6.47" r="3.68"/><path d="M2 21.21v-1.05c0 -3.58 2.74 -6.32 6.84 -6.32s6.84 2.74 6.84 6.32v1.05"/><path d="M16.21 3.32a3.68 3.68 0 0 1 0 7.37"/><path d="M18.11 14.16c2.53 0.84 3.89 2.95 3.89 6v1.05"/></svg>`;
 const SYS_SPARK_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.33 2l2.11 5.67L18.11 9.78l-5.67 2.11L10.33 17.56l-2.11 -5.67L2.56 9.78l5.67 -2.11z"/><path d="M18.11 15.33l0.89 2.44L21.44 18.67l-2.44 0.89L18.11 22l-0.89 -2.44L14.78 18.67l2.44 -0.89z"/></svg>`;
+// Splitting a bill: one line, two ways to go. 20 units tall in the 24 grid.
+const SYS_SPLIT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20"/><path d="M8 8 4 12l4 4"/><path d="M16 8l4 4-4 4"/></svg>`;
 const SYS_GIFT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2.07" y="7.66" width="19.86" height="4.41"/><path d="M12 7.66v14.34"/><path d="M4.28 12.07v9.93h15.44v-9.93"/><path d="M7.04 4.57A2.54 2.54 0 0 1 12 3.8 2.54 2.54 0 0 1 16.96 4.57C16.96 6.56 15.31 7.66 12 7.66s-4.96 -1.1 -4.96 -3.09z"/></svg>`;
 const SYS_CAMERA_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6.25h3l2 -2.5h6L17 6.25h3a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2H4a2 2 0 0 1 -2 -2V8.25a2 2 0 0 1 2 -2z"/><circle cx="12" cy="13.25" r="3.5"/></svg>`;
 const SYS_IMAGE_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.22"/><circle cx="8.67" cy="8.67" r="2.22"/><path d="M22 15.33l-5 -5L5.33 22"/></svg>`;
@@ -15270,12 +15307,19 @@ function renderTicketPanel() {
       </div>`;
     })()}
     <div class="ticket-actions">
+      ${state.showCheckout ? `
+      <!-- Paying: the two actions sit under the bill they settle, and the
+           ordering actions stand down. Same buttons, same family. -->
+      <div class="action-icons">
+        <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>
+      </div>` : `
       <div class="action-icons">
         <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
         <button class="icon-action pay" data-act="checkout" ${!openOrder && !state.cart.length ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" data-act="clear" ${state.cart.length === 0 ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Discard</span></button>
         <button class="icon-action send" data-act="send-to-kitchen" ${state.sending || !cartSendable() ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : 'Send'}</span></button>
-      </div>
+      </div>`}
     </div>
     ${state.settings.ticketFooter ? `<div class="ticket-footer-msg">${esc(state.settings.ticketFooter)}</div>` : ''}
   </div>`;
@@ -15563,6 +15607,36 @@ function renderCallAwayPop() {
   </div>`;
 }
 
+// The notes someone actually hands over: the next round dollar up, then the
+// next two Australian notes above that. Never a note smaller than the bill.
+function cashQuickNotes(total) {
+  const out = [];
+  const round = Math.ceil(total / 5) * 5;
+  if (round > total) out.push(round);
+  for (const n of [20, 50, 100, 200]) if (n > total && !out.includes(n)) out.push(n);
+  return out.slice(0, 3);
+}
+
+// Is the payment ready to go through? Asked by the docket's Confirm and by
+// the middle, so they can never disagree.
+function payReady() {
+  if (state.paySeat || state.evenSplit) return false;
+  const grand = cartGrandTotal();
+  if (state.splitMode) {
+    return Math.abs(splitRemaining()) <= 0.01 && state.splitTenders.every(t => (parseFloat(t.amount) || 0) > 0);
+  }
+  if (state.paymentMethod === 'card' || state.paymentMethod === 'giftcard') return true;
+  const given = parseFloat(state.cashGiven);
+  return !isNaN(given) && given >= grand;
+}
+function payConfirmLabel() {
+  const grand = cartGrandTotal();
+  if (terminalActive() && state.paymentMethod === 'card' && !state.splitMode) return `Send ${money(grand)}`;
+  const given = parseFloat(state.cashGiven);
+  if (state.paymentMethod === 'cash' && !isNaN(given) && given > grand) return `Take ${money(given)}`;
+  return `Confirm ${money(grand)}`;
+}
+
 function renderCheckoutMiddle() {
   const total = cartTotal();
   const tipAmount = cartTipAmount();
@@ -15591,7 +15665,7 @@ function renderCheckoutMiddle() {
       ` : state.discount ? `
         <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)}) <button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></div>
       ` : `
-        <button class="btn-secondary" style="width:auto;padding:8px 14px;margin-bottom:16px;" data-act="open-discount">${SYS_TAG_SVG} Add discount / surcharge</button>
+        
       `) : ''}
       <label>Customer (optional)</label>
       ${attachedCustomer ? `
@@ -15619,9 +15693,12 @@ function renderCheckoutMiddle() {
         ${tipAmount > 0 ? `<div class="tot-row"><span>Tip</span><span>${money(tipAmount)}</span></div><div class="tot-row grand" style="margin-bottom:14px;"><span>Total incl. tip</span><span>${money(grandTotal)}</span></div>` : ''}
       ` : ''}
       <div style="display:flex;gap:16px;flex-wrap:wrap;">
-        <button type="button" class="link-btn" data-act="toggle-even-split" style="font-weight:700;">${state.evenSplit ? '← Use a single payment method' : 'Split evenly →'}</button>
-        <button type="button" class="link-btn" data-act="toggle-split-mode" style="font-weight:700;">${state.splitMode ? '← Use a single payment method' : 'Split across multiple tenders →'}</button>
-        ${seatSplitAvailable ? `<button type="button" class="link-btn" data-act="toggle-seat-split" style="font-weight:700;">${state.paySeat ? '← Use a single payment method' : 'Split by seat →'}</button>` : ''}
+        ${state.payRailSplit || state.splitMode || state.paySeat || state.evenSplit ? `
+        <div class="pay-options" style="margin-bottom:0;">
+          <div class="pay-opt ${state.evenSplit ? 'active' : ''}" data-act="toggle-even-split">Evenly</div>
+          ${seatSplitAvailable ? `<div class="pay-opt ${state.paySeat ? 'active' : ''}" data-act="toggle-seat-split">By seat</div>` : ''}
+          <div class="pay-opt ${state.splitMode ? 'active' : ''}" data-act="toggle-split-mode">By tender</div>
+        </div>` : ''}
       </div>
       ${state.paySeat ? `
         <label>Each seat pays</label>
@@ -15687,23 +15764,28 @@ function renderCheckoutMiddle() {
           <button data-act="clear-giftcard-payment" style="background:none;border:1px solid var(--green);border-radius:6px;padding:4px 10px;color:var(--green);cursor:pointer;font-weight:700;">Change</button>
         </div>
       ` : `
-      <div class="pay-options">
-        <div class="pay-opt ${state.paymentMethod === 'card' ? 'active' : ''}" data-act="pay" data-val="card">${SYS_CARD_SVG} Card</div>
-        <div class="pay-opt ${state.paymentMethod === 'cash' ? 'active' : ''}" data-act="pay" data-val="cash">${SYS_CASH_SVG} Cash</div>
-      </div>
+      <!-- method lives on the pay rail (one door) -->
       ${state.paymentMethod === 'cash' ? `
         <label>Cash received</label>
-        <input id="cash-input" type="number" min="0" step="0.01" placeholder="0.00" value="${state.cashGiven}">
+        <div class="cash-read ${state.cashGiven ? 'filled' : ''}">${state.cashGiven ? money(parseFloat(state.cashGiven) || 0) : '0.00'}</div>
+        <div class="pay-options" style="margin-bottom:10px;">
+          ${cashQuickNotes(grandTotal).map(n => `<div class="pay-opt" data-act="cash-quick" data-val="${n}">${money(n)}</div>`).join('')}
+          <div class="pay-opt" data-act="cash-quick" data-val="${grandTotal.toFixed(2)}">Exact</div>
+        </div>
+        <div class="covers-pad-grid" style="max-width:330px;">
+          ${['1','2','3','4','5','6','7','8','9','.','0','back'].map(k =>
+            `<button type="button" class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="cash-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
+        </div>
         ${change !== null ? `<div class="change-due"><span>Change due</span><span>${money(change)}</span></div>` : ''}
       ` : ''}
       <div style="display:flex;gap:8px;margin-top:14px;">
         <input id="checkout-giftcard-input" type="text" value="${state.checkoutGiftCardCode}" placeholder="Gift card code" style="flex:1;">
-        <button class="btn-secondary" style="width:auto;padding:9px 14px;" data-act="apply-giftcard-code">Pay with gift card</button>
+        <button class="btn-secondary" style="width:132px;flex:none;padding:0;" data-act="apply-giftcard-code">Apply</button>
       </div>
       ${!state.discount ? `
       <div style="display:flex;gap:8px;margin-top:8px;">
         <input id="checkout-voucher-input" type="text" value="${state.checkoutVoucherCode}" placeholder="Voucher code" style="flex:1;">
-        <button class="btn-secondary" style="width:auto;padding:9px 14px;" data-act="apply-voucher-code">Apply voucher</button>
+        <button class="btn-secondary" style="width:132px;flex:none;padding:0;" data-act="apply-voucher-code">Apply</button>
       </div>` : ''}
       `}
       `}
@@ -15716,10 +15798,7 @@ function renderCheckoutMiddle() {
             <span>${esc(state.terminalPending.message || 'Ask the customer to tap or insert their card…')}</span>
           </div>
         </div>` : ''}
-      <div class="modal-actions">
-        <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" data-act="confirm-payment" ${canConfirm && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${terminalActive() && state.paymentMethod === 'card' && !state.splitMode ? `Send ${money(grandTotal)} to terminal` : `Confirm ${money(grandTotal)}`}</span></button>
-      </div>
+
     </div>
   </div>`;
 }
@@ -29938,6 +30017,39 @@ function handleActClick(el, e) {
       else if (act === 'cancel-checkout') { closeCheckout(); }
       else if (act === 'confirm-payment') { confirmPayment(); }
       else if (act === 'pay') { state.paymentMethod = el.dataset.val; render(); }
+      // The pay rail is a shortcut to the mechanisms that already exist — the
+      // same doors, reached from where the hand already is.
+      // The cash pad writes the same field the old text box did, so nothing
+      // downstream of it changes.
+      else if (act === 'cash-key') {
+        const k = el.dataset.key;
+        let v = String(state.cashGiven || '');
+        if (k === 'back') v = v.slice(0, -1);
+        else if (k === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
+        else if (/^[0-9]$/.test(k)) { if (!(v.includes('.') && v.split('.')[1].length >= 2)) v += k; }
+        state.cashGiven = v;
+        render();
+      }
+      else if (act === 'cash-quick') { state.cashGiven = String(el.dataset.val); render(); }
+      else if (act === 'pay-rail') {
+        const k = el.dataset.val;
+        if (k === 'split') {
+          // Tapping Split when a split is already running puts it back to one payment.
+          if (state.splitMode) toggleSplitMode();
+          else if (state.paySeat) toggleSeatSplit();
+          else if (state.evenSplit) toggleEvenSplit();
+          else { state.payRailSplit = true; render(); }
+        } else if (k === 'discount') {
+          openDiscountModal();
+        } else {
+          if (state.splitMode) toggleSplitMode();
+          else if (state.paySeat) toggleSeatSplit();
+          else if (state.evenSplit) toggleEvenSplit();
+          state.payRailSplit = false;
+          state.paymentMethod = k;
+          render();
+        }
+      }
       else if (act === 'tip-mode') { state.tipMode = el.dataset.val; if (el.dataset.val !== 'preset') state.tipPercent = null; render(); }
       else if (act === 'tip-preset') { state.tipMode = 'preset'; state.tipPercent = parseFloat(el.dataset.val); render(); }
       else if (act === 'toggle-split-mode') { toggleSplitMode(); }

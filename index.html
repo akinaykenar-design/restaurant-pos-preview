@@ -2984,6 +2984,28 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 .staff-badge{min-width:0;}
 .staff-badge > *:not(.pin-strip){flex-shrink:0;}
 
+
+/* ---- Venue type: the one setup question, and its row in Settings ------- */
+.vt-grid{display:grid;gap:10px;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));max-width:600px;}
+.vt-tile{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;
+  padding:14px;border-radius:12px;border:1px solid var(--steel-300);background:var(--surface);
+  color:var(--text-primary);cursor:pointer;text-align:left;min-height:96px;}
+/* Selection is an overlay ring, never a border or weight change — the layout
+   must not move when a tile turns on. */
+.vt-tile::after{content:'';position:absolute;inset:0;border-radius:12px;
+  box-shadow:inset 0 0 0 2px transparent;pointer-events:none;}
+.vt-tile.vt-on::after{box-shadow:inset 0 0 0 2px var(--accent);}
+.vt-tile.vt-on{background:var(--surface-2,var(--surface));}
+.vt-ico{display:block;width:24px;height:24px;color:var(--accent);margin-bottom:4px;}
+.vt-ico svg{width:24px;height:24px;display:block;}
+.vt-name{font-size:var(--fs-lg);font-weight:700;}
+.vt-sub{font-size:var(--fs-sm);color:var(--text-secondary);}
+.vt-welcome{min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:var(--bg);padding:24px;}
+.vt-welcome-in{width:100%;max-width:620px;}
+.vt-hi{font-size:var(--fs-xl);font-weight:800;color:var(--text-primary);margin-bottom:2px;}
+.vt-why{font-size:var(--fs-md);color:var(--text-secondary);margin-bottom:16px;}
+
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -5014,6 +5036,12 @@ app.put('/api/settings', (req, res) => {
       && typeof r.d === 'string' && r.d.length <= 300000 && /^[A-Za-z0-9+/=]*$/.test(r.d)) {
       data.settings.venueLogoRaster = { w: r.w, h: r.h, d: r.d };
     }
+  }
+  // Which kind of venue this till was set up as. Only ever a starting point:
+  // every switch it sets stays editable on its own screen.
+  if (req.body.venueType !== undefined) {
+    const v = String(req.body.venueType || '');
+    data.settings.venueType = ['restaurant', 'cafe', 'bar', 'takeaway'].includes(v) ? v : '';
   }
   if (tableMode !== undefined) data.settings.tableMode = tableMode === 'simple' ? 'simple' : 'floorplan';
   if (simpleTableCount !== undefined) {
@@ -13916,6 +13944,21 @@ function render() {
     return;
   }
 
+  // A till nobody has set up yet asks one question before anything else.
+  // Same tiles, same handler as Settings → Venue: one door, shown early.
+  if (needsVenueSetup()) {
+    app.innerHTML = `
+    <div class="vt-welcome">
+      <div class="vt-welcome-in">
+        <div class="vt-hi">What kind of venue?</div>
+        <div class="vt-why">Sets the switches. Change any later.</div>
+        ${venueTypeTiles('')}
+      </div>
+    </div>`;
+    bindEvents();
+    return;
+  }
+
   // Remember which screen is showing so a page refresh lands back on it —
   // including the open dine-in table, so a refresh keeps you on that order
   // instead of dropping you back to the table picker.
@@ -20007,6 +20050,64 @@ function renderDiscountPresetModal() {
   </div>`;
 }
 
+// The kind of venue this till is running. Every switch here can still be
+// changed one by one afterwards — the type only sets a sensible starting
+// point, so a new venue is selling in a minute instead of hunting through
+// forty screens (owner-asked, Aug '26).
+const VENUE_TYPES = [
+  { key: 'restaurant', name: 'Restaurant', sub: 'Tables, courses, seats', icon: 'restaurant',
+    patch: { tableMode: 'floorplan', coversEnabled: true, seatNumbersEnabled: true, tipsEnabled: true, takeawayEnabled: true, deliveryEnabled: false, qtyPadEnabled: false,
+      courses: [{ name: 'Entree', color: null }, { name: 'Main', color: null }, { name: 'Dessert', color: null }] } },
+  { key: 'cafe', name: 'Cafe', sub: 'Simple tables, one course', icon: 'cafe',
+    patch: { tableMode: 'simple', coversEnabled: false, seatNumbersEnabled: false, tipsEnabled: true, takeawayEnabled: true, deliveryEnabled: false, qtyPadEnabled: true,
+      courses: [{ name: 'Course 1', color: null }] } },
+  { key: 'bar', name: 'Bar', sub: 'Fast rounds, no courses', icon: 'bar',
+    patch: { tableMode: 'simple', coversEnabled: false, seatNumbersEnabled: false, tipsEnabled: true, takeawayEnabled: false, deliveryEnabled: false, qtyPadEnabled: true,
+      courses: [{ name: 'Course 1', color: null }] } },
+  { key: 'takeaway', name: 'Takeaway', sub: 'Counter and delivery', icon: 'takeaway',
+    patch: { tableMode: 'simple', coversEnabled: false, seatNumbersEnabled: false, tipsEnabled: false, takeawayEnabled: true, deliveryEnabled: true, qtyPadEnabled: true,
+      courses: [{ name: 'Course 1', color: null }] } },
+];
+// Drawn on the 24 grid, 20-unit content box, stroke 1.5 — same law as every
+// other icon in the app.
+const VENUE_TYPE_ICONS = {
+  restaurant: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><path d="M4 2v8M4 14v8M20 2v6a2 2 0 0 1-2 2v12"/></svg>',
+  cafe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8h13v6a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5z"/><path d="M16 10h2a3 3 0 0 1 0 6h-2"/><path d="M6 2v3M10 2v3"/></svg>',
+  bar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h18l-9 9z"/><path d="M12 12v9"/><path d="M8 21h8"/></svg>',
+  takeaway: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h16l-1.5 13H5.5z"/><path d="M8 8V5a4 4 0 0 1 8 0v3"/></svg>',
+};
+function venueTypeTiles(sel) {
+  return `<div class="vt-grid">${VENUE_TYPES.map(t => `
+    <button class="vt-tile${sel === t.key ? ' vt-on' : ''}" data-act="set-venue-type" data-val="${t.key}">
+      <span class="vt-ico">${VENUE_TYPE_ICONS[t.icon]}</span>
+      <span class="vt-name">${t.name}</span>
+      <span class="vt-sub">${t.sub}</span>
+    </button>`).join('')}</div>`;
+}
+// One door: the welcome screen and the Venue settings row both land here.
+async function setVenueType(key) {
+  const t = VENUE_TYPES.find(x => x.key === key);
+  if (!t) return;
+  const patch = Object.assign({ venueType: key }, t.patch);
+  // A venue that has already named its own courses keeps them. The type only
+  // writes courses onto a till that is still on the untouched default —
+  // picking a type must never throw away a real setup.
+  const cur = (state.settings && state.settings.courses) || [];
+  const untouched = cur.length <= 1;
+  if (!untouched) delete patch.courses;
+  await saveVenueSettings(patch);
+  state.courseCount = (state.settings.courses || []).length || 1;
+  state.activeCourse = 1;
+  state.toast = `Set up for a ${t.name.toLowerCase()}`;
+  render();
+}
+// A brand-new till: nothing on the menu and no type chosen yet. An existing
+// venue never sees this — its setup is already done.
+function needsVenueSetup() {
+  const s = state.settings || {};
+  return !s.venueType && !(state.menu || []).length;
+}
+
 function renderVenueSettingsAdmin() {
   const s = state.settings || {};
   const logo = (s.venueLogo && s.venueLogo !== 'default') ? s.venueLogo : '';
@@ -20020,6 +20121,10 @@ function renderVenueSettingsAdmin() {
     <div style="margin-top:12px;">
       <label class="field-label">Address</label>
       <input id="venue-address-input" type="text" value="${esc(s.venueAddress || '')}" maxlength="80" placeholder="Prints on receipts" style="width:320px;max-width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);" onblur="saveVenueAddress()">
+    </div>
+    <div style="margin-top:14px;">
+      <label class="field-label">Venue type</label>
+      ${venueTypeTiles(s.venueType || '')}
     </div>
     <div style="margin-top:12px;">
       <label class="field-label">Logo</label>
@@ -29939,6 +30044,7 @@ function handleActClick(el, e) {
       else if (act === 'save-staff-pin') { saveStaffPin(el.dataset.id); }
       else if (act === 'toggle-staff-pin-view') { toggleStaffPinView(el.dataset.id); }
       else if (act === 'venue-logo-none') { saveVenueSettings({ venueLogo: '', venueLogoRaster: '' }); }
+      else if (act === 'set-venue-type') { setVenueType(el.dataset.val); }
       else if (act === 'venue-logo-upload') { pickVenueLogo(); }
       else if (act === 'clear-staff-selection') { state.selectedStaffIds = []; render(); }
       else if (act === 'delete-selected-staff') { deleteSelectedStaff(); }

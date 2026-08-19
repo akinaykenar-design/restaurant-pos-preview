@@ -3094,6 +3094,10 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 .card-owing{margin:0 0 12px;padding:11px 13px;border-radius:var(--radius);background:color-mix(in srgb, var(--red) 10%, var(--surface));border:1px solid var(--red);}
 .card-owing b{color:var(--red);font-size:var(--fs-md);}
 .card-owing .co-sub{font-size:var(--fs-sm);color:var(--text-secondary);margin-top:4px;}
+/* The bill's payment block, the way an invoice carries it: what was taken,
+   then the amount still due. */
+.bill-paid{border-top:1px solid var(--steel-200);margin-top:8px;padding-top:6px;}
+.tot-row.grand.due{color:var(--red);}
 /* Every control in a part row is one height — the button height, the button
    corner. Three sizes in one row read as three different things. */
 .split-part .sp-methods{margin-bottom:0;flex:none;width:150px;}
@@ -12449,6 +12453,13 @@ function cardTakenAmount() {
   return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
 }
 function cardOver() { return Math.round((cardTakenAmount() - amountOwing()) * 100) / 100; }
+// Cash reads the same way, except money over the bill is change, not a tip.
+function cashTakenAmount() {
+  const v = String(state.cashGiven || '');
+  if (v === '') return amountOwing();
+  return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
+}
+function cashOver() { return Math.round((cashTakenAmount() - amountOwing()) * 100) / 100; }
 // The tip typed for THIS card — the running total less whatever earlier cards
 // already carried away, so each card shows the tip it actually took.
 function cardTipPending() {
@@ -12703,7 +12714,9 @@ function billSplitParts() {
   if (frozen && frozen.length) {
     const parts = frozen.map(p => ({ key: p.key, label: p.label, amount: p.amount }));
     const paidMap = splitPaidMap();
-    Object.keys(paidMap).filter(k => k.indexOf('later') === 0).sort()
+    // Anything paid that is not one of the frozen parts — a card taken on the
+    // pay screen, a later round — sits alongside them as its own row.
+    Object.keys(paidMap).filter(k => !parts.some(p => p.key === k)).sort()
       .forEach(k => parts.push({ key: k, label: paidMap[k].label, amount: paidMap[k].amount }));
     const extra = Math.round((cartGrandTotal() - parts.reduce((a, p) => a + p.amount, 0)) * 100) / 100;
     if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
@@ -13825,9 +13838,6 @@ function maybeApplyAutoSurcharge() {
 }
 function openCheckout() {
   if (state.cart.length === 0 && !state.openOrderId) return;
-  // Money has already been taken in parts on this table — the rest of it is
-  // taken in the split screen, never as a fresh full-bill payment.
-  if (splitPaidList().length) { openBillSplit(); return; }
   // A dine-in bill needs a table — prompt for one first.
   if (state.orderType === 'dine-in' && !state.table) { openTablePicker(); return; }
   dropMobileDrawer();
@@ -14301,7 +14311,17 @@ async function confirmPayment() {
     const taken = cardTakenAmount();
     if (taken <= 0 || cardOver() > 0.005) return;
     if (taken < amountOwing() - 0.005 || splitPaidList().length) {
-      await takeCardPart(taken);
+      await takePart(taken, 'card');
+      return;
+    }
+  }
+  // Cash the same, except money over the bill is change, so only what the
+  // bill is owed goes on the till.
+  if (state.paymentMethod === 'cash' && !state.splitMode) {
+    const taken = cashTakenAmount();
+    if (taken <= 0) return;
+    if (taken < amountOwing() - 0.005 || splitPaidList().length) {
+      await takePart(Math.min(taken, amountOwing()), 'cash');
       return;
     }
   }
@@ -15144,20 +15164,17 @@ function renderOrderView() {
     // same rail (owner, Aug '26). Split sits with them because splitting is
     // decided at the same moment as how they're paying (owner-asked, Aug '26)
     // — it opens the SAME split screen as the docket's split button.
-    // Once part of the bill is paid the only live row is Split — nothing else
-    // may offer the whole amount again.
-    const partPaid = splitPaidList().length > 0;
     const rows = [
-      { key: 'card', label: 'Card', icon: '💳', on: !partPaid && !state.billSplit && state.paymentMethod === 'card' },
-      { key: 'cash', label: 'Cash', icon: '💵', on: !partPaid && !state.billSplit && state.paymentMethod === 'cash' },
-      { key: 'vouchers', label: 'Vouchers', icon: '🎁', on: !partPaid && !state.billSplit && (state.paymentMethod === 'giftcard' || state.payRailVouchers) },
+      { key: 'card', label: 'Card', icon: '💳', on: !state.billSplit && !state.payRailVouchers && state.paymentMethod === 'card' },
+      { key: 'cash', label: 'Cash', icon: '💵', on: !state.billSplit && !state.payRailVouchers && state.paymentMethod === 'cash' },
+      { key: 'vouchers', label: 'Vouchers', icon: '🎁', on: !state.billSplit && (state.paymentMethod === 'giftcard' || state.payRailVouchers) },
       { key: 'split', label: 'Split', icon: '✂️', on: !!state.billSplit },
       { key: 'discount', label: 'Discount', icon: '🏷️', on: !!state.discountModal },
     ];
     return `
     <div class="catrail">
       ${rows.filter(r => !r.hide).map(r => `
-        <button class="cat-btn ${r.on ? 'active' : ''}" data-act="pay-rail" data-val="${r.key}" ${partPaid && r.key !== 'split' ? 'disabled' : ''}>
+        <button class="cat-btn ${r.on ? 'active' : ''}" data-act="pay-rail" data-val="${r.key}">
           <span class="ico-g" style="font-size:var(--rail-icon,20px);">${r.icon}</span>${r.label}
         </button>`).join('')}
     </div>`;
@@ -15642,8 +15659,10 @@ function renderBillPanel() {
       <div class="tot-row grand"><span>Total</span><span>${money(grand)}</span></div>
       ${tax && t.mode === 'inclusive' ? `<div class="tot-row bill-note"><span>Includes ${esc(taxCfg().name)}</span><span>${money(tax)}</span></div>` : ''}
       ${splitPaidList().length ? `
-        <div class="tot-row"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
-        <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(Math.max(0, grand - splitPaidTotal()))}</span></div>` : ''}
+        <div class="bill-paid">
+          ${splitPaidList().map(p => `<div class="tot-row"><span>${esc(p.label)}${p.tip ? ` · ${money(p.tip)} tip` : ''}</span><span>${money(p.amount)}</span></div>`).join('')}
+        </div>` : ''}
+      <div class="tot-row grand ${grand - splitPaidTotal() > 0.005 ? 'due' : 'settled'}"><span>Amount due</span><span>${money(Math.max(0, grand - splitPaidTotal()))}</span></div>
     </div>
     <div class="ticket-actions">
       <div class="action-icons">
@@ -15890,8 +15909,10 @@ function renderTicketPanel() {
           ${taxAll ? `<div class="tot-row"><span>${esc(taxLabel())}</span><span>${money(taxAll)}</span></div>` : ''}</div>` : ''}
         <div class="tot-row grand"><span>Total ${state.totalsExpanded ? '' : '▸'}</span><span>${money(totalAll)}</span></div>
         ${splitPaidList().length ? `
-          <div class="tot-row"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
-          <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(Math.max(0, totalAll - splitPaidTotal()))}</span></div>` : ''}
+          <div class="bill-paid">
+            ${splitPaidList().map(p => `<div class="tot-row"><span>${esc(p.label)}${p.tip ? ` · ${money(p.tip)} tip` : ''}</span><span>${money(p.amount)}</span></div>`).join('')}
+          </div>
+          <div class="tot-row grand due"><span>Amount due</span><span>${money(Math.max(0, totalAll - splitPaidTotal()))}</span></div>` : ''}
       </div>`;
     })()}
     <div class="ticket-actions">
@@ -16210,8 +16231,7 @@ function payReady() {
     return cardTakenAmount() > 0 && cardOver() <= 0.005;
   }
   if (state.paymentMethod === 'giftcard') return true;
-  const given = parseFloat(state.cashGiven);
-  return !isNaN(given) && given >= grand;
+  return cashTakenAmount() > 0;
 }
 function payConfirmLabel() {
   const grand = cartGrandTotal();
@@ -16221,27 +16241,31 @@ function payConfirmLabel() {
     if (terminalActive()) return `Send ${money(taken)}`;
     return part ? `Take ${money(taken)}` : `Confirm ${money(taken)}`;
   }
-  const given = parseFloat(state.cashGiven);
-  if (state.paymentMethod === 'cash' && !isNaN(given) && given > grand) return `Take ${money(given)}`;
+  if (state.paymentMethod === 'cash' && !state.splitMode) {
+    const taken = cashTakenAmount();
+    return taken < amountOwing() - 0.005 ? `Take ${money(taken)}` : `Confirm ${money(taken)}`;
+  }
   return `Confirm ${money(grand)}`;
 }
 
 // One card of several: the money is taken now, so it is written onto the order
 // now — the same parts the split screen uses, so the table still cannot close
 // a dollar short.
-async function takeCardPart(amount) {
+async function takeCardPart(amount) { return takePart(amount, 'card'); }
+async function takePart(amount, method) {
   const order = activeOpenOrder();
   if (!order) { state.toast = 'Send the order first.'; render(); return; }
-  if (terminalActive() && !state._terminalApproved) {
+  if (method === 'card' && terminalActive() && !state._terminalApproved) {
     const ok = await runTerminalPurchase(amount);
     if (!ok) return;
   }
-  const n = (order.splitPaid || []).filter(p => String(p.key).indexOf('card') === 0).length + 1;
+  const n = (order.splitPaid || []).filter(p => String(p.key).indexOf(method) === 0).length + 1;
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: 'card' + n, label: cardTypeLabel(state.cardType), amount, method: 'card', cardType: state.cardType, tip: cardTipPending(), staffName }),
+      body: JSON.stringify({ key: method + n, label: method === 'cash' ? 'Cash' : cardTypeLabel(state.cardType), amount,
+        method, cardType: method === 'card' ? state.cardType : null, tip: method === 'card' ? cardTipPending() : 0, staffName }),
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
@@ -16251,6 +16275,7 @@ async function takeCardPart(amount) {
     return;
   }
   state.cardAmount = '';
+  state.cashGiven = '';
   if (amountOwing() <= 0.005) {
     // The cards add up to the bill — close it, each card its own payment.
     state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
@@ -16266,12 +16291,7 @@ function renderCheckoutMiddle() {
   const total = cartTotal();
   const tipAmount = cartTipAmount();
   const grandTotal = cartGrandTotal();
-  const given = parseFloat(state.cashGiven);
-  const change = (!isNaN(given) && given >= grandTotal) ? given - grandTotal : null;
   const remaining = splitRemaining();
-  const canConfirm = (state.paySeat || state.evenSplit) ? false : state.splitMode
-    ? Math.abs(remaining) <= 0.01 && state.splitTenders.every(t => (parseFloat(t.amount) || 0) > 0)
-    : (state.paymentMethod === 'card' || state.paymentMethod === 'giftcard' || (!isNaN(given) && given >= grandTotal));
   const openForSeats = activeOpenOrder();
   const seatSplitAvailable = (state.covers || 0) > 1
     || [...(openForSeats ? openForSeats.items : []), ...state.cart].some(i => typeof i.seat === 'number');
@@ -16392,38 +16412,38 @@ function renderCheckoutMiddle() {
         </div>
       ` : `
       <!-- method lives on the pay rail (one door) -->
-      ${state.paymentMethod === 'card' ? `
-        <label>Card type</label>
+      ${state.paymentMethod === 'card' && !state.payRailVouchers ? `
+        <label>Card</label>
         <div class="pay-options" style="margin-bottom:14px;">
           ${CARD_TYPES.map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${c.label}</div>`).join('')}
         </div>
-        ${splitPaidList().length ? `
-          <label>Taken so far</label>
-          ${splitPaidList().map(p => `<div class="tot-row"><span>${esc(p.label)}${p.tip ? ` · ${money(p.tip)} tip` : ''}</span><span>${money(p.amount)}</span></div>`).join('')}
-          <div class="tot-row grand" style="color:var(--red);margin-bottom:14px;"><span>Still to pay</span><span>${money(amountOwing())}</span></div>
-        ` : ''}
+        <label>Amount</label>
+        <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
         <label>Tip</label>
         <div class="pay-amount-row"><input id="card-tip-input" class="cash-read ${cardTipPending() > 0 ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${cardTipPending() ? cardTipPending().toFixed(2) : ''}"></div>
-        <label>Taken on this card</label>
-        <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
         ${cardOver() > 0.005 ? `
           <div class="card-ask">
-            <b>${money(cardOver())} over — keep it as a tip?</b>
+            <b>Keep ${money(cardOver())} as a tip?</b>
             <div class="ca-btns">
-              <button class="btn-confirm" style="width:auto;" data-act="card-tip-yes">Yes, tip</button>
-              <button class="btn-secondary sm" style="width:auto;" data-act="card-tip-no">No, fix it</button>
+              <button class="btn-confirm" style="width:auto;" data-act="card-tip-yes">Yes</button>
+              <button class="btn-secondary sm" style="width:auto;" data-act="card-tip-no">No</button>
             </div>
           </div>` : ''}
         ${cardOver() < -0.005 ? `
           <div class="card-owing">
-            <b>${money(amountOwing() - cardTakenAmount())} still owing after this</b>
+            <b>${money(amountOwing() - cardTakenAmount())} left after this</b>
             <div class="co-sub">Take it, then the next card goes on top.</div>
           </div>` : ''}
       ` : ''}
-      ${state.paymentMethod === 'cash' ? `
-        <label>Cash received</label>
-        <div class="pay-amount-row"><input id="cash-given-input" class="cash-read ${state.cashGiven ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${esc(String(state.cashGiven))}"></div>
-        ${change !== null ? `<div class="change-due"><span>Change due</span><span>${money(change)}</span></div>` : ''}
+      ${state.paymentMethod === 'cash' && !state.payRailVouchers ? `
+        <label>Cash</label>
+        <div class="pay-amount-row"><input id="cash-given-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cashTakenAmount().toFixed(2)}"></div>
+        ${cashOver() > 0.005 ? `<div class="change-due"><span>Change</span><span>${money(cashOver())}</span></div>` : ''}
+        ${cashOver() < -0.005 ? `
+          <div class="card-owing">
+            <b>${money(amountOwing() - cashTakenAmount())} left after this</b>
+            <div class="co-sub">Take it, then take the rest however they want.</div>
+          </div>` : ''}
       ` : ''}
       ${state.payRailVouchers ? `
       <!-- Both kinds of code live behind the rail's Vouchers, so they are not
@@ -30662,12 +30682,7 @@ function handleActClick(el, e) {
         if (state.cart.length) openConfirm({ message: 'Discard the unsent items on this ticket?', confirmLabel: 'Discard', danger: true }, () => discardCartUndoable());
         else clearCart();
       }
-      else if (act === 'checkout') {
-        // A bill already in parts is finished in the split screen — Pay must
-        // never offer the whole amount again over money already taken.
-        if (splitPaidList().length) { openBillSplit(); return; }
-        openCheckout();
-      }
+      else if (act === 'checkout') { openCheckout(); }
       else if (act === 'print-bill') { markBillPrinted(el.dataset.order); }
       else if (act === 'send-to-kitchen') {
         if (_sendHoldFired) { _sendHoldFired = false; return; }
@@ -30754,11 +30769,6 @@ function handleActClick(el, e) {
           state.payRailVouchers = false;
           // Tapping it again backs out, like every other row on this rail.
           if (state.billSplit) closeBillSplit(); else openBillSplit();
-        } else if (splitPaidList().length) {
-          // Part of this bill is already paid — no row may offer the whole
-          // amount a second time. Finishing happens in the split.
-          state.toast = 'This bill is in parts — finish it there.';
-          render();
         } else if (k === 'discount') {
           // Tapping it again backs out, like every other row on this rail —
           // it was a one-way door and Cancel was the only escape.

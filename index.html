@@ -8127,7 +8127,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { key, label, amount, method, staffName, parts, cardType } = req.body || {};
+  const { key, label, amount, method, staffName, parts, cardType, tip } = req.body || {};
   const k = String(key || '').slice(0, 40);
   if (!k) return res.status(400).json({ error: 'That part has no name' });
   order.splitPaid = order.splitPaid || [];
@@ -8145,6 +8145,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const by = String(staffName || 'Unknown').slice(0, 40);
   order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
     cardType: CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null,
+    tip: Math.max(0, Math.min(amt, Math.round((parseFloat(tip) || 0) * 100) / 100)),
     at: Date.now(), staffName: by });
   logAudit(data, by, `Took ${String(label || k).slice(0, 60)} ($${amt.toFixed(2)}, ${m}) on Ticket #${order.id}`);
   writeData(data);
@@ -12448,6 +12449,12 @@ function cardTakenAmount() {
   return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
 }
 function cardOver() { return Math.round((cardTakenAmount() - amountOwing()) * 100) / 100; }
+// The tip typed for THIS card — the running total less whatever earlier cards
+// already carried away, so each card shows the tip it actually took.
+function cardTipPending() {
+  const already = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
+  return Math.max(0, Math.round(((parseFloat(state.cardTip) || 0) - already) * 100) / 100);
+}
 function cartGrandTotal() { return cartTotal() + cartTipAmount(); }
 
 function toggleSplitMode() {
@@ -13534,7 +13541,9 @@ function escapeMiddlePane() {
     : state.allergySeatPop ? () => { state.allergySeatPop = false; render(); }
     : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.coversPad ? () => { state.coversPad = null; state.pickFlashId = null; render(); }
-    : state.showCheckout ? () => closeCheckout()
+    // Paying is never left by a stray touch — the same rule as a popup's dark
+    // behind it. Cancel under the bill is the way out (owner, Aug '26).
+    : (state.showCheckout || state.billSplit) ? null
     : state.callAway ? () => closeCallAwayPane()
     : state.quickNotePad ? () => { state.quickNotePad = false; render(); }
     : state.notesPanel ? () => closeNotesPanel()
@@ -16188,14 +16197,6 @@ function renderCallAwayPop() {
 
 // The notes someone actually hands over: the next round dollar up, then the
 // next two Australian notes above that. Never a note smaller than the bill.
-function cashQuickNotes(total) {
-  const out = [];
-  const round = Math.ceil(total / 5) * 5;
-  if (round > total) out.push(round);
-  for (const n of [20, 50, 100, 200]) if (n > total && !out.includes(n)) out.push(n);
-  return out.slice(0, 3);
-}
-
 // Is the payment ready to go through? Asked by the docket's Confirm and by
 // the middle, so they can never disagree.
 function payReady() {
@@ -16240,7 +16241,7 @@ async function takeCardPart(amount) {
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: 'card' + n, label: cardTypeLabel(state.cardType), amount, method: 'card', cardType: state.cardType, staffName }),
+      body: JSON.stringify({ key: 'card' + n, label: cardTypeLabel(state.cardType), amount, method: 'card', cardType: state.cardType, tip: cardTipPending(), staffName }),
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
@@ -16396,6 +16397,13 @@ function renderCheckoutMiddle() {
         <div class="pay-options" style="margin-bottom:14px;">
           ${CARD_TYPES.map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${c.label}</div>`).join('')}
         </div>
+        ${splitPaidList().length ? `
+          <label>Taken so far</label>
+          ${splitPaidList().map(p => `<div class="tot-row"><span>${esc(p.label)}${p.tip ? ` · ${money(p.tip)} tip` : ''}</span><span>${money(p.amount)}</span></div>`).join('')}
+          <div class="tot-row grand" style="color:var(--red);margin-bottom:14px;"><span>Still to pay</span><span>${money(amountOwing())}</span></div>
+        ` : ''}
+        <label>Tip</label>
+        <div class="pay-amount-row"><input id="card-tip-input" class="cash-read ${cardTipPending() > 0 ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${cardTipPending() ? cardTipPending().toFixed(2) : ''}"></div>
         <label>Taken on this card</label>
         <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
         ${cardOver() > 0.005 ? `
@@ -16411,17 +16419,10 @@ function renderCheckoutMiddle() {
             <b>${money(amountOwing() - cardTakenAmount())} still owing after this</b>
             <div class="co-sub">Take it, then the next card goes on top.</div>
           </div>` : ''}
-        ${splitPaidTotal() > 0.005 ? `
-          <div class="tot-row" style="margin-top:12px;"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
-          <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(amountOwing())}</span></div>` : ''}
       ` : ''}
       ${state.paymentMethod === 'cash' ? `
         <label>Cash received</label>
         <div class="pay-amount-row"><input id="cash-given-input" class="cash-read ${state.cashGiven ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${esc(String(state.cashGiven))}"></div>
-        <div class="pay-options" style="margin-bottom:10px;">
-          ${cashQuickNotes(grandTotal).map(n => `<div class="pay-opt" data-act="cash-quick" data-val="${n}">${money(n)}</div>`).join('')}
-          <div class="pay-opt" data-act="cash-quick" data-val="${grandTotal.toFixed(2)}">Exact</div>
-        </div>
         ${change !== null ? `<div class="change-due"><span>Change due</span><span>${money(change)}</span></div>` : ''}
       ` : ''}
       ${state.payRailVouchers ? `
@@ -29771,6 +29772,16 @@ function bindEvents() {
       });
     });
   }
+  const cardTipInput = document.getElementById('card-tip-input');
+  if (cardTipInput) {
+    cardTipInput.addEventListener('change', (e) => {
+      const already = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
+      const v = Math.max(0, parseFloat(e.target.value) || 0);
+      state.cardTip = Math.round((already + v) * 100) / 100;
+      // The amount follows the tip unless they have typed their own number.
+      render();
+    });
+  }
   const cardAmountInput = document.getElementById('card-amount-input');
   if (cardAmountInput) {
     cardAmountInput.addEventListener('change', (e) => {
@@ -30702,7 +30713,6 @@ function handleActClick(el, e) {
       // same doors, reached from where the hand already is.
       // The cash pad writes the same field the old text box did, so nothing
       // downstream of it changes.
-      else if (act === 'cash-quick') { state.cashGiven = String(el.dataset.val); render(); }
       // ---- Paying by card ---------------------------------------------------
       else if (act === 'card-type') { state.cardType = state.cardType === el.dataset.val ? null : el.dataset.val; render(); }
       else if (act === 'card-tip-yes') {

@@ -6347,16 +6347,39 @@ app.get('/api/gift-cards', (req, res) => {
   res.json(readData().giftCards || []);
 });
 
+const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function newVoucherCode() {
+  const bytes = require('crypto').randomBytes(16);
+  let out = '';
+  for (let i = 0; i < 16; i++) out += VOUCHER_ALPHABET[bytes[i] % VOUCHER_ALPHABET.length];
+  return out;
+}
+// However it was typed — spaces, dashes, lower case off a phone screen — it
+// is the same code.
+function normaliseVoucherCode(v) {
+  return String(v || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+// A code the till suggests, so nobody has to invent one.
+app.get('/api/gift-cards/new-code', (req, res) => {
+  const data = readData();
+  let code = newVoucherCode();
+  let guard = 0;
+  while ((data.giftCards || []).some(g => normaliseVoucherCode(g.code) === code) && guard++ < 20) code = newVoucherCode();
+  res.json({ code });
+});
+
 app.post('/api/gift-cards', (req, res) => {
   const data = readData();
   const { code, initialValue } = req.body;
   const value = parseFloat(initialValue);
-  if (!code || !code.trim()) return res.status(400).json({ error: 'Gift card code is required' });
+  const clean = normaliseVoucherCode(code) || newVoucherCode();
+  if (clean.length < 8) return res.status(400).json({ error: 'A voucher code needs at least 8 characters' });
   if (isNaN(value) || value <= 0) return res.status(400).json({ error: 'Initial value must be greater than 0' });
-  if ((data.giftCards || []).some(g => g.code.toLowerCase() === code.trim().toLowerCase())) {
+  if ((data.giftCards || []).some(g => normaliseVoucherCode(g.code) === clean)) {
     return res.status(400).json({ error: 'That code already exists' });
   }
-  const card = { id: 'gc' + Date.now(), code: code.trim().toUpperCase(), initialValue: value, balance: value, active: true, createdAt: Date.now() };
+  const card = { id: 'gc' + Date.now(), code: clean, initialValue: value, balance: value, active: true, createdAt: Date.now() };
   data.giftCards = [...(data.giftCards || []), card];
   logAudit(data, staffFromReq(req), `Issued gift card ${card.code} ($${value.toFixed(2)})`);
   writeData(data);
@@ -6365,7 +6388,8 @@ app.post('/api/gift-cards', (req, res) => {
 
 app.get('/api/gift-cards/lookup/:code', (req, res) => {
   const data = readData();
-  const card = (data.giftCards || []).find(g => g.code.toLowerCase() === req.params.code.toLowerCase());
+  const wanted = normaliseVoucherCode(req.params.code);
+  const card = (data.giftCards || []).find(g => normaliseVoucherCode(g.code) === wanted);
   if (!card) return res.status(404).json({ error: 'Gift card not found' });
   res.json(card);
 });
@@ -19078,10 +19102,20 @@ async function loadGiftCardsAndVouchers() {
   render();
 }
 function openIssueGiftCard() {
-  state.giftCardModal = { code: 'GC' + Math.floor(1000 + Math.random() * 9000), initialValue: '' };
+  state.giftCardModal = { code: '', initialValue: '' };
+  api('/api/gift-cards/new-code').then(r => {
+    if (state.giftCardModal && !state.giftCardModal.code) { state.giftCardModal.code = r.code; render(); }
+  }).catch(() => {});
   state.adminError = '';
   render();
 }
+// Sixteen characters run together can't be read off a printed receipt; in
+// fours it can. Spaces are ignored wherever a code is looked up.
+function voucherCodeSpaced(code) {
+  const c = String(code || '').replace(/[^A-Za-z0-9]/g, '');
+  return c.replace(/(.{4})(?=.)/g, '$1 ');
+}
+
 function closeGiftCardModal() { state.giftCardModal = null; state.adminError = ''; render(); }
 async function saveGiftCardModal() {
   const m = state.giftCardModal;
@@ -19169,7 +19203,7 @@ function renderGiftCardModal() {
       <h2>Issue gift card</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
       <label>Code</label>
-      <input id="gift-card-code-input" type="text" value="${m.code}">
+      <input id="gift-card-code-input" type="text" value="${voucherCodeSpaced(m.code)}" spellcheck="false" autocapitalize="characters">
       <label>Initial value</label>
       <input id="gift-card-value-input" type="number" min="0" step="0.01" value="${m.initialValue}" placeholder="0.00">
       <div class="modal-actions">

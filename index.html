@@ -3075,6 +3075,11 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 .split-part .sp-done{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:700;font-size:var(--fs-sm);}
 .split-part .sp-done svg{width:20px;height:20px;}
 .split-amount-input{min-width:0;}
+/* Every control in a part row is one height — the button height, the button
+   corner. Three sizes in one row read as three different things. */
+.split-part .sp-methods{margin-bottom:0;flex:none;width:150px;}
+.split-part .sp-methods .pay-opt{height:41px;padding:0;display:flex;align-items:center;justify-content:center;}
+.split-part .sp-btn{height:41px;width:96px;flex:none;padding:0;}
 
 </style>
 <div id="app">Loading…</div>
@@ -8024,6 +8029,15 @@ app.post('/api/orders/:id/close', (req, res) => {
   }
   const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
+  // A bill in parts closes only when every part has been taken — otherwise a
+  // stray Pay would charge the table for money it has already handed over.
+  if ((order.splitPaid || []).length) {
+    const already = Math.round(splitPaidTotal(order) * 100);
+    const owed = Math.round(grandTotal * 100);
+    if (already < owed - 1) {
+      return res.status(400).json({ error: `$${((owed - already) / 100).toFixed(2)} of this bill is still unpaid — settle every part first.` });
+    }
+  }
 
   order.subtotal = subtotal;
   order.discount = discountRecord;
@@ -8047,6 +8061,68 @@ app.post('/api/orders/:id/close', (req, res) => {
   creditLoyalty(data, order.customerId, grandTotal);
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
+  res.json(order);
+});
+
+// ---------- Splitting a bill into parts that are REAL --------------------
+// A settled part is money already taken, so it goes onto the open order the
+// moment it is taken. A reload, a flat battery or another till can no longer
+// lose it, and the tab cannot be closed until the parts add up to the bill
+// (owner-asked, Aug '26).
+const SPLIT_WAY_KEYS = ['evenly', 'seat', 'amount', 'category'];
+function splitPaidTotal(order) {
+  return (order.splitPaid || []).reduce((s, p) => s + (p.amount || 0), 0);
+}
+
+// How the bill is being divided, kept on the order so every till shows the
+// same parts. Locked once any part has been paid.
+app.post('/api/orders/:id/split-plan', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  if ((order.splitPaid || []).length) return res.status(400).json({ error: 'A part has been paid — the split cannot be changed.' });
+  const { way, n, amounts } = req.body || {};
+  if (!way) {
+    order.splitPlan = null;
+  } else {
+    if (!SPLIT_WAY_KEYS.includes(String(way))) return res.status(400).json({ error: 'Unknown way to split' });
+    order.splitPlan = {
+      way: String(way),
+      n: Math.max(2, Math.min(50, parseInt(n, 10) || 2)),
+      amounts: Array.isArray(amounts) ? amounts.slice(0, 50).map(a => String(a).slice(0, 12)) : [],
+    };
+  }
+  writeData(data);
+  res.json(order);
+});
+
+// One part settled. The parts are frozen on the first payment so a later
+// round cannot move money that has already been taken.
+app.post('/api/orders/:id/split-part', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  const { key, label, amount, method, staffName, parts } = req.body || {};
+  const k = String(key || '').slice(0, 40);
+  if (!k) return res.status(400).json({ error: 'That part has no name' });
+  order.splitPaid = order.splitPaid || [];
+  if (order.splitPaid.some(p => p.key === k)) return res.status(400).json({ error: 'That part is already paid.' });
+  const amt = Math.round((parseFloat(amount) || 0) * 100) / 100;
+  if (!(amt > 0)) return res.status(400).json({ error: 'That part has no amount' });
+  if (!order.splitParts && Array.isArray(parts) && parts.length) {
+    order.splitParts = parts.slice(0, 60).map(p => ({
+      key: String(p.key || '').slice(0, 40),
+      label: String(p.label || '').slice(0, 60),
+      amount: Math.round((parseFloat(p.amount) || 0) * 100) / 100,
+    })).filter(p => p.key);
+  }
+  const m = ['card', 'cash', 'giftcard', 'account'].includes(String(method)) ? String(method) : 'card';
+  const by = String(staffName || 'Unknown').slice(0, 40);
+  order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m, at: Date.now(), staffName: by });
+  logAudit(data, by, `Took ${String(label || k).slice(0, 60)} ($${amt.toFixed(2)}, ${m}) on Ticket #${order.id}`);
+  writeData(data);
   res.json(order);
 });
 
@@ -12329,21 +12405,54 @@ function splitRemaining() { return cartGrandTotal() - splitTendersSum(); }
 // scaled so they add up exactly to the amount due (tax, discount, tip and
 // all) — cent rounding goes to the seats with the largest remainders.
 function openBillSplit() {
-  if (!activeOpenOrder() && !state.cart.length) return;
+  const order = activeOpenOrder();
+  if (!order && !state.cart.length) return;
   state.showCheckout = false;
-  state.billSplit = { way: 'evenly', n: 2, amounts: [''], paid: {}, methods: {}, printed: {} };
+  // How the bill is being divided is kept ON THE ORDER, so coming back to the
+  // table — on this till or another one — shows the same parts, with the ones
+  // already paid still paid (owner-asked, Aug '26).
+  const plan = (order && order.splitPlan) || null;
+  state.billSplit = {
+    way: (plan && plan.way) || 'evenly',
+    n: (plan && plan.n) || 2,
+    amounts: (plan && plan.amounts && plan.amounts.length) ? plan.amounts.slice() : [''],
+    methods: {}, printed: {},
+  };
   render();
 }
 function closeBillSplit() {
-  // Walking away from a half-settled split would lose the parts already taken,
-  // so it has to be finished or the takings put back by a manager.
-  if (state.billSplit && Object.keys(state.billSplit.paid).length) {
-    state.toast = 'Parts have been settled — finish the bill.';
-    render();
-    return;
-  }
+  // Safe to walk away now: every part taken is recorded on the order, so the
+  // table keeps showing what it still owes and Pay comes straight back here.
   state.billSplit = null;
   render();
+}
+// Every part already PAID on this table, straight from the order.
+function splitPaidList() {
+  const order = activeOpenOrder();
+  return (order && order.splitPaid) || [];
+}
+function splitPaidMap() {
+  const m = {};
+  splitPaidList().forEach(p => { m[p.key] = p; });
+  return m;
+}
+function splitPaidTotal() {
+  return splitPaidList().reduce((a, p) => a + (p.amount || 0), 0);
+}
+// The way the bill is being divided is saved as it is chosen, so the parts are
+// the same on every till. Locked by the server once a part has been paid.
+async function saveSplitPlan() {
+  const order = activeOpenOrder();
+  const sp = state.billSplit;
+  if (!order || !sp || splitPaidList().length) return;
+  try {
+    const updated = await api(`/api/orders/${order.id}/split-plan`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ way: sp.way, n: sp.n, amounts: sp.amounts || [] }),
+    });
+    const i = state.orders.findIndex(o => o.id === updated.id);
+    if (i >= 0) state.orders[i] = updated;
+  } catch (e) { /* the plan is a convenience; the parts still work locally */ }
 }
 // Each part prints as its own bill, so four people get four pieces of paper.
 async function printSplitPart(key) {
@@ -12360,30 +12469,45 @@ async function printSplitPart(key) {
   } catch (e) { state.toast = e.message || 'Could not print that part.'; }
   render();
 }
-// Settling one part. Nothing is written to the order until the last part is
-// taken — then every part goes on as its own payment, so four cards read as
-// four payments, not one lump.
+// Settling one part. The money is taken, so it is written onto the order
+// immediately — a reload or another till can no longer lose it. The tab only
+// closes when the parts add up to the bill, and then each part goes on as its
+// own payment, so four cards read as four payments, not one lump.
 async function paySplitPart(key) {
   const sp = state.billSplit;
-  if (!sp || sp.paid[key] || state.terminalPending) return;
-  const part = billSplitParts().find(p => p.key === key);
+  if (!sp || splitPaidMap()[key] || state.terminalPending) return;
+  const parts = billSplitParts();
+  const part = parts.find(p => p.key === key);
   if (!part || part.amount <= 0) return;
+  const order = activeOpenOrder();
+  if (!order) { state.toast = 'Send the order first.'; render(); return; }
   const method = sp.methods[key] || 'card';
   if (method === 'card' && terminalActive()) {
     const ok = await runTerminalPurchase(part.amount);
     if (!ok) return;
   }
-  sp.paid[key] = true;
+  const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
+  try {
+    const updated = await api(`/api/orders/${order.id}/split-part`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, label: part.label, amount: part.amount, method, staffName, parts }),
+    });
+    const i = state.orders.findIndex(o => o.id === updated.id);
+    if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
+  } catch (e) {
+    state.toast = e.message || 'Could not record that part.';
+    render();
+    return;
+  }
   if (billSplitAllPaid()) {
-    const parts = billSplitParts();
-    state.splitTenders = parts.map(p => ({ method: sp.methods[p.key] || 'card', amount: p.amount.toFixed(2) }));
+    state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
     state.splitMode = true;
     state.billSplit = null;
     state.showCheckout = true;
     await confirmPayment();
     return;
   }
-  state.toast = `${part.label} settled`;
+  state.toast = `${part.label} paid`;
   render();
 }
 
@@ -12391,11 +12515,13 @@ function renderSplitMiddle() {
   const sp = state.billSplit;
   const parts = billSplitParts();
   const outstanding = billSplitOutstanding();
-  const paidCount = parts.filter(p => sp.paid[p.key]).length;
+  const paidMap = splitPaidMap();
+  const paidCount = parts.filter(p => paidMap[p.key]).length;
+  const takenSoFar = splitPaidTotal();
   return `
   <div class="middle-view">
     <div class="pay-pane" style="padding:8px 20px 24px;">
-      <div class="sub">${money(cartGrandTotal())} on this table · ${parts.length} part${parts.length === 1 ? '' : 's'}${paidCount ? ` · ${paidCount} settled` : ''}</div>
+      <div class="sub">${money(cartGrandTotal())} on this table · ${parts.length} part${parts.length === 1 ? '' : 's'}${paidCount ? ` · ${money(takenSoFar)} paid` : ''}</div>
       <label>How to divide it</label>
       <div class="pay-options" style="margin-bottom:14px;">
         ${SPLIT_WAYS.map(w => `<div class="pay-opt ${sp.way === w.key ? 'active' : ''}" data-act="split-way" data-val="${w.key}">${w.label}</div>`).join('')}
@@ -12408,7 +12534,7 @@ function renderSplitMiddle() {
           <button data-act="split-n-inc" ${paidCount ? 'disabled' : ''}>+</button>
         </div>` : ''}
       ${sp.way === 'amount' ? `
-        <label>Set the amounts — whatever is left becomes the last part</label>
+        <label>Set the amounts</label>
         ${(sp.amounts || []).map((a, i) => `
           <div class="split-row">
             <input class="split-amount-input" data-idx="${i}" type="number" min="0" step="0.01" placeholder="0.00" value="${esc(String(a))}" style="flex:1;" ${paidCount ? 'disabled' : ''}>
@@ -12417,24 +12543,29 @@ function renderSplitMiddle() {
         <button class="btn-secondary" style="width:100%;margin-bottom:14px;" data-act="split-amount-add" ${paidCount ? 'disabled' : ''}>+ Another amount</button>` : ''}
       <label>The parts</label>
       ${parts.length ? parts.map(p => {
-        const paid = !!sp.paid[p.key];
-        const method = sp.methods[p.key] || 'card';
+        const paidRec = paidMap[p.key];
+        const paid = !!paidRec;
+        const method = paidRec ? paidRec.method : (sp.methods[p.key] || 'card');
         return `
         <div class="split-part ${paid ? 'is-paid' : ''}">
           <div class="sp-label">${esc(p.label)}${sp.printed[p.key] ? '<span class="sp-printed">printed</span>' : ''}</div>
           <div class="sp-amount">${money(p.amount)}</div>
           ${paid ? `<div class="sp-done">${ACT_TICK_SVG}<span>Paid ${esc(method)}</span></div>` : `
-            <div class="pay-options" style="margin-bottom:0;flex:none;width:132px;">
-              <div class="pay-opt ${method === 'card' ? 'active' : ''}" data-act="split-part-method" data-key="${p.key}" data-val="card">${SYS_CARD_SVG}</div>
-              <div class="pay-opt ${method === 'cash' ? 'active' : ''}" data-act="split-part-method" data-key="${p.key}" data-val="cash">${SYS_CASH_SVG}</div>
+            <div class="pay-options sp-methods">
+              <div class="pay-opt ${method === 'card' ? 'active' : ''}" data-act="split-part-method" data-key="${p.key}" data-val="card">Card</div>
+              <div class="pay-opt ${method === 'cash' ? 'active' : ''}" data-act="split-part-method" data-key="${p.key}" data-val="cash">Cash</div>
             </div>
-            <button class="btn-secondary" style="width:96px;flex:none;padding:0;" data-act="split-print" data-key="${p.key}">Print</button>
-            <button class="btn-confirm" style="width:auto;flex:none;" data-act="split-pay" data-key="${p.key}" ${state.terminalPending || p.amount <= 0 ? 'disabled' : ''}>${terminalActive() && method === 'card' ? 'To terminal' : 'Take it'}</button>`}
+            <button class="btn-secondary sp-btn" data-act="split-print" data-key="${p.key}">Print</button>
+            <button class="btn-confirm sp-btn" data-act="split-pay" data-key="${p.key}" ${state.terminalPending || p.amount <= 0 ? 'disabled' : ''}>${terminalActive() && method === 'card' ? 'To terminal' : 'Take it'}</button>`}
         </div>`;
       }).join('') : '<div class="muted">Nothing to divide yet.</div>'}
-      <div class="tot-row grand" style="margin-top:14px;${outstanding <= 0.005 ? '' : 'color:var(--red);'}">
-        <span>${outstanding <= 0.005 ? 'All parts settled' : 'Still to settle'}</span><span>${money(outstanding)}</span>
+      ${takenSoFar > 0.005 ? `<div class="tot-row" style="margin-top:14px;"><span>Paid so far</span><span>${money(takenSoFar)}</span></div>` : ''}
+      <div class="tot-row grand" style="margin-top:${takenSoFar > 0.005 ? '0' : '14px'};${outstanding <= 0.005 ? '' : 'color:var(--red);'}">
+        <span>${outstanding <= 0.005 ? 'All parts paid' : 'Still to pay'}</span><span>${money(outstanding)}</span>
       </div>
+    </div>
+    <div class="pane-actions">
+      <button class="icon-action discard" data-act="close-split">${ACT_CROSS_SVG}<span class="ia-label">Back</span></button>
     </div>
   </div>`;
 }
@@ -12475,6 +12606,20 @@ function shareCents(weights, targetCents) {
 function billSplitParts() {
   const sp = state.billSplit;
   if (!sp) return [];
+  // Once a part is paid the parts are FROZEN on the order — a later round can
+  // never move money that has already been taken. Anything added afterwards
+  // shows up as its own part, so the table still cannot close a dollar short.
+  const order = activeOpenOrder();
+  const frozen = (order && order.splitParts) || null;
+  if (frozen && frozen.length) {
+    const parts = frozen.map(p => ({ key: p.key, label: p.label, amount: p.amount }));
+    const paidMap = splitPaidMap();
+    Object.keys(paidMap).filter(k => k.indexOf('later') === 0).sort()
+      .forEach(k => parts.push({ key: k, label: paidMap[k].label, amount: paidMap[k].amount }));
+    const extra = Math.round((cartGrandTotal() - parts.reduce((a, p) => a + p.amount, 0)) * 100) / 100;
+    if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
+    return parts;
+  }
   const target = Math.round(cartGrandTotal() * 100);
   if (sp.way === 'evenly') {
     const n = Math.max(2, sp.n || 2);
@@ -12513,12 +12658,13 @@ function billSplitParts() {
 
 function billSplitAllPaid() {
   const parts = billSplitParts();
-  return parts.length > 0 && parts.every(p => state.billSplit.paid[p.key]);
+  const paidMap = splitPaidMap();
+  return parts.length > 0 && parts.every(p => paidMap[p.key]);
 }
 function billSplitOutstanding() {
-  const sp = state.billSplit;
-  if (!sp) return 0;
-  return billSplitParts().filter(p => !sp.paid[p.key]).reduce((a, p) => a + p.amount, 0);
+  if (!state.billSplit) return 0;
+  const paidMap = splitPaidMap();
+  return billSplitParts().filter(p => !paidMap[p.key]).reduce((a, p) => a + p.amount, 0);
 }
 
 function seatShares() {
@@ -13578,6 +13724,9 @@ function maybeApplyAutoSurcharge() {
 }
 function openCheckout() {
   if (state.cart.length === 0 && !state.openOrderId) return;
+  // Money has already been taken in parts on this table — the rest of it is
+  // taken in the split screen, never as a fresh full-bill payment.
+  if (splitPaidList().length) { openBillSplit(); return; }
   // A dine-in bill needs a table — prompt for one first.
   if (state.orderType === 'dine-in' && !state.table) { openTablePicker(); return; }
   dropMobileDrawer();
@@ -15622,6 +15771,9 @@ function renderTicketPanel() {
           ${discountAmount ? `<div class="tot-row"><span>${state.discount && state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${money(-discountAmount)}</span></div>` : ''}
           ${taxAll ? `<div class="tot-row"><span>${esc(taxLabel())}</span><span>${money(taxAll)}</span></div>` : ''}</div>` : ''}
         <div class="tot-row grand"><span>Total ${state.totalsExpanded ? '' : '▸'}</span><span>${money(totalAll)}</span></div>
+        ${splitPaidList().length ? `
+          <div class="tot-row"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
+          <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(Math.max(0, totalAll - splitPaidTotal()))}</span></div>` : ''}
       </div>`;
     })()}
     <div class="ticket-actions">
@@ -30305,11 +30457,18 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'clear') {
+        // Money has been taken on this table — the bill has to be finished.
+        if (splitPaidList().length) { state.toast = 'Parts of this bill are paid — finish it.'; render(); return; }
         // Discarding wipes the unsent items — confirm first (mirrors log-off).
         if (state.cart.length) openConfirm({ message: 'Discard the unsent items on this ticket?', confirmLabel: 'Discard', danger: true }, () => discardCartUndoable());
         else clearCart();
       }
-      else if (act === 'checkout') { openCheckout(); }
+      else if (act === 'checkout') {
+        // A bill already in parts is finished in the split screen — Pay must
+        // never offer the whole amount again over money already taken.
+        if (splitPaidList().length) { openBillSplit(); return; }
+        openCheckout();
+      }
       else if (act === 'print-bill') { markBillPrinted(el.dataset.order); }
       else if (act === 'send-to-kitchen') {
         if (_sendHoldFired) { _sendHoldFired = false; return; }
@@ -30369,20 +30528,21 @@ function handleActClick(el, e) {
       else if (act === 'open-split') { openBillSplit(); }
       else if (act === 'close-split') { closeBillSplit(); }
       else if (act === 'split-way') {
-        if (Object.keys(state.billSplit.paid).length) { state.toast = 'A part has been settled — finish it or cancel.'; render(); return; }
+        if (splitPaidList().length) { state.toast = 'A part has been paid — finish it.'; render(); return; }
         state.billSplit.way = el.dataset.val;
         if (state.billSplit.way === 'amount' && !(state.billSplit.amounts || []).length) state.billSplit.amounts = [''];
-        render();
+        render(); saveSplitPlan();
       }
-      else if (act === 'split-n-inc') { state.billSplit.n = Math.min(20, (state.billSplit.n || 2) + 1); render(); }
-      else if (act === 'split-n-dec') { state.billSplit.n = Math.max(2, (state.billSplit.n || 2) - 1); render(); }
-      else if (act === 'split-amount-add') { state.billSplit.amounts = [...(state.billSplit.amounts || []), '']; render(); }
+      else if (act === 'split-n-inc') { state.billSplit.n = Math.min(20, (state.billSplit.n || 2) + 1); render(); saveSplitPlan(); }
+      else if (act === 'split-n-dec') { state.billSplit.n = Math.max(2, (state.billSplit.n || 2) - 1); render(); saveSplitPlan(); }
+      else if (act === 'split-amount-add') { state.billSplit.amounts = [...(state.billSplit.amounts || []), '']; render(); saveSplitPlan(); }
       else if (act === 'split-amount-remove') {
         const i = parseInt(el.dataset.idx, 10);
         state.billSplit.amounts = (state.billSplit.amounts || []).filter((_, n) => n !== i);
-        render();
+        render(); saveSplitPlan();
       }
       else if (act === 'split-part-method') { state.billSplit.methods[el.dataset.key] = el.dataset.val; render(); }
+      else if (act === 'close-split') { closeBillSplit(); }
       else if (act === 'split-print') { printSplitPart(el.dataset.key); }
       else if (act === 'split-pay') { paySplitPart(el.dataset.key); }
       else if (act === 'split-tender-rest') {

@@ -804,6 +804,8 @@ label.toggle-row{display:flex;align-items:center;gap:10px;cursor:pointer;font-si
    collide with it (e.g. "Uncategorized$316.14"). */
 .detail-line > span:first-child{min-width:0;overflow:hidden;text-overflow:ellipsis;}
 .detail-line > span:last-child{flex-shrink:0;white-space:nowrap;text-align:right;}
+/* A breakdown under the line above it — which card made up the card total. */
+.detail-line.sub-line{font-size:var(--fs-sm);color:var(--text-secondary);padding:2px 0 2px 14px;}
 .void-btn{background:none;border:1px solid var(--red);color:var(--red);border-radius:8px;padding:9px;font-weight:700;cursor:pointer;width:100%;margin-top:10px;}
 .icon-btn{border-radius:var(--btn-radius);transition:background .12s,color .12s;}
 /* Row deletes stay quiet until pointed at — a page of red ✕s reads as danger
@@ -3075,6 +3077,13 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 .split-part .sp-done{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:700;font-size:var(--fs-sm);}
 .split-part .sp-done svg{width:20px;height:20px;}
 .split-amount-input{min-width:0;}
+/* Card screen: the two answers to "the number isn't the bill". */
+.card-ask{margin:0 0 12px;padding:11px 13px;border-radius:var(--radius);background:var(--green-dim);border:1px solid var(--green);}
+.card-ask b{color:var(--green);font-size:var(--fs-md);}
+.card-ask .ca-btns{display:flex;gap:8px;margin-top:9px;}
+.card-owing{margin:0 0 12px;padding:11px 13px;border-radius:var(--radius);background:color-mix(in srgb, var(--red) 10%, var(--surface));border:1px solid var(--red);}
+.card-owing b{color:var(--red);font-size:var(--fs-md);}
+.card-owing .co-sub{font-size:var(--fs-sm);color:var(--text-secondary);margin-top:4px;}
 /* Every control in a part row is one height — the button height, the button
    corner. Three sizes in one row read as three different things. */
 .split-part .sp-methods{margin-bottom:0;flex:none;width:150px;}
@@ -8010,7 +8019,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId } = req.body;
+  const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId, cardType } = req.body;
 
   const subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   const { discountRecord, discountAmount } = computeDiscount(subtotal, discount);
@@ -8048,6 +8057,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   order.paymentMethod = splitPayments ? 'split' : (paymentMethod || 'card');
   order.payments = splitPayments;
   order.giftCardCode = paymentMethod === 'giftcard' ? giftCardResult.card.code : null;
+  order.cardType = CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null;
   order.status = 'paid';
   order.closedBy = staffName || order.staffName;
   order.closedAt = Date.now();
@@ -8070,6 +8080,9 @@ app.post('/api/orders/:id/close', (req, res) => {
 // lose it, and the tab cannot be closed until the parts add up to the bill
 // (owner-asked, Aug '26).
 const SPLIT_WAY_KEYS = ['evenly', 'seat', 'amount', 'category'];
+// Which card it was — recorded only, never charged. It is what lets the
+// night's takings be matched against the terminal's own settlement report.
+const CARD_TYPE_KEYS = ['visa', 'mastercard', 'amex', 'eftpos'];
 function splitPaidTotal(order) {
   return (order.splitPaid || []).reduce((s, p) => s + (p.amount || 0), 0);
 }
@@ -8104,7 +8117,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { key, label, amount, method, staffName, parts } = req.body || {};
+  const { key, label, amount, method, staffName, parts, cardType } = req.body || {};
   const k = String(key || '').slice(0, 40);
   if (!k) return res.status(400).json({ error: 'That part has no name' });
   order.splitPaid = order.splitPaid || [];
@@ -8120,7 +8133,9 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   }
   const m = ['card', 'cash', 'giftcard', 'account'].includes(String(method)) ? String(method) : 'card';
   const by = String(staffName || 'Unknown').slice(0, 40);
-  order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m, at: Date.now(), staffName: by });
+  order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
+    cardType: CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null,
+    at: Date.now(), staffName: by });
   logAudit(data, by, `Took ${String(label || k).slice(0, 60)} ($${amt.toFixed(2)}, ${m}) on Ticket #${order.id}`);
   writeData(data);
   res.json(order);
@@ -8376,11 +8391,31 @@ function computePeriodSummary(data, fromTs, toTs) {
       giftNet += gt - refunded;
     }
   });
+  // Which card — Visa / Mastercard / Amex / EFTPOS — so the night's card
+  // takings can be matched against the terminal's own settlement report.
+  const byCard = {};
+  const addCard = (type, amount) => {
+    if (!(amount > 0)) return;
+    const k = CARD_TYPE_KEYS.includes(String(type)) ? String(type) : 'other';
+    byCard[k] = (byCard[k] || 0) + amount;
+  };
+  paid.forEach(o => {
+    const gt = o.grandTotal !== undefined ? o.grandTotal : o.total;
+    const refunded = o.refundedTotal || 0;
+    const kept = gt > 0 ? 1 - refunded / gt : 1;
+    if (Array.isArray(o.splitPaid) && o.splitPaid.length) {
+      o.splitPaid.filter(p => p.method === 'card').forEach(p => addCard(p.cardType, p.amount * kept));
+    } else if (o.paymentMethod === 'card') {
+      addCard(o.cardType, gt - refunded);
+    }
+  });
+
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
   // cash, the lime run) — logged, and owed against the expected count.
   const paidOuts = (data.paidOuts || []).filter(p => p.ts > fromTs && p.ts <= toTs);
   const paidOutTotal = paidOuts.reduce((a, p) => a + p.amount, 0);
   return {
+    byCard,
     orderCount: paid.length,
     voidCount,
     subtotal,
@@ -8992,6 +9027,9 @@ let state = {
   customerSearch: '',
   customerSearchResults: [],
   attachedCustomerId: null,
+  cardType: null,      // Visa / Mastercard / Amex / EFTPOS — recorded, never charged
+  cardAmount: '',      // what's being taken on THIS card; empty = whatever is owing
+  cardTip: 0,          // the bit over the bill they chose to leave
   expenses: [],
   expenseForm: { date: '', category: '', amount: '', note: '' },
   stockMovements: [],
@@ -12366,10 +12404,46 @@ function cartTotal() {
   return taxCfg().mode === 'exclusive' ? taxable + cartTax() : taxable;
 }
 function cartTipAmount() {
-  if (!state.settings.tipsEnabled || state.tipMode === 'none') return 0;
-  if (state.tipMode === 'preset') return cartTotal() * ((state.tipPercent || 0) / 100);
-  if (state.tipMode === 'custom') return Math.max(0, parseFloat(state.tipCustomAmount) || 0);
-  return 0;
+  // A tip left on the card is money the terminal actually took, so it counts
+  // whether or not tip prompting is switched on (owner-asked, Aug '26).
+  const card = Math.max(0, parseFloat(state.cardTip) || 0);
+  if (!state.settings.tipsEnabled || state.tipMode === 'none') return card;
+  if (state.tipMode === 'preset') return cartTotal() * ((state.tipPercent || 0) / 100) + card;
+  if (state.tipMode === 'custom') return Math.max(0, parseFloat(state.tipCustomAmount) || 0) + card;
+  return card;
+}
+
+// ---------- Paying by card ------------------------------------------------
+// The card screen is shaped like the cash screen: one amount, the same pad.
+// It opens with whatever is still owing already in it, so the ordinary bill
+// is no typing at all. Type MORE and it offers the difference as a tip; type
+// LESS and it takes that much on this card and the table keeps the rest owing
+// (owner-asked, Aug '26).
+const CARD_TYPES = [
+  { key: 'visa', label: 'Visa' },
+  { key: 'mastercard', label: 'Mastercard' },
+  { key: 'amex', label: 'Amex' },
+  { key: 'eftpos', label: 'EFTPOS' },
+];
+function cardTypeLabel(k) { return (CARD_TYPES.find(c => c.key === k) || {}).label || 'Card'; }
+// Everything still owed on this table: the bill less every part already taken.
+function amountOwing() {
+  return Math.max(0, Math.round((cartGrandTotal() - splitPaidTotal()) * 100) / 100);
+}
+function cardTakenAmount() {
+  const v = String(state.cardAmount || '');
+  if (v === '') return amountOwing();
+  return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
+}
+function cardOver() { return Math.round((cardTakenAmount() - amountOwing()) * 100) / 100; }
+// Two round-ups above the bill, for the tip they hand over on the terminal.
+function cardQuickAmounts(owing) {
+  const out = [];
+  for (const step of [5, 10]) {
+    const up = Math.ceil((owing + 0.01) / step) * step;
+    if (up > owing && !out.includes(up)) out.push(up);
+  }
+  return out.slice(0, 2);
 }
 function cartGrandTotal() { return cartTotal() + cartTipAmount(); }
 
@@ -12625,14 +12699,20 @@ function billSplitParts() {
     if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
     return parts;
   }
-  const target = Math.round(cartGrandTotal() * 100);
+  // Money already taken (a card, an earlier part) stays as its own row, and
+  // only what is LEFT gets divided — the two screens must never disagree.
+  const paidRows = splitPaidList().map(p => ({ key: p.key, label: p.label, amount: p.amount }));
+  const target = Math.round(amountOwing() * 100);
+  if (!target && paidRows.length) return paidRows;
   if (sp.way === 'evenly') {
     const n = Math.max(2, sp.n || 2);
     const amounts = shareCents(Array(n).fill(1), target);
-    return amounts.map((a, i) => ({ key: 'e' + (i + 1), label: `Share ${i + 1} of ${n}`, amount: a }));
+    return paidRows.concat(amounts.map((a, i) => ({ key: 'e' + (i + 1), label: `Share ${i + 1} of ${n}`, amount: a })));
   }
   if (sp.way === 'seat') {
-    return seatShares().map(r => ({ key: 's' + r.seat, label: `${state.settings.seatPrefix || 'Seat'} ${r.seat}`, amount: r.amount }));
+    const seats = seatShares();
+    const amounts = shareCents(seats.map(r => r.amount), target);
+    return paidRows.concat(seats.map((r, i) => ({ key: 's' + r.seat, label: `${state.settings.seatPrefix || 'Seat'} ${r.seat}`, amount: amounts[i] })));
   }
   if (sp.way === 'category') {
     const byCat = new Map();
@@ -12648,7 +12728,7 @@ function billSplitParts() {
     if (other > 0.001) rows.push({ key: 'cother', label: 'Everything else', raw: other });
     if (!rows.length) return [];
     const amounts = shareCents(rows.map(r => r.raw), target);
-    return rows.map((r, i) => ({ key: r.key, label: r.label, amount: amounts[i] }));
+    return paidRows.concat(rows.map((r, i) => ({ key: r.key, label: r.label, amount: amounts[i] })));
   }
   if (sp.way === 'amount') {
     const typed = (sp.amounts || []).map(a => Math.max(0, Math.round((parseFloat(a) || 0) * 100)));
@@ -12656,9 +12736,9 @@ function billSplitParts() {
     const parts = typed.map((c, i) => ({ key: 'a' + i, label: `Part ${i + 1}`, amount: c / 100 }));
     const rest = target - used;
     parts.push({ key: 'arest', label: 'The rest', amount: Math.max(0, rest) / 100, isRest: true });
-    return parts;
+    return paidRows.concat(parts);
   }
-  return [];
+  return paidRows;
 }
 
 function billSplitAllPaid() {
@@ -13745,6 +13825,8 @@ function openCheckout() {
   maybeApplyAutoSurcharge();
   state.paymentMethod = 'card';
   state.cashGiven = '';
+  state.cardAmount = '';
+  state.cardTip = 0;
   state.tipMode = 'none';
   state.tipPercent = null;
   state.tipCustomAmount = '';
@@ -13763,7 +13845,7 @@ function openCheckout() {
   state.attachedCustomerId = (openOrder && openOrder.customerId) || null;
   render();
 }
-function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.paySeat = null; state.evenSplit = null; render(); }
+function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
 
 // Items whose ordered quantity exceeds the tracked stock count — the "inventory
 // vs actual stock don't align" case. Soft: warned, never blocked.
@@ -14203,6 +14285,16 @@ async function runTerminalPurchase(amount) {
 async function confirmPayment() {
   // A bill being split is settled part by part, never in one lump.
   if (state.billSplit) return;
+  // A card taking less than the whole bill — or landing on a table that has
+  // already had money taken — goes on as a part, not as a fresh whole bill.
+  if (state.paymentMethod === 'card' && !state.splitMode) {
+    const taken = cardTakenAmount();
+    if (taken <= 0 || cardOver() > 0.005) return;
+    if (taken < amountOwing() - 0.005 || splitPaidList().length) {
+      await takeCardPart(taken);
+      return;
+    }
+  }
   const grandTotal = cartGrandTotal();
   const tipAmount = cartTipAmount();
   // Card + integrated terminal: charge the terminal first; only a real
@@ -14228,10 +14320,13 @@ async function confirmPayment() {
       const order = await api(`/api/orders/${state.openOrderId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null }),
+        body: JSON.stringify({ paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType }),
       });
       state.openOrderId = null;
       state.cart = [];
+      state.cardAmount = '';
+      state.cardTip = 0;
+      state.cardType = null;
       state.covers = (findTableById(state.table) || {}).covers || 0;
       state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
@@ -16110,16 +16205,61 @@ function payReady() {
   if (state.splitMode) {
     return Math.abs(splitRemaining()) <= 0.01 && state.splitTenders.every(t => (parseFloat(t.amount) || 0) > 0);
   }
-  if (state.paymentMethod === 'card' || state.paymentMethod === 'giftcard') return true;
+  if (state.paymentMethod === 'card') {
+    // Over the bill has to be answered first — tip or fix the number.
+    return cardTakenAmount() > 0 && cardOver() <= 0.005;
+  }
+  if (state.paymentMethod === 'giftcard') return true;
   const given = parseFloat(state.cashGiven);
   return !isNaN(given) && given >= grand;
 }
 function payConfirmLabel() {
   const grand = cartGrandTotal();
-  if (terminalActive() && state.paymentMethod === 'card' && !state.splitMode) return `Send ${money(grand)}`;
+  if (state.paymentMethod === 'card' && !state.splitMode) {
+    const taken = cardTakenAmount();
+    const part = taken < amountOwing() - 0.005;
+    if (terminalActive()) return `Send ${money(taken)}`;
+    return part ? `Take ${money(taken)}` : `Confirm ${money(taken)}`;
+  }
   const given = parseFloat(state.cashGiven);
   if (state.paymentMethod === 'cash' && !isNaN(given) && given > grand) return `Take ${money(given)}`;
   return `Confirm ${money(grand)}`;
+}
+
+// One card of several: the money is taken now, so it is written onto the order
+// now — the same parts the split screen uses, so the table still cannot close
+// a dollar short.
+async function takeCardPart(amount) {
+  const order = activeOpenOrder();
+  if (!order) { state.toast = 'Send the order first.'; render(); return; }
+  if (terminalActive() && !state._terminalApproved) {
+    const ok = await runTerminalPurchase(amount);
+    if (!ok) return;
+  }
+  const n = (order.splitPaid || []).filter(p => String(p.key).indexOf('card') === 0).length + 1;
+  const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
+  try {
+    const updated = await api(`/api/orders/${order.id}/split-part`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: 'card' + n, label: cardTypeLabel(state.cardType), amount, method: 'card', cardType: state.cardType, staffName }),
+    });
+    const i = state.orders.findIndex(o => o.id === updated.id);
+    if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
+  } catch (e) {
+    state.toast = e.message || 'Could not record that card.';
+    render();
+    return;
+  }
+  state.cardAmount = '';
+  if (amountOwing() <= 0.005) {
+    // The cards add up to the bill — close it, each card its own payment.
+    state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
+    state.splitMode = true;
+    await confirmPayment();
+    return;
+  }
+  state.toast = `${money(amount)} taken — ${money(amountOwing())} still to pay`;
+  render();
 }
 
 function renderCheckoutMiddle() {
@@ -16252,6 +16392,38 @@ function renderCheckoutMiddle() {
         </div>
       ` : `
       <!-- method lives on the pay rail (one door) -->
+      ${state.paymentMethod === 'card' ? `
+        <label>Card type</label>
+        <div class="pay-options" style="margin-bottom:14px;">
+          ${CARD_TYPES.map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${c.label}</div>`).join('')}
+        </div>
+        <label>Taken on this card</label>
+        <div class="cash-read filled">${money(cardTakenAmount())}</div>
+        <div class="pay-options" style="margin-bottom:10px;">
+          <div class="pay-opt ${state.cardAmount === '' ? 'active' : ''}" data-act="card-quick" data-val="">All of it</div>
+          ${cardQuickAmounts(amountOwing()).map(n => `<div class="pay-opt ${state.cardAmount === n.toFixed(2) ? 'active' : ''}" data-act="card-quick" data-val="${n.toFixed(2)}">${money(n)}</div>`).join('')}
+        </div>
+        ${cardOver() > 0.005 ? `
+          <div class="card-ask">
+            <b>${money(cardOver())} over — keep it as a tip?</b>
+            <div class="ca-btns">
+              <button class="btn-confirm" style="width:auto;" data-act="card-tip-yes">Yes, tip</button>
+              <button class="btn-secondary sm" style="width:auto;" data-act="card-tip-no">No, fix it</button>
+            </div>
+          </div>` : ''}
+        ${cardOver() < -0.005 ? `
+          <div class="card-owing">
+            <b>${money(amountOwing() - cardTakenAmount())} still owing after this</b>
+            <div class="co-sub">Take it, then the next card goes on top.</div>
+          </div>` : ''}
+        <div class="covers-pad-grid" style="max-width:330px;">
+          ${['1','2','3','4','5','6','7','8','9','.','0','back'].map(k =>
+            `<button type="button" class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="card-key" data-key="${k}">${k === 'back' ? '⌫' : k}</button>`).join('')}
+        </div>
+        ${splitPaidTotal() > 0.005 ? `
+          <div class="tot-row" style="margin-top:12px;"><span>Paid so far</span><span>${money(splitPaidTotal())}</span></div>
+          <div class="tot-row grand" style="color:var(--red);"><span>Still to pay</span><span>${money(amountOwing())}</span></div>` : ''}
+      ` : ''}
       ${state.paymentMethod === 'cash' ? `
         <label>Cash received</label>
         <div class="cash-read ${state.cashGiven ? 'filled' : ''}">${state.cashGiven ? money(parseFloat(state.cashGiven) || 0) : '0.00'}</div>
@@ -16470,6 +16642,8 @@ function renderRegisterAdmin() {
     ${cur.refunds ? `<div class="detail-line"><span>Refunds</span><span>-${money(cur.refunds)}</span></div>` : ''}
     <div class="detail-line" style="font-weight:700;font-size:15px;"><span>Net total</span><span>${money(cur.netTotal)}</span></div>
     <div class="detail-line"><span>Card</span><span>${money(cur.cardNet)}</span></div>
+    ${Object.entries(cur.byCard || {}).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+      `<div class="detail-line sub-line"><span>${k === 'other' ? 'Not recorded' : cardTypeLabel(k)}</span><span>${money(v)}</span></div>`).join('')}
     <div class="detail-line"><span>Cash</span><span>${money(cur.cashNet)}</span></div>
     ${cur.giftNet ? `<div class="detail-line"><span>Gift cards</span><span>${money(cur.giftNet)}</span></div>` : ''}
   </div>
@@ -30539,6 +30713,26 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'cash-quick') { state.cashGiven = String(el.dataset.val); render(); }
+      // ---- Paying by card ---------------------------------------------------
+      else if (act === 'card-type') { state.cardType = state.cardType === el.dataset.val ? null : el.dataset.val; render(); }
+      else if (act === 'card-quick') { state.cardAmount = String(el.dataset.val); render(); }
+      else if (act === 'card-key') {
+        const k = el.dataset.key;
+        // The pad starts from whatever is showing, so a correction is one tap.
+        let v = state.cardAmount === '' ? amountOwing().toFixed(2) : String(state.cardAmount);
+        if (k === 'back') v = v.slice(0, -1);
+        else if (k === '.') { if (!v.includes('.')) v = (v || '0') + '.'; }
+        else if (/^[0-9]$/.test(k)) { if (!(v.includes('.') && v.split('.')[1].length >= 2)) v += k; }
+        state.cardAmount = v;
+        render();
+      }
+      else if (act === 'card-tip-yes') {
+        // The extra is money the terminal took — it goes on as a tip, which
+        // makes the amount typed and the bill agree again.
+        state.cardTip = Math.round((state.cardTip + cardOver()) * 100) / 100;
+        render();
+      }
+      else if (act === 'card-tip-no') { state.cardAmount = ''; render(); }
       // ---- Splitting a bill -------------------------------------------------
       else if (act === 'split-way') {
         if (splitPaidList().length) { state.toast = 'A part has been paid — finish it.'; render(); return; }
@@ -30594,6 +30788,7 @@ function handleActClick(el, e) {
           state.payRailSplit = false;
           state.payRailVouchers = false;
           state.paymentMethod = k;
+          state.cardAmount = '';
           render();
         }
       }

@@ -428,6 +428,17 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
    (owner, Aug '26). auto-fill keeps the column COUNT, so a section with two
    items gets two normal tiles and empty tracks — never two slabs. */
 .menu-panel .grid{grid-template-columns:repeat(auto-fill,minmax(var(--item-min-w,118px),1fr));}
+/* Fixed grid (Design → Menu tiles steppers). Cols pin the column count; rows
+   pin the tile height so exactly that many rows fill the menu area — the
+   rest scrolls. Auto (attr "0") leaves the auto-fill rules above in charge. */
+body[data-fixed-cols="1"] .menu-panel .grid{grid-template-columns:repeat(var(--grid-cols,5),1fr);}
+body[data-fixed-rows="1"] .menu-panel .grid{grid-auto-rows:var(--fixed-row-h,92px);}
+body[data-fixed-rows="1"] .menu-panel .grid .item-card{height:var(--fixed-row-h,92px);}
+.mk-wrap[data-fixed-cols="1"] .mk-menu .grid{grid-template-columns:repeat(var(--grid-cols,5),1fr);}
+.grid-stepper{display:flex;align-items:center;gap:10px;}
+.grid-stepper .btn-secondary.sm{width:48px;padding:0;font-size:var(--fs-lg);}
+.grid-stepper .btn-secondary[disabled]{opacity:.45;cursor:default;}
+.grid-step-val{min-width:52px;text-align:center;font-weight:700;font-size:var(--fs-md);}
 /* One fixed height per size setting: a long name never makes a taller button.
    Names clamp to two lines (one when sharing space with a photo or icon); the
    price sits pinned to the bottom in the tile's own text colour. Tiles with a
@@ -5094,6 +5105,21 @@ app.put('/api/theme', (req, res) => {
   };
   for (const f of ['itemSize', 'fontSize', 'tktFontSize', 'subcatSize', 'railSize', 'railHeight', 'tileGap', 'tktGap', 'tileHeight']) {
     const nv = sizeVal(req.body[f]);
+    if (nv !== undefined) data.theme[f] = nv;
+  }
+  // Fixed order-grid steppers: 0 = Auto, else 2..12, single value or per-device map.
+  const dimVal = (v) => {
+    const one = (x) => { const n = Number(x); return Number.isInteger(n) && (n === 0 || (n >= 2 && n <= 12)) ? n : undefined; };
+    if (typeof v === 'number' || typeof v === 'string') return one(v);
+    if (v && typeof v === 'object') {
+      const out = {};
+      for (const d of ['pc', 'tablet', 'mobile']) { const n = one(v[d]); if (n !== undefined) out[d] = n; }
+      return Object.keys(out).length ? out : undefined;
+    }
+    return undefined;
+  };
+  for (const f of ['gridCols', 'gridRows']) {
+    const nv = dimVal(req.body[f]);
     if (nv !== undefined) data.theme[f] = nv;
   }
   if (Number.isFinite(Number(tktWidth))) data.theme.tktWidth = Math.max(260, Math.min(560, Math.round(Number(tktWidth))));
@@ -11584,6 +11610,46 @@ function themeSizePatch(field, val) {
   const base = (cur && typeof cur === 'object') ? cur : { pc: cur || 'md', mobile: cur || 'md' };
   return { ...base, [dev]: val };
 }
+// Fixed order-screen grid (owner-picked, Aug '26): "Tiles across" and
+// "Tiles down" steppers in Design → Menu tiles. 0 = Auto, which is the
+// pre-existing behaviour (the tile-size slider drives everything) — nothing
+// changes until the owner touches a stepper. Rows size the tiles to fit that
+// many on screen; anything past the fold scrolls freely (owner: no paging).
+// A row is never squeezed under 44px tall — below that staff mis-tap.
+const GRID_DIM_MIN = 2, GRID_DIM_MAX = 12, GRID_ROW_MIN_H = 44;
+function gridDimFor(field, dev) {
+  const v = state.theme[field];
+  const n = Number((v && typeof v === 'object') ? v[dev] : v);
+  return Number.isInteger(n) && n >= GRID_DIM_MIN && n <= GRID_DIM_MAX ? n : 0;
+}
+function gridDimPatch(field, val) {
+  const dev = state.mockDevice === 'mobile' ? 'mobile' : 'pc';
+  const cur = state.theme[field];
+  const base = (cur && typeof cur === 'object') ? cur : { pc: cur || 0, mobile: cur || 0 };
+  return { ...base, [dev]: val };
+}
+// Measures AFTER render (needs the mounted order screen): row height is the
+// leftover menu height divided by the chosen row count.
+function applyGridDims() {
+  const dev = activeLayoutDevice() === 'mobile' ? 'mobile' : 'pc';
+  const cols = gridDimFor('gridCols', dev);
+  const rows = gridDimFor('gridRows', dev);
+  const root = document.documentElement;
+  document.body.setAttribute('data-fixed-cols', cols ? '1' : '0');
+  if (cols) root.style.setProperty('--grid-cols', cols); else root.style.removeProperty('--grid-cols');
+  let rowH = 0;
+  if (rows) {
+    const scroller = document.querySelector('.menu-panel .menu-scroll');
+    const grid = scroller && scroller.querySelector('.grid');
+    if (grid) {
+      const gap = parseFloat(getComputedStyle(grid).rowGap) || 10;
+      const avail = scroller.clientHeight - (grid.offsetTop - scroller.offsetTop) - 18;
+      rowH = Math.max(GRID_ROW_MIN_H, Math.floor((avail - (rows - 1) * gap) / rows));
+    }
+  }
+  document.body.setAttribute('data-fixed-rows', rows && rowH ? '1' : '0');
+  if (rows && rowH) root.style.setProperty('--fixed-row-h', rowH + 'px'); else root.style.removeProperty('--fixed-row-h');
+}
 // 'auto' theme follows the DEVICE's light/dark setting (the tablet's own
 // display mode), resolved live so flipping the tablet flips the till.
 function resolvedThemeMode() {
@@ -14673,6 +14739,7 @@ function render() {
   fitTileNames();
   placeTileCounts();
   syncPopupTileGrids();
+  applyGridDims();
   // Table select owns the WHOLE screen: while it's the visible middle pane
   // the rail and docket hide (they're dead during picking) and the grid
   // upsizes — see body[data-fs-picker] rules. Exit stays: pick / Close /
@@ -14750,7 +14817,7 @@ function syncPopupTileGrids() {
 let _qnResizeTimer = 0;
 window.addEventListener('resize', () => {
   clearTimeout(_qnResizeTimer);
-  _qnResizeTimer = setTimeout(() => { fitTileNames(); placeTileCounts(); syncPopupTileGrids(); }, 120);
+  _qnResizeTimer = setTimeout(() => { fitTileNames(); placeTileCounts(); syncPopupTileGrids(); applyGridDims(); }, 120);
 });
 // "2 Kofta" — the count reads naturally to the LEFT of the item name. It's an
 // overlay measured against the name's first text line (after fitTileNames has
@@ -22642,8 +22709,9 @@ function renderScreenMockup() {
     </div>`;
   requestAnimationFrame(fitScreenMockup);
   const sizeAttrs = Object.entries(THEME_SIZE_ATTRS).map(([f, a]) => `${a}="${themeSizeFor(f, dev)}"`).join(' ');
+  const mkCols = gridDimFor('gridCols', dev === 'mobile' ? 'mobile' : 'pc');
   const wrap = (inner) => `
-    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-fw="${frame.w}" data-cap="${frame.cap}" ${sizeAttrs} style="--mks:${MK_SCALE};--mkw:${frame.w}px;--mkh:${frame.h}px;">
+    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-fw="${frame.w}" data-cap="${frame.cap}" ${sizeAttrs} data-fixed-cols="${mkCols ? '1' : '0'}" style="--mks:${MK_SCALE};--mkw:${frame.w}px;--mkh:${frame.h}px;${mkCols ? `--grid-cols:${mkCols};` : ''}">
       <div class="scrmock">${inner}</div>
     </div>`;
   // Mobile designs BOTH phone screens side by side: the menu, and the docket
@@ -22700,6 +22768,20 @@ function renderScreenAdmin() {
   <div class="settings-card" id="ctl-tiles">
     <div class="th" style="margin-bottom:14px;">Menu tiles — ${devName}</div>
     ${slider('itemSize')}
+    ${(() => {
+      // Fixed grid steppers. Auto = the slider above runs the layout, as ever.
+      const gstep = (field, label) => {
+        const cur = gridDimFor(field, dev);
+        return `
+        <div class="th" style="margin:18px 0 14px;">${label} — ${devName}</div>
+        <div class="grid-stepper">
+          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="-1" ${cur === 0 ? 'disabled' : ''}>−</button>
+          <span class="grid-step-val">${cur === 0 ? 'Auto' : cur}</span>
+          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="1" ${cur >= GRID_DIM_MAX ? 'disabled' : ''}>+</button>
+        </div>`;
+      };
+      return gstep('gridCols', 'Tiles across') + gstep('gridRows', 'Tiles down');
+    })()}
   </div>
   <div class="settings-card" id="ctl-subcat">
     <div class="th" style="margin-bottom:14px;">Subsection style</div>
@@ -27391,7 +27473,7 @@ async function saveTicketSetting(patch) {
 
 async function saveAppearance() {
   try {
-    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth, subcatSize: state.theme.subcatSize, railSize: state.theme.railSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, lockStyle: state.theme.lockStyle }) });
+    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth, subcatSize: state.theme.subcatSize, railSize: state.theme.railSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, gridCols: state.theme.gridCols, gridRows: state.theme.gridRows, lockStyle: state.theme.lockStyle }) });
     state.theme = theme;
     applyTheme();
   } catch (e) {
@@ -31095,6 +31177,17 @@ function handleActClick(el, e) {
       else if (act === 'add-mod-option') { addModOption(); }
       else if (act === 'remove-mod-option') { removeModOption(parseInt(el.dataset.oidx)); }
       else if (act === 'set-theme-mode') { setThemeModeDraft(el.dataset.val); }
+      else if (act === 'grid-dim') {
+        const field = el.dataset.field;
+        const dev = state.mockDevice === 'mobile' ? 'mobile' : 'pc';
+        const cur = gridDimFor(field, dev);
+        const d = parseInt(el.dataset.d, 10);
+        // Auto → 5 on first +; stepping below the minimum lands back on Auto.
+        let next = cur === 0 ? (d > 0 ? 5 : 0) : cur + d;
+        if (next < GRID_DIM_MIN) next = 0;
+        if (next > GRID_DIM_MAX) next = GRID_DIM_MAX;
+        setThemeDraft({ [field]: gridDimPatch(field, next) });
+      }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
       else if (act === 'save-appearance') { saveAppearance(); }
       else if (act === 'add-variant') { addVariantRow(); }

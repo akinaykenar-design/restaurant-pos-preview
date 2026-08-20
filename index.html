@@ -340,7 +340,7 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
 
 /* Design page size sliders: 5 stops XS→XL, current step spelled out beside. */
 .size-slider-row{display:flex;align-items:center;gap:12px;max-width:300px;}
-.size-slider{flex:1;min-width:0;height:28px;accent-color:var(--orange);cursor:pointer;}
+.size-slider{flex:1;min-width:0;height:28px;accent-color:var(--orange);cursor:pointer;touch-action:pan-y;} /* vertical swipe = scroll, never an accidental resize */
 .size-slider-val{font-family:var(--font-mono);font-size:12.5px;font-weight:700;min-width:26px;text-align:center;color:var(--text-primary);}
 /* Order type lives in the top bar; same quiet segmented control, on a slightly
    deeper track so it reads against the bar surface. */
@@ -455,10 +455,10 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
 /* Fixed grid (Design → Menu tiles steppers). Cols pin the column count; rows
    pin the tile height so exactly that many rows fill the menu area — the
    rest scrolls. Auto (attr "0") leaves the auto-fill rules above in charge. */
-body[data-fixed-cols="1"] .menu-panel .grid{grid-template-columns:repeat(var(--grid-cols,5),1fr);}
+body[data-fixed-cols="1"] .menu-panel .grid{grid-template-columns:repeat(var(--grid-cols,5),minmax(0,1fr));} /* minmax(0,…): a long name can never widen its column — all tracks stay equal */
 body[data-fixed-rows="1"] .menu-panel .grid{grid-auto-rows:var(--fixed-row-h,92px);}
 body[data-fixed-rows="1"] .menu-panel .grid .item-card{height:var(--fixed-row-h,92px);}
-.mk-wrap[data-fixed-cols="1"] .mk-menu .grid{grid-template-columns:repeat(var(--grid-cols,5),1fr);}
+.mk-wrap[data-fixed-cols="1"] .mk-menu .grid{grid-template-columns:repeat(var(--grid-cols,5),minmax(0,1fr));}
 .grid-stepper{display:flex;align-items:center;gap:10px;}
 .grid-stepper .btn-secondary.sm{width:48px;padding:0;font-size:var(--fs-lg);}
 .grid-stepper .btn-secondary[disabled]{opacity:.45;cursor:default;}
@@ -2922,7 +2922,8 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
   .admin-content:has(.screen-ctl-scroll){ overflow:hidden; display:flex; flex-direction:column; padding:0; }
   .admin-content:has(.screen-ctl-scroll) #admin-router{ flex:1; min-height:0; display:flex; flex-direction:column; }
   .admin-content:has(.screen-ctl-scroll) .settings-card.mock-card{ position:static; flex:none; margin:0; width:100%; max-width:none;
-    border:none; border-bottom:1px solid var(--steel-200); border-radius:0; padding:10px 14px; box-shadow:0 6px 18px rgba(0,0,0,.10); }
+    border:none; border-bottom:1px solid var(--steel-200); border-radius:0; padding:10px 14px; box-shadow:0 6px 18px rgba(0,0,0,.10);
+    max-height:56vh; overflow:auto; touch-action:pan-x pan-y; /* pinch-zoomed preview pans inside its half */ }
   .settings-card.mock-card .seg{ margin-bottom:8px !important; }
   .screen-ctl-scroll{ flex:1; min-height:0; overflow-y:auto; padding:8px 14px 24px; }
   /* Both phone frames stay side by side — never stacked (owner ask). */
@@ -22739,7 +22740,7 @@ function fitScreenMockup() {
     // Phones: the pinned preview keeps to about a quarter of the screen so
     // the controls below stay usable (owner: pin it, scroll the rest).
     const fh = parseFloat(wrap.dataset.fh) || 0;
-    if (fh && window.innerWidth <= 768) s = Math.min(s, Math.max(120, window.innerHeight * 0.5 - 120) / fh);
+    if (fh && window.innerWidth <= 768) s = Math.min(s, Math.max(120, window.innerHeight * 0.5 - 120) / fh) * _mkZoom;
     if (!(s > 0)) return;
     _mkFitScale = s;
     wrap.style.setProperty('--mks', s);
@@ -22749,6 +22750,25 @@ function fitScreenMockup() {
   if (ac && ac.scrollTop !== keep) ac.scrollTop = keep;
 }
 let _mkFitScale = 0;
+// Phone: pinch on the Design preview zooms it (it renders small there); the
+// zoomed preview pans inside its half. One finger still taps and drags.
+let _mkZoom = 1;
+(function () {
+  let d0 = 0, z0 = 1;
+  const dist = (e) => Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+  document.addEventListener('touchstart', (e) => {
+    if (window.innerWidth > 768 || e.touches.length !== 2) return;
+    if (!e.target.closest || !e.target.closest('.mock-card')) return;
+    d0 = dist(e); z0 = _mkZoom;
+  }, { passive: true });
+  document.addEventListener('touchmove', (e) => {
+    if (!d0 || e.touches.length !== 2) return;
+    e.preventDefault();
+    _mkZoom = Math.max(1, Math.min(3.5, z0 * dist(e) / d0));
+    fitScreenMockup();
+  }, { passive: false });
+  document.addEventListener('touchend', (e) => { if (e.touches.length < 2) d0 = 0; }, { passive: true });
+})();
 
 // Design › Screen: live scaled mockup of the order screen. Tiles and docket
 // read the same CSS vars as the real screen, so every control (and the drag
@@ -30431,6 +30451,20 @@ function bindEvents() {
       if (wrap) wrap.setAttribute(THEME_SIZE_ATTRS[field], val);
     });
     el.addEventListener('change', () => { render(); saveAppearance(); });
+    // A finger aiming to SCROLL that lands on the slider still jumps the value
+    // (native range behaviour). If the touch turns out vertical, put the value
+    // back before the change commits — scrolling never edits a setting.
+    let _tx = null, _tv = null, _tcancel = false;
+    el.addEventListener('touchstart', (e) => { _tx = [e.touches[0].clientX, e.touches[0].clientY]; _tv = el.value; _tcancel = false; }, { passive: true });
+    el.addEventListener('touchmove', (e) => {
+      if (!_tx || _tcancel) return;
+      const dx = Math.abs(e.touches[0].clientX - _tx[0]), dy = Math.abs(e.touches[0].clientY - _tx[1]);
+      if (dy > 12 && dy > dx * 1.2) _tcancel = true;
+    }, { passive: true });
+    el.addEventListener('touchend', () => {
+      if (_tcancel && _tv != null && el.value !== _tv) { el.value = _tv; el.dispatchEvent(new Event('input')); }
+      _tx = null;
+    }, { passive: true });
   });
   // Pointer-drag sortable for the admin reorder lists.
   makeSortable('size-preset-row', reorderSizePresets, { canStart: () => !isListSorted('sizes') });

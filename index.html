@@ -939,6 +939,31 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 @keyframes app-spin{to{transform:rotate(360deg);}}
 @media (prefers-reduced-motion:reduce){.app-spinner .spin-ring{animation-duration:1.8s;}}
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%);background:var(--charcoal);color:#fff;padding:14px 22px;border-radius:10px;font-weight:600;font-size:14px;box-shadow:var(--shadow);z-index:60;display:flex;align-items:center;gap:10px;}
+
+/* ---- Motion (owner-approved, Aug '26). One rule: things that APPEAR settle
+   in over 150ms; things hit rapid-fire (menu tiles, pad keys, docket taps)
+   stay instant. render() rebuilds the DOM constantly, so every entrance here
+   has a JS replay-guard (applyMotion) that stamps animation:none on surfaces
+   that were already open — the settle plays once, on true arrival only. ---- */
+@media (prefers-reduced-motion: no-preference){
+  .modal-bg{ animation: mo-shade .15s ease-out; }
+  .pop-scrim{ animation: mo-shade .15s ease-out; }
+  .modal-bg .modal{ animation: mo-settle .15s cubic-bezier(.2,.8,.3,1); }
+  .middle-view{ animation: mo-settle .15s cubic-bezier(.2,.8,.3,1); }
+  .qty-pop{ animation: mo-settle .15s cubic-bezier(.2,.8,.3,1); }
+  .qty-pop.covers-pop, .io-pop{ animation: mo-pop .15s cubic-bezier(.2,.8,.3,1); }
+  .toast{ animation: mo-rise .18s cubic-bezier(.2,.8,.3,1); }
+  .tl-qty.mo-pulse{ animation: mo-pulse .16s ease-out; }
+  .ticket-line.mo-just-sent{ animation: mo-dim .35s ease-out; }
+  .icon-action.mo-flick svg{ animation: mo-print .4s ease; }
+}
+@keyframes mo-shade{ from{ background-color:rgba(20,24,25,0); } }
+@keyframes mo-settle{ from{ opacity:0; transform:translateY(14px) scale(.985); } }
+@keyframes mo-pop{ from{ opacity:0; transform:translate(-50%,calc(-50% + 10px)) scale(.975); } }
+@keyframes mo-rise{ from{ opacity:0; transform:translate(-50%, 10px); } }
+@keyframes mo-pulse{ 0%{ transform:scale(1); } 40%{ transform:scale(1.2); } 100%{ transform:scale(1); } }
+@keyframes mo-dim{ from{ opacity:1; } }
+@keyframes mo-print{ 0%{ transform:translateY(0); } 35%{ transform:translateY(-4px); } 100%{ transform:translateY(0); } }
 .toast-btn{background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;font:inherit;font-size:12.5px;font-weight:700;padding:4px 12px;border-radius:7px;cursor:pointer;margin-left:4px;}
 .toast .dot{width:9px;height:9px;border-radius:50%;background:var(--green);}
 /* No scrollbars drawn anywhere — this is a touch-first till; everything still
@@ -14656,6 +14681,7 @@ function render() {
   ensureToastTimer();
 
   const _prevExp = snapshotExpKeys();
+  const _prevMotion = snapshotMotion();
   const app = document.getElementById('app');
 
   if (!state.currentStaff) {
@@ -14780,6 +14806,7 @@ function render() {
   setToolbarHeightVar();
   // Backstage: the app bar flips shade while in Admin (see style.css).
   document.body.setAttribute('data-admin', state.view === 'admin' ? '1' : '0');
+  applyMotion(_prevMotion);
   animateExpansions(_prevExp);
   fitTileNames();
   placeTileCounts();
@@ -14818,6 +14845,86 @@ function render() {
 // the same column COUNT (the pane's width differs from the panel's), so after
 // each render we read the real order grid and copy its geometry across. When
 // the order grid isn't on screen the CSS fallback sizing stands.
+// ---- Motion (owner-approved, Aug '26). render() rebuilds the DOM on every
+// state change, which would REPLAY every CSS entrance animation on every tap.
+// So: before the rebuild we note which surfaces are already up and where the
+// docket lines sit; after it, surfaces that were already open get their
+// animation stamped off (the settle plays once, on true arrival), a docket
+// line whose count grew gets a pulse, a line that just went to the kitchen
+// dims once, and a line that changed row glides to its new spot (FLIP).
+function motionOff() {
+  try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
+}
+function _motionSurfaces() {
+  const mv = document.querySelector('.middle-view');
+  return {
+    modal: !!document.querySelector('.modal-bg'),
+    covers: !!document.querySelector('.qty-pop.covers-pop'),
+    qty: !!document.querySelector('.qty-pop:not(.covers-pop)'),
+    io: !!document.querySelector('.io-pop'),
+    scrim: !!document.querySelector('.pop-scrim'),
+    toast: !!document.querySelector('.toast'),
+    middle: mv ? (mv.firstElementChild ? mv.firstElementChild.className : 'x') : '',
+  };
+}
+function snapshotMotion() {
+  if (motionOff()) return null;
+  const lineTops = {}, qtys = {};
+  document.querySelectorAll('.ticket-line').forEach(el => {
+    const n = el.querySelector('.tl-name'); if (!n) return;
+    const k = n.textContent + '|' + (el.classList.contains('sent') ? 's' : 'n');
+    lineTops[k] = el.getBoundingClientRect().top;
+    const q = el.querySelector('.tl-qty'); if (q) qtys[k] = parseInt(q.textContent, 10) || 0;
+  });
+  return { surfaces: _motionSurfaces(), lineTops, qtys };
+}
+function applyMotion(prev) {
+  if (!prev) return;
+  const cur = _motionSurfaces();
+  const KEEP = [
+    ['modal', '.modal-bg, .modal-bg .modal'],
+    ['covers', '.qty-pop.covers-pop'],
+    ['qty', '.qty-pop:not(.covers-pop)'],
+    ['io', '.io-pop'],
+    ['scrim', '.pop-scrim'],
+    ['toast', '.toast'],
+  ];
+  for (const [k, sel] of KEEP) {
+    if (cur[k] && prev.surfaces[k]) document.querySelectorAll(sel).forEach(el => { el.style.animation = 'none'; });
+  }
+  const mv = document.querySelector('.middle-view');
+  if (mv && prev.surfaces.middle === cur.middle) mv.style.animation = 'none';
+  if (state._moFlick && Date.now() - state._moFlick < 500) {
+    state._moFlick = 0;
+    const bb = document.querySelector('.icon-action.bill');
+    if (bb) { bb.classList.add('mo-flick'); setTimeout(() => bb.classList.remove('mo-flick'), 450); }
+  }
+  document.querySelectorAll('.ticket-line').forEach(el => {
+    const n = el.querySelector('.tl-name'); if (!n) return;
+    const k = n.textContent + '|' + (el.classList.contains('sent') ? 's' : 'n');
+    const q = el.querySelector('.tl-qty');
+    if (q && k in prev.qtys && (parseInt(q.textContent, 10) || 0) > prev.qtys[k]) {
+      q.classList.add('mo-pulse');
+      setTimeout(() => q.classList.remove('mo-pulse'), 260);
+    }
+    if (el.classList.contains('sent') && (n.textContent + '|n') in prev.lineTops && !((n.textContent + '|s') in prev.lineTops)) {
+      el.classList.add('mo-just-sent');
+      setTimeout(() => el.classList.remove('mo-just-sent'), 500);
+    }
+    if (k in prev.lineTops) {
+      const d = prev.lineTops[k] - el.getBoundingClientRect().top;
+      if (Math.abs(d) >= 6 && Math.abs(d) < 500) {
+        el.style.transition = 'none';
+        el.style.transform = `translateY(${d}px)`;
+        requestAnimationFrame(() => {
+          el.style.transition = 'transform .18s ease';
+          el.style.transform = '';
+          setTimeout(() => { el.style.transition = ''; }, 240);
+        });
+      }
+    }
+  });
+}
 let _lastMenuGridGeom = null;
 function syncPopupTileGrids() {
   // First VISIBLE panel grid — a hidden one (subsection tiles vs items) reads
@@ -30871,7 +30978,13 @@ function handleActClick(el, e) {
         else clearCart();
       }
       else if (act === 'checkout') { openCheckout(); }
-      else if (act === 'print-bill') { markBillPrinted(el.dataset.order); }
+      else if (act === 'print-bill') {
+        // The receipt glyph does a little "out of the printer" hop (owner's
+        // print-bill-animation ask, Aug '26). Applied AFTER the post-print
+        // render (applyMotion) so the rebuild can't cut it short.
+        state._moFlick = Date.now();
+        markBillPrinted(el.dataset.order);
+      }
       else if (act === 'send-to-kitchen') {
         if (_sendHoldFired) { _sendHoldFired = false; return; }
         state._logoffOnce = false; // plain tap never inherits an old hold's intent

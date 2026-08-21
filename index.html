@@ -14909,16 +14909,28 @@ function _motionSurfaces() {
     middle: mv ? (mv.firstElementChild ? mv.firstElementChild.className : 'x') : '',
   };
 }
-function snapshotMotion() {
-  if (motionOff()) return null;
-  const lineTops = {}, qtys = {};
+// Lines are keyed by name + sent-state + OCCURRENCE (two seats can carry the
+// same item — name alone collided and fired phantom pulses/glides on every
+// re-render). Tops are measured inside the docket's own scroll space, so a
+// scroll restore never reads as the lines moving.
+function _lineKeys() {
+  const counts = {}, out = [];
   document.querySelectorAll('.ticket-line').forEach(el => {
     const n = el.querySelector('.tl-name'); if (!n) return;
-    const k = n.textContent + '|' + (el.classList.contains('sent') ? 's' : 'n');
-    lineTops[k] = el.getBoundingClientRect().top;
-    const q = el.querySelector('.tl-qty'); if (q) qtys[k] = parseInt(q.textContent, 10) || 0;
+    const base = n.textContent + '|' + (el.classList.contains('sent') ? 's' : 'n');
+    counts[base] = (counts[base] || 0) + 1;
+    const cont = el.closest('.ticket-items');
+    const top = el.getBoundingClientRect().top - (cont ? cont.getBoundingClientRect().top - cont.scrollTop : 0);
+    const q = el.querySelector('.tl-qty');
+    out.push({ el, base, key: base + '#' + counts[base], top, qty: q ? (parseInt(q.textContent, 10) || 0) : null });
   });
-  return { surfaces: _motionSurfaces(), lineTops, qtys };
+  return out;
+}
+function snapshotMotion() {
+  if (motionOff()) return null;
+  const lineTops = {}, qtys = {}, bases = new Set();
+  _lineKeys().forEach(L => { lineTops[L.key] = L.top; if (L.qty != null) qtys[L.key] = L.qty; bases.add(L.base); });
+  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001') };
 }
 function applyMotion(prev) {
   if (!prev) return;
@@ -14941,20 +14953,27 @@ function applyMotion(prev) {
     const bb = document.querySelector('.icon-action.bill');
     if (bb) { bb.classList.add('mo-flick'); setTimeout(() => bb.classList.remove('mo-flick'), 450); }
   }
-  document.querySelectorAll('.ticket-line').forEach(el => {
-    const n = el.querySelector('.tl-name'); if (!n) return;
-    const k = n.textContent + '|' + (el.classList.contains('sent') ? 's' : 'n');
+  const lines = _lineKeys();
+  const sameSet = lines.map(L => L.key).sort().join('\u0001') === prev.lineSet;
+  lines.forEach(L => {
+    const { el, base, key } = L;
     const q = el.querySelector('.tl-qty');
-    if (q && k in prev.qtys && (parseInt(q.textContent, 10) || 0) > prev.qtys[k]) {
+    if (q && key in prev.qtys && (parseInt(q.textContent, 10) || 0) > prev.qtys[key]) {
       q.classList.add('mo-pulse');
       setTimeout(() => q.classList.remove('mo-pulse'), 260);
     }
-    if (el.classList.contains('sent') && (n.textContent + '|n') in prev.lineTops && !((n.textContent + '|s') in prev.lineTops)) {
-      el.classList.add('mo-just-sent');
-      setTimeout(() => el.classList.remove('mo-just-sent'), 500);
+    if (el.classList.contains('sent')) {
+      const name = base.slice(0, -2);
+      if (prev.bases.has(name + '|n') && !prev.bases.has(name + '|s')) {
+        el.classList.add('mo-just-sent');
+        setTimeout(() => el.classList.remove('mo-just-sent'), 500);
+      }
     }
-    if (k in prev.lineTops) {
-      const d = prev.lineTops[k] - el.getBoundingClientRect().top;
+    // Glide ONLY when the same set of lines changed ORDER (course move,
+    // merge). A new line pushing the others down must not send the whole
+    // docket sliding (owner: "items act weird when you add them").
+    if (sameSet && key in prev.lineTops) {
+      const d = prev.lineTops[key] - L.top;
       if (Math.abs(d) >= 6 && Math.abs(d) < 500) {
         el.style.transition = 'none';
         el.style.transform = `translateY(${d}px)`;

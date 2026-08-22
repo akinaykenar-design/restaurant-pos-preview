@@ -457,7 +457,7 @@ body[data-osk="1"] .tabs .bar-search input{ display:none; }
    chips — the SAME pick-table door, one tap back into the order. */
 .mine-lane{display:inline-flex;align-items:center;gap:6px;}
 .mine-lane .mine-lab{font-size:var(--fs-chip);font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--charcoal-soft);}
-.mine-lane .mine-chip{font-family:var(--font-mono);font-weight:800;}
+.mine-lane .mine-chip{font-family:var(--font-mono);font-weight:800;min-width:44px;} /* single-digit tables still finger-sized */
 
 .mob-search{position:fixed;left:0;right:0;bottom:0;z-index:69;} /* below every popup (79+): a seat pick opened from a row lands ON TOP of the search */
 /* The ONE popup dim behind phone search — the menu behind is background,
@@ -16235,7 +16235,7 @@ function renderBillPanel() {
   <div class="ticket-panel bill-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}">
     <div class="ticket-head">
       <button class="ticket-close-mobile" data-act="toggle-mobile-cart">✕</button>
-      <div class="bill-title">The bill${state.table ? ` · Table ${esc(String(state.table))}` : ''}</div>
+      <div class="bill-title">The bill${state.table ? ` · Table ${esc(String((findTableById(state.table) || {}).label || state.table))}` : ''}</div>
       <div class="bill-sub">${state.covers ? `${state.covers} cover${state.covers === 1 ? '' : 's'} · ` : ''}${state.currentStaff ? esc(state.currentStaff.name) : ''}</div>
     </div>
     <div class="bill-lines">
@@ -16800,7 +16800,12 @@ function payReady() {
   // Nothing left to collect — a comped table, or one a voucher covered — still
   // has to be closed, or it sits open all night with no way to finish it
   // (owner scan, Aug '26).
-  if (!state.splitMode && amountOwing() <= 0.005) return true;
+  if (!state.splitMode && amountOwing() <= 0.005) {
+    // A comped or voucher-covered table still closes — but an EMPTY bill has
+    // nothing to confirm (owner catch, Aug '26: green "Confirm $0.00").
+    const o = activeOpenOrder();
+    return cartTotal() > 0.005 || state.cart.length > 0 || !!(o && o.items && o.items.length);
+  }
   if (state.splitMode) {
     return Math.abs(splitRemaining()) <= 0.01 && state.splitTenders.every(t => (parseFloat(t.amount) || 0) > 0);
   }
@@ -16882,9 +16887,12 @@ function renderCheckoutMiddle() {
       ${state.settings.ticketHeader ? `<div class="ticket-custom-header" style="text-align:left;padding:0 0 8px;">${esc(state.settings.ticketHeader)}</div>` : ''}
       <div class="sub">${money(total)} due${state.discount ? ' (after ' + money(Math.abs(cartDiscountAmount())) + ' ' + (state.discount.kind === 'surcharge' ? 'surcharge' : 'discount') + ')' : ''}</div>
       ${isManager ? (state.discountModal ? `
-        <div style="border:1px solid var(--steel-200);border-radius:12px;padding:12px 14px;margin-bottom:16px;">
+        <!-- Discount stands ALONE (owner, Aug '26) — its own popup, not a
+             box piled on top of the card form. -->
+        <div class="modal-bg"><div class="modal" style="max-width:560px;">
+          <div class="th" style="margin-bottom:12px;">${(state.discountModal.kind || 'discount') === 'surcharge' ? 'Surcharge' : 'Discount'}</div>
           ${renderDiscountFields()}
-        </div>
+        </div></div>
       ` : state.discount ? `
         <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)}) <button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></div>
       ` : `
@@ -17015,6 +17023,19 @@ function renderCheckoutMiddle() {
       ` : ''}
       ${state.paymentMethod === 'cash' && !state.payRailVouchers ? `
         <label>Cash</label>
+        ${state.settings.cashQuickTender !== false ? (() => {
+          // Quick notes, worked out from THIS bill (owner, Aug '26): exact,
+          // then the next round-ups — $458 offers $460 / $500, never a $50
+          // chip on a big table. Off in Admin → Payments for venues that
+          // prefer a bare field.
+          const owe = amountOwing();
+          if (owe <= 0.005) return '';
+          const ups = [...new Set([5, 10, 50, 100].map(u => Math.ceil((owe + 0.005) / u) * u).filter(v => v > owe + 0.005))].sort((a, b) => a - b).slice(0, 3);
+          return `<div class="pay-options" style="margin-bottom:8px;">
+            <div class="pay-opt ${Math.abs(cashTakenAmount() - owe) <= 0.005 ? 'active' : ''}" data-act="cash-quick" data-val="${owe.toFixed(2)}">Exact</div>
+            ${ups.map(v => `<div class="pay-opt ${Math.abs(cashTakenAmount() - v) <= 0.005 ? 'active' : ''}" data-act="cash-quick" data-val="${v}">${money(v)}</div>`).join('')}
+          </div>`;
+        })() : ''}
         <div class="pay-amount-row"><input id="cash-given-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cashTakenAmount().toFixed(2)}"></div>
         ${cashOver() > 0.005 ? `<div class="change-due"><span>Change</span><span>${money(cashOver())}</span></div>` : ''}
         ${cashOver() < -0.005 ? `
@@ -19055,6 +19076,13 @@ function renderCardTerminalSettingsAdmin() {
   const t = state.settings.terminal || { provider: 'none', linkly: {} };
   const linkly = t.linkly || {};
   return `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Cash quick amounts</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.cashQuickTender !== false, 'set-cash-quick')}
+    </div>
+    <div class="ts" style="margin-top:8px;">Worked out from each bill</div>
+  </div>
   <div class="settings-card wide">
     <div class="th">Card terminal</div>
     <div class="seg" style="width:fit-content;margin-bottom:8px;">
@@ -20689,7 +20717,7 @@ const ADMIN_SECTIONS = [
     { key: 'expenses', label: 'Expenses' },
   ] },
   { group: 'Integrations', children: [
-    { key: 'settings-payments', label: 'Card Terminal' },
+    { key: 'settings-payments', label: 'Payments' },
     { key: 'settings-doshii', label: 'App Orders' },
   ] },
   { group: 'Settings', children: [
@@ -20729,7 +20757,7 @@ const SETTINGS_INDEX = [
   { page: 'settings-printers', tab: 'setup', label: 'Printers & wifi scan', terms: 'printer station ip address find scan wifi bar kitchen pause fallback route paper size width 80mm 58mm' },
   { page: 'settings-printers', tab: 'docket', label: 'Kitchen docket layout & auto-print', terms: 'docket kitchen layout auto print fire course' },
   { page: 'settings-printers', tab: 'receipt', label: 'Receipt header, footer & auto-print', terms: 'receipt check header footer served staff covers auto print' },
-  { page: 'settings-payments', label: 'Card terminal (EFTPOS)', terms: 'card terminal eftpos linkly commbank pair payment machine' },
+  { page: 'settings-payments', label: 'Payments', terms: 'card terminal eftpos linkly commbank pair payment machine cash quick amounts tender' },
   { page: 'settings-doshii', label: 'App orders & pay at table', terms: 'doshii app orders qr delivery pay at table' },
   { page: 'settings-tips', label: 'Tips & quick percentages', terms: 'tips tip percent presets' },
   { page: 'settings-discounts', label: 'Discount & surcharge presets', terms: 'discount surcharge preset staff percent' },
@@ -27403,6 +27431,14 @@ function tapQtyPad(key) {
   render();
 }
 
+async function setCashQuickTender(val) {
+  state.settings.cashQuickTender = val;
+  render();
+  try {
+    const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cashQuickTender: val }) });
+    state.settings = s;
+  } catch (e) {}
+}
 async function setTipsEnabled(val) {
   state.settings.tipsEnabled = val;
   render();
@@ -32301,6 +32337,8 @@ function handleActClick(el, e) {
       else if (act === 'pick-popover-icon') { pickPopoverIcon(el.dataset.icon); }
       else if (act === 'icon-popover-enabled') { setIconPopoverEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-tips-enabled') { setTipsEnabled(el.dataset.val === 'true'); }
+      else if (act === 'set-cash-quick') { setCashQuickTender(el.dataset.val === 'true'); }
+      else if (act === 'cash-quick') { state.cashGiven = parseFloat(el.dataset.val).toFixed(2); render(); }
       else if (act === 'set-tip-period') { state.tipPayoutPeriod = el.dataset.val; render(); }
       else if (act === 'roster-week') { const v = parseInt(el.dataset.val); const base = state.rosterWeekStart || rosterMonday(Date.now()); state.rosterWeekStart = v === 0 ? rosterMonday(Date.now()) : base + v * 7 * 86400000; render(); }
       else if (act === 'roster-add') { openRosterAdd(el.dataset.staff, el.dataset.date); }

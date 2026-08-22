@@ -449,16 +449,22 @@ body[data-osk="1"] .tabs .bar-search input{ display:none; }
   body .topbar .tab-btn{ min-width:72px; padding:8px 14px; }
   /* Searching: the hub tile steps aside so the field gets typing room. */
   .topbar:has(.bar-search input.open) .staff-badge [data-act="toggle-account-menu"]{ display:none; }
-  /* While TYPING the field docks to the TOP of the phone screen — the
-     keyboard rises from the bottom, results sit right under the field, and
-     the browser never has to drag the page (which exposed a dark band and
-     hid the results). The magnifier stays in the bar to clear/close. */
-  body .topbar .tabs .bar-search input.open{
-    position:fixed; top:8px; left:8px; right:8px; width:auto; z-index:130;
-    box-shadow:0 6px 18px rgba(0,0,0,.35);
-  }
-  body:has(.topbar .tabs .bar-search input.open) .menu-scroll{ padding-top:64px; }
 }
+/* Phone search rides the KEYBOARD (owner pick, Aug '26 sheet C): the field
+   sits on the keyboard's top edge, best matches stack above it — everything
+   at thumb height, nothing jumps to the top, the browser never pans. */
+.mob-search{position:fixed;left:0;right:0;bottom:0;z-index:130;}
+.mob-hit{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;
+  min-height:44px;padding:10px 16px;border:none;border-top:1px solid #2A2D30;border-radius:0;
+  background:#1D2023;color:#E8ECF0;cursor:pointer;text-align:left;}
+.mob-hit .mh-name{font-size:var(--fs-md);font-weight:600;min-width:0;}
+.mob-hit .mh-price{font-family:var(--font-mono);font-size:var(--fs-sm);font-weight:700;color:#9FB6C9;flex:none;}
+.mob-field{display:flex;gap:8px;padding:8px;background:#16181A;border-top:1px solid #2A2D30;}
+.mob-field input{flex:1;min-width:0;height:46px;padding:0 14px;border-radius:var(--radius);
+  border:1px solid #3A4149;background:#2E343B;color:#E8ECF0;font-family:inherit;font-size:var(--fs-md);font-weight:600;}
+.mob-field input::placeholder{color:#8A939D;}
+.mob-field .mob-x{flex:none;width:46px;height:46px;border-radius:var(--radius);border:1px solid #3A4149;
+  background:#2E343B;color:#E8ECF0;font-size:18px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;}
 body[data-appbar-pos="left"] .tabs .bar-search input.open,
 body[data-appbar-pos="right"] .tabs .bar-search input.open{ width:100%; }
 @media (prefers-reduced-motion: no-preference){
@@ -15509,6 +15515,19 @@ function renderTopbar() {
         if (state.view === 'admin') return `<span class="staff-badge bar-search"><button class="${state.adminSearchOpen ? 'active' : ''}" data-act="admin-search-toggle" aria-label="Search">${SYS_SEARCH_SVG}</button></span>`;
         if (state.view !== 'order' || state.showTablePicker || (state.orderType === 'dine-in' && !state.table)) return '';
         const on = state.searchOpen || state.search;
+        // Phones (owner pick, Aug '26 sheet C): searching lives ON the
+        // keyboard — the field rides its top edge and the best matches stack
+        // above, right at the thumbs. Nothing jumps to the top of the screen.
+        if (on && document.body.dataset.mobile === 'true') {
+          return `<span class="staff-badge bar-search"><button class="active" data-act="close-search">${SYS_SEARCH_SVG}</button></span>
+            <div class="mob-search">
+              <div class="mob-hits">${mobSearchHitsHTML()}</div>
+              <div class="mob-field">
+                <input id="search-input" type="text" placeholder="Search menu…" value="${esc(state.search)}" autocomplete="off">
+                <button type="button" class="mob-x" data-act="close-search" aria-label="Close search">✕</button>
+              </div>
+            </div>`;
+        }
         return `<span class="staff-badge bar-search"><button class="${on ? 'active' : ''}" data-act="${on ? 'close-search' : 'open-search'}">${SYS_SEARCH_SVG}</button><input id="search-input" type="text" class="${on ? 'open' : ''}" placeholder="Search menu…" value="${esc(state.search)}" ${on ? '' : 'tabindex="-1"'} autocomplete="off"></span>`;
       })()}
     </div>
@@ -15528,6 +15547,15 @@ function renderTopbar() {
   </div>`;
 }
 
+// Phone search suggestions: the best matches, one compact row each, tap = the
+// normal add flow. Rebuilt in place on every keystroke so the input (and the
+// phone keyboard) never die mid-word.
+function mobSearchHitsHTML() {
+  const q = (state.search || '').trim().toLowerCase();
+  if (!q) return '';
+  return (state.menu || []).filter(m => m.price > 0 && !m.out && m.name.toLowerCase().includes(q)).slice(0, 4)
+    .map(m => `<button type="button" class="mob-hit" data-act="add" data-id="${m.id}"><span class="mh-name">${esc(m.name)}</span><span class="mh-price">${money(m.price)}</span></button>`).join('');
+}
 // Order type lives in the top bar. The guest name for takeaway/delivery sits in
 // the docket head instead, next to where the table picker sits for dine-in —
 // the docket head carries the order's identity either way.
@@ -30260,6 +30288,10 @@ function bindEvents() {
       // search input (and the mobile keyboard) alive on every keystroke.
       // DEBOUNCED: the grid rebuild + tile measuring is the expensive part on
       // cheap tablets, so it waits for a typing pause instead of every key.
+      // Phone keyboard-glued search: swap the suggestion rows in place —
+      // never a full render, or the input dies and the keyboard drops.
+      const mh = document.querySelector('.mob-search .mob-hits');
+      if (mh) mh.innerHTML = mobSearchHitsHTML();
       clearTimeout(window._menuSearchTimer);
       window._menuSearchTimer = setTimeout(() => {
         const body = document.querySelector('.menu-scroll');
@@ -30273,6 +30305,7 @@ function bindEvents() {
   // the two never fight. Phones keep the system keyboard; physical keyboards
   // type either way.
   if (oskEligible()) document.querySelectorAll(OSK_TEXT_SEL).forEach(i => i.setAttribute('inputmode', 'none'));
+  if (window._glueMobSearch) window._glueMobSearch();
   const exportFromInput = document.getElementById('export-from-input');
   if (exportFromInput) exportFromInput.addEventListener('change', (e) => { state.analyticsFrom = e.target.value; render(); });
   const exportToInput = document.getElementById('export-to-input');
@@ -33099,6 +33132,21 @@ function setupResponsive() {
   window.addEventListener('resize', apply);
 }
 setupResponsive();
+
+// Phone search rides the keyboard: the visual viewport shrinks when the
+// system keyboard opens, and the panel's bottom tracks that edge so the
+// field sits right on the keys with the matches above it.
+if (window.visualViewport) {
+  const glueMobSearch = () => {
+    const el = document.querySelector('.mob-search');
+    if (!el) return;
+    const vv = window.visualViewport;
+    el.style.bottom = Math.max(0, window.innerHeight - vv.height - vv.offsetTop) + 'px';
+  };
+  window.visualViewport.addEventListener('resize', glueMobSearch);
+  window.visualViewport.addEventListener('scroll', glueMobSearch);
+  window._glueMobSearch = glueMobSearch;
+}
 
 // Tick the "called away N min" counters (docket + table map) without a full
 // re-render, so the elapsed time stays live between interactions.

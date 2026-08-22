@@ -2012,7 +2012,13 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
    The app's own compact keyboard for text fields on touch screens —
    replaces the OS keyboard (huge, mismatched, unreliable in app mode).
    A persistent overlay outside #app: render() never rebuilds it. */
-.osk{position:fixed;left:0;right:0;bottom:0;z-index:2500;background:var(--steel-100);border-top:1px solid var(--steel-200);padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));box-shadow:0 -6px 24px rgba(0,0,0,.14);display:none;}
+/* The keyboard FLOATS (owner, Aug '26 — OrderMate style): a centred panel
+   that sits clear of the bottom bar, so the search field and the bar stay
+   visible while typing. oskShow() sets --osk-off to clear a bottom bar. */
+.osk{position:fixed;left:50%;transform:translateX(-50%);bottom:var(--osk-off,12px);z-index:2500;
+  width:min(680px, calc(100vw - 24px));background:var(--steel-100);
+  border:1px solid var(--steel-200);border-radius:var(--radius);
+  padding:10px;box-shadow:0 10px 25px rgba(0,0,0,.12), 0 30px 60px rgba(0,0,0,.28);display:none;}
 /* While the keyboard is up, scroll areas gain its height so search results
    and list tails can scroll clear instead of hiding underneath it. */
 body.osk-open .admin-content{padding-bottom:var(--osk-h,220px);}
@@ -11928,9 +11934,14 @@ function oskShow(target) {
   // dot and the digits are the whole job; ABC stays one tap away for COM3.
   _oskMode = target.matches('.ps-ip-input') ? 'sym' : 'lower';
   oskPaint();
+  // Float clear of a bottom app bar — the bar and its search field stay
+  // visible while typing (the keyboard must never cover what it types into).
+  const bar = document.querySelector('.topbar');
+  const off = document.body.getAttribute('data-appbar-pos') === 'bottom' && bar ? bar.offsetHeight + 10 : 12;
+  document.documentElement.style.setProperty('--osk-off', off + 'px');
   _oskEl.classList.add('open');
-  // The keyboard is fixed to the bottom — pad the page so search results and
-  // list tails can scroll clear of it instead of hiding underneath.
+  // Pad the page so search results and list tails can scroll clear of the
+  // keyboard instead of hiding underneath it.
   document.body.classList.add('osk-open');
   document.documentElement.style.setProperty('--osk-h', (_oskEl.offsetHeight || 220) + 'px');
   setTimeout(() => { if (_oskTarget && document.contains(_oskTarget)) _oskTarget.scrollIntoView({ block: 'center' }); }, 120);
@@ -12341,7 +12352,25 @@ function finishLogin(staff) {
   // EVERY login lands on the table select (owner ask) — no resuming a saved
   // view or table. Chefs keep their kitchen screen (they have no till).
   if (staff.role === 'chef') state.view = 'kitchen';
-  else { state.view = 'order'; setOrderType('dine-in'); state.table = null; state.showTablePicker = true; }
+  else {
+    state.view = 'order'; setOrderType('dine-in'); state.table = null; state.showTablePicker = true;
+    // Refresh armour, restore half: the SAME person's next PIN hands back the
+    // unsent table order a reload interrupted (the snapshot writes on every
+    // order-screen render). A different person, an empty cart, or a snapshot
+    // older than a shift still lands on table select; a deliberate log-off
+    // already cleared it.
+    try {
+      const snap = JSON.parse(localStorage.getItem('pos-cart') || 'null');
+      if (snap && snap.staffId === staff.id && Array.isArray(snap.cart) && snap.cart.length
+          && snap.table != null && Date.now() - (snap.ts || 0) < 8 * 3600 * 1000) {
+        state.cart = snap.cart;
+        state.activeCourse = snap.activeCourse || null;
+        state.openOrderId = snap.openOrderId || null;
+        state.table = snap.table;
+        state.showTablePicker = false;
+      }
+    } catch (e) {}
+  }
   render();
   showSpinner('Signing in…'); // the menu can be big — show it's loading, not stuck
   const done = () => hideSpinner();
@@ -12517,7 +12546,6 @@ function logOut() {
   // A fresh login starts with the admin nav collapsed.
   state.adminOpenGroups = [];
   try { localStorage.removeItem('pos-admin-group'); } catch (e) {}
-  try { localStorage.removeItem('pos-view'); } catch (e) {}
   state.currentStaff = null;
   state.loginSelectedId = null;
   state.loginPin = '';
@@ -14830,15 +14858,6 @@ function render() {
     return;
   }
 
-  // Remember which screen is showing so a page refresh lands back on it —
-  // including the open dine-in table, so a refresh keeps you on that order
-  // instead of dropping you back to the table picker.
-  try {
-    localStorage.setItem('pos-view', state.view);
-    if (state.table != null) localStorage.setItem('pos-table', String(state.table));
-    else localStorage.removeItem('pos-table');
-  } catch (e) {}
-
   // Every scrollable surface keeps its position across the full re-render —
   // otherwise any tap "snaps" panels back to their start.
   // '.dk-menu': the Elements checklist stays open while the owner ticks, and
@@ -14965,7 +14984,13 @@ function render() {
     if (state.currentStaff && state.view === 'order' && state.cart.length) {
       localStorage.setItem('pos-cart', JSON.stringify({ staffId: state.currentStaff.id, table: state.table, cart: state.cart, activeCourse: state.activeCourse, openOrderId: state.openOrderId, ts: Date.now() }));
     } else if (state.currentStaff && state.cart.length === 0) {
-      localStorage.removeItem('pos-cart');
+      // Only the snapshot's OWNER empties it — a colleague logging in with an
+      // empty cart must not wipe someone else's refresh armour.
+      const raw = localStorage.getItem('pos-cart');
+      if (raw) {
+        let owner = null; try { owner = JSON.parse(raw).staffId; } catch (e) {}
+        if (owner === null || owner === state.currentStaff.id) localStorage.removeItem('pos-cart');
+      }
     }
   } catch (e) {}
 
@@ -30176,6 +30201,11 @@ function bindEvents() {
       }, 120);
     });
   }
+  // Tablets get OUR keyboard only: wherever the on-screen keyboard is
+  // eligible, text fields drop the tablet's own keyboard (inputmode=none) so
+  // the two never fight. Phones keep the system keyboard; physical keyboards
+  // type either way.
+  if (oskEligible()) document.querySelectorAll(OSK_TEXT_SEL).forEach(i => i.setAttribute('inputmode', 'none'));
   const exportFromInput = document.getElementById('export-from-input');
   if (exportFromInput) exportFromInput.addEventListener('change', (e) => { state.analyticsFrom = e.target.value; render(); });
   const exportToInput = document.getElementById('export-to-input');

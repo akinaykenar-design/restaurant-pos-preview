@@ -453,6 +453,17 @@ body[data-osk="1"] .tabs .bar-search input{ display:none; }
 /* Phone search rides the KEYBOARD (owner pick, Aug '26 sheet C): the field
    sits on the keyboard's top edge, best matches stack above it — everything
    at thumb height, nothing jumps to the top, the browser never pans. */
+/* Folded section bands in admin lists: closed by default, tap to open,
+   remembered per section (owner, Aug '26). */
+.group-fold-head{display:flex;align-items:center;gap:9px;width:100%;min-height:44px;
+  padding:0 14px;margin:2px 0;border:1px solid var(--steel-200);border-radius:var(--btn-radius);
+  background:var(--steel-100);color:var(--text-primary);cursor:pointer;text-align:left;
+  font-family:var(--font-display);font-size:var(--fs-md);font-weight:800;}
+.group-fold-head.open{background:var(--surface);}
+.group-fold-head .gf-chev{flex:none;width:14px;color:var(--charcoal-soft);}
+.group-fold-head .gf-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.group-fold-head .gf-count{margin-left:auto;font-family:var(--font-mono);font-size:var(--fs-sm);font-weight:700;color:var(--charcoal-soft);}
+
 /* "Mine" fast lane on the table picker: the waiter's own open tables as
    chips — the SAME pick-table door, one tap back into the order. */
 .mine-lane{display:inline-flex;align-items:center;gap:6px;}
@@ -6696,6 +6707,32 @@ app.post('/api/gift-cards', (req, res) => {
   res.json(card);
 });
 
+// Vouchers SOLD on a bill (owner, Aug '26): a 'Gift voucher' line rides the
+// order like any item, but the card itself only comes to life when the money
+// is actually taken — never before, or vouchers would exist unpaid. The codes
+// are kept on the order so the receipt (and any reprint) carries them.
+function issueSoldVouchers(data, order, byName) {
+  const codes = [];
+  for (const it of order.items || []) {
+    if (!it.giftcardSale) continue;
+    for (let n = 0; n < (it.qty || 1); n++) {
+      let code = newVoucherCode(); let guard = 0;
+      while ((data.giftCards || []).some(g => normaliseVoucherCode(g.code) === code) && guard++ < 20) code = newVoucherCode();
+      const card = { id: 'gc' + Date.now() + Math.random().toString(36).slice(2, 6), code, initialValue: it.price, balance: it.price, active: true, createdAt: Date.now(), soldOnOrder: order.id };
+      data.giftCards = [...(data.giftCards || []), card];
+      logAudit(data, byName, `Sold gift voucher ${code} ($${it.price.toFixed(2)}) on Ticket #${order.id}`);
+      codes.push(code);
+    }
+  }
+  if (codes.length) order.voucherCodes = codes;
+  return codes;
+}
+// GST never applies to SELLING a voucher (it applies when it is spent) — the
+// tax base excludes voucher-sale lines.
+function voucherSaleTotal(items) {
+  return (items || []).reduce((s, i) => s + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
+}
+
 app.get('/api/gift-cards/lookup/:code', (req, res) => {
   const data = readData();
   const wanted = normaliseVoucherCode(req.params.code);
@@ -8109,13 +8146,13 @@ app.post('/api/orders', (req, res) => {
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
-    printing.printDocketsForRound(data, order, items, 1, order.rounds[0].quickNote ? { quickNote: order.rounds[0].quickNote, quickNoteStation: order.rounds[0].quickNoteStation } : undefined);
+    printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), 1, order.rounds[0].quickNote ? { quickNote: order.rounds[0].quickNote, quickNoteStation: order.rounds[0].quickNoteStation } : undefined);
     return res.json(order);
   }
 
   const { discountRecord, discountAmount } = computeDiscount(subtotal, discount);
   const taxableSubtotal = subtotal - discountAmount;
-  const taxCalc = computeTax(data, taxableSubtotal);
+  const taxCalc = computeTax(data, taxableSubtotal - voucherSaleTotal(items));
   const tax = taxCalc.tax;
   const total = taxableSubtotal + taxCalc.add;
   const tipAmount = Math.max(0, parseFloat(tip) || 0);
@@ -8161,9 +8198,10 @@ app.post('/api/orders', (req, res) => {
     const label = discountRecord.kind === 'surcharge' ? 'surcharge' : 'discount';
     logAudit(data, order.staffName, `Applied ${discountRecord.type === 'percent' ? discountRecord.value + '%' : '$' + discountRecord.value.toFixed(2)} ${label} ($${Math.abs(discountAmount).toFixed(2)}) to Ticket #${order.id}${discountRecord.reason ? ' — ' + discountRecord.reason : ''}`);
   }
+  issueSoldVouchers(data, order, order.staffName);
   creditLoyalty(data, customerId, grandTotal);
   writeData(data);
-  printing.printDocketsForRound(data, order, items, 1);
+  printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), 1);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
 
   res.json(order);
@@ -8200,7 +8238,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   // order). The old settings.docket.roundPrint switch is retired.
   // (was: settings.docket.roundPrint =
   // 'full') so the kitchen sees the complete table, or just the added items.
-  printing.printDocketsForRound(data, order, items, roundNumber, quickNote ? { quickNote, quickNoteStation } : undefined);
+  printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), roundNumber, quickNote ? { quickNote, quickNoteStation } : undefined);
   res.json(order);
 });
 
@@ -8292,7 +8330,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   const subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   const { discountRecord, discountAmount } = computeDiscount(subtotal, discount);
   const taxableSubtotal = subtotal - discountAmount;
-  const taxCalc = computeTax(data, taxableSubtotal);
+  const taxCalc = computeTax(data, taxableSubtotal - voucherSaleTotal(order.items));
   const tax = taxCalc.tax;
   const total = taxableSubtotal + taxCalc.add;
   const tipAmount = Math.max(0, parseFloat(tip) || 0);
@@ -8336,6 +8374,7 @@ app.post('/api/orders/:id/close', (req, res) => {
     logAudit(data, order.closedBy, `Applied ${discountRecord.type === 'percent' ? discountRecord.value + '%' : '$' + discountRecord.value.toFixed(2)} ${label} ($${Math.abs(discountAmount).toFixed(2)}) to Ticket #${order.id}${discountRecord.reason ? ' — ' + discountRecord.reason : ''}`);
   }
   logAudit(data, order.closedBy, `Closed tab & charged Ticket #${order.id} (${order.grandTotal.toFixed(2)})`);
+  issueSoldVouchers(data, order, order.closedBy);
   creditLoyalty(data, order.customerId, grandTotal);
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
@@ -12812,7 +12851,13 @@ function cartDiscountAmount() {
   if (d.type === 'fixed' && (!d.kind || d.kind === 'discount')) rawAmount = Math.min(subtotal, rawAmount);
   return d.kind === 'surcharge' ? -rawAmount : rawAmount;
 }
-function cartTax() { return taxOn(cartSubtotal() - cartDiscountAmount()); }
+// GST never applies to SELLING a voucher (it applies when it is spent) —
+// mirror of the server's rule so the on-screen GST always matches the paper.
+function cartVoucherSaleTotal() {
+  const open = activeOpenOrder();
+  return [...(open ? open.items : []), ...state.cart].reduce((s, i) => s + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
+}
+function cartTax() { return taxOn(cartSubtotal() - cartDiscountAmount() - cartVoucherSaleTotal()); }
 function cartTotal() {
   const taxable = cartSubtotal() - cartDiscountAmount();
   return taxCfg().mode === 'exclusive' ? taxable + cartTax() : taxable;
@@ -14769,7 +14814,7 @@ async function confirmPayment() {
       state.attachedCustomerId = null;
       state.giftCardAppliedCode = '';
       state.mobileCartOpen = false;
-      state.toast = `Tab closed — ${money(order.grandTotal)} paid`;
+      state.toast = `Tab closed — ${money(order.grandTotal)} paid` + ((order.voucherCodes || []).length ? ` · voucher code ${order.voucherCodes.join(', ')}` : '');
       // Paid means done: the table goes back to the floor rather than the till
       // sitting on a settled table until someone thinks to leave it (owner,
       // Aug '26). Takeaway has no table to give back, so it stays put.
@@ -14825,7 +14870,7 @@ async function confirmPayment() {
     state.attachedCustomerId = null;
     state.giftCardAppliedCode = '';
     state.mobileCartOpen = false;
-    state.toast = `Order #${order.id} sent — ${money(order.grandTotal)} paid`;
+    state.toast = `Order #${order.id} sent — ${money(order.grandTotal)} paid` + ((order.voucherCodes || []).length ? ` · voucher code ${order.voucherCodes.join(', ')}` : '');
     await refreshOrders();
     await refreshSummary();
     state.menu = await api('/api/menu');
@@ -17056,7 +17101,16 @@ function renderCheckoutMiddle() {
       <div style="display:flex;gap:8px;">
         <input id="checkout-voucher-input" type="text" value="${state.checkoutVoucherCode}" placeholder="Voucher code" style="flex:1;">
         <button class="btn-secondary" style="width:132px;flex:none;padding:0;" data-act="apply-voucher-code">Apply</button>
-      </div>` : ''}` : ''}
+      </div>` : ''}
+      <label style="margin-top:16px;">Sell a voucher</label>
+      <div class="pay-options" style="margin-bottom:8px;">
+        ${[50, 100, 200].map(v => `<div class="pay-opt" data-act="sell-voucher" data-val="${v}">${money(v)}</div>`).join('')}
+      </div>
+      <div style="display:flex;gap:8px;">
+        <input id="sell-voucher-amount" type="number" min="1" step="1" placeholder="Other amount" style="flex:1;">
+        <button class="btn-secondary" style="width:132px;flex:none;padding:0;" data-act="sell-voucher-custom">Add to bill</button>
+      </div>
+      <div class="ts" style="margin-top:6px;">Code prints on the receipt</div>` : ''}
       `}
       `}
       ${state.settings.ticketFooter ? `<div class="ticket-footer-msg" style="border-top:none;padding:10px 0 0;">${esc(state.settings.ticketFooter)}</div>` : ''}
@@ -22335,12 +22389,40 @@ function renderMenuAdmin() {
 // Item rows for the Items admin, rendered into #menu-admin-list so the search
 // box can refresh just the rows on keystroke without rebuilding the input
 // (which bounces the mobile keyboard).
+// Folded sections (owner, Aug '26): viewing ALL items, each section is a
+// fold-away band — closed by default, tap to open, remembered. A search or
+// a picked section shows plain rows as before.
+function foldKey(k) { return 'fold:' + k; }
+function groupFolded(k) {
+  try { return !(JSON.parse(localStorage.getItem('pos-folds') || '{}')[foldKey(k)]); } catch (e) { return true; }
+}
+function toggleGroupFold(k) {
+  try {
+    const f = JSON.parse(localStorage.getItem('pos-folds') || '{}');
+    if (f[foldKey(k)]) delete f[foldKey(k)]; else f[foldKey(k)] = 1;
+    localStorage.setItem('pos-folds', JSON.stringify(f));
+  } catch (e) {}
+  render();
+}
+function foldHeadHtml(key, label, count) {
+  const folded = groupFolded(key);
+  return `<button type="button" class="group-fold-head${folded ? '' : ' open'}" data-act="fold-group" data-key="${esc(key)}">
+    <span class="gf-chev">${folded ? '▸' : '▾'}</span><span class="gf-name">${esc(label)}</span><span class="gf-count">${count}</span></button>`;
+}
 function renderMenuAdminRows() {
   const items = visibleMenuItemsForAdmin();
-  return `
-    ${items.length === 0 ? `<div class="empty-hist">No items match.</div>` : ''}
-    ${items.map(menuItemRowHtml).join('')}
-`;
+  if (items.length === 0) return `<div class="empty-hist">No items match.</div>`;
+  const grouped = !state.menuAdminCategoryFilter && !state.menuAdminSearch.trim() && !isListSorted('menu-items');
+  if (!grouped) return items.map(menuItemRowHtml).join('');
+  const groups = [];
+  for (const m of items) {
+    const k = m.category || 'No section';
+    let g = groups.find(x => x.k === k);
+    if (!g) { g = { k, rows: [] }; groups.push(g); }
+    g.rows.push(m);
+  }
+  return groups.map(g => foldHeadHtml('items:' + g.k, g.k, g.rows.length)
+    + (groupFolded('items:' + g.k) ? '' : g.rows.map(menuItemRowHtml).join(''))).join('');
 }
 
 // One Items-admin row (collapsed, or expanded with its inline edit panel).
@@ -27439,6 +27521,17 @@ function tapQtyPad(key) {
   render();
 }
 
+// Selling a voucher (owner, Aug '26): it rides the BILL like any item — the
+// money comes in through card/cash/split as normal, and the server only
+// creates the live code once the bill is actually paid.
+function addVoucherSaleLine(amount) {
+  const v = Math.round((parseFloat(amount) || 0) * 100) / 100;
+  if (!(v > 0)) { state.toast = 'Enter a voucher amount first'; armToastTimer(2500); render(); return; }
+  state.cart.push({ id: 'gv' + Date.now(), menuItemId: null, giftcardSale: true, name: 'Gift voucher', price: v, qty: 1, seat: null, mods: [] });
+  const inp = document.getElementById('sell-voucher-amount');
+  if (inp) inp.value = '';
+  render();
+}
 async function setCashQuickTender(val) {
   state.settings.cashQuickTender = val;
   render();
@@ -31737,6 +31830,7 @@ function handleActClick(el, e) {
       else if (act === 'add-menu-item') { quickAddMenuItem(); }
       else if (act === 'duplicate-menu-item') { duplicateMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-active') { toggleMenuItemActive(el.dataset.id); }
+      else if (act === 'fold-group') { toggleGroupFold(el.dataset.key); }
       else if (act === 'sel-cb') { selListToggle(el.dataset.list, el.dataset.key); }
       else if (act === 'toggle-modifier-custom') {
         const g = state.modifierGroups.find(x => x.id === el.dataset.id);
@@ -32346,6 +32440,8 @@ function handleActClick(el, e) {
       else if (act === 'icon-popover-enabled') { setIconPopoverEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-tips-enabled') { setTipsEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-cash-quick') { setCashQuickTender(el.dataset.val === 'true'); }
+      else if (act === 'sell-voucher') { addVoucherSaleLine(parseFloat(el.dataset.val)); }
+      else if (act === 'sell-voucher-custom') { const inp = document.getElementById('sell-voucher-amount'); addVoucherSaleLine(parseFloat(inp && inp.value)); }
       else if (act === 'cash-quick') { state.cashGiven = parseFloat(el.dataset.val).toFixed(2); render(); }
       else if (act === 'set-tip-period') { state.tipPayoutPeriod = el.dataset.val; render(); }
       else if (act === 'roster-week') { const v = parseInt(el.dataset.val); const base = state.rosterWeekStart || rosterMonday(Date.now()); state.rosterWeekStart = v === 0 ? rosterMonday(Date.now()) : base + v * 7 * 86400000; render(); }

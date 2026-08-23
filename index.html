@@ -10317,12 +10317,8 @@ function stationsForLines(lines) {
 // label + a bordered block (inverse black on thermal) — no course colours print
 // on the docket, though colours are kept everywhere else in the app.
 function buildDocketDoc(ctx, edit) {
-  // In the designer with a station picked, the paper wears that station's
-  // overrides; parts stop being tappable there (station scope edits the
-  // whole docket, not elements).
-  const stOv = edit ? dkStationOv() : null;
-  const d = Object.assign({}, docketCfg(), stOv || {});
-  const selectable = edit && !state.dkStation;
+  const d = Object.assign({}, docketCfg());
+  const selectable = edit;
   const rc = k => (d.red && d.red[k]) ? ' dk-red' : '';
   // Per-part size override → inline scale on the paper preview, so the
   // designer shows what the printer will do (Auto = no style).
@@ -10722,7 +10718,7 @@ function buildDocketDoc(ctx, edit) {
     return (g || blocks[k]) ? g + (blocks[k] || '') : '';
   }).filter(Boolean).join('\n      ');
   return `
-    <div class="${docketDocClasses(stOv)}" style="font-size:${(13 * (DK_SIZE_MULT[dkBaseSize(Object.assign({}, d, stOv || {}))] || 1)).toFixed(1)}px;">
+    <div class="${docketDocClasses(null)}" style="font-size:${(13 * (DK_SIZE_MULT[dkBaseSize(d)] || 1)).toFixed(1)}px;">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
       ${body}
       ${d.showFootRule === false ? '' : dkRuleHtml(dkRuleStyle(d.footRuleStyle || d.ruleStyle),
@@ -19419,29 +19415,6 @@ function renderPrintersDocketTab() {
   const d = docketCfg();
   const dl = d.layout || 'standard';
   return `
-    ${(state.printerStations || []).length ? `
-    <div class="settings-card wide" style="max-width:740px;">
-      <div class="th" style="margin-bottom:8px;">Printer</div>
-      <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
-        <div class="pay-opt ${state.dkStation ? '' : 'active'}" style="flex:none;" data-act="dk-station" data-val="all">All stations</div>
-        ${(state.printerStations || []).map(st => `
-        <div class="pay-opt ${state.dkStation === st.id ? 'active' : ''}" style="flex:none;" data-act="dk-station" data-val="${st.id}">${esc(st.name)}</div>`).join('')}
-      </div>
-      ${(() => {
-        // A saved design can be given to a station: it prints that design and
-        // inherits anything the design does not set (owner, Aug '26). Stored by
-        // ID, so editing the design updates every station wearing it.
-        const st = (state.printerStations || []).find(x => x.id === state.dkStation);
-        if (!st) return '';
-        const designs = state.settings.docketDesigns || [];
-        if (!designs.length) return `<div class="ts" style="margin-top:10px;">Save a design to assign one here</div>`;
-        return `<div class="pay-options" style="flex-wrap:wrap;margin:10px 0 0;">
-          <div class="pay-opt ${st.docketDesign ? '' : 'active'}" style="flex:none;" data-act="set-station-design" data-id="${st.id}" data-val="">Same as all</div>
-          ${designs.map(dz => `
-          <div class="pay-opt ${st.docketDesign === dz.id ? 'active' : ''}" style="flex:none;" data-act="set-station-design" data-id="${st.id}" data-val="${esc(dz.id)}">${esc(dz.name)}</div>`).join('')}
-        </div>`;
-      })()}
-    </div>` : ''}
     <div class="settings-card wide" style="max-width:740px;">
       <div class="th" style="margin-bottom:8px;">Docket</div>
       <div class="pay-options" style="flex-wrap:wrap;margin-bottom:0;">
@@ -19483,24 +19456,8 @@ function renderPrintersDocketTab() {
 // part on the paper and the same bar edits just that part, with whatever
 // doesn't apply greyed out — exactly Word's ribbon behaviour. Every choice
 // lands in settings.docket, so the printer honours it too.
-// Designer station scope: 'All stations' edits the venue design; picking a
-// station edits ITS overrides ({layout, fontScale, density} — Inherit follows
-// the venue) on the same paper. The station modal no longer carries these.
-function dkStationOv() {
-  const st = (state.printerStations || []).find(s => s.id === state.dkStation);
-  return (st && pickStationDocket(st.docket)) || {};
-}
-async function setDkStationOpt(key, val) {
-  const st = (state.printerStations || []).find(s => s.id === state.dkStation);
-  if (!st) return;
-  const dk = Object.assign({}, pickStationDocket(st.docket) || {});
-  if (val === 'inherit') delete dk[key]; else dk[key] = val;
-  st.docket = Object.keys(dk).length ? dk : null;
-  render();
-  try {
-    await api(`/api/printer-stations/${st.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ docket: st.docket }) });
-  } catch (e) { state.toast = 'Could not save the station design.'; render(); armToastTimer(2600); }
-}
+// A station prints its assigned saved design (picked in its own printer row);
+// the designer edits the venue docket only.
 // The picked line's own controls. A control that cannot apply to this line is
 // NOT drawn — a greyed button cannot say why it is dead.
 // The formatting row: size, alignment, ink, bold, underline. Always drawn and
@@ -19679,7 +19636,6 @@ const FMT_L = { standard: 'By course', byseat: 'By seat' };
 // reach any of them without hunting on the paper. Rows, not elements — an
 // element riding another line is shown against the row it prints on.
 function dkLineRows(d) {
-  if (state.dkStation) return [];
   const order = docketLineOrder(d);
   const j = (k) => dkJoinedOn(d, k);
   const rows = [];
@@ -19732,7 +19688,6 @@ function dkLineRows(d) {
 // nothing the first could not hold. It sits in the bar whether or not a line
 // is selected — adding one element used to mean tapping Done before the next.
 function dkAddMenu(d, dd) {
-  if (state.dkStation) return '';
   // The slip has its own inventory now — its four lines plus the same facts
   // the docket can be given, each ticked when it is on ITS paper.
   if (state.dkSlip) {
@@ -19853,8 +19808,6 @@ function dkKeyed(group, key, val) {
 function dkPaper() { return state.dkSlip ? caCfg() : docketCfg(); }
 function dkToolbar(dIn) {
   let d = dIn;
-  const station = (state.printerStations || []).find(s => s.id === state.dkStation) || null;
-  const stOv = station ? (pickStationDocket(station.docket) || {}) : {};
   // The slip's own settings while one of its lines is picked.
   if (state.dkSlip) d = caCfg();
   // An added line is a line: it takes a size, an alignment, ink, weight and a
@@ -19866,7 +19819,7 @@ function dkToolbar(dIn) {
   // A note type is an element of its own — the key is nt:<type id>.
   const ntNow = state.dkPart && /^nt:/.test(state.dkPart)
     ? (state.noteCategories || []).find(c => 'nt:' + c.id === state.dkPart) : null;
-  const p = !station && state.dkPart && (DK_PARTS[state.dkPart] || exNow || ntNow) ? state.dkPart : null;
+  const p = state.dkPart && (DK_PARTS[state.dkPart] || exNow || ntNow) ? state.dkPart : null;
   const meta = p ? (DK_PARTS[p] || (ntNow ? { label: ntNow.name, show: null, size: true, align: true, red: true } : EX_META)) : null;
   const shown = meta && meta.show ? d[meta.show] !== false : true;
   const menu = state.dkMenu || null;
@@ -19896,34 +19849,26 @@ function dkToolbar(dIn) {
   // picking the layout's own default clears the override — stored nothing,
   // printed bytes identical, but the menu always answers with a real size.
   const defN = dkBaseSize(d);
-  const stBase = stOv.baseSize || (stOv.fontScale === 'xlarge' ? 3 : stOv.fontScale === 'large' ? 2 : stOv.fontScale === 'normal' ? 1 : undefined);
-  // One ladder, numbers only — the docket's own size, a station's and a
-  // line's all speak 1..8 (owner, Aug '26: "wtf is LARGE").
-  const sizeLabel = station
-    ? (stBase !== undefined ? String(stBase) : 'Inherit')
-    : p
-      ? (meta.size ? String(partSize || defN) : '\u2014')
-      : String(defN);
+  // One ladder, numbers only — the docket's own size and a line's both
+  // speak 1..8 (owner, Aug '26: "wtf is LARGE").
+  const sizeLabel = p
+    ? (meta.size ? String(partSize || defN) : '\u2014')
+    : String(defN);
   const NUMS = ['1', '1.5', '2', '3', '4', '5', '6', '7', '8']; // 1.5 = taller only, the one in-between the printer can do
-  const sizeItems = station
-    ? [{ v: 'inherit', l: 'Inherit', on: stBase === undefined }].concat(NUMS.map((v) => ({ v, l: v, on: stBase === parseFloat(v) })))
-    : p
-      ? NUMS.map((v) => ({ v, l: v, on: (partSize || defN) === parseFloat(v) }))
-      : NUMS.map((v) => ({ v, l: v, on: defN === parseFloat(v) }));
+  const sizeItems = p
+    ? NUMS.map((v) => ({ v, l: v, on: (partSize || defN) === parseFloat(v) }))
+    : NUMS.map((v) => ({ v, l: v, on: defN === parseFloat(v) }));
   // Word-style numbers (owner call), mapped to real printer line feeds.
   // Legacy tight/roomy read as their numeric neighbours.
   // Three steps, as multiples of the printer's own line height (owner ask):
   // five near-identical options were a choice nobody could see the point of.
   const SPACING_OPTS = [['1', '1'], ['1.5', '1.5'], ['2', '2']];
   const denTick = (v) => {
-    const cur = station ? stOv.density : d.density;
+    const cur = d.density;
     const c = (cur === 'roomy' || cur === '1.5') ? '1.5' : cur === '2' ? '2' : '1';
     return c === v;
   };
-  const spacingItems = station
-    ? [['inherit', 'Inherit'], ...SPACING_OPTS].map(([v, l]) =>
-        ({ v, l, on: v === 'inherit' ? stOv.density === undefined : denTick(v) }))
-    : SPACING_OPTS.map(([v, l]) => ({ v, l, on: denTick(v) }));
+  const spacingItems = SPACING_OPTS.map(([v, l]) => ({ v, l, on: denTick(v) }));
 
   // ONE panel, not two. The bar used to swap wholesale: pick a line and every
   // docket-wide control vanished, pick nothing and every line control did.
@@ -19938,15 +19883,10 @@ function dkToolbar(dIn) {
   const pw = (state.settings || {}).paperWidth === '58' ? '58' : (state.settings || {}).paperWidth === '76' ? '76' : '80';
   const cols = (fb) => fb ? (pw === '58' ? 42 : pw === '76' ? 40 : 56) : (pw === '58' ? 32 : pw === '76' ? 33 : 42);
   const docRow = `
-      ${station ? dd('format', stOv.layout ? FMT_L[stOv.layout] : 'Inherit', true, [
-        ['inherit', 'Inherit'], ['standard', 'By course'], ['byseat', 'By seat'],
-      ].map(([v, l]) => ({ v, l, on: v === 'inherit' ? stOv.layout === undefined : stOv.layout === v })), 'Docket format') : ''}
-      ${dd('font', d.font === 'B' ? 'Narrow' : 'Wide', !station, [
+      ${dd('font', d.font === 'B' ? 'Narrow' : 'Wide', true, [
         { v: 'A', l: `Wide — ${cols(false)} a line`, on: (d.font || 'A') === 'A' },
         { v: 'B', l: `Narrow — ${cols(true)} a line`, on: d.font === 'B' },
       ], 'Letter width')}
-      ${station ? dd('size', sizeLabel, true, sizeItems, 'Text size') : ''}
-      ${station ? dd('spacing', 'Spacing ' + (denTick('1.5') ? '1.5' : denTick('2') ? '2' : '1'), true, spacingItems, 'Line spacing for this station') : ''}
       ${dkAddMenu(d, dd)}
       ${dkLinesMenu(d, dd)}
       ${state.dkSlip
@@ -20304,6 +20244,20 @@ function stationFormFields(m) {
         <div class="pay-opt ${m.kind !== 'impact' ? 'active' : ''}" data-act="set-station-kind" data-val="thermal">Thermal</div>
         <div class="pay-opt ${m.kind === 'impact' ? 'active' : ''}" data-act="set-station-kind" data-val="impact">Ink · red+black</div>
       </div>
+      ${(() => {
+        // The design this printer wears — designs are made in Papers, worn
+        // here. Stored by ID, so editing a design updates every wearer.
+        if (m.mode !== 'edit' || !m.id) return '';
+        const designs = state.settings.docketDesigns || [];
+        const label = '<label>Docket design</label>';
+        if (!designs.length) return label + '<div class="ts" style="margin-bottom:6px;">Save a design in Papers first</div>';
+        const cur = ((state.printerStations || []).find(s => s.id === m.id) || {}).docketDesign || '';
+        return label + `<div class="pay-options" style="margin-bottom:6px;flex-wrap:wrap;">
+        <div class="pay-opt ${cur ? '' : 'active'}" data-act="set-station-design" data-id="${m.id}" data-val="">Same as all</div>
+        ${designs.map(dz => `
+        <div class="pay-opt ${cur === dz.id ? 'active' : ''}" data-act="set-station-design" data-id="${m.id}" data-val="${esc(dz.id)}">${esc(dz.name)}</div>`).join('')}
+        </div>`;
+      })()}
       <label>If nothing here prints, send to station</label>
       <select id="printer-station-fallback">
         <option value="">— nowhere (alert only) —</option>
@@ -31710,7 +31664,9 @@ function handleActClick(el, e) {
         } else if (k === 'vouchers') {
           if (state.discountModal) closeDiscountModal();
           state.billSplit = null; // any rail row walks out of the split pane
-          state.payRailVouchers = !state.payRailVouchers;
+          // Re-tapping stays put — toggling off dropped you onto Cash
+          // (owner, Aug '26: "clicking voucher again selects cash").
+          state.payRailVouchers = true;
           render();
         } else {
           if (state.splitMode) toggleSplitMode();
@@ -32704,7 +32660,6 @@ function handleActClick(el, e) {
           .then(() => { state.toast = val ? 'Station design set.' : 'Station follows the main docket.'; render(); armToastTimer(2000); })
           .catch(() => { state.toast = 'Could not set the station design.'; render(); });
       }
-      else if (act === 'dk-station') { state.dkSel = []; state.dkPart = null; state.dkStation = el.dataset.val === 'all' ? null : el.dataset.val; render(); }
       else if (act === 'set-docket-layout') { state.dkSel = []; state.dkPart = null; setDocketOpt('layout', el.dataset.val); }
       else if (act === 'set-receipt-layout') { setReceiptLayout(el.dataset.val); }
       else if (act === 'toggle-docket-red') {
@@ -32729,7 +32684,6 @@ function handleActClick(el, e) {
         // Parts nest (covers sits inside the table header, notes inside the
         // item line) and every [data-act] has its own listener, so the tap
         // bubbles to outer parts too — only the innermost one may handle it.
-        if (state.dkStation) return; // station scope: paper parts aren't editable
         if (e.target.closest('[data-act]') !== el) return;
         // Which paper the pick landed on — table/time live on BOTH the docket
         // and the call-away slip, and the arrows move the paper that was
@@ -32834,7 +32788,6 @@ function handleActClick(el, e) {
       else if (act === 'dk-menu-opt') {
         const m = el.dataset.menu, v = el.dataset.val;
         if (m === 'element') { state.dkMenu = null; state.dkPart = v === 'whole' ? null : v; render(); }
-        else if (m === 'station') { state.dkMenu = null; state.dkPart = null; state.dkStation = v === 'all' ? null : v; render(); }
         else if (m === 'linespacing') {
           // Every picked line, so ctrl+A then spacing sets the whole paper —
           // which is why there is no separate whole-docket spacing control.
@@ -32843,7 +32796,6 @@ function handleActClick(el, e) {
           dkSelection().forEach(k => { next[k] = v === 'auto' ? undefined : v; });
           if (state.dkSlip) setCaOpt('gaps', next); else setDocketOpt('gaps', next);
         }
-        else if (m === 'format') { state.dkMenu = null; setDkStationOpt('layout', v); }
         else if (m === 'layout') { state.dkMenu = null; setDocketOpt('layout', v); }
         else if (m === 'courseRuleStyle' || m === 'itemRuleStyle') { state.dkMenu = null; setDocketOpt(m, v); }
         else if (m === 'align') {
@@ -32941,16 +32893,14 @@ function handleActClick(el, e) {
           setDocketOpts(Object.assign({ blockStyle: Object.assign({}, docketCfg().blockStyle || {}, { [k]: v }) },
             k === 'course' ? { newCourseStyle: v } : {}));
         }
-        else if (m === 'docsize') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('baseSize', v === 'inherit' ? 'inherit' : parseInt(v, 10)); else setDocketOpt('baseSize', parseInt(v, 10)); }
         // The docket's own spacing and letter width. Both menus were on screen
         // and neither was wired (owner, Aug '26: "cannot edit select").
-        else if (m === 'spacing') { state.dkMenu = null; if (state.dkStation) setDkStationOpt('density', v); else setDocketOpt('density', v); }
+        else if (m === 'spacing') { state.dkMenu = null; setDocketOpt('density', v); }
         else if (m === 'font') { state.dkMenu = null; if (state.dkSlip) setCaOpt('font', v === 'B' ? 'B' : 'A'); else setDocketOpt('font', v === 'B' ? 'B' : 'A'); }
         else if (m === 'size') {
           state.dkMenu = null;
           const pk = state.dkPart;
-          if (state.dkStation) setDkStationOpt('baseSize', v === 'inherit' ? 'inherit' : parseFloat(v));
-          else if (state.dkSlip) {
+          if (state.dkSlip) {
             const c = caCfg(), bN = caBaseSize(c);
             if (!dkSelection().length) { setCaOpt('baseSize', parseFloat(v)); }
             else {

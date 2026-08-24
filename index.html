@@ -3566,9 +3566,57 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
       if (btn) {
         var old = btn.textContent;
         btn.textContent = '\u2713 Copied \u2014 paste it to Claude';
-        setTimeout(function () { btn.textContent = old; }, 2600);
+        setTimeout(function () { pillLabel(btn); }, 2600);
       }
     } catch (e) { downloadMyData(); }
+  }
+  // Cloud save (owner ask, Aug '26): with a GitHub token pasted once, the pill
+  // uploads this browser's data straight to the preview repo's phone-data
+  // branch \u2014 Claude reads it from there, no copy-paste. No token (or a failed
+  // upload) falls back to the clipboard copy above. The token lives only in
+  // this browser's storage; scope it to just this repo, Contents read/write.
+  var TOKKEY = 'pv-gh-token';
+  function cloudToken() { try { return localStorage.getItem(TOKKEY) || ''; } catch (e) { return ''; } }
+  function pillLabel(btn) {
+    btn.textContent = cloudToken() ? '\u2601 Save for Claude' : '\u2398 Copy for Claude';
+  }
+  function b64utf8(str) {
+    var bytes = new TextEncoder().encode(str);
+    var bin = '';
+    for (var i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+  async function saveForClaude(btn) {
+    var token = cloudToken();
+    if (!token) {
+      var entered = prompt('Save without copy-paste: paste a GitHub token here (github.com \u2192 Settings \u2192 Developer settings \u2192 Fine-grained tokens \u2192 this repo only, Contents: read & write).\n\nCancel keeps the copy-to-clipboard behaviour.');
+      if (entered && entered.trim()) {
+        token = entered.trim();
+        try { localStorage.setItem(TOKKEY, token); } catch (e) {}
+      } else { copyForClaude(btn); return; }
+    }
+    btn.textContent = '\u2191 Saving\u2026';
+    try {
+      var url = 'https://api.github.com/repos/akinaykenar-design/restaurant-pos-preview/contents/pos-data.json';
+      var head = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' };
+      var sha = null;
+      var cur = await fetch(url + '?ref=phone-data', { headers: head });
+      if (cur.ok) { sha = (await cur.json()).sha; }
+      else if (cur.status === 401 || cur.status === 403) throw new Error('auth');
+      var body = { message: 'Phone data save', branch: 'phone-data', content: b64utf8(files[DB]) };
+      if (sha) body.sha = sha;
+      var res = await fetch(url, { method: 'PUT', headers: head, body: JSON.stringify(body) });
+      if (res.status === 401 || res.status === 403) throw new Error('auth');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      btn.textContent = '\u2713 Saved \u2014 tell Claude to pull it';
+      setTimeout(function () { pillLabel(btn); }, 2600);
+    } catch (e) {
+      // A rejected token is forgotten so the next tap asks for a fresh one;
+      // either way the old clipboard road still gets the data out.
+      if (String(e && e.message) === 'auth') { try { localStorage.removeItem(TOKKEY); } catch (e2) {} }
+      btn.textContent = '\u2715 Cloud failed \u2014 copying instead';
+      setTimeout(function () { copyForClaude(btn); }, 900);
+    }
   }
   function showConflictBar() {
     var bar = document.createElement('div');
@@ -3861,8 +3909,8 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
   window.addEventListener('load', function () {
     var save = document.createElement('div');
     save.style.cssText = 'position:fixed;z-index:99999;background:#4FA51D;color:#fff;padding:6px 12px;border-radius:99px;font:700 11px/1.6 system-ui,sans-serif;user-select:none;touch-action:none;cursor:grab;box-shadow:0 2px 10px rgba(0,0,0,.35);opacity:.92;';
-    save.textContent = '\u2398 Copy for Claude';
-    save.title = 'Tap: copy this browser\u2019s data \u2014 then paste it into the Claude chat. Drag to move the button.';
+    pillLabel(save);
+    save.title = 'Tap: save this browser\u2019s data for Claude \u2014 straight to the repo with a GitHub token, or to the clipboard to paste into chat. Drag to move the button.';
     var POSKEY = 'pv-save-pos';
     function clamp(x, y) {
       var r = save.getBoundingClientRect();
@@ -3893,7 +3941,7 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
       if (drag.moved) {
         var r = save.getBoundingClientRect();
         try { localStorage.setItem(POSKEY, JSON.stringify({ x: r.left, y: r.top })); } catch (err) {}
-      } else { copyForClaude(save); }
+      } else { saveForClaude(save); }
       drag = null;
     });
     save.addEventListener('pointercancel', function () { drag = null; });

@@ -5401,7 +5401,7 @@ app.get('/api/discount-presets', (req, res) => {
 
 app.post('/api/discount-presets', (req, res) => {
   const data = readData();
-  const { name, kind, type, value, color } = req.body;
+  const { name, kind, type, value, color, minCovers } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
   if (value === undefined || isNaN(parseFloat(value))) return res.status(400).json({ error: 'A valid value is required' });
   const preset = {
@@ -5411,6 +5411,9 @@ app.post('/api/discount-presets', (req, res) => {
     type: type === 'fixed' ? 'fixed' : 'percent',
     value: parseFloat(value),
     color: (typeof color === 'string' && color) || null,
+    // Cover criteria: a surcharge can apply only from a party size up
+    // (e.g. groups of 8+). null = every table.
+    minCovers: parseInt(minCovers, 10) > 0 ? parseInt(minCovers, 10) : null,
   };
   data.discountPresets.push(preset);
   logAudit(data, staffFromReq(req), `Added ${preset.kind} preset: ${preset.name}`);
@@ -5422,8 +5425,9 @@ app.put('/api/discount-presets/:id', (req, res) => {
   const data = readData();
   const preset = data.discountPresets.find(p => p.id === req.params.id);
   if (!preset) return res.status(404).json({ error: 'Preset not found' });
-  const { name, kind, type, value, color } = req.body;
+  const { name, kind, type, value, color, minCovers } = req.body;
   if (name !== undefined) { if (!name.trim()) return res.status(400).json({ error: 'Name is required' }); preset.name = name.trim().slice(0, 40); }
+  if (minCovers !== undefined) preset.minCovers = parseInt(minCovers, 10) > 0 ? parseInt(minCovers, 10) : null;
   if (kind !== undefined) preset.kind = kind === 'surcharge' ? 'surcharge' : 'discount';
   if (type !== undefined) preset.type = type === 'fixed' ? 'fixed' : 'percent';
   if (value !== undefined && !isNaN(parseFloat(value))) preset.value = parseFloat(value);
@@ -17394,7 +17398,12 @@ function renderDiscountFields(hideApply) {
     ${state.discountPresets.length > 0 ? `
       <label>Presets</label>
       <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;">
-        ${state.discountPresets.map(p => `<button type="button" class="pay-opt sm ${m.reason === p.name && m.kind === p.kind && m.type === p.type && String(m.value) === String(p.value) ? 'active' : ''}" data-act="pick-discount-preset" data-id="${p.id}">${esc(p.name)}</button>`).join('')}
+        ${state.discountPresets.map(p => {
+          // Cover criteria: the button never disappears (buttons don't move),
+          // it just dims until the party is big enough.
+          const under = p.kind === 'surcharge' && p.minCovers && (state.covers || 0) < p.minCovers;
+          return `<button type="button" class="pay-opt sm ${m.reason === p.name && m.kind === p.kind && m.type === p.type && String(m.value) === String(p.value) ? 'active' : ''}" ${under ? 'disabled style="opacity:.4;"' : ''} data-act="pick-discount-preset" data-id="${p.id}">${esc(p.name)}${p.kind === 'surcharge' && p.minCovers ? ` · ${p.minCovers}+` : ''}</button>`;
+        }).join('')}
       </div>` : ''}
     <label>Kind</label>
     <div class="pay-options">
@@ -22123,6 +22132,7 @@ function renderPresetTileList(kind, addLabel) {
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="discount-preset" data-key="${p.id}" ${sel.includes(p.id) ? 'checked' : ''}>
           ${colorDotButton('discount-preset', p.id, p.color)}
           <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
+          ${p.minCovers ? `<span class="ts" style="font-family:var(--font-mono);">${p.minCovers}+ covers</span>` : ''}
           <span style="flex:1;"></span>
           <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);">${p.type === 'percent' ? p.value + '%' : money(p.value)}</span>
         </div>
@@ -22137,6 +22147,9 @@ function renderPresetTileList(kind, addLabel) {
               <button class="pay-opt sm${p.type === 'percent' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="percent">%</button>
               <button class="pay-opt sm${p.type === 'fixed' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="fixed">$</button>
             </div>
+            ${kind === 'surcharge' ? `
+            <label class="field-label" style="margin-top:10px;">Cover criteria — from this many covers (blank = every table)</label>
+            <input type="number" min="0" step="1" value="${p.minCovers || ''}" placeholder="Any party size" onblur="updateDiscountPresetField('${p.id}', { minCovers: parseInt(this.value, 10) > 0 ? parseInt(this.value, 10) : null })" style="width:120px;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);">` : ''}
           </div>
         </div>` : ''}
       </div>`).join('')}
@@ -22273,6 +22286,10 @@ function renderDiscountPresetModal() {
       </div>
       <label>${m.type === 'percent' ? 'Percent' : 'Amount'}</label>
       <input id="discount-preset-value-input" type="number" min="0" step="0.01" value="${m.value}" placeholder="${m.type === 'percent' ? '10' : '5.00'}">
+      ${m.kind === 'surcharge' ? `
+      <label>Cover criteria</label>
+      <input id="discount-preset-mincovers-input" type="number" min="0" step="1" value="${m.minCovers || ''}" placeholder="Any party size">
+      <div class="ts" style="margin-top:4px;">Only offered for parties of this size or larger — e.g. 8 for a big-group service charge. Leave blank for every table.</div>` : ''}
       <div class="modal-actions">
         <button class="icon-action discard" data-act="close-discount-preset-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
         ${state.discountPresetModal && state.discountPresetModal.id ? `<button type="button" class="btn-modal-delete" data-act="modal-delete-discount-preset">Delete</button>` : ''}
@@ -29098,7 +29115,7 @@ async function confirmAddTip() {
   }
 }
 
-function openAddDiscountPreset(kind) { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: kind === 'surcharge' ? 'surcharge' : 'discount', type: 'percent', value: 10 }); state.adminError = ''; render(); }
+function openAddDiscountPreset(kind) { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: kind === 'surcharge' ? 'surcharge' : 'discount', type: 'percent', value: 10, minCovers: '' }); state.adminError = ''; render(); }
 // Inline tile edits (name/value/type/colour) — save one field, keep the list fresh.
 async function updateDiscountPresetField(id, patch) {
   try {
@@ -29137,7 +29154,7 @@ async function deleteSelectedDiscountPresets() {
 }
 function openEditDiscountPreset(id) {
   const p = state.discountPresets.find(x => x.id === id);
-  state.discountPresetModal = withDirtyCheck({ mode: 'edit', id: p.id, name: p.name, kind: p.kind, type: p.type, value: p.value });
+  state.discountPresetModal = withDirtyCheck({ mode: 'edit', id: p.id, name: p.name, kind: p.kind, type: p.type, value: p.value, minCovers: p.minCovers || '' });
   state.adminError = '';
   render();
 }
@@ -29146,7 +29163,8 @@ async function saveDiscountPresetModal() {
   const m = state.discountPresetModal;
   if (!m.name.trim()) { state.adminError = 'Name is required.'; render(); return; }
   if (m.value === '' || isNaN(parseFloat(m.value))) { state.adminError = 'Enter a valid value.'; render(); return; }
-  const payload = { name: m.name, kind: m.kind, type: m.type, value: parseFloat(m.value) };
+  const mc = parseInt(m.minCovers, 10);
+  const payload = { name: m.name, kind: m.kind, type: m.type, value: parseFloat(m.value), minCovers: m.kind === 'surcharge' && mc > 0 ? mc : null };
   try {
     if (m.mode === 'add') {
       await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -31655,6 +31673,8 @@ function bindEvents() {
   if (discountPresetNameInput) discountPresetNameInput.addEventListener('input', (e) => { state.discountPresetModal.name = e.target.value; });
   const discountPresetValueInput = document.getElementById('discount-preset-value-input');
   if (discountPresetValueInput) discountPresetValueInput.addEventListener('input', (e) => { state.discountPresetModal.value = e.target.value; });
+  const discountPresetMinCoversInput = document.getElementById('discount-preset-mincovers-input');
+  if (discountPresetMinCoversInput) discountPresetMinCoversInput.addEventListener('input', (e) => { state.discountPresetModal.minCovers = e.target.value; });
   const cashInput = document.getElementById('cash-input');
   if (cashInput) {
     cashInput.addEventListener('input', (e) => {

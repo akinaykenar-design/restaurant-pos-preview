@@ -3039,7 +3039,7 @@ body[data-fixed-cols="1"] .admin-content .acct-grid{ grid-template-columns:repea
    height (the column count + pop width are synced to the order grid by
    syncPopupTileGrids). The numeric dial pads keep their own 3-column shape. */
 .qty-pop.covers-pop .seat-grid .covers-pad-key{ height:calc(var(--item-h,92px) * var(--item-h-mult,1)); }
-body[data-fixed-rows="1"] .qty-pop.covers-pop .seat-grid .covers-pad-key{ height:var(--fixed-row-h,92px); } /* pinned rows: seat keys match the order tiles exactly */
+body[data-fixed-rows="1"] .qty-pop.covers-pop .seat-grid .covers-pad-key{ height:calc(var(--fixed-row-h,92px) * var(--item-h-mult,1)); } /* pinned rows: seat keys track the order tiles (at the pop's half scale) */
 .qty-pop.covers-pop .seat-grid{ gap:var(--grid-gap,6px); }
 /* In the widened (order-grid-width) pops the ✓/× must NOT stretch into
    full-width slabs — compact right-aligned buttons, same as modal actions. */
@@ -15761,17 +15761,22 @@ function syncPopupTileGrids() {
   // the cache below is warm before any popup opens.
   const ref = [...document.querySelectorAll('.menu-scroll .grid')].find(g => g.getBoundingClientRect().width > 0);
   let cols = 0, tileW = 0, gap = 10;
+  let hubRows = 0;
   if (ref) {
     const refStyle = getComputedStyle(ref);
     cols = refStyle.gridTemplateColumns.split(' ').length;
     const refW = ref.getBoundingClientRect().width;
     gap = parseFloat(refStyle.columnGap) || 0;
     tileW = (refW - gap * (cols - 1)) / cols;
+    // How many whole tile rows the menu shows — the seat pop mirrors this.
+    const scroller0 = ref.closest('.menu-scroll');
+    const t0 = [...ref.children].find(c => c.offsetParent);
+    if (scroller0 && t0 && t0.offsetHeight) hubRows = Math.max(1, Math.floor((scroller0.clientHeight + gap) / (t0.offsetHeight + gap)));
   }
   // A floating pane squeezes the menu behind it, so the live measurement can
   // read one starved column — remember the last real geometry and use that.
-  if (cols >= 2 && tileW > 60) _lastMenuGridGeom = { cols, tileW, gap };
-  else if (_lastMenuGridGeom) ({ cols, tileW, gap } = _lastMenuGridGeom);
+  if (cols >= 2 && tileW > 60) _lastMenuGridGeom = { cols, tileW, gap, hubRows };
+  else if (_lastMenuGridGeom) ({ cols, tileW, gap, hubRows } = _lastMenuGridGeom);
   const grids = document.querySelectorAll('.modal-pane .note-preset-grid, .io-pop .io-size-grid, .io-pop .io-seat-grid, .qty-pop .seat-grid');
   if (!grids.length) return;
   if (!cols || cols < 2 || !tileW) return;
@@ -15794,22 +15799,30 @@ function syncPopupTileGrids() {
     if (pane.classList.contains('seat-pop')) {
       const ps3 = getComputedStyle(pane);
       const pad3 = (parseFloat(ps3.paddingLeft) || 0) + (parseFloat(ps3.paddingRight) || 0);
-      paneGrids.forEach(g => { g.style.gridTemplateColumns = `repeat(${cols}, ${tileW}px)`; g.style.justifyContent = 'start'; });
+      // HALF SCALE (owner, Aug '26): the pop is the order grid at 50% — the
+      // hub's columns across, the set rows down, every cell half a tile, and
+      // half the gap to keep the proportions. Same map, smaller print.
+      const kW = Math.max(44, Math.round(tileW / 2));
+      const gap3 = Math.max(4, Math.round(gap / 2));
+      let mult0 = parseFloat(pane.dataset.multBase);
+      if (!mult0) { mult0 = parseFloat(ps3.getPropertyValue('--item-h-mult')) || 1; pane.dataset.multBase = mult0; }
+      pane.style.setProperty('--item-h-mult', (mult0 * 0.5).toFixed(3));
+      paneGrids.forEach(g => { g.style.gridTemplateColumns = `repeat(${cols}, ${kW}px)`; g.style.gap = gap3 + 'px'; g.style.justifyContent = 'start'; });
       pane.style.maxWidth = 'none';
-      pane.style.width = Math.min(window.innerWidth * 0.94, Math.round(tileW * cols + gap * (cols - 1) + pad3)) + 'px';
+      pane.style.width = Math.min(window.innerWidth * 0.94, Math.round(kW * cols + gap3 * (cols - 1) + pad3)) + 'px';
       const g3 = paneGrids[0];
       const key3 = g3 && [...g3.children].find(t => t.offsetParent);
       if (g3 && key3) {
-        const rowGap3 = parseFloat(getComputedStyle(g3).rowGap) || gap;
+        const rowGap3 = gap3;
         const rowH3 = key3.offsetHeight + rowGap3;
         pane.style.height = 'auto'; pane.style.maxHeight = 'none';
         const chrome3 = pane.offsetHeight - g3.offsetHeight;
         const budget3 = window.innerHeight * 0.86;
         const setRows3 = gridDimFor('gridRows', activeLayoutDevice() === 'mobile' ? 'mobile' : 'pc');
         // "Whatever down is set": the pinned row count when there is one,
-        // otherwise as many whole rows as fit — either way a constant,
-        // never a function of the cover count.
-        let R3 = setRows3 || Math.floor((budget3 - chrome3 + rowGap3) / rowH3);
+        // otherwise the row count the menu itself shows — either way a
+        // constant, never a function of the cover count.
+        let R3 = setRows3 || hubRows || Math.floor((budget3 - chrome3 + rowGap3) / rowH3);
         R3 = Math.max(2, Math.min(R3, Math.floor((budget3 - chrome3 + rowGap3) / rowH3)));
         g3.style.overflowY = 'auto';
         g3.style.height = Math.round(R3 * rowH3 - rowGap3) + 'px';

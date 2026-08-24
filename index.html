@@ -3331,7 +3331,7 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 /* Floor picker band: the SAME chip strip as the admin rail (size, radius,
    colours, padding) so the top band holds its position flipping
    Order <-> Admin (owner ask). */
-.fp-band{display:flex;align-items:center;gap:6px;padding:8px 10px;overflow-x:auto;scrollbar-width:none;background:var(--surface);border-bottom:1px solid var(--steel-200);} /* same ground + edge as the admin rail strip */
+.fp-band{display:flex;align-items:center;gap:6px;padding:10px;overflow-x:auto;scrollbar-width:none;background:var(--surface);border-bottom:1px solid var(--steel-200);} /* same ground + edge as the admin rail strip; even 10px so the chips never sit on the screen border */
 .fp-band::-webkit-scrollbar{display:none;}
 .fp-chip{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:7px 13px;min-height:38px;border-radius:var(--btn-radius);border:none;background:var(--steel-100);color:var(--charcoal-soft);font-size:var(--rail-fs,13px);font-weight:600;white-space:nowrap;cursor:pointer;font-family:inherit;}
 .fp-chip.active{background:var(--orange);color:#fff;}
@@ -5967,6 +5967,9 @@ app.put('/api/settings', (req, res) => {
       color: c.color || null,
       image: (typeof c.image === 'string' && c.image) || null,
       enabled: c.enabled !== false,
+      // Allowed sections: null = every section welcome; an array of category
+      // ids = only dishes from those sections may file under this course.
+      sections: Array.isArray(c.sections) ? c.sections.map(s => String(s)).slice(0, 64) : null,
     }));
   }
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
@@ -13763,8 +13766,66 @@ function itemDefaultCourse(item) {
   const cat = state.categories.find(c => c.name === item.category);
   return (cat && cat.defaultCourse) || null;
 }
+// Allowed sections per course (owner ask, Aug '26): a course template can name
+// which menu sections its dishes may come from — so a Coke can't file under
+// Mains. sections: null (or a missing state.categories match) = no restriction.
+function courseAllowsItem(n, item) {
+  const c = state.settings.courses[n - 1];
+  if (!c || !Array.isArray(c.sections) || !item) return true;
+  const cat = state.categories.find(x => x.name === item.category);
+  return !cat || c.sections.includes(cat.id);
+}
+// Where a dish goes when its intended course refuses its section: the closest
+// enabled course that takes it (ties break toward the earlier course), or the
+// intended course unchanged when nothing allows it — a dead-end restriction
+// must not eat the dish.
+function nearestAllowedCourse(intended, item) {
+  if (courseAllowsItem(intended, item)) return intended;
+  const cand = state.settings.courses.map((_, i) => i + 1)
+    .filter(n => state.settings.courses[n - 1].enabled !== false && courseAllowsItem(n, item));
+  if (!cand.length) return intended;
+  return cand.reduce((best, n) => {
+    const d = Math.abs(n - intended), db = Math.abs(best - intended);
+    return d < db || (d === db && n < best) ? n : best;
+  });
+}
+// Auto-cascade (owner ask, Aug '26): when Auto files a fresh order into only
+// the later courses — mains + desserts, no starter — the kitchen shouldn't get
+// a docket that OPENS at "2nd course". Before anything is sent or fired, each
+// course group slides down into the empty slots below it (only ever DOWN, and
+// only into an enabled course whose allowed-sections take every dish in the
+// group). Once a round is sent or a course fired the numbering is frozen — it
+// never shifts under the kitchen.
+function cascadeAutoCourses(openOrder) {
+  if (!autoCourseOn() || openOrder || Object.keys(state.firedCourses || {}).length || !state.cart.length) return;
+  const present = [...new Set(state.cart.map(c => c.course || 1))].sort((a, b) => a - b);
+  const map = {};
+  let next = 1;
+  // Same name heuristic as the one-tap default fill: a course is drinks,
+  // dessert, or plain food by its name. Until allowed-sections are set on a
+  // course, a group only slides into a course of its own kind — mains never
+  // land under "Drinks" just because Drinks is course 1 and empty. An explicit
+  // sections list on the target overrides the name and decides alone.
+  const kindOf = (c) => /drink/i.test(c.name) ? 'drinks' : /dessert|sweet/i.test(c.name) ? 'dessert' : 'food';
+  present.forEach(n => {
+    let target = Math.min(next, n);
+    const groupFits = (t) => {
+      const tpl = state.settings.courses[t - 1];
+      if (!tpl || tpl.enabled === false) return false;
+      const src = state.settings.courses[n - 1];
+      if (!Array.isArray(tpl.sections) && src && kindOf(tpl) !== kindOf(src)) return false;
+      return state.cart.every(l => (l.course || 1) !== n || courseAllowsItem(t, (state.menu || []).find(m => m.id === l.menuItemId)));
+    };
+    while (target < n && !groupFits(target)) target++;
+    map[n] = target;
+    next = target + 1;
+  });
+  if (present.every(n => map[n] === n)) return;
+  state.cart.forEach(l => { l.course = map[l.course || 1] || l.course; });
+  if (map[state.activeCourse]) state.activeCourse = map[state.activeCourse];
+}
 function pushCartLine(item, variant, modifiers, seat, qty, note) {
-  const course = itemDefaultCourse(item) || state.activeCourse;
+  const course = nearestAllowedCourse(itemDefaultCourse(item) || state.activeCourse, item);
   // The highlighted tab (and the docket page, when paged) FOLLOWS the dish
   // just added, so what you rang up is always the course on screen. With
   // course pages this is not optional: the paged docket shows ONLY the active
@@ -16585,6 +16646,7 @@ function renderTicketPanel() {
   const sub = cartSubtotal(), discountAmount = cartDiscountAmount(), tax = cartTax(), total = cartTotal();
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
   const openOrder = activeOpenOrder();
+  cascadeAutoCourses(openOrder); // pre-send only: slide course groups down into empty slots
   // Items already sent to the kitchen (from the open order's rounds), aggregated
   // per course. They stay on the ticket, faded, so the waiter can tell what's
   // gone from what's still being built.
@@ -21452,6 +21514,15 @@ function renderCoursesSettingsAdmin() {
             <label class="field-label">Name</label>
             <input class="course-template-name-quick-input" data-idx="${idx}" type="text" value="${esc(c.name)}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
           </div>
+          ${state.categories.length ? `
+          <label class="field-label" style="margin-top:12px;">Allowed sections</label>
+          <div class="ts" style="margin-bottom:8px;">Dishes from a switched-off section can't file under this course — they slide to the nearest course that takes them.</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;max-width:560px;">
+            ${state.categories.map(cat => {
+              const on = !Array.isArray(c.sections) || c.sections.includes(cat.id);
+              return `<button class="pay-opt sm${on ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="toggle-course-section" data-idx="${idx}" data-cat="${esc(cat.id)}">${esc(cat.name)}</button>`;
+            }).join('')}
+          </div>` : ''}
         </div>` : ''}
       </div>
     `).join('')}
@@ -25922,7 +25993,12 @@ function renderLineEditMiddle() {
         </div>` : ''}
       <label>Course</label>
       <div class="pay-options" style="margin-bottom:16px;flex-wrap:wrap;">
-        ${(state.settings.courses || []).map((c, i) => c.enabled === false && line.course !== i + 1 ? '' : `<div class="pay-opt sm ${line.course === i + 1 ? 'active' : ''}" data-act="edit-line-course" data-val="${i + 1}">${esc(c.name)}</div>`).join('')}
+        ${(state.settings.courses || []).map((c, i) => c.enabled === false && line.course !== i + 1 ? '' : (() => {
+          // A course whose allowed-sections refuse this dish still shows (so the
+          // wall is visible) but dimmed — the tap explains itself with a toast.
+          const ok = courseAllowsItem(i + 1, state.menu.find(m => m.id === line.menuItemId));
+          return `<div class="pay-opt sm ${line.course === i + 1 ? 'active' : ''}" data-act="edit-line-course" data-val="${i + 1}"${ok ? '' : ' style="opacity:.35;"'}>${esc(c.name)}</div>`;
+        })()).join('')}
       </div>
       <label>Note</label>
       <input id="edit-line-note-input" type="text" value="${esc(line.note || '')}">
@@ -32388,7 +32464,17 @@ function handleActClick(el, e) {
       else if (act === 'toggle-auto-course-order') { toggleAutoCourseOrder(); }
       else if (act === 'edit-line-course') {
         const l = state.cart[state.editLine && state.editLine.idx];
-        if (l) { l.course = parseInt(el.dataset.val); if (l.course > state.courseCount) state.courseCount = l.course; render(); }
+        if (l) {
+          const n = parseInt(el.dataset.val);
+          const it = state.menu.find(m => m.id === l.menuItemId);
+          // Allowed-sections is a hard wall even by hand: the tap bounces with
+          // a reason instead of filing a drink under a food course.
+          if (!courseAllowsItem(n, it)) {
+            state.toast = `${courseInfo(n).name} doesn't take ${it && it.category ? it.category : 'this section'}`;
+            render(); armToastTimer(2400); return;
+          }
+          l.course = n; if (l.course > state.courseCount) state.courseCount = l.course; render();
+        }
       }
       else if (act === 'fire-course') { fireCourse(parseInt(el.dataset.val)); }
       else if (act === 'call-away-table') { callAwayTable(el.dataset.order); }
@@ -32897,6 +32983,16 @@ function handleActClick(el, e) {
       else if (act === 'set-allergy-custom-enabled') { saveTicketSetting({ allergyCustomEnabled: el.dataset.val === 'true' }); }
       else if (act === 'add-course-template') { addCourseTemplate(el.dataset.name); }
       else if (act === 'toggle-course-enabled') { toggleCourseEnabled(parseInt(el.dataset.idx)); }
+      else if (act === 'toggle-course-section') {
+        const idx = parseInt(el.dataset.idx), catId = el.dataset.cat;
+        const c = state.settings.courses[idx];
+        const all = state.categories.map(x => x.id);
+        // null means "everything welcome" — materialise it before toggling,
+        // and collapse back to null the moment every section is on again.
+        let sections = Array.isArray(c.sections) ? c.sections.slice() : all.slice();
+        sections = sections.includes(catId) ? sections.filter(x => x !== catId) : [...sections, catId];
+        updateCourseTemplate(idx, { sections: all.every(id => sections.includes(id)) ? null : sections });
+      }
       else if (act === 'add-allergy-preset') { addAllergyPreset(); }
       else if (act === 'bulk-delete-allergies') { bulkDeleteAllergies(); }
       else if (act === 'clear-allergy-selection') { clearAllergySelection(); }

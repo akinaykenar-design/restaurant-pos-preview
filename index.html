@@ -19053,10 +19053,11 @@ function renderRecipesAdmin() {
   <div style="max-width:var(--admin-list-w,640px);">
     <div class="settings-card wide" style="max-width:var(--admin-list-w,640px);">
       <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Recipes<span style="flex:1;"></span>${sortControl('menu-items:recipes')}</div>
+      <input id="recipes-search" type="text" placeholder="Search dishes…" value="${esc(state.recipesSearch || '')}" style="width:100%;max-width:300px;margin-top:8px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;">
     </div>
     ${inv.length === 0 ? `<div class="empty-hist">No ingredients yet.</div>` : `
-    <div style="display:flex;flex-direction:column;gap:8px;">
-      ${applyListSort('menu-items:recipes', state.menu).map(row).join('')}
+    <div id="recipes-list" style="display:flex;flex-direction:column;gap:8px;">
+      ${applyListSort('menu-items:recipes', state.menu.filter(m => !state.recipesSearch || m.name.toLowerCase().includes(state.recipesSearch.toLowerCase()))).map(row).join('')}
     </div>`}
   </div>`;
 }
@@ -21219,7 +21220,7 @@ function renderHouseAdmin(section) {
     const tracked = state.menu.filter(m => m.trackStock).sort((a, b) => (a.stockCount || 0) - (b.stockCount || 0));
     return `
   <div class="settings-card" style="margin-bottom:16px;">
-    <div class="th" style="margin-bottom:6px;">Stock count</div>
+    <div class="th" style="margin-bottom:6px;display:flex;align-items:center;gap:10px;">Stock count<span style="flex:1;"></span>${tracked.length ? `<button class="btn-secondary sm" data-act="clear-countdowns">Clear countdowns</button>` : ''}</div>
     ${tracked.length === 0 ? `<div class="ts">No countdowns running yet.</div>` : tracked.map(m => {
       const n = m.stockCount || 0;
       const chip = n <= 0 ? `<span class="status-chip void">86'd</span>` : n <= (m.lowStockThreshold || 5) ? `<span class="status-chip course">low</span>` : '';
@@ -22264,8 +22265,16 @@ async function setVenueType(key) {
 // A brand-new till: nothing on the menu and no type chosen yet. An existing
 // venue never sees this — its setup is already done.
 function needsVenueSetup() {
+  // First-run ONLY. This gate once rode on menu.length alone, so any moment
+  // the menu read empty (slow load after a reload, an emptied items list)
+  // the "What kind of venue?" welcome TOOK OVER a live till and the floor
+  // became unreachable (found by the Aug '26 monkey test). A venue with
+  // tables on a floor, open orders, or a staff roster is set up — period.
   const s = state.settings || {};
-  return !s.venueType && !(state.menu || []).length;
+  return !s.venueType && !(state.menu || []).length
+    && !(state.floorPlans || []).some(f => (f.tables || []).some(t => t.type !== 'decor'))
+    && !(state.orders || []).length
+    && (state.staffList || []).length <= 1;
 }
 
 function renderVenueSettingsAdmin() {
@@ -23066,7 +23075,6 @@ function renderMenuAdmin() {
     ${subcatOptions.length > 0 ? maFilterDd('sub', 'Subsection…', [{ v: '', l: 'All subsections' }].concat(subcatOptions.map(s => ({ v: s.id, l: s.label }))), state.menuAdminSubcategoryFilter) : ''}
     ${subsubOptions.length > 0 ? maFilterDd('subsub', 'Sub-subsection…', [{ v: '', l: 'All sub-subsections' }].concat(subsubOptions.map(s => ({ v: s.id, l: s.name }))), state.menuAdminSubsubFilter) : ''}
     <input id="menu-admin-search-input" class="tb-ctl" type="text" placeholder="Search items…" value="${state.menuAdminSearch}" style="width:160px;">
-    ${items.some(m => m.trackStock) ? `<button class="btn-secondary sm" data-act="clear-countdowns">Clear countdowns</button>` : ''}
   </div>
   <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${sortControl('menu-items')}${state.selectedMenuItemIds.length > 0 ? `
       
@@ -27593,7 +27601,7 @@ document.addEventListener('scroll', closeQtyPop, true);
 // Table peek: press-and-hold an occupied table on the picker to read its
 // order (same hold grammar as the qty pop). The fired flag swallows the
 // release's click so holding never also selects the table.
-let _peekHoldFired = false;
+let _peekHoldFired = false, _peekHoldAt = 0;
 document.addEventListener('pointerdown', (e) => {
   if (e.isPrimary === false) return; // second finger never arms a hold
   const tile = e.target.closest && e.target.closest('[data-act="pick-table"]');
@@ -27602,7 +27610,7 @@ document.addEventListener('pointerdown', (e) => {
   if (!t || !tableOpenOrder(t.label)) return;
   const x0 = e.clientX, y0 = e.clientY;
   _peekHoldFired = false;
-  const myTimer = setTimeout(() => { _peekHoldFired = true; state.tablePeek = t.id; render(); }, 450);
+  const myTimer = setTimeout(() => { _peekHoldFired = true; _peekHoldAt = Date.now(); state.tablePeek = t.id; render(); }, 450);
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { const slop = ev.pointerType === 'touch' ? 18 : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
@@ -31399,6 +31407,15 @@ function bindEvents() {
     const list = document.getElementById('inventory-list');
     if (list) list.innerHTML = renderInventoryRows(); else render();
   });
+  // Recipes search (owner ask, Aug '26: "easier to find shit") — same live
+  // keystroke refresh as the inventory search, rebuilding only the list.
+  const recipesSearchInput = document.getElementById('recipes-search');
+  if (recipesSearchInput) recipesSearchInput.addEventListener('input', (e) => {
+    state.recipesSearch = e.target.value;
+    render();
+    const again = document.getElementById('recipes-search');
+    if (again) { again.focus(); const v = again.value; again.setSelectionRange(v.length, v.length); }
+  });
   const adjustInventoryChangeInput = document.getElementById('adjust-inventory-change');
   if (adjustInventoryChangeInput) adjustInventoryChangeInput.addEventListener('input', (e) => { state.adjustInventoryModal.change = e.target.value; });
   const adjustInventoryReasonInput = document.getElementById('adjust-inventory-reason');
@@ -33052,7 +33069,11 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'pick-table') {
-        if (_peekHoldFired) { _peekHoldFired = false; return; }
+        // Swallow only the release-click of the hold ITSELF (a sub-second
+        // window). The flag used to linger after the peek closed and silently
+        // eat the NEXT tap on any table — "I tapped and nothing happened"
+        // (found by the Aug '26 monkey test).
+        if (_peekHoldFired) { _peekHoldFired = false; if (Date.now() - _peekHoldAt < 700) return; }
         if (state.moveItemsPicking) doMoveItems(el.dataset.id);
         else if (state.transferMode) transferPickTable(el.dataset.id);
         else if (state.showTablePicker && state.floorStatusView === 'booked' && (() => {
@@ -33307,7 +33328,9 @@ function handleActClick(el, e) {
       else if (act === 'overwrite-floor-layout') {
         // Save INTO an existing template (owner ask, Aug '26): the server
         // already overwrites by name — this button just aims the save at the
-        // card's name instead of asking for a new one.
+        // card's name instead of asking for a new one. stopPropagation, or the
+        // card underneath also fires and its LOAD confirm replaces this one.
+        e.stopPropagation();
         const fpId = el.dataset.fp, name = el.dataset.name;
         openConfirm({ message: `Overwrite “${esc(name)}” with the arrangement on screen?`, confirmLabel: 'Overwrite', danger: false }, () => saveFloorLayout(fpId, name));
       }

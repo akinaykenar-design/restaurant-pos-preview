@@ -489,9 +489,13 @@ body[data-osk="1"] .tabs .bar-search input{ display:none; }
 
 /* "Mine" fast lane on the table picker: the waiter's own open tables as
    chips — the SAME pick-table door, one tap back into the order. */
-.mine-lane{display:inline-flex;align-items:center;gap:6px;}
-.mine-lane .mine-lab{font-size:var(--fs-chip);font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--charcoal-soft);}
-.mine-lane .mine-chip{font-family:var(--font-mono);font-weight:800;min-width:44px;} /* single-digit tables still finger-sized */
+/* My-tables lane: a person icon + OUTLINED number chips, walled off from the
+   zone tabs by a divider — so "11" can never read as another floor tab
+   (owner: "this is a bit confusing", Aug '26). */
+.mine-lane{display:inline-flex;align-items:center;gap:6px;padding-right:8px;margin-right:2px;border-right:1px solid var(--steel-200);}
+.mine-lane .mine-lab{display:inline-flex;color:var(--charcoal-soft);}
+.mine-lane .mine-lab svg{width:15px;height:15px;}
+.mine-lane .mine-chip{font-family:var(--font-mono);font-weight:800;min-width:44px;background:transparent;border:1.5px solid var(--steel-300);} /* single-digit tables still finger-sized */
 
 .mob-search{position:fixed;left:0;right:0;bottom:0;z-index:69;} /* below every popup (79+): a seat pick opened from a row lands ON TOP of the search */
 /* The ONE popup dim behind phone search — the menu behind is background,
@@ -3062,6 +3066,8 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 .peek-meta{ text-align:center; font-size:12.5px; color:var(--charcoal-soft); flex:none; }
 .peek-chips{ display:flex; flex-wrap:wrap; gap:6px; justify-content:center; margin-top:4px; flex:none; }
 .peek-pop .sp-item, .peek-pop .peek-total, .peek-pop .qp-actions{ flex:none; }
+/* The docket panel's course header, worn by the peek: same tabs, same tick. */
+.peek-pop .course-tabs{ flex:none; padding:8px 0; border-bottom:1px solid var(--steel-200); margin-bottom:4px; }
 /* Popup ✓/✕ are ONE family: same footprint as every pane's, never stretched. */
 .peek-pop .qp-actions{ justify-content:flex-end; }
 .peek-pop .qp-actions button{ flex:0 0 auto; min-width:104px; padding:0 20px; height:64px; }
@@ -12191,6 +12197,10 @@ function applyTheme() {
     root.style.removeProperty('--docket-sel');
     root.style.removeProperty('--docket-sel-b');
   }
+  // Remember what was applied: the next load dresses in these sizes BEFORE
+  // the theme fetch returns, so the top band never renders thin (default md)
+  // on a fresh open — and never sticks thin if that fetch hiccups.
+  try { localStorage.setItem('pos-theme-cache', JSON.stringify(state.theme)); } catch (e) {}
 }
 window.addEventListener('resize', applyTheme);
 // In Auto the till re-themes the moment the DEVICE's light/dark flips.
@@ -14750,6 +14760,11 @@ function openConfirm(opts, onConfirm) {
     danger: o.danger !== false,
     onConfirm,
     onCancel: o.onCancel || null, // optional: "No" still proceeds with something
+    // Ghost-tap armor: the dialog can render its buttons UNDER the finger
+    // that opened it (transfer confirm over the tapped table), and the tail
+    // of that same tap then "confirms" instantly. Ignore both buttons for a
+    // beat after opening.
+    openedAt: Date.now(),
   };
   render();
 }
@@ -14938,7 +14953,10 @@ function renderOrderHistoryPop() {
 function renderTablePeekPop() {
   const t = findTableById(state.tablePeek);
   const o = t && tableOpenOrder(t.label);
-  if (!t || !o) return '';
+  // Self-heal: if the peeked order vanished mid-peek (paid on another device,
+  // a background refresh), a set tablePeek with no pop would silently eat
+  // holds forever. Clear it instead of rendering nothing.
+  if (!t || !o) { state.tablePeek = null; return ''; }
   const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
   // Merge every sent round into per-course lines, same grammar as the ticket.
   const byCourse = {};
@@ -14969,10 +14987,24 @@ function renderTablePeekPop() {
       </div>`;
   };
   return `
-      <div class="pop-scrim"></div>
+      <div class="pop-scrim" data-act="peek-close"></div>
       <div class="qty-pop covers-pop peek-pop">
         <div class="sp-item">${tableDisplayLabel(t.id)}</div>
         <div class="peek-meta">${o.covers ? `${o.covers} covers · ` : ''}${esc(o.staffName || '')} · ${mins}m</div>
+        ${(() => {
+          // The docket panel's course header, on the peek (owner pick, Aug
+          // '26): one tab per sent course — called-away ones wear the blue +
+          // tick, tapping a plain one calls THAT course away. The pop stays
+          // up so mains can follow entrées without re-holding the table.
+          const ns = Object.keys(byCourse).map(Number).sort((a, b) => a - b);
+          if (!ns.length) return '';
+          return `<div class="course-tabs peek-ct">
+            ${ns.map(n => `
+            <button class="course-tab${firedC[n] ? ' active' : ''}"${firedC[n] ? '' : ` data-act="peek-callaway-course" data-course="${n}"`}>
+              ${esc(courseInfo(n).name)}${firedC[n] ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : ''}
+            </button>`).join('')}
+          </div>`;
+        })()}
         ${(t.allergies || []).length ? `<div class="peek-chips">${t.allergies.map(a => `<span class="algn-chip contains">${esc(a.allergy)}${a.seat ? ` · ${esc(prefix).toLowerCase()} ${a.seat}` : ''}</span>`).join('')}</div>` : ''}
         <div class="peek-list">
           ${Object.keys(byCourse).map(Number).sort((a, b) => a - b).map(n => `
@@ -14982,7 +15014,6 @@ function renderTablePeekPop() {
         <div class="peek-total"><span>Total</span><span>${money(total)}</span></div>
         <div class="qp-row qp-actions">
           <button class="icon-action discard" data-act="peek-close">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
-          ${nextCallAway != null ? `<button class="icon-action callaway" data-act="peek-callaway-next" data-course="${nextCallAway}">${DKT_FLAME_SVG}<span class="ia-label">Call away ${esc(courseInfo(nextCallAway).name)}</span></button>` : ''}
           <button class="icon-action" data-act="peek-close-table">${ACT_PAY_SVG}<span class="ia-label">Close table</span></button>
         </div>
       </div>`;
@@ -25496,7 +25527,7 @@ function renderTablePickerMiddle() {
         const labels = [...new Set(mine.map(o => String(o.table)))].slice(0, 6);
         const chips = labels.map(l => { const t = allTables().find(x => String(x.label) === l);
           return t ? `<button class="fp-chip mine-chip" data-act="pick-table" data-id="${t.id}">${esc(l)}</button>` : ''; }).join('');
-        return chips ? `<span class="mine-lane"><span class="mine-lab">Mine</span>${chips}</span>` : '';
+        return chips ? `<span class="mine-lane"><span class="mine-lab" aria-label="My tables">${SYS_USERS_SVG}</span>${chips}</span>` : '';
       })()}
       ${state.settings.tableMode !== 'simple' && state.floorPlans.length > 1 ?
         state.floorPlans.map(f => `<button class="fp-chip${fp && fp.id === f.id ? ' active' : ''}" data-act="picker-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('') : ''}
@@ -25623,9 +25654,13 @@ function offerCloseEmptyTable(next) {
   // and it used to hold the table open for the rest of service because "has an
   // order" was all this asked (owner, Aug '26).
   const liveOrder = !!(order && (order.items || []).length);
-  const setUp = (state.covers || 0) > 0 || (state.allergies || []).length || state.vipType;
   const emptyTicket = !!(order && !(order.items || []).length);
-  if (!t || liveOrder || (state.cart || []).length || (!setUp && !emptyTicket)) { next(); return; }
+  // Only a zero-bill TICKET earns the question (the owner's original ask).
+  // A table that is merely seated — covers/notes set, nothing ordered — must
+  // never gate the floor behind a modal: an accidental seat made EVERY next
+  // table tap pop "close it?" and read as "selecting does nothing" (owner
+  // bug report, Aug '26). Switching away just keeps the sitting on the floor.
+  if (!t || liveOrder || (state.cart || []).length || !emptyTicket) { next(); return; }
   openConfirm({
     message: `Table ${esc(String(t.label))} has nothing ordered — close it?`,
     confirmLabel: 'Close table',
@@ -32415,8 +32450,8 @@ function handleActClick(el, e) {
       // only the Cancel button closes it.
       else if (act === 'close-order-detail') { state.detailOrder = null; render(); }
       else if (act === 'close-allergen-warn') { if (e.target !== el) { state.allergenWarnModal = null; render(); } }
-      else if (act === 'confirm-dialog-cancel') { const cb = state.confirmDialog && state.confirmDialog.onCancel; state.confirmDialog = null; render(); if (cb) cb(); }
-      else if (act === 'confirm-dialog-yes') { const cb = state.confirmDialog && state.confirmDialog.onConfirm; state.confirmDialog = null; render(); if (cb) cb(); }
+      else if (act === 'confirm-dialog-cancel') { if (state.confirmDialog && Date.now() - (state.confirmDialog.openedAt || 0) < 350) return; const cb = state.confirmDialog && state.confirmDialog.onCancel; state.confirmDialog = null; render(); if (cb) cb(); }
+      else if (act === 'confirm-dialog-yes') { if (state.confirmDialog && Date.now() - (state.confirmDialog.openedAt || 0) < 350) return; const cb = state.confirmDialog && state.confirmDialog.onConfirm; state.confirmDialog = null; render(); if (cb) cb(); }
       else if (act === 'cancel-checkout') { closeCheckout(); }
       else if (act === 'confirm-payment') { confirmPayment(); }
       else if (act === 'pay') { state.paymentMethod = el.dataset.val; render(); }
@@ -32928,6 +32963,20 @@ function handleActClick(el, e) {
           }
         }
         render();
+      }
+      else if (act === 'peek-callaway-course') {
+        // Course tab on the peek header: fire exactly that course. The peek
+        // STAYS open — the tab flips to blue + tick so the next course can
+        // follow without re-holding the table.
+        const t = findTableById(state.tablePeek);
+        const o = t && tableOpenOrder(t.label);
+        const course = parseInt(el.dataset.course);
+        if (o && course) {
+          api(`/api/orders/${o.id}/print-course`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course }) })
+            .then(() => refreshOrders())
+            .then(() => { state.toast = `${courseInfo(course).name} called away — ${tableDisplayLabel(t.id)}`; render(); armToastTimer(2400); })
+            .catch(e => { state.toast = e.message || 'Could not call away'; render(); armToastTimer(3000); });
+        }
       }
       else if (act === 'peek-callaway-next') {
         // Hold a table → its order pop → one tap calls away the NEXT course that
@@ -34270,8 +34319,14 @@ setInterval(() => {
     if (t && adminPageMeta(t)) state.adminTab = t;
   } catch (e) {}
   // Theme (incl. dark mode) applies BEFORE login — the login screen must not
-  // flash light on a dark till.
-  try { state.theme = await api('/api/theme'); applyTheme(); render(); } catch (e) {}
+  // flash light on a dark till. The cached copy goes on synchronously first:
+  // the fetch only refreshes it, and a failed fetch can no longer strand the
+  // till on thin default sizes.
+  try {
+    const cached = JSON.parse(localStorage.getItem('pos-theme-cache') || 'null');
+    if (cached && typeof cached === 'object') { state.theme = { ...state.theme, ...cached }; applyTheme(); render(); }
+  } catch (e) {}
+  try { state.theme = await api('/api/theme'); applyTheme(); render(); } catch (e) { applyTheme(); }
   // Venue name + logo show on the lock screen, so settings load before login.
   try { state.settings = { ...state.settings, ...(await api('/api/settings')) }; } catch (e) {}
   await loadStaffList();

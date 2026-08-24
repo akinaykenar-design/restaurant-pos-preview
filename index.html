@@ -2361,6 +2361,9 @@ body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
 .tp-canvas-wrap .floor-canvas{ flex:none; }
 @media (max-width:768px){
   .tp-canvas-wrap{ height:calc(100dvh - 125px); }
+  /* The picker's Close FLOATS above the bar on phones — the map is taller
+     than the screen, so a Close in the page flow scrolled out of reach. */
+  .tp-actions{ position:fixed; right:12px; bottom:calc(var(--appbar-off, 0px) + 12px); z-index:70; padding:0 !important; margin:0; }
   .tp-canvas-wrap .floor-canvas{ height:calc((100dvh - 125px) * var(--tp-zoom,1)); width:auto !important; max-width:none !important; }
 }
 
@@ -15661,6 +15664,11 @@ function middleCut(el, name, keepEnd) {
 function setToolbarHeightVar() {
   const tb = document.querySelector('.admin-toolbar');
   document.documentElement.style.setProperty('--admin-toolbar-h', tb ? tb.offsetHeight + 'px' : '0px');
+  // Height of a BOTTOM app bar — floating controls (the picker's Close)
+  // sit clear of it; 0 when the bar lives anywhere else.
+  const bar = document.querySelector('.topbar');
+  const off = document.body.getAttribute('data-appbar-pos') === 'bottom' && bar ? bar.offsetHeight : 0;
+  document.documentElement.style.setProperty('--appbar-off', off + 'px');
 }
 window.addEventListener('resize', setToolbarHeightVar);
 
@@ -25320,10 +25328,19 @@ function transferToTable(newTableId) {
   if (newTable.mergedInto) { state.toast = 'Pick a table that is not merged into another.'; render(); return; }
   // A destination with its own open tab is fine — the two tabs COMBINE.
   const destOpenOrder = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
+  // Both sides carry their area AND how much is on them (owner, Aug '26):
+  // "Move Inside · Table 1 (5 items) to Inside · Table 15 (20 items)?" —
+  // the counts are what makes a wrong tap obvious before it lands.
+  const oldT = findTableById(oldTableId);
+  const srcOrder = oldT ? state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(oldT.label)) : null;
+  const qtyOf = (o) => o ? (o.items || []).reduce((s, i) => s + (i.qty || 1), 0) : 0;
+  const srcN = qtyOf(srcOrder) + (oldTableId === state.table ? state.cart.reduce((s, i) => s + (i.qty || 1), 0) : 0);
+  const destN = qtyOf(destOpenOrder);
+  const part = (lbl, n) => n ? `${lbl} (${n} item${n === 1 ? '' : 's'})` : lbl;
   openConfirm({
     message: destOpenOrder
-      ? `Move ${tableDisplayLabel(oldTableId)} to table ${esc(newTable.label)}? The two tabs become one.`
-      : `Move ${tableDisplayLabel(oldTableId)} to table ${esc(newTable.label)}?`,
+      ? `Move ${part(tableDisplayLabel(oldTableId), srcN)} to ${part(tableDisplayLabel(newTableId), destN)}? The two tabs become one.`
+      : `Move ${part(tableDisplayLabel(oldTableId), srcN)} to ${tableDisplayLabel(newTableId)}?`,
     confirmLabel: 'Move', danger: false,
   }, () => doTransferToTable(newTableId));
 }
@@ -31753,6 +31770,14 @@ function handleActClick(el, e) {
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
+        // Already on the order screen with the map open: the Order chip is
+        // an EXIT from the picker (owner, Aug '26 — the Close can be off
+        // screen on a tall phone map). Only when closing is legal — a
+        // table-less dine-in still has to pick.
+        if (state.view === 'order' && state.showTablePicker && (state.table || state.transferMode || state.moveItemsPicking)) {
+          state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
+          state.pickFlashId = null; state.tablesCallAway = false; state.moveItemsPicking = false; render(); return;
+        }
         state.view = 'order'; if (state.orderType !== 'dine-in') setOrderType('dine-in'); render(); }
       else if (act === 'toggle-mobile-cart') {
         if (state.mobileCartOpen) closeMobileCart(); else openMobileCart();

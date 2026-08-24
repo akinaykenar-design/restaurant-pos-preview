@@ -9684,6 +9684,9 @@ let state = {
   expandedTipIdxs: [],
   expandedDiscountPresetIds: [], // Finance preset tiles open for inline edit
   selectedDiscountPresetIds: [], // bulk-select on the discount/surcharge tiles
+  expandedHappyHourIds: [], selectedHappyHourIds: [],       // Promotions tiles
+  expandedCustomerIds: [], selectedCustomerIds: [],         // Customers tiles
+  expandedInventoryItemIds: [], selectedInventoryItemIds: [], // Stock tiles
   selectedVipIdxs: [], // bulk-select on the VIP types list
   selectedTimeoffIds: [], // bulk-select: time off list
   selectedExpenseIds: [], // bulk-select: expenses list
@@ -18614,17 +18617,41 @@ async function saveCustomerModal() {
 async function deleteCustomerAction(id) {
   try { await api(`/api/customers/${id}`, { method: 'DELETE' }); state.customers = await api('/api/customers'); render(); } catch (e) {}
 }
+// Customers wear the Items uniform too: tiles, checkbox select with bulk
+// delete, expand for the inline name/phone/email editor. Spend on the right
+// is the number an owner scans for. (No duplicate — two of a person is a
+// data bug, not a convenience.)
 function renderCustomersAdmin() {
+  const sel = state.selectedCustomerIds || [];
+  const list = state.customers;
   return `
-  <div style="display:flex;justify-content:flex-end;max-width:var(--admin-list-w,600px);margin-bottom:14px;"><button class="btn-add inline" data-act="add-customer">+ Customer</button></div>
   <div style="max-width:var(--admin-list-w,600px);">
-    ${state.customers.length === 0 ? `<div class="empty-hist">No customers yet.</div>` : state.customers.map(c => `
-      <div class="order-row">
-        <div class="order-info">
-          <div class="t1">${esc(c.name)} ${editIconButton('edit-customer', c.id, 'Edit')}</div>
-          <div class="t2">${esc(c.phone || '')}${c.phone && c.email ? ' · ' : ''}${esc(c.email || '')} · ${c.visits || 0} visits · ${money(c.totalSpent || 0)} spent · ${c.points || 0} pts</div>
+    <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-customer" ${list.length > 0 && list.every(c => sel.includes(c.id)) ? 'checked' : ''}></label>${sel.length > 0 ? `
+      <button class="icon-sq" data-act="delete-selected-customers">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" data-act="clear-customer-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-customer">+ Customer</button></div>
+    ${list.length === 0 ? `<div class="empty-hist">No customers yet.</div>` : ''}
+    ${list.map(c => `
+      <div class="menu-item-expandable customer-row${sel.includes(c.id) ? ' selected' : ''}${(state.expandedCustomerIds || []).includes(c.id) ? ' open' : ''}" data-id="${c.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
+        <div class="menu-item-header sel-head" data-act="customer-toggle-open" data-id="${c.id}" data-sellist="customer" data-selkey="${c.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="customer" data-key="${c.id}" ${sel.includes(c.id) ? 'checked' : ''}>
+          <span style="min-width:0;">
+            <span class="t1" style="display:block;font-weight:700;font-size:var(--fs-md);">${esc(c.name)}</span>
+            <span class="t2" style="display:block;">${esc(c.phone || '')}${c.phone && c.email ? ' · ' : ''}${esc(c.email || '')}${(c.phone || c.email) ? ' · ' : ''}${c.visits || 0} visits · ${c.points || 0} pts</span>
+          </span>
+          <span style="flex:1;"></span>
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);">${money(c.totalSpent || 0)}</span>
         </div>
-        
+        ${(state.expandedCustomerIds || []).includes(c.id) ? `
+        <div style="padding:0 12px 12px 44px;">
+          <div style="display:flex;flex-direction:column;max-width:280px;">
+            <label class="field-label">Name</label>
+            <input type="text" value="${esc(c.name)}" onblur="updateCustomerField('${c.id}', { name: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+            <label class="field-label" style="margin-top:10px;">Phone</label>
+            <input type="text" value="${esc(c.phone || '')}" onblur="updateCustomerField('${c.id}', { phone: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+            <label class="field-label" style="margin-top:10px;">Email</label>
+            <input type="text" value="${esc(c.email || '')}" onblur="updateCustomerField('${c.id}', { email: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+          </div>
+        </div>` : ''}
       </div>
     `).join('')}
   </div>
@@ -18650,6 +18677,43 @@ function renderCustomerModal() {
       </div>
     </div>
   </div>`;
+}
+// Inline tile edits for the converted admin lists (Promotions, Customers) —
+// save one field, refresh the list, keep going.
+async function updateHappyHourField(id, patch) {
+  try {
+    await api(`/api/happy-hours/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    state.happyHours = await api('/api/happy-hours');
+  } catch (e) { state.toast = 'Could not save that change.'; armToastTimer(2500); }
+  render();
+}
+async function updateCustomerField(id, patch) {
+  try {
+    await api(`/api/customers/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    state.customers = await api('/api/customers');
+  } catch (e) { state.toast = 'Could not save that change.'; armToastTimer(2500); }
+  render();
+}
+async function duplicateSelectedHappyHours() {
+  const sel = state.selectedHappyHourIds || [];
+  for (const h of state.happyHours.filter(x => sel.includes(x.id))) {
+    try { await api('/api/happy-hours', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(h.name), days: h.days, startTime: h.startTime, endTime: h.endTime, discountPercent: h.discountPercent }) }); } catch (e) {}
+    await new Promise(r => setTimeout(r, 2)); // Date.now() ids — never mint twins
+  }
+  state.happyHours = await api('/api/happy-hours');
+  state.selectedHappyHourIds = [];
+  render();
+}
+// One bulk-delete for every id-keyed admin list: DELETE each selected id
+// against the collection's endpoint, then let the caller refresh its state.
+async function deleteSelectedByIds(selKey, endpoint, refresh) {
+  const sel = state[selKey] || [];
+  for (const id of sel) {
+    try { await api(`${endpoint}/${id}`, { method: 'DELETE' }); } catch (e) {}
+  }
+  state[selKey] = [];
+  await refresh();
+  render();
 }
 async function searchCustomers(q) {
   state.customerSearch = q;
@@ -18745,7 +18809,7 @@ function renderInventoryAdmin() {
   const tab = state.inventoryTab || 'items';
   const lowStockItems = (state.inventoryItems || []).filter(i => i.currentStock < i.minStock);
   return `
-  <div style="max-width:1000px;">
+  <div style="max-width:var(--admin-list-w,1000px);">
     ${lowStockItems.length > 0 ? `
     <div style="border:1px solid var(--red);border-radius:12px;padding:16px 18px;background:var(--surface);margin-bottom:20px;">
       <div class="th" style="margin-bottom:10px;color:var(--red);">${SYS_WARN_SVG} Low stock items (${lowStockItems.length})</div>
@@ -18774,69 +18838,80 @@ function renderInventoryAdmin() {
 }
 
 function renderInventoryItemsTab() {
-  const items = state.inventoryItems || [];
-  const suppliers = state.suppliers || [];
+  const sel = state.selectedInventoryItemIds || [];
   return `
-  <div style="display:flex;gap:10px;align-items:center;margin-bottom:20px;">
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;">
     ${sortControl('inventory')}
     <input id="inventory-search" type="text" placeholder="Search items…" value="${state.inventorySearch || ''}" style="flex:1;max-width:300px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;">
-    <button class="btn-add inline" data-act="open-add-inventory-item" style="margin-left:auto;">+ Item</button>
   </div>
-  <div id="inventory-list" style="display:grid;gap:12px;">${renderInventoryRows()}</div>
+  <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-inventory-item" ${(state.inventoryItems || []).length > 0 && (state.inventoryItems || []).every(i => sel.includes(i.id)) ? 'checked' : ''}></label>${sel.length > 0 ? `
+    <button class="icon-sq" data-act="delete-selected-inventory-items">${ACT_TRASH_SVG}</button>
+    <button class="icon-sq" data-act="clear-inventory-item-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="open-add-inventory-item">+ Item</button></div>
+  <div id="inventory-list">${renderInventoryRows()}</div>
   `;
 }
 
 // Inventory item cards, rendered into #inventory-list so the search box can
 // refresh just the list on keystroke without rebuilding the input.
 function renderInventoryRows() {
+  // Stock wears the Items uniform (owner ask, Aug '26): tile header carries
+  // the count as a status chip (red at zero, amber under the minimum); the
+  // detail grid, supplier, recipe blast-radius and the Adjust/Edit buttons
+  // live behind the expand.
   const suppliers = state.suppliers || [];
+  const sel = state.selectedInventoryItemIds || [];
   const items = applyListSort('inventory', (state.inventoryItems || []).filter(i => !state.inventorySearch || i.name.toLowerCase().includes(state.inventorySearch.toLowerCase())));
   return `
     ${items.map(i => `
-      <div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--surface);">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px;">
-          <div>
-            <div class="th">${esc(i.name)}</div>
-            <div class="t2" style="margin-top:4px;">SKU: ${i.sku} · ${i.category} · ${i.unit}</div>
+      <div class="menu-item-expandable inventory-item-row${sel.includes(i.id) ? ' selected' : ''}${(state.expandedInventoryItemIds || []).includes(i.id) ? ' open' : ''}" data-id="${i.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
+        <div class="menu-item-header sel-head" data-act="inventory-item-toggle-open" data-id="${i.id}" data-sellist="inventory-item" data-selkey="${i.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="inventory-item" data-key="${i.id}" ${sel.includes(i.id) ? 'checked' : ''}>
+          <span style="min-width:0;">
+            <span class="t1" style="display:block;font-weight:700;font-size:var(--fs-md);">${esc(i.name)}</span>
+            <span class="t2" style="display:block;">SKU: ${i.sku} · ${i.category} · ${i.unit}</span>
+          </span>
+          <span style="flex:1;"></span>
+          <span class="status-chip ${i.currentStock <= 0 ? 'void' : i.currentStock < i.minStock ? 'course' : 'paid'}" style="flex-shrink:0;">${i.currentStock} ${i.unit}</span>
+        </div>
+        ${(state.expandedInventoryItemIds || []).includes(i.id) ? `
+        <div style="padding:0 12px 12px 44px;">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;">
+            <div>
+              <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">CURRENT STOCK</div>
+              <div style="font-size:18px;font-weight:600;">${i.currentStock}</div>
+            </div>
+            <div>
+              <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">THRESHOLDS</div>
+              <div style="font-size:var(--fs-md);">Min: ${i.minStock} · Max: ${i.maxStock}</div>
+            </div>
+            <div>
+              <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">COST</div>
+              <div style="font-size:var(--fs-md);">$${i.costPerUnit.toFixed(2)}/${i.unit}</div>
+            </div>
           </div>
-          <div style="display:flex;gap:8px;">
+          ${i.supplierId ? `<div class="t2" style="margin-top:12px;">Supplier: ${esc(suppliers.find(s => s.id === i.supplierId)?.name || 'Unknown')}</div>` : ''}
+          ${(() => {
+            // Reverse lookup: which dishes this ingredient feeds — the blast
+            // radius before you 86 it or its price moves.
+            const used = state.menu.filter(m => (m.recipes || []).some(r => r.inventoryItemId === i.id));
+            const open = state.usageOpenInvId === i.id;
+            return `
+            <div style="margin-top:12px;">
+              ${used.length === 0
+                ? `<span class="t2" style="color:var(--charcoal-soft);">Not used in any recipe yet</span>`
+                : `<button type="button" class="link-btn" style="font-weight:700;padding:0;" data-act="toggle-inv-usage" data-id="${i.id}">Used in ${used.length} recipe${used.length === 1 ? '' : 's'}</button>
+                   ${open ? used.map(m => `
+                     <div class="detail-line" style="margin:8px 0 0;">
+                       <span>${esc(m.name)}</span>
+                       <button class="btn-secondary sm" style="padding:4px 10px;font-size:11px;" data-act="open-recipe-editor" data-id="${m.id}">${SYS_EDIT_SVG} Recipe</button>
+                     </div>`).join('') : ''}`}
+            </div>`;
+          })()}
+          <div style="display:flex;gap:8px;margin-top:12px;">
+            <button class="btn-secondary" style="flex:1;padding:8px;font-size:var(--fs-sm);" data-act="open-adjust-inventory" data-id="${i.id}">± Adjust Stock</button>
             <button class="btn-secondary sm" data-act="open-edit-inventory-item" data-id="${i.id}">Edit</button>
-            
           </div>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;padding-top:12px;border-top:1px solid var(--border);">
-          <div>
-            <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">CURRENT STOCK</div>
-            <div style="font-size:18px;font-weight:600;">${i.currentStock}</div>
-          </div>
-          <div>
-            <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">THRESHOLDS</div>
-            <div style="font-size:var(--fs-md);">Min: ${i.minStock} · Max: ${i.maxStock}</div>
-          </div>
-          <div>
-            <div class="t2" style="color:var(--text-secondary);font-size:11px;margin-bottom:4px;">COST</div>
-            <div style="font-size:var(--fs-md);">$${i.costPerUnit.toFixed(2)}/${i.unit}</div>
-          </div>
-        </div>
-        ${i.supplierId ? `<div class="t2" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">Supplier: ${esc(suppliers.find(s => s.id === i.supplierId)?.name || 'Unknown')}</div>` : ''}
-        ${(() => {
-          // Reverse lookup: which dishes this ingredient feeds — the blast
-          // radius before you 86 it or its price moves.
-          const used = state.menu.filter(m => (m.recipes || []).some(r => r.inventoryItemId === i.id));
-          const open = state.usageOpenInvId === i.id;
-          return `
-          <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
-            ${used.length === 0
-              ? `<span class="t2" style="color:var(--charcoal-soft);">Not used in any recipe yet</span>`
-              : `<button type="button" class="link-btn" style="font-weight:700;padding:0;" data-act="toggle-inv-usage" data-id="${i.id}">Used in ${used.length} recipe${used.length === 1 ? '' : 's'}</button>
-                 ${open ? used.map(m => `
-                   <div class="detail-line" style="margin:8px 0 0;">
-                     <span>${esc(m.name)}</span>
-                     <button class="btn-secondary sm" style="padding:4px 10px;font-size:11px;" data-act="open-recipe-editor" data-id="${m.id}">${SYS_EDIT_SVG} Recipe</button>
-                   </div>`).join('') : ''}`}
-          </div>`;
-        })()}
-        <button class="btn-secondary" style="width:100%;margin-top:12px;padding:8px;font-size:var(--fs-sm);" data-act="open-adjust-inventory" data-id="${i.id}">± Adjust Stock</button>
+        </div>` : ''}
       </div>
     `).join('')}
 `;
@@ -18875,7 +18950,7 @@ function renderSuppliersTab() {
 function renderAdjustmentsTab() {
   const adjustments = (state.inventoryAdjustments || []).slice().sort((a, b) => b.timestamp - a.timestamp).slice(0, 100);
   return `
-  <div style="max-width:800px;">
+  <div style="max-width:var(--admin-list-w,800px);">
     ${adjustments.length === 0 ? `<div class="empty-hist">No stock adjustments yet.</div>` : adjustments.map(a => `
       <div class="order-row">
         <div class="order-info">
@@ -19725,7 +19800,7 @@ function renderPrinterStationsSettingsAdmin() {
   // row under it, and the last paper you were on is remembered.
   const onPapers = tab !== 'setup';
   return `
-  <div style="max-width:720px;">
+  <div style="max-width:var(--admin-list-w,720px);">
     <div class="seg" style="width:fit-content;margin-bottom:${onPapers ? '8' : '16'}px;">
       <button class="${tab === 'setup' ? 'active' : ''}" data-act="printers-tab" data-val="setup">Printers</button>
       <button class="${onPapers ? 'active' : ''}" data-act="printers-tab" data-val="${state.papersTab || 'docket'}">Papers</button>
@@ -19747,7 +19822,7 @@ function renderPrinterStationsSettingsAdmin() {
 // The call-away slip's own page: the same designer bar, pointed at the slip.
 function renderPrintersCallawayTab() {
   return `
-    <div class="settings-card wide" style="max-width:740px;">
+    <div class="settings-card wide">
       <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:10px;">Call away designer<span style="flex:1;"></span><button class="btn-secondary sm" data-act="print-sample-callaway">${SYS_PRINTER_SVG} Test slip</button></div>
       ${dkToolbar(caCfg())}
       <div class="print-preview-grid" style="margin-top:12px;">
@@ -20807,18 +20882,57 @@ function applyHappyHour(id) {
   state.discount = { type: 'percent', value: hh.discountPercent, reason: hh.name, kind: 'discount' };
   render();
 }
+// Promotions wear the Items uniform (owner ask, Aug '26): tile list on the
+// grid width, checkbox select with bulk duplicate/delete, tap to expand the
+// inline editor (name, days, window, percent). The On/Off chip stays on the
+// header — pausing a promo is the most common touch.
 function renderHappyHourSettingsAdmin() {
+  const sel = state.selectedHappyHourIds || [];
+  const list = state.happyHours;
   return `
   <div style="max-width:var(--admin-list-w,600px);">
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px;"><button class="btn-add inline" data-act="add-happy-hour">+ Promotion</button></div>
-    ${state.happyHours.length === 0 ? `<div class="empty-hist">No promotions yet.</div>` : state.happyHours.map(h => `
-      <div class="order-row">
-        <div class="order-info">
-          <div class="t1">${esc(h.name)} ${editIconButton('edit-happy-hour', h.id, 'Edit')}</div>
-          <div class="t2">${h.days.map(d => DAY_NAMES[d]).join(', ')} · ${h.startTime}–${h.endTime} · ${h.discountPercent}% off</div>
+    <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-happy-hour" ${list.length > 0 && list.every(h => sel.includes(h.id)) ? 'checked' : ''}></label>${sel.length > 0 ? `
+      <button class="icon-sq" data-act="duplicate-selected-happy-hours">${ACT_COPY_SVG}</button>
+      <button class="icon-sq" data-act="delete-selected-happy-hours">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" data-act="clear-happy-hour-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-happy-hour">+ Promotion</button></div>
+    ${list.length === 0 ? `<div class="empty-hist">No promotions yet.</div>` : ''}
+    ${list.map(h => `
+      <div class="menu-item-expandable happy-hour-row${sel.includes(h.id) ? ' selected' : ''}${(state.expandedHappyHourIds || []).includes(h.id) ? ' open' : ''}" data-id="${h.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
+        <div class="menu-item-header sel-head" data-act="happy-hour-toggle-open" data-id="${h.id}" data-sellist="happy-hour" data-selkey="${h.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="happy-hour" data-key="${h.id}" ${sel.includes(h.id) ? 'checked' : ''}>
+          <span style="min-width:0;">
+            <span class="t1" style="display:block;font-weight:700;font-size:var(--fs-md);">${esc(h.name)}</span>
+            <span class="t2" style="display:block;">${h.days.map(d => DAY_NAMES[d]).join(', ')} · ${h.startTime}–${h.endTime}</span>
+          </span>
+          <span style="flex:1;"></span>
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);">${h.discountPercent}%</span>
+          <span onclick="event.stopPropagation();">${togglePill(!!h.enabled, 'toggle-happy-hour', `data-id="${h.id}"`)}</span>
         </div>
-        ${togglePill(!!h.enabled, 'toggle-happy-hour', `data-id="${h.id}"`)}
-        
+        ${(state.expandedHappyHourIds || []).includes(h.id) ? `
+        <div style="padding:0 12px 12px 44px;">
+          <div style="display:flex;flex-direction:column;max-width:280px;">
+            <label class="field-label">Name</label>
+            <input type="text" value="${esc(h.name)}" onblur="updateHappyHourField('${h.id}', { name: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+          </div>
+          <label class="field-label" style="margin-top:10px;">Days</label>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;">
+            ${DAY_NAMES.map((d, idx) => `<button class="pay-opt sm${h.days.includes(idx) ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="hh-inline-day" data-id="${h.id}" data-val="${idx}">${d}</button>`).join('')}
+          </div>
+          <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;">
+            <div style="display:flex;flex-direction:column;">
+              <label class="field-label">Start</label>
+              <input type="time" value="${h.startTime}" onchange="updateHappyHourField('${h.id}', { startTime: this.value })" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+            </div>
+            <div style="display:flex;flex-direction:column;">
+              <label class="field-label">End</label>
+              <input type="time" value="${h.endTime}" onchange="updateHappyHourField('${h.id}', { endTime: this.value })" style="padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+            </div>
+            <div style="display:flex;flex-direction:column;">
+              <label class="field-label">Discount %</label>
+              <input type="number" min="0" max="100" value="${h.discountPercent}" onblur="updateHappyHourField('${h.id}', { discountPercent: parseFloat(this.value) || 0 })" style="width:90px;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);">
+            </div>
+          </div>
+        </div>` : ''}
       </div>
     `).join('')}
   </div>
@@ -31041,6 +31155,9 @@ const SEL_LISTS = {
   'void-reason': { arr: 'selectedVoidReasonIdxs', numeric: true },
   'tip-preset': { arr: 'selectedTipPresetIdxs', numeric: true },
   'discount-preset': { arr: 'selectedDiscountPresetIds' },
+  'happy-hour': { arr: 'selectedHappyHourIds' },
+  customer: { arr: 'selectedCustomerIds' },
+  'inventory-item': { arr: 'selectedInventoryItemIds' },
   station: { arr: 'selectedStationIds' },
 };
 // Select-all for the simpler lists: tick = everything, tick again = nothing.
@@ -33961,6 +34078,38 @@ function handleActClick(el, e) {
       else if (act === 'close-reservation-modal') { closeReservationModal(); }
       else if (act === 'save-reservation-modal') { saveReservationModal(); }
       else if (act === 'add-customer') { openAddCustomer(); }
+      else if (act === 'customer-toggle-open') {
+        const id = el.dataset.id, open = state.expandedCustomerIds || [];
+        state.expandedCustomerIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
+        render();
+      }
+      else if (act === 'selall-customer') { toggleSelAllList('customer', state.customers.map(c => c.id)); }
+      else if (act === 'delete-selected-customers') { deleteSelectedByIds('selectedCustomerIds', '/api/customers', async () => { state.customers = await api('/api/customers'); }); }
+      else if (act === 'clear-customer-selection') { state.selectedCustomerIds = []; render(); }
+      else if (act === 'happy-hour-toggle-open') {
+        const id = el.dataset.id, open = state.expandedHappyHourIds || [];
+        state.expandedHappyHourIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
+        render();
+      }
+      else if (act === 'hh-inline-day') {
+        const h = state.happyHours.find(x => x.id === el.dataset.id);
+        if (h) {
+          const d = parseInt(el.dataset.val);
+          updateHappyHourField(h.id, { days: h.days.includes(d) ? h.days.filter(x => x !== d) : [...h.days, d].sort((a, b) => a - b) });
+        }
+      }
+      else if (act === 'selall-happy-hour') { toggleSelAllList('happy-hour', state.happyHours.map(h => h.id)); }
+      else if (act === 'duplicate-selected-happy-hours') { duplicateSelectedHappyHours(); }
+      else if (act === 'delete-selected-happy-hours') { deleteSelectedByIds('selectedHappyHourIds', '/api/happy-hours', async () => { state.happyHours = await api('/api/happy-hours'); }); }
+      else if (act === 'clear-happy-hour-selection') { state.selectedHappyHourIds = []; render(); }
+      else if (act === 'inventory-item-toggle-open') {
+        const id = el.dataset.id, open = state.expandedInventoryItemIds || [];
+        state.expandedInventoryItemIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
+        render();
+      }
+      else if (act === 'selall-inventory-item') { toggleSelAllList('inventory-item', (state.inventoryItems || []).map(i => i.id)); }
+      else if (act === 'delete-selected-inventory-items') { deleteSelectedByIds('selectedInventoryItemIds', '/api/inventory-items', loadInventoryData); }
+      else if (act === 'clear-inventory-item-selection') { state.selectedInventoryItemIds = []; render(); }
       else if (act === 'edit-customer') { openEditCustomer(el.dataset.id); }
       else if (act === 'delete-customer') { openConfirm({ message: 'Delete this customer?', confirmLabel: 'Delete', danger: true }, () => deleteCustomerAction(el.dataset.id)); }
       else if (act === 'close-customer-modal') { closeCustomerModal(); }

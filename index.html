@@ -2119,10 +2119,11 @@ body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
 .osk-key.wide{max-width:140px;flex:1.6;font-size:var(--fs-md);}
 .osk-key.space{max-width:480px;flex:6;}
 .osk-key.on{background:#EDE6D6;color:#26231F;} /* shift latched: cream, same voice as the bar's selected chip */
-/* The corner key wears Gboard's fat chevron (owner pick 3, Aug '26) — a
-   drawn chevron, dead-centred by flex (the '⌄' text glyph never was). */
-.osk-key[data-k="⌄"] svg{width:26px;height:26px;display:block;}
-@media (max-width:520px){ .osk-key[data-k="⌄"] svg{width:22px;height:22px;} }
+/* Drawn keys (down / shift / backspace) are one family — same box, same
+   stroke, dead-centred by flex. Shift latched fills its arrow solid. */
+.osk-key svg{width:26px;height:26px;display:block;}
+.osk-key.on svg{fill:currentColor;}
+@media (max-width:520px){ .osk-key svg{width:22px;height:22px;} }
 /* Phone widths: the tablet metrics turn keys into skinny 30×56 sticks
    (owner: "looks shit in mobile"). Phone keys keep the phone's own
    proportions — shorter, tighter gaps, smaller corner, slim board. */
@@ -12043,14 +12044,12 @@ function oskRows() {
     ['#', '%', '+', '=', '*', '?', '!', "'", '⌫'],
     ['ABC', ',', '␣', '.', '⌄'],
   ];
-  // Search is case-blind, so shift has no job there and steps off the
-  // keyboard (owner, Aug '26). Names and notes keep it — a docket still
-  // wants its capital letters.
-  const isSearch = _oskTarget && /search/.test(_oskTarget.id || '');
+  // Shift stays on EVERY layout, search included (owner, Aug '26: "same as
+  // all keyboard layouts") — one keyboard, no surprise row shuffles.
   const letters = [
     ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
     ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l'],
-    isSearch ? ['z', 'x', 'c', 'v', 'b', 'n', 'm', '⌫'] : ['⇧', 'z', 'x', 'c', 'v', 'b', 'n', 'm', '⌫'],
+    ['⇧', 'z', 'x', 'c', 'v', 'b', 'n', 'm', '⌫'],
     ['!#1', ',', '␣', '.', '⌄'],
   ];
   if (_oskMode === 'upper') return letters.map(r => r.map(k => k.length === 1 && /[a-z]/.test(k) ? k.toUpperCase() : k));
@@ -12072,9 +12071,15 @@ function oskPaint() {
     const wide = ['⇧', '⌫', '!#1', 'ABC', '⌄'].includes(k);
     const mod = wide || k === ',' || k === '.'; // darker "function" keys, like the phone's
     const cls = 'osk-key' + (wide ? ' wide' : '') + (mod ? ' mod' : '') + (k === '␣' ? ' space' : '') + (k === '⇧' && _oskMode === 'upper' ? ' on' : '');
-    // The down key draws a REAL chevron — the '⌄' text glyph hangs low in
-    // its em box and never sat centred (owner: "fix the centreing").
-    const label = k === '␣' ? '' : (k === '⌄' ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9l7 7 7-7"/></svg>' : k);
+    // Down, shift and backspace are DRAWN, one family — same 2.5 stroke,
+    // round caps (owner: "match the style and thickness of the chevron").
+    // Text glyphs hang oddly in their em boxes; drawn icons centre true.
+    const ICONS = {
+      '⌄': '<path d="M5 9l7 7 7-7"/>',
+      '⇧': '<path d="M12 4.5 19 12h-4v6.5H9V12H5z"/>',
+      '⌫': '<path d="M9.5 5.5H21v13H9.5L3.5 12z"/><path d="M12.5 9.5l5 5M17.5 9.5l-5 5"/>',
+    };
+    const label = k === '␣' ? '' : (ICONS[k] ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">${ICONS[k]}</svg>` : k);
     return `<button type="button" class="${cls}" data-k="${k === '"' ? '&quot;' : k}">${label}</button>`;
   }).join('')}</div>`).join('')}`;
   oskEcho();
@@ -27186,7 +27191,13 @@ document.addEventListener('touchstart', (e) => {
   const wrap = e.target.closest && e.target.closest('.tp-canvas-wrap');
   if (!wrap) return;
   const [a, b] = e.touches;
-  _tpPinch = { wrap, dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom: tpZoom() };
+  // Pinching IN goes past 1× down to "the whole room on screen" (owner,
+  // Aug '26): the floor below fit-width would just squash, so the fit IS
+  // the floor of the zoom. On the till the map already fits — min stays 1.
+  const canvas = wrap.querySelector('.floor-canvas');
+  const baseW = canvas ? canvas.offsetWidth / tpZoom() : wrap.clientWidth;
+  _tpPinch = { wrap, dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom: tpZoom(),
+    minZ: Math.min(1, wrap.clientWidth / baseW) };
   _tpPinchGuard = Date.now() + 600;
 }, { passive: true });
 document.addEventListener('touchmove', (e) => {
@@ -27194,7 +27205,7 @@ document.addEventListener('touchmove', (e) => {
   e.preventDefault(); // the browser must neither scroll nor page-zoom mid-pinch
   const [a, b] = e.touches;
   const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
-  const z = Math.min(3, Math.max(1, _tpPinch.zoom * d / _tpPinch.dist));
+  const z = Math.min(3, Math.max(_tpPinch.minZ, _tpPinch.zoom * d / _tpPinch.dist));
   const old = tpZoom();
   if (Math.abs(z - old) < 0.01) return;
   const w = _tpPinch.wrap, r = w.getBoundingClientRect();

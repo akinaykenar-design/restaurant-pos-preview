@@ -3178,6 +3178,7 @@ body[data-fixed-rows="1"] .qty-pop.covers-pop .seat-grid .covers-pad-key{ height
 .note-preset-grid.fixed4{ grid-auto-rows:78px; }
 .note-preset-grid.fixed4 .item-card{ height:auto; min-height:0; }
 .note-ghost{ border:1.5px dashed var(--steel-200); border-radius:var(--radius); opacity:.5; pointer-events:none; }
+.ct-fired.ct-staged{ opacity:.45; } /* staged call-away: hollow-looking tick until Send fires it */
 /* Half-tile preset squares: centred key-style text, two lines max — the
    full item-tile font clipped long names at this size (owner, Aug '26). */
 .modal-pane .note-preset-grid .item-card{ padding:4px 6px; align-items:center; justify-content:center; text-align:center; }
@@ -14362,6 +14363,17 @@ function lastFiredCourse() {
   Object.entries(state.firedCourses).forEach(([n, t]) => { if (t > bt) { bt = t; best = parseInt(n); } });
   return best;
 }
+// Owner rule (Aug '26): nothing reaches the kitchen without Send. Tapping or
+// holding a course STAGES the call-away (hollow tick on the tab); Send fires
+// it. Holding the already-fired course still takes it back instantly.
+function stageCourse(n) {
+  state.stagedCallAway = state.stagedCallAway === n ? null : n;
+  state.callAway = false;
+  if (state._callAwayReturn) { state._callAwayReturn = false; state.showTablePicker = true; }
+  state.toast = state.stagedCallAway ? `${courseInfo(n).name} will call away on Send` : 'Call away cancelled';
+  render();
+  armToastTimer(2400);
+}
 function fireCourse(n) {
   // ONE course is away at a time (owner rule): calling the next clears the
   // last, so the docket always shows the single course the kitchen is on.
@@ -15155,6 +15167,7 @@ function renderTablePeekPop() {
 // whose standing notes/allergies can go out as a notes-only docket.
 function cartSendable() {
   if (state.cart.length) return true;
+  if (state.stagedCallAway) return true; // a staged call-away rides the Send
   if ((state.quickNote || '').trim()) return true;
   return state.orderType === 'dine-in' && !!state.table && (state.notes.length > 0 || state.allergies.length > 0);
 }
@@ -15163,6 +15176,13 @@ async function sendToKitchen() {
   // The phone Save button is always tappable (its hold is the log-off
   // gesture) — an empty tap just says so instead of dying silently.
   if (!cartSendable()) { state.toast = 'Nothing new to save'; render(); armToastTimer(2200); return; }
+  // ONLY a staged call-away to send: fire it without minting an empty round.
+  if (!state.cart.length && !(state.quickNote || '').trim() && state.stagedCallAway
+      && !(state.orderType === 'dine-in' && state.table && (state.notes.length > 0 || state.allergies.length > 0))) {
+    const n0 = state.stagedCallAway; state.stagedCallAway = null;
+    fireCourse(n0);
+    return;
+  }
   // A dine-in docket needs a table — prompt for one instead of sending nowhere.
   if (state.orderType === 'dine-in' && !state.table) { openTablePicker(); return; }
   // Heads-up (not a block) when the order exceeds what's in stock. "Send anyway"
@@ -15216,6 +15236,8 @@ async function sendToKitchen() {
     state.cart = [];
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
     state.courseCount = state.settings.courses.length || 1;
+    // The staged call-away goes out WITH the round it was staged behind.
+    if (state.stagedCallAway) { const n0 = state.stagedCallAway; state.stagedCallAway = null; fireCourse(n0); }
     // Keep any called-away courses (and their timers) — sending a round must not
     // wipe fire state, so the "send the order, fire mains later" flow works.
     // Docket's away — when the venue runs one till for many staff, hand it
@@ -17122,7 +17144,7 @@ function renderTicketPanel() {
           const info = courseInfo(n);
           return `
           <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}">
-            ${esc(info.name)}${lastFiredCourse() === n ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : ''}
+            ${esc(info.name)}${lastFiredCourse() === n ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : state.stagedCallAway === n ? `<span class="ct-fired ct-staged">${ACT_TICK_SVG}</span>` : ''}
           </button>`;
         }).join('');
       })()}
@@ -24344,21 +24366,15 @@ function renderScreenAdmin() {
   <div class="settings-card" id="ctl-docket">
     ${dev !== 'mobile' ? `
     <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>
-    <div class="pay-options" style="margin-bottom:18px;">
-      ${[['side', 'Side'], ['bottom', 'Bottom']].map(([v, l]) => `<div class="pay-opt ${((state.settings.ticketPos || {})[dev] === 'bottom' ? 'bottom' : 'side') === v ? 'active' : ''}" data-act="set-ticket-pos" data-val="${v}">${l}</div>`).join('')}
-    </div>
     <div class="th" style="margin-bottom:10px;">Width</div>
     <div class="size-slider-row">
-      <input type="range" class="dkw-slider" min="240" max="560" step="10" value="${Math.round(state.theme.tktWidth || 360)}" oninput="setDocketWidth(this.value)">
+      <input type="range" class="dkw-slider" min="240" max="560" step="5" value="${Math.round(state.theme.tktWidth || 360)}"
+        oninput="const v = this.value; const lab = this.parentElement.querySelector('.size-slider-val'); if (lab) lab.textContent = v + 'px'; const wrap = document.querySelector('.mk-wrap'); if (wrap) wrap.style.setProperty('--ticket-w', Math.round(parseFloat(wrap.dataset.fw || 1440) * (v / Math.max(1080, innerWidth))) + 'px');"
+        onchange="setDocketWidth(this.value)">
       <span class="size-slider-val">${Math.round(state.theme.tktWidth || 360)}px</span>
     </div>
     <div class="ts" style="margin:2px 0 14px;">Dragging the preview's docket edge still works — this follows it.</div>` : `
     <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>`}
-    <div class="th" style="margin-bottom:14px;">Selected line colour</div>
-    <div class="pay-options" style="margin-bottom:4px;align-items:center;">
-      ${colorDotButton('docket-sel', 'sel', state.settings.docketSelColor || null, { bg: state.settings.docketSelColor || null, title: 'Highlight colour for the line being edited' })}
-      <span class="ts" style="margin-left:8px;">Line being edited on the docket</span>
-    </div>
   </div>
   ${fold('extras', 'Extras', 'Icon pack · item icons · prices on tiles · subsection style · icon-only bar · tiles start at the bottom', `
     <div id="ctl-subcat">
@@ -24422,7 +24438,12 @@ function renderScreenAdmin() {
     <div class="th" style="margin:18px 0 14px;">Docket text — ${devName}</div>
     ${slider('tktFontSize')}
     <div class="th" style="margin:18px 0 14px;">Docket spacing — ${devName}</div>
-    ${slider('tktGap')}`)}
+    ${slider('tktGap')}
+    <div class="th" style="margin:18px 0 14px;">Selected line colour</div>
+    <div class="pay-options" style="align-items:center;">
+      ${colorDotButton('docket-sel', 'sel', state.settings.docketSelColor || null, { bg: state.settings.docketSelColor || 'var(--orange)', title: 'Highlight colour for the line being edited' })}
+      <span class="ts" style="margin-left:8px;">Line being edited on the docket</span>
+    </div>`)}
   ${fold('service', 'Service & behaviour', 'Quantity pad · menu search · log off · order types', `
     <div id="ctl-extras">
     <div class="th" style="margin-bottom:14px;">Quantity number pad</div>
@@ -27930,7 +27951,7 @@ document.addEventListener('pointerdown', (e) => {
         clearFiredCourse(n);
         state.toast = `${courseInfo(n).name} call away taken back`;
         render();
-      } else fireCourse(n);
+      } else stageCourse(n);
     } else if (send) {
       _sendHoldFired = true;
       // Hold = send this round, then hand the till back to table select (still
@@ -32106,6 +32127,9 @@ function bindEvents() {
       if (lab) lab.textContent = SIZE_LABELS[val];
       state.theme = { ...state.theme, [field]: themeSizePatch(field, val) };
       applyTheme();
+      // Names re-fit NOW — the auto-fitted inline sizes went stale on resize
+      // until the next render ("text stuck on medium", owner Aug '26).
+      requestAnimationFrame(() => { try { fitTileNames(); placeTileCounts(); } catch (err) {} });
       const wrap = document.querySelector('.mk-wrap');
       if (wrap) wrap.setAttribute(THEME_SIZE_ATTRS[field], val);
     });
@@ -33190,7 +33214,7 @@ function handleActClick(el, e) {
           l.course = n; if (l.course > state.courseCount) state.courseCount = l.course; render();
         }
       }
-      else if (act === 'fire-course') { fireCourse(parseInt(el.dataset.val)); }
+      else if (act === 'fire-course') { stageCourse(parseInt(el.dataset.val)); }
       else if (act === 'call-away-table') { callAwayTable(el.dataset.order); }
       else if (act === 'toggle-tables-callaway') {
         state.tablesCallAway = !state.tablesCallAway;

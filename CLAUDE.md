@@ -63,3 +63,8 @@ as accents or decoration. Accents come from the curated set only.
 
 A drawn icon may not repeat: two different pages/actions never share a
 glyph (e.g. Discounts' tag ≠ Categories; typed-note ≠ order-notes).
+NO ARROWS, EVER (owner rule, Aug '26): no drawn icon uses arrow motifs —
+no direction arrows, no up/down trend arrows, no arrow-circles. Express
+"more/less" with +/−, movement with position or colour, never an arrow.
+(The table-transfer swap glyph the owner picked earlier is the single
+grandfathered exception unless they say otherwise.)

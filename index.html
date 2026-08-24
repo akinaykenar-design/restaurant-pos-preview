@@ -3461,8 +3461,12 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
   var LS_KEY = 'pos-preview-store-v9';
   var SEED_KEY = LS_KEY + '-seedhash';
   var DIRTY_KEY = LS_KEY + '-dirty';
-  var DB = 'data/store.json';
+  var DB = 'data/store.json';        // the SEED slot — what boot restores into
+  var DB_LIVE = 'data/store.local.json'; // where the server actually writes now
   var files = {};
+  // The one true copy of the venue's data right now: the live file once the
+  // server has seeded it, the seed slot before that.
+  function liveStore() { return files[DB_LIVE] || files[DB]; }
   var conflict = false; // new deploy data + local edits — the visitor decides
   try {
     var freshSeed = localStorage.getItem(SEED_KEY) !== window.__POS_SEED_HASH__;
@@ -3531,19 +3535,24 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 
   var booted = false;
   function persist(p) {
-    if (p !== DB) return;
+    // The server writes the LIVE file (store.local.json) since the Aug '26
+    // db rework; watching only the seed slot silently dropped every edit the
+    // moment the tab closed. Both slots persist into the SAME LS key — boot
+    // restores it into the seed slot, and ensureStore reseeds the live file
+    // from there, so the round-trip holds.
+    if (p !== DB && p !== DB_LIVE) return;
     try {
-      localStorage.setItem(LS_KEY, files[DB]);
+      localStorage.setItem(LS_KEY, liveStore());
       // Writes after boot are the visitor's own edits — remember that so a
       // future deploy can't silently reset them.
-      if (booted) localStorage.setItem(DIRTY_KEY, '1');
+      if (booted) { localStorage.setItem(DIRTY_KEY, '1'); scheduleSync(); }
     } catch (e) {}
   }
   setTimeout(function () { booted = true; }, 1500);
 
   function downloadMyData() {
     try {
-      var blob = new Blob([files[DB]], { type: 'application/json' });
+      var blob = new Blob([liveStore()], { type: 'application/json' });
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'pos-data-' + new Date().toISOString().slice(0, 10) + '.json';
@@ -3555,7 +3564,7 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
   // Falls back to the plain file download on browsers without the pieces.
   async function copyForClaude(btn) {
     try {
-      var json = files[DB];
+      var json = liveStore();
       var bytes = new TextEncoder().encode(json);
       var stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip'));
       var buf = new Uint8Array(await new Response(stream).arrayBuffer());
@@ -3570,53 +3579,124 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
       }
     } catch (e) { downloadMyData(); }
   }
-  // Cloud save (owner ask, Aug '26): with a GitHub token pasted once, the pill
-  // uploads this browser's data straight to the preview repo's phone-data
-  // branch \u2014 Claude reads it from there, no copy-paste. No token (or a failed
-  // upload) falls back to the clipboard copy above. The token lives only in
-  // this browser's storage; scope it to just this repo, Contents read/write.
+  // Cloud sync (owner pick, Aug '26: "auto-sync everywhere"). ONE home for the
+  // data: the preview repo's phone-data branch. Edits quietly upload a few
+  // seconds after they happen; opening the app adopts the newest cloud copy.
+  // Phone and PC stay the same without any buttons to remember \u2014 the pill is
+  // just a status light (tap = sync now / set up). The GitHub token (this repo
+  // only, Contents read/write) is pasted once per device and lives only in
+  // that browser's storage. No token: the pill stays the old clipboard copy.
+  // One truth, last writer wins \u2014 this is a preview tool for one person, not
+  // a multi-till backend.
   var TOKKEY = 'pv-gh-token';
+  var SYNCSHA = 'pv-cloud-sha';    // cloud file version this device last matched
+  var PENDKEY = 'pv-sync-pending'; // '1' = local edits the cloud hasn't seen yet
+  var GH_URL = 'https://api.github.com/repos/akinaykenar-design/restaurant-pos-preview/contents/pos-data.json';
   function cloudToken() { try { return localStorage.getItem(TOKKEY) || ''; } catch (e) { return ''; } }
-  function pillLabel(btn) {
-    btn.textContent = cloudToken() ? '\u2601 Save for Claude' : '\u2398 Copy for Claude';
-  }
+  function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function lsSet(k, v) { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch (e) {} }
+  function ghHead() { return { 'Authorization': 'Bearer ' + cloudToken(), 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' }; }
   function b64utf8(str) {
     var bytes = new TextEncoder().encode(str);
     var bin = '';
     for (var i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
     return btoa(bin);
   }
-  async function saveForClaude(btn) {
-    var token = cloudToken();
-    if (!token) {
-      var entered = prompt('Save without copy-paste: paste a GitHub token here (github.com \u2192 Settings \u2192 Developer settings \u2192 Fine-grained tokens \u2192 this repo only, Contents: read & write).\n\nCancel keeps the copy-to-clipboard behaviour.');
-      if (entered && entered.trim()) {
-        token = entered.trim();
-        try { localStorage.setItem(TOKKEY, token); } catch (e) {}
-      } else { copyForClaude(btn); return; }
-    }
-    btn.textContent = '\u2191 Saving\u2026';
+  function b64decode(b64) {
+    var bin = atob((b64 || '').replace(/\n/g, ''));
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new TextDecoder().decode(bytes);
+  }
+  var _pill = null, _syncing = false, _syncQueued = false, _syncT = null;
+  function setPill(txt) { if (_pill) _pill.textContent = txt; }
+  function pillLabel(btn) {
+    _pill = btn || _pill;
+    setPill(!cloudToken() ? '\u2398 Copy for Claude'
+      : lsGet(PENDKEY) === '1' ? '\u26a0 Not synced \u2014 tap to retry'
+      : '\u2601 Synced');
+  }
+  function dropToken(msg) { lsSet(TOKKEY, null); lsSet(SYNCSHA, null); setPill(msg || '\u2398 Copy for Claude'); }
+  // Edits push up ~4s after the last change; PENDKEY survives reloads so an
+  // offline edit still uploads on the next open.
+  function scheduleSync() {
+    if (!cloudToken()) return;
+    lsSet(PENDKEY, '1');
+    clearTimeout(_syncT);
+    _syncT = setTimeout(syncUp, 4000);
+  }
+  async function syncUp() {
+    if (!cloudToken()) return;
+    if (_syncing) { _syncQueued = true; return; }
+    _syncing = true;
+    setPill('\u2191 Saving\u2026');
     try {
-      var url = 'https://api.github.com/repos/akinaykenar-design/restaurant-pos-preview/contents/pos-data.json';
-      var head = { 'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' };
-      var sha = null;
-      var cur = await fetch(url + '?ref=phone-data', { headers: head });
-      if (cur.ok) { sha = (await cur.json()).sha; }
-      else if (cur.status === 401 || cur.status === 403) throw new Error('auth');
-      var body = { message: 'Phone data save', branch: 'phone-data', content: b64utf8(files[DB]) };
+      var sha = lsGet(SYNCSHA);
+      if (!sha) {
+        var cur = await fetch(GH_URL + '?ref=phone-data', { headers: ghHead() });
+        if (cur.status === 401 || cur.status === 403) throw new Error('auth');
+        if (cur.ok) sha = (await cur.json()).sha;
+      }
+      var body = { message: 'Phone data sync', branch: 'phone-data', content: b64utf8(liveStore()) };
       if (sha) body.sha = sha;
-      var res = await fetch(url, { method: 'PUT', headers: head, body: JSON.stringify(body) });
+      var res = await fetch(GH_URL, { method: 'PUT', headers: ghHead(), body: JSON.stringify(body) });
+      if (res.status === 409 || res.status === 422) {
+        // Stale sha (the other device wrote in between): take the fresh sha
+        // and write once more \u2014 last writer wins.
+        var again = await fetch(GH_URL + '?ref=phone-data', { headers: ghHead() });
+        if (again.ok) { body.sha = (await again.json()).sha; res = await fetch(GH_URL, { method: 'PUT', headers: ghHead(), body: JSON.stringify(body) }); }
+      }
       if (res.status === 401 || res.status === 403) throw new Error('auth');
       if (!res.ok) throw new Error('HTTP ' + res.status);
-      btn.textContent = '\u2713 Saved \u2014 tell Claude to pull it';
-      setTimeout(function () { pillLabel(btn); }, 2600);
+      var out = await res.json();
+      lsSet(SYNCSHA, out && out.content && out.content.sha || null);
+      lsSet(PENDKEY, null);
+      setPill('\u2601 Synced');
     } catch (e) {
-      // A rejected token is forgotten so the next tap asks for a fresh one;
-      // either way the old clipboard road still gets the data out.
-      if (String(e && e.message) === 'auth') { try { localStorage.removeItem(TOKKEY); } catch (e2) {} }
-      btn.textContent = '\u2715 Cloud failed \u2014 copying instead';
-      setTimeout(function () { copyForClaude(btn); }, 900);
+      if (String(e && e.message) === 'auth') dropToken('\u26a0 Token rejected \u2014 tap to redo');
+      else setPill('\u26a0 Not synced \u2014 tap to retry');
     }
+    _syncing = false;
+    if (_syncQueued) { _syncQueued = false; syncUp(); }
+  }
+  // On open: local edits that never uploaded win (they push); otherwise a
+  // newer cloud copy is adopted and the app reloads into it once.
+  async function syncDown() {
+    if (!cloudToken()) return;
+    if (lsGet(PENDKEY) === '1') { syncUp(); return; }
+    try {
+      setPill('\u2601 Checking\u2026');
+      var res = await fetch(GH_URL + '?ref=phone-data', { headers: ghHead() });
+      if (res.status === 401 || res.status === 403) { dropToken('\u26a0 Token rejected \u2014 tap to redo'); return; }
+      if (res.status === 404) { syncUp(); return; } // first device to sync seeds the cloud
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var file = await res.json();
+      if (file.sha === lsGet(SYNCSHA)) { setPill('\u2601 Synced'); return; }
+      var json = file.content ? b64decode(file.content) : b64decode((await (await fetch(file.git_url, { headers: ghHead() })).json()).content);
+      JSON.parse(json); // never adopt a broken file
+      if (json === liveStore()) { lsSet(SYNCSHA, file.sha); setPill('\u2601 Synced'); return; }
+      lsSet(LS_KEY, json);
+      lsSet(SEED_KEY, window.__POS_SEED_HASH__); // adopted cloud data is not a seed conflict
+      lsSet(DIRTY_KEY, '1');                     // ...but it IS worth protecting from a re-seed
+      lsSet(SYNCSHA, file.sha);
+      location.reload();
+    } catch (e) { setPill('\u26a0 Not synced \u2014 tap to retry'); }
+  }
+  // Tap on the pill: set up sync (token prompt; Cancel keeps the clipboard
+  // road), or force a sync right now.
+  async function saveForClaude(btn) {
+    _pill = btn;
+    if (!cloudToken()) {
+      var entered = prompt('Sync this device: paste a GitHub token (github.com \u2192 Settings \u2192 Developer settings \u2192 Fine-grained tokens \u2192 only restaurant-pos-preview, Contents: read & write).\n\nCancel copies the data to the clipboard instead, like before.');
+      if (entered && entered.trim()) {
+        lsSet(TOKKEY, entered.trim());
+        lsSet(SYNCSHA, null);
+        syncDown(); // adopt whatever the other device saved \u2014 or seed the cloud from here
+      } else { copyForClaude(btn); }
+      return;
+    }
+    lsSet(PENDKEY, '1');
+    syncUp();
   }
   function showConflictBar() {
     var bar = document.createElement('div');
@@ -3642,7 +3722,9 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
       bar.remove();
     };
   }
-  if (conflict) {
+  if (conflict && !cloudToken()) {
+    // With sync on, the cloud copy is the truth and adopts right after boot —
+    // the deploy-vs-local question answers itself, so no bar.
     if (document.body) showConflictBar();
     else document.addEventListener('DOMContentLoaded', showConflictBar);
   }
@@ -3910,7 +3992,8 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
     var save = document.createElement('div');
     save.style.cssText = 'position:fixed;z-index:99999;background:#4FA51D;color:#fff;padding:6px 12px;border-radius:99px;font:700 11px/1.6 system-ui,sans-serif;user-select:none;touch-action:none;cursor:grab;box-shadow:0 2px 10px rgba(0,0,0,.35);opacity:.92;';
     pillLabel(save);
-    save.title = 'Tap: save this browser\u2019s data for Claude \u2014 straight to the repo with a GitHub token, or to the clipboard to paste into chat. Drag to move the button.';
+    save.title = 'Sync status. Set up once with a GitHub token and this device saves and loads your data by itself; tap to sync now. Without a token, tap copies the data for the Claude chat. Drag to move.';
+    setTimeout(syncDown, 400); // adopt the newest cloud copy on open
     var POSKEY = 'pv-save-pos';
     function clamp(x, y) {
       var r = save.getBoundingClientRect();

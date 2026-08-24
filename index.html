@@ -6159,6 +6159,9 @@ app.put('/api/settings', (req, res) => {
   if (Array.isArray(tipPresets)) {
     data.settings.tipPresets = tipPresets.map(p => parseFloat(p)).filter(p => !isNaN(p) && p >= 0 && p <= 100).slice(0, 8);
   }
+  if (Array.isArray(req.body.cardTypes)) {
+    data.settings.cardTypes = req.body.cardTypes.map(s => String(s).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
+  }
   if (managerApprovalForVoid !== undefined) data.settings.managerApprovalForVoid = !!managerApprovalForVoid;
   if (allergyCustomEnabled !== undefined) data.settings.allergyCustomEnabled = !!allergyCustomEnabled;
   if (Array.isArray(courses) && courses.length > 0) {
@@ -13319,7 +13322,18 @@ const CARD_TYPES = [
   { key: 'amex', label: 'Amex' },
   { key: 'eftpos', label: 'EFTPOS' },
 ];
-function cardTypeLabel(k) { return (CARD_TYPES.find(c => c.key === k) || {}).label || 'Card'; }
+// The card buttons are the venue's to edit (Finance → Tips & Payouts):
+// settings.cardTypes holds the labels; keys derive from them. The default
+// list is the classic four above.
+function cardTypes() {
+  const labels = (state.settings.cardTypes && state.settings.cardTypes.length)
+    ? state.settings.cardTypes : CARD_TYPES.map(c => c.label);
+  return labels.map(l => ({ key: String(l).toLowerCase().replace(/[^a-z0-9]+/g, '-'), label: l }));
+}
+function cardTypeLabel(k) {
+  return (cardTypes().find(c => c.key === k) || CARD_TYPES.find(c => c.key === k) || {}).label
+    || (k ? String(k).replace(/-/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase()) : 'Card');
+}
 // Everything still owed on this table: the bill less every part already taken.
 function amountOwing() {
   return Math.max(0, Math.round((cartGrandTotal() - splitPaidTotal()) * 100) / 100);
@@ -16963,7 +16977,7 @@ function renderBillPanel() {
   <div class="ticket-panel bill-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}">
     <div class="ticket-head">
       <button class="ticket-close-mobile" data-act="toggle-mobile-cart">✕</button>
-      <div class="bill-title">The bill${state.table ? ` · Table ${esc(String((findTableById(state.table) || {}).label || state.table))}` : ''}</div>
+      <div class="bill-title">${state.table ? `Table ${esc(String((findTableById(state.table) || {}).label || state.table))}` : 'The bill'}</div>
       <div class="bill-sub">${state.covers ? `${state.covers} cover${state.covers === 1 ? '' : 's'} · ` : ''}${state.currentStaff ? esc(state.currentStaff.name) : ''}</div>
     </div>
     <div class="bill-lines">
@@ -17764,7 +17778,7 @@ function renderCheckoutMiddle() {
       ${state.paymentMethod === 'card' && !state.payRailVouchers ? `
         <label>Card</label>
         <div class="pay-options" style="margin-bottom:14px;">
-          ${CARD_TYPES.map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${c.label}</div>`).join('')}
+          ${cardTypes().map(c => `<div class="pay-opt ${state.cardType === c.key ? 'active' : ''}" data-act="card-type" data-val="${c.key}">${esc(c.label)}</div>`).join('')}
         </div>
         <label>Amount</label>
         <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
@@ -22334,6 +22348,21 @@ function renderTipsSettingsAdmin() {
         </div>` : ''}
       </div>
     `).join('')}
+  </div>
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:4px;">Card types</div>
+    <div class="ts" style="margin-bottom:12px;">The card buttons on the pay screen — which card was used, recorded for the night's takings split.</div>
+    <div style="display:flex;flex-direction:column;gap:8px;max-width:var(--admin-card-w,280px);">
+      ${cardTypes().map((c, i) => `
+      <div class="order-row" style="margin:0;">
+        <span class="t1" style="flex:1;font-weight:700;">${esc(c.label)}</span>
+        <button class="icon-sq" data-act="del-card-type" data-idx="${i}">${ACT_TRASH_SVG}</button>
+      </div>`).join('')}
+      <div style="display:flex;gap:8px;">
+        <input id="new-card-type-input" type="text" placeholder="e.g. Diners" style="flex:1;min-width:0;">
+        <button class="btn-add inline" data-act="add-card-type">+ Add</button>
+      </div>
+    </div>
   </div>` : ''}
   `;
 }
@@ -24288,7 +24317,7 @@ function renderScreenAdmin() {
         <div class="grid-stepper">
           <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="-1" ${shown <= GRID_DIM_MIN ? 'disabled' : ''}>−</button>
           <span class="grid-step-val">${shown}</span>
-          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="1" ${shown >= max ? 'disabled' : ''} title="${shown >= max ? 'More would make tiles too small to tap' : ''}>+</button>
+          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="1" ${shown >= max ? 'disabled' : ''} title="${shown >= max ? 'More would make tiles too small to tap' : ''}">+</button>
         </div>`;
       };
       return gstep('gridCols', 'Tiles across') + gstep('gridRows', 'Tiles down');
@@ -33731,6 +33760,16 @@ function handleActClick(el, e) {
       else if (act === 'selall-tip-preset') { toggleSelAllList('tip-preset', state.settings.tipPresets.map((_, i) => i)); }
       else if (act === 'delete-selected-tip-presets') { openConfirm({ message: `Delete ${state.selectedTipPresetIdxs.length} selected?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedTipPresets()); }
       else if (act === 'clear-tip-preset-selection') { state.selectedTipPresetIdxs = []; render(); }
+      else if (act === 'add-card-type') {
+        const inp = document.getElementById('new-card-type-input');
+        const v = inp && inp.value.trim();
+        if (v) saveTicketSetting({ cardTypes: [...cardTypes().map(c => c.label), v] });
+      }
+      else if (act === 'del-card-type') {
+        const labels = cardTypes().map(c => c.label);
+        labels.splice(parseInt(el.dataset.idx, 10), 1);
+        saveTicketSetting({ cardTypes: labels });
+      }
       else if (act === 'add-tip-preset') { addTipPreset(); }
       else if (act === 'set-allergy-custom-enabled') { saveTicketSetting({ allergyCustomEnabled: el.dataset.val === 'true' }); }
       else if (act === 'add-course-template') { addCourseTemplate(el.dataset.name); }

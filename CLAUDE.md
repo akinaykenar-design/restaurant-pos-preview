@@ -42,3 +42,24 @@ change makes a button's position depend on data, it's wrong.
   buttons need `e.stopPropagation()`.
 - Show visual/design choices to the owner as lettered mockups BEFORE pushing
   when they ask for options; otherwise ship and tell them to "Get latest".
+
+## Derivation hierarchy (Design)
+
+The order grid (tiles across × down) is the senior decision; docket width
+is junior to it; text size junior to both. The 44px law arbitrates every
+conflict — a senior setting can never be moved into breaking a junior one's
+tap targets, and nothing reflows without an explicit choice. "Auto" modes
+are banned: a setting always displays a real number (derived until first
+touch pins it). Every popup (covers, seats, notes) draws the order grid's
+half-scale frame — one grammar.
+
+## Reserved colours
+
+Green (open table), red (needs you), orange (locked/selection), yellow
+(running long) and violet (over time) are status vocabulary — never usable
+as accents or decoration. Accents come from the curated set only.
+
+## Icons
+
+A drawn icon may not repeat: two different pages/actions never share a
+glyph (e.g. Discounts' tag ≠ Categories; typed-note ≠ order-notes).

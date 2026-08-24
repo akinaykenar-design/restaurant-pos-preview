@@ -5352,7 +5352,7 @@ app.get('/api/discount-presets', (req, res) => {
 
 app.post('/api/discount-presets', (req, res) => {
   const data = readData();
-  const { name, kind, type, value } = req.body;
+  const { name, kind, type, value, color } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
   if (value === undefined || isNaN(parseFloat(value))) return res.status(400).json({ error: 'A valid value is required' });
   const preset = {
@@ -5361,6 +5361,7 @@ app.post('/api/discount-presets', (req, res) => {
     kind: kind === 'surcharge' ? 'surcharge' : 'discount',
     type: type === 'fixed' ? 'fixed' : 'percent',
     value: parseFloat(value),
+    color: (typeof color === 'string' && color) || null,
   };
   data.discountPresets.push(preset);
   logAudit(data, staffFromReq(req), `Added ${preset.kind} preset: ${preset.name}`);
@@ -5372,11 +5373,12 @@ app.put('/api/discount-presets/:id', (req, res) => {
   const data = readData();
   const preset = data.discountPresets.find(p => p.id === req.params.id);
   if (!preset) return res.status(404).json({ error: 'Preset not found' });
-  const { name, kind, type, value } = req.body;
+  const { name, kind, type, value, color } = req.body;
   if (name !== undefined) { if (!name.trim()) return res.status(400).json({ error: 'Name is required' }); preset.name = name.trim().slice(0, 40); }
   if (kind !== undefined) preset.kind = kind === 'surcharge' ? 'surcharge' : 'discount';
   if (type !== undefined) preset.type = type === 'fixed' ? 'fixed' : 'percent';
   if (value !== undefined && !isNaN(parseFloat(value))) preset.value = parseFloat(value);
+  if (color !== undefined) preset.color = (typeof color === 'string' && color) || null;
   logAudit(data, staffFromReq(req), `Updated ${preset.kind} preset: ${preset.name}`);
   writeData(data);
   res.json(preset);
@@ -9668,6 +9670,8 @@ let state = {
   expandedCourseIdxs: [],
   expandedNotePresetIdxs: [],
   expandedTipIdxs: [],
+  expandedDiscountPresetIds: [], // Finance preset tiles open for inline edit
+  selectedDiscountPresetIds: [], // bulk-select on the discount/surcharge tiles
   selectedVipIdxs: [], // bulk-select on the VIP types list
   selectedTimeoffIds: [], // bulk-select: time off list
   selectedExpenseIds: [], // bulk-select: expenses list
@@ -11767,6 +11771,8 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
   else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
   else if (kind === 'bulk-vip') bulkSetVipColor(color);
+  else if (kind === 'discount-preset') updateDiscountPresetField(id, { color: color || null });
+  else if (kind === 'bulk-discount-preset') bulkSetDiscountPresetColor(color);
   else if (kind === 'note-preset') setNotePresetColor(id, color);
   else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
   else if (kind === 'bulk-allergy') bulkSetAllergyColor(color);
@@ -21228,6 +21234,7 @@ const ADMIN_SECTIONS = [
   { group: 'Finance', children: [
     { key: 'settings-tax', label: 'Tax' },
     { key: 'settings-discounts', label: 'Discounts' },
+    { key: 'settings-surcharges', label: 'Surcharges' },
     { key: 'settings-happyhour', label: 'Promotions' },
     { key: 'settings-giftcards', label: 'Vouchers' },
     { key: 'expenses', label: 'Expenses' },
@@ -21276,7 +21283,8 @@ const SETTINGS_INDEX = [
   { page: 'settings-payments', label: 'Payments', terms: 'card terminal eftpos linkly commbank pair payment machine cash quick amounts tender' },
   { page: 'settings-doshii', label: 'App orders & pay at table', terms: 'doshii app orders qr delivery pay at table' },
   { page: 'settings-tips', label: 'Tips & quick percentages', terms: 'tips tip percent presets' },
-  { page: 'settings-discounts', label: 'Discount & surcharge presets', terms: 'discount surcharge preset staff percent' },
+  { page: 'settings-discounts', label: 'Discount presets', terms: 'discount preset staff percent' },
+  { page: 'settings-surcharges', label: 'Surcharges & auto surcharges', terms: 'surcharge preset percent sunday saturday public holiday auto weekend' },
   { page: 'settings-happyhour', label: 'Promotions & happy hour', terms: 'promotion happy hour discount times days' },
   { page: 'settings-giftcards', label: 'Gift cards & vouchers', terms: 'gift card voucher code redeem' },
   { page: 'settings-void', label: 'Void reasons', terms: 'void reasons cancel waste' },
@@ -21345,6 +21353,7 @@ const PIN_PAGE_ICON = {
   'settings-venue': '<path d="M2 22h20"/><path d="M4.22 22V6.44l7.78 -4.44 7.78 4.44v15.56"/><path d="M8.67 22v-6.67h6.67v6.67"/>',
   'settings-tax': '<path d="M20.75 3.25 3.25 20.75"/><circle cx="5.12" cy="5.12" r="3.12"/><circle cx="18.88" cy="18.88" r="3.12"/>',
   'settings-discounts': '<path d="M12 2H2v10l10 10 10 -10L12 2z"/><circle cx="7" cy="7" r="1.5"/>',
+  'settings-surcharges': '<path d="M20.75 3.25 3.25 20.75"/><circle cx="5.12" cy="5.12" r="3.12"/><circle cx="18.88" cy="18.88" r="3.12"/><path d="M12 22l0 -3"/>',
   'expenses': '<rect x="2" y="5" width="20" height="14" rx="2"/><path d="M16 11h4"/>',
 };
 // One lookup for a page's glyph, shared by the pin lane and the hub tiles so
@@ -21541,6 +21550,7 @@ function renderAdminView() {
         : state.adminTab === 'settings-vip' ? renderVipSettingsAdmin()
         : state.adminTab === 'settings-notes' ? renderOrderNotesAdmin()
         : state.adminTab === 'settings-discounts' ? renderDiscountsSettingsAdmin()
+        : state.adminTab === 'settings-surcharges' ? renderSurchargesSettingsAdmin()
         : state.adminTab === 'settings-tips' ? renderTipsSettingsAdmin()
         : state.adminTab === 'settings-void' ? renderVoidReasonsSettingsAdmin()
         : state.adminTab === 'settings-printers' ? renderPrinterStationsSettingsAdmin()
@@ -21846,21 +21856,85 @@ function renderVoidReasonsSettingsAdmin() {
   `;
 }
 
-function renderDiscountsSettingsAdmin() {
+// Discount and Surcharge presets share ONE tile list — the same clean
+// container the menu items admin uses (owner ask, Aug '26): checkbox select,
+// colour dot, name, value on the right, expand for the inline editor. Each
+// Finance page shows only its own kind; the page's + button pre-picks it.
+function renderPresetTileList(kind, addLabel) {
+  const list = state.discountPresets.filter(p => (p.kind === 'surcharge') === (kind === 'surcharge'));
+  const sel = state.selectedDiscountPresetIds || [];
+  const selHere = sel.filter(id => list.some(p => p.id === id));
   return `
-  <div style="max-width:600px;">
-    <div style="display:flex;justify-content:flex-end;margin-bottom:14px;"><button class="btn-add inline" data-act="add-discount-preset">+ Discount</button></div>
-    ${state.discountPresets.length === 0 ? `<div class="empty-hist">No discount or surcharge presets yet.</div>` : ''}
-    ${state.discountPresets.map(p => `
-      <div class="order-row discount-preset-row" data-id="${p.id}">
-        <div class="order-info">
-          <div class="t1">${esc(p.name)} ${editIconButton('edit-discount-preset', p.id, 'Edit')} <span class="status-chip ${p.kind === 'surcharge' ? 'neutral' : 'paid'}">${p.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span></div>
-          <div class="t2">${p.type === 'percent' ? p.value + '%' : money(p.value)}</div>
+  <div style="max-width:560px;">
+    <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-discount-preset" data-kind="${kind}" ${list.length > 0 && list.every(p => sel.includes(p.id)) ? 'checked' : ''}></label>${selHere.length > 0 ? `
+      <span style="display:inline-flex;align-items:center;gap:6px;" data-stop="1">${colorDotButton('bulk-discount-preset', 'x', null, { pencil: true, allowClear: true })}</span>
+      <button class="icon-sq" data-act="duplicate-selected-discount-presets">${ACT_COPY_SVG}</button>
+      <button class="icon-sq" data-act="delete-selected-discount-presets">${ACT_TRASH_SVG}</button>
+      <button class="icon-sq" data-act="clear-discount-preset-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-discount-preset" data-kind="${kind}">${addLabel}</button></div>
+    ${list.length === 0 ? `<div class="empty-hist">No ${kind === 'surcharge' ? 'surcharges' : 'discounts'} yet.</div>` : ''}
+    ${list.map(p => `
+      <div class="menu-item-expandable discount-preset-row${sel.includes(p.id) ? ' selected' : ''}${(state.expandedDiscountPresetIds || []).includes(p.id) ? ' open' : ''}" data-id="${p.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
+        <div class="menu-item-header sel-head" data-act="discount-preset-toggle-open" data-id="${p.id}" data-sellist="discount-preset" data-selkey="${p.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="discount-preset" data-key="${p.id}" ${sel.includes(p.id) ? 'checked' : ''}>
+          ${colorDotButton('discount-preset', p.id, p.color)}
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
+          <span style="flex:1;"></span>
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);">${p.type === 'percent' ? p.value + '%' : money(p.value)}</span>
         </div>
-        
+        ${(state.expandedDiscountPresetIds || []).includes(p.id) ? `
+        <div style="padding:0 12px 12px 44px;">
+          <div style="display:flex;flex-direction:column;max-width:280px;">
+            <label class="field-label">Name</label>
+            <input type="text" value="${esc(p.name)}" onblur="updateDiscountPresetField('${p.id}', { name: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+            <label class="field-label" style="margin-top:10px;">${kind === 'surcharge' ? 'Surcharge' : 'Discount'}</label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <input type="number" step="0.5" min="0" value="${p.value}" onblur="updateDiscountPresetField('${p.id}', { value: parseFloat(this.value) || 0 })" style="width:90px;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);">
+              <button class="pay-opt sm${p.type === 'percent' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="percent">%</button>
+              <button class="pay-opt sm${p.type === 'fixed' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="fixed">$</button>
+            </div>
+          </div>
+        </div>` : ''}
       </div>`).join('')}
-  </div>
-  `;
+  </div>`;
+}
+function renderDiscountsSettingsAdmin() {
+  return renderPresetTileList('discount', '+ Discount');
+}
+function renderSurchargesSettingsAdmin() {
+  // Surcharges live HERE now (owner ask): the preset tiles plus the auto
+  // surcharge rules that used to hide at the bottom of the Tax page.
+  const cfg = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
+  const chip = (key, label) => `<div class="pay-opt ${cfg[key] ? 'active' : ''}" data-act="toggle-auto-surcharge" data-key="${key}">${label}</div>`;
+  const today = autoSurchargeToday();
+  const states = [
+    ['NSW', 'New South Wales'], ['VIC', 'Victoria'], ['QLD', 'Queensland'],
+    ['SA', 'South Australia'], ['WA', 'Western Australia'], ['TAS', 'Tasmania'],
+    ['NT', 'Northern Territory'], ['ACT', 'Australian Capital Territory'],
+  ];
+  return `
+  ${renderPresetTileList('surcharge', '+ Surcharge')}
+  <div class="settings-card" style="margin-top:14px;">
+    <div class="th" style="margin-bottom:4px;">Auto surcharges</div>
+    <div class="ts" style="margin-bottom:10px;">Applied by themselves at checkout on the chosen days — staff can still take one off a bill.</div>
+    <div class="pay-options" style="margin-bottom:14px;">
+      ${chip('sunday', 'Sundays')}
+      ${chip('saturday', 'Saturdays')}
+      ${chip('publicHoliday', 'Public holidays')}
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
+      <div>
+        <label class="field-label">Rate %</label>
+        <input id="auto-surcharge-rate" type="number" min="0" max="40" step="0.5" value="${cfg.rate}" style="width:90px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);" onblur="saveAutoSurcharge({ rate: Math.max(0, parseFloat(this.value) || 0) })">
+      </div>
+      <div>
+        <label class="field-label">State (for holidays)</label>
+        <select class="pp-select" style="width:210px;" onchange="saveAutoSurcharge({ state: this.value })">
+          ${states.map(([code, name]) => `<option value="${code}" ${cfg.state === code ? 'selected' : ''}>${code} — ${name}</option>`).join('')}
+        </select>
+      </div>
+    </div>
+    <div class="ts" style="margin-top:12px;">${today ? `Today: <b>${esc(today.label)} ${today.rate}%</b>` : 'Nothing applies today.'}</div>
+  </div>`;
 }
 
 
@@ -22199,38 +22273,7 @@ function renderTaxSettingsAdmin() {
         onblur="saveVenueAbn(this.value)">
     </div>
   </div>
-  ${(() => {
-    const cfg = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
-    const chip = (key, label) => `<div class="pay-opt ${cfg[key] ? 'active' : ''}" data-act="toggle-auto-surcharge" data-key="${key}">${label}</div>`;
-    const today = autoSurchargeToday();
-    const states = [
-      ['NSW', 'New South Wales'], ['VIC', 'Victoria'], ['QLD', 'Queensland'],
-      ['SA', 'South Australia'], ['WA', 'Western Australia'], ['TAS', 'Tasmania'],
-      ['NT', 'Northern Territory'], ['ACT', 'Australian Capital Territory'],
-    ];
-    return `
-  <div class="settings-card" style="margin-top:14px;">
-    <div class="th" style="margin-bottom:4px;">Auto surcharges</div>
-    <div class="pay-options" style="margin-bottom:14px;">
-      ${chip('sunday', 'Sundays')}
-      ${chip('saturday', 'Saturdays')}
-      ${chip('publicHoliday', 'Public holidays')}
-    </div>
-    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
-      <div>
-        <label class="field-label">Rate %</label>
-        <input id="auto-surcharge-rate" type="number" min="0" max="40" step="0.5" value="${cfg.rate}" style="width:90px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);" onblur="saveAutoSurcharge({ rate: Math.max(0, parseFloat(this.value) || 0) })">
-      </div>
-      <div>
-        <label class="field-label">State (for holidays)</label>
-        <select class="pp-select" style="width:210px;" onchange="saveAutoSurcharge({ state: this.value })">
-          ${states.map(([code, name]) => `<option value="${code}" ${cfg.state === code ? 'selected' : ''}>${code} — ${name}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-    <div class="ts" style="margin-top:12px;">${today ? `Today: <b>${esc(today.label)} ${today.rate}%</b>` : 'Nothing applies today.'}</div>
-  </div>`;
-  })()}`;
+  <div class="ts" style="margin-top:4px;">Auto surcharges moved to Finance → Surcharges.</div>`;
 }
 function saveAutoSurcharge(patch) {
   const cur = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
@@ -28753,7 +28796,43 @@ async function confirmAddTip() {
   }
 }
 
-function openAddDiscountPreset() { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: 'discount', type: 'percent', value: 10 }); state.adminError = ''; render(); }
+function openAddDiscountPreset(kind) { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: kind === 'surcharge' ? 'surcharge' : 'discount', type: 'percent', value: 10 }); state.adminError = ''; render(); }
+// Inline tile edits (name/value/type/colour) — save one field, keep the list fresh.
+async function updateDiscountPresetField(id, patch) {
+  try {
+    await api(`/api/discount-presets/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    state.discountPresets = await api('/api/discount-presets');
+  } catch (e) { state.toast = 'Could not save that change.'; armToastTimer(2500); }
+  render();
+}
+async function bulkSetDiscountPresetColor(color) {
+  const sel = state.selectedDiscountPresetIds || [];
+  for (const id of sel) {
+    try { await api(`/api/discount-presets/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ color: color || null }) }); } catch (e) {}
+  }
+  state.discountPresets = await api('/api/discount-presets');
+  render();
+}
+async function duplicateSelectedDiscountPresets() {
+  const sel = state.selectedDiscountPresetIds || [];
+  const picks = state.discountPresets.filter(p => sel.includes(p.id));
+  for (const p of picks) {
+    try { await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(p.name), kind: p.kind, type: p.type, value: p.value, color: p.color || null }) }); } catch (e) {}
+    await new Promise(r => setTimeout(r, 2)); // ids are Date.now()-based — never mint twins
+  }
+  state.discountPresets = await api('/api/discount-presets');
+  state.selectedDiscountPresetIds = [];
+  render();
+}
+async function deleteSelectedDiscountPresets() {
+  const sel = state.selectedDiscountPresetIds || [];
+  for (const id of sel) {
+    try { await api(`/api/discount-presets/${id}`, { method: 'DELETE' }); } catch (e) {}
+  }
+  state.discountPresets = await api('/api/discount-presets');
+  state.selectedDiscountPresetIds = [];
+  render();
+}
 function openEditDiscountPreset(id) {
   const p = state.discountPresets.find(x => x.id === id);
   state.discountPresetModal = withDirtyCheck({ mode: 'edit', id: p.id, name: p.name, kind: p.kind, type: p.type, value: p.value });
@@ -30964,6 +31043,7 @@ const SEL_LISTS = {
   course: { arr: 'selectedCourseIdxs', numeric: true },
   'void-reason': { arr: 'selectedVoidReasonIdxs', numeric: true },
   'tip-preset': { arr: 'selectedTipPresetIdxs', numeric: true },
+  'discount-preset': { arr: 'selectedDiscountPresetIds' },
   station: { arr: 'selectedStationIds' },
 };
 // Select-all for the simpler lists: tick = everything, tick again = nothing.
@@ -33196,9 +33276,23 @@ function handleActClick(el, e) {
       else if (act === 'remove-note-preset') { removeNotePreset(el.dataset.id, parseInt(el.dataset.idx)); }
       else if (act === 'add-void-reason') { addVoidReason(); }
       else if (act === 'set-manager-approval-void') { setManagerApprovalForVoid(el.dataset.val === 'true'); }
-      else if (act === 'add-discount-preset') { openAddDiscountPreset(); }
+      else if (act === 'add-discount-preset') { openAddDiscountPreset(el.dataset.kind); }
       else if (act === 'edit-discount-preset') { openEditDiscountPreset(el.dataset.id); }
       else if (act === 'delete-discount-preset') { deleteDiscountPresetAction(el.dataset.id); }
+      else if (act === 'discount-preset-toggle-open') {
+        const id = el.dataset.id;
+        const open = state.expandedDiscountPresetIds || [];
+        state.expandedDiscountPresetIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
+        render();
+      }
+      else if (act === 'discount-preset-inline-type') { updateDiscountPresetField(el.dataset.id, { type: el.dataset.val }); }
+      else if (act === 'selall-discount-preset') {
+        const wantSurcharge = el.dataset.kind === 'surcharge';
+        toggleSelAllList('discount-preset', state.discountPresets.filter(p => (p.kind === 'surcharge') === wantSurcharge).map(p => p.id));
+      }
+      else if (act === 'duplicate-selected-discount-presets') { duplicateSelectedDiscountPresets(); }
+      else if (act === 'delete-selected-discount-presets') { deleteSelectedDiscountPresets(); }
+      else if (act === 'clear-discount-preset-selection') { state.selectedDiscountPresetIds = []; render(); }
       else if (act === 'close-discount-preset-modal') { closeDiscountPresetModal(); }
       else if (act === 'save-discount-preset-modal') { saveDiscountPresetModal(); }
       else if (act === 'discount-preset-kind') { state.discountPresetModal.kind = el.dataset.val; render(); }

@@ -14257,9 +14257,9 @@ function saveAllergyModal() {
     : state.allergies;
   const updated = [...kept, ...newEntries];
   state.allergies = updated;
-  state.allergyModal = freshAllergyDraft();
-  state.adminError = '';
-  render();
+  // Saved = done: the popup closes itself (owner, Aug '26 — no Close tap
+  // after the job's finished).
+  closeNotesPanel();
   saveTableAllergies(state.table, updated);
 }
 function removeAllergyEntry(idx) {
@@ -14297,9 +14297,8 @@ function saveCustomNoteDraft() {
   const kept = m.editIdx !== undefined ? state.notes.filter((_, i) => i !== m.editIdx) : state.notes;
   const updated = [...kept, ...newEntries];
   state.notes = updated;
-  state.customNoteDraft = freshCustomNoteDraft(m.categoryId);
-  state.adminError = '';
-  render();
+  // Saved = done: the popup closes itself (owner, Aug '26).
+  closeNotesPanel();
   saveTableNotes(state.table, updated);
 }
 function removeNoteEntry(idx) {
@@ -14323,8 +14322,8 @@ async function saveTableNotes(tableId, notes) {
 function saveVipModal() {
   const type = state.vipModal.type.trim();
   state.vipType = type;
-  state.vipModal = { type };
-  render();
+  // Saved = done: the popup closes itself (owner, Aug '26).
+  closeNotesPanel();
   saveTableVip(state.table, type);
 }
 function clearVip() {
@@ -16971,8 +16970,8 @@ function renderNoteSeatPop() {
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop seat-pop">
         <div class="covers-pad-grid qp-grid seat-grid">
-          <button class="covers-pad-key util" data-act="note-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key" data-act="note-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+          <button class="covers-pad-key util${m._pickedSeat === 'all' ? ' assigned' : ''}" data-act="note-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${m._pickedSeat === n ? ' assigned' : ''}" data-act="note-pick-seat" data-seat="${n}">${n}</button>`).join('')}
         </div>
         <div class="qp-row qp-actions">
           <button class="icon-action discard" data-act="close-note-seat-pop">${ACT_CROSS_SVG}</button>
@@ -16982,10 +16981,19 @@ function renderNoteSeatPop() {
 function pickNoteSeat(seat) {
   const m = state.customNoteDraft;
   if (!m) { state.noteSeatPop = false; render(); return; }
-  if (seat === 'all') { m.wholeTable = true; m.seats = []; }
-  else { m.wholeTable = false; m.seats = [seat]; }
-  state.noteSeatPop = false;
-  saveCustomNoteDraft();
+  if (m._seatDone) return; // the pick is being SHOWN — pop is on its way out
+  // The draft only takes the seat when the beat COMMITS — a ✕ during the
+  // flash cancels cleanly, leaving nothing half-picked behind.
+  m._seatDone = true; m._pickedSeat = seat; render();
+  setTimeout(() => {
+    m._seatDone = false;
+    const picked = m._pickedSeat; m._pickedSeat = null;
+    if (state.customNoteDraft !== m || !state.noteSeatPop) return;
+    if (picked === 'all') { m.wholeTable = true; m.seats = []; }
+    else { m.wholeTable = false; m.seats = [picked]; }
+    state.noteSeatPop = false;
+    saveCustomNoteDraft();
+  }, IO_PICK_BEAT);
 }
 
 function renderAllergySeatPop() {
@@ -16997,8 +17005,8 @@ function renderAllergySeatPop() {
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop seat-pop">
         <div class="covers-pad-grid qp-grid seat-grid">
-          <button class="covers-pad-key util" data-act="allergy-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key" data-act="allergy-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+          <button class="covers-pad-key util${m._pickedSeat === 'all' ? ' assigned' : ''}" data-act="allergy-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${m._pickedSeat === n ? ' assigned' : ''}" data-act="allergy-pick-seat" data-seat="${n}">${n}</button>`).join('')}
         </div>
         <div class="qp-row qp-actions">
           <button class="icon-action discard" data-act="close-allergy-seat-pop">${ACT_CROSS_SVG}</button>
@@ -17008,10 +17016,18 @@ function renderAllergySeatPop() {
 function pickAllergySeat(seat) {
   const m = state.allergyModal;
   if (!m) { state.allergySeatPop = false; render(); return; }
-  if (seat === 'all') { m.wholeTable = true; m.seats = []; }
-  else { m.wholeTable = false; m.seats = [seat]; }
-  state.allergySeatPop = false;
-  saveAllergyModal();
+  if (m._seatDone) return; // the pick is being SHOWN — pop is on its way out
+  // Same rule as notes: the seat lands on the draft only when the beat commits.
+  m._seatDone = true; m._pickedSeat = seat; render();
+  setTimeout(() => {
+    m._seatDone = false;
+    const picked = m._pickedSeat; m._pickedSeat = null;
+    if (state.allergyModal !== m || !state.allergySeatPop) return;
+    if (picked === 'all') { m.wholeTable = true; m.seats = []; }
+    else { m.wholeTable = false; m.seats = [picked]; }
+    state.allergySeatPop = false;
+    saveAllergyModal();
+  }, IO_PICK_BEAT);
 }
 
 function renderCustomNoteTabContent(categoryId) {
@@ -25725,9 +25741,18 @@ function ioHasChoiceButton() {
   return ioGroups(state.itemOptions).some(g => (g.max || 1) > 1 || (g.min != null ? g.min : 1) !== 1);
 }
 // Auto-add only for the classic pure single-required case (no choice button).
-function ioMaybeAutoAdd() { if (!ioHasChoiceButton() && ioSelectionComplete()) { confirmItemOptions(); return true; } return false; }
+// The finishing pick stays visibly selected for a beat, THEN the pop closes
+// itself (owner, Aug '26: see the pick land — never wait for the tick).
+function ioMaybeAutoAdd() {
+  if (ioHasChoiceButton() || !ioSelectionComplete()) return false;
+  const io = state.itemOptions;
+  io._done = true; render();
+  setTimeout(() => { if (state.itemOptions === io) { io._done = false; confirmItemOptions(); } }, IO_PICK_BEAT);
+  return true;
+}
 function pickIoVariant(variantId) {
   const io = state.itemOptions;
+  if (io._done) return; // the last pick is being SHOWN — pop is on its way out
   io.variantId = variantId;
   if (ioMaybeAutoAdd()) return;
   io.step = (io.step || 0) + 1; // choice made — switch to the next group
@@ -25735,6 +25760,7 @@ function pickIoVariant(variantId) {
 }
 function pickIoModifier(groupId, optionId) {
   const io = state.itemOptions;
+  if (io._done) return; // the last pick is being SHOWN — pop is on its way out
   const g = state.modifierGroups.find(x => x.id === groupId);
   const max = (g && g.max) || 1;
   let arr = modSel(io.modSelections, groupId).slice();
@@ -27347,8 +27373,9 @@ document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.targ
 // also navigate.
 // HOLD a note/allergy preset tile when the table has several covers
 // (owner, Aug '26): the hold picks the preset AND opens the seat pop in
-// one gesture — the same hold language as tiles everywhere else. A tap
-// still just toggles the preset; Save still asks the seat at the end.
+// one gesture — the same hold language as tiles everywhere else. A tap on a
+// note preset saves by itself after a beat (the seat pop asks when needed);
+// allergy presets stay multi-pick, so their taps toggle and Save finishes.
 let _npHoldFired = false, _npHoldTimer = 0;
 document.addEventListener('pointerdown', (e) => {
   const el = e.target.closest && e.target.closest('[data-act="pick-note-preset"], [data-act="toggle-allergy-preset"]');
@@ -27374,6 +27401,30 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointerup', npCancel, { once: true });
   document.addEventListener('pointercancel', npCancel, { once: true });
 });
+// Swipe left/right anywhere on the notes popup slides between its sections —
+// VIP → allergies → each note tab, the same order as the chips (owner, Aug
+// '26). A mostly-vertical drag still scrolls; typing fields are left alone.
+let _npSwipe = null;
+document.addEventListener('touchstart', (e) => {
+  _npSwipe = null;
+  if (!state.notesPanel || state.noteSeatPop || state.allergySeatPop) return;
+  if (e.touches.length !== 1) return;
+  if (!(e.target.closest && e.target.closest('.modal-pane')) || e.target.closest('input, select, textarea')) return;
+  _npSwipe = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+}, { passive: true });
+document.addEventListener('touchend', (e) => {
+  const s = _npSwipe; _npSwipe = null;
+  if (!s || !state.notesPanel || state.noteSeatPop || state.allergySeatPop) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  if (!t) return;
+  const dx = t.clientX - s.x, dy = t.clientY - s.y;
+  if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 2) return;
+  const keys = ['vip', 'allergy', ...state.noteCategories.map(c => c.id)];
+  const i = keys.indexOf(state.notesPanel.tab);
+  const next = dx < 0 ? i + 1 : i - 1; // swipe left = next section
+  if (i === -1 || next < 0 || next >= keys.length) return;
+  switchNotesTab(keys[next]);
+}, { passive: true });
 let _adminPinFired = false, _adminPinTimer = 0;
 document.addEventListener('pointerdown', (e) => {
   if (state.view !== 'admin') return;
@@ -33493,7 +33544,16 @@ function handleActClick(el, e) {
         state.notesPanel = { tab: 'allergy' };
         render();
       }
-      else if (act === 'pick-note-preset') { if (_npHoldFired) { _npHoldFired = false; return; } state.customNoteDraft.text = (state.customNoteDraft.text === el.dataset.val) ? '' : el.dataset.val; render(); }
+      else if (act === 'pick-note-preset') {
+        // One tap = the whole job (owner, Aug '26): the preset lights up for a
+        // beat, then saves itself — the seat pop still asks when covers > 1.
+        if (_npHoldFired) { _npHoldFired = false; return; }
+        const m = state.customNoteDraft;
+        if (m._done) return; // the pick is being SHOWN — pop is on its way out
+        m.text = el.dataset.val;
+        m._done = true; render();
+        setTimeout(() => { m._done = false; if (state.customNoteDraft === m && state.notesPanel) saveCustomNoteDraft(); }, IO_PICK_BEAT);
+      }
       else if (act === 'pick-note-whole-table') { state.customNoteDraft.wholeTable = !state.customNoteDraft.wholeTable; if (state.customNoteDraft.wholeTable) state.customNoteDraft.seats = []; render(); }
       else if (act === 'toggle-note-seat') {
         const seat = parseInt(el.dataset.seat);

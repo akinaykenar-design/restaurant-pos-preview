@@ -3175,6 +3175,13 @@ body[data-fixed-rows="1"] .qty-pop.covers-pop .seat-grid .covers-pad-key{ height
 .note-preset-grid.fixed4{ grid-auto-rows:78px; }
 .note-preset-grid.fixed4 .item-card{ height:auto; min-height:0; }
 .note-ghost{ border:1.5px dashed var(--steel-200); border-radius:var(--radius); opacity:.5; pointer-events:none; }
+/* Half-tile preset squares: centred key-style text, two lines max — the
+   full item-tile font clipped long names at this size (owner, Aug '26). */
+.modal-pane .note-preset-grid .item-card{ padding:4px 6px; align-items:center; justify-content:center; text-align:center; }
+.modal-pane .note-preset-grid .item-name{ font-size:12px; line-height:1.15; font-weight:700; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; word-break:break-word; padding:0 !important; }
+.note-add-cell{ border:1.5px dashed var(--steel-300); background:transparent; display:flex; align-items:center; justify-content:center; padding:4px; height:auto; min-height:0; }
+.note-add-cell input{ border:none; outline:none; background:transparent; width:100%; text-align:center; font-weight:700; color:var(--text-primary); font-size:var(--fs-sm); font-family:inherit; }
+.note-add-cell input::placeholder{ color:var(--charcoal-soft); }
 /* Fixed "Tiles down": the mock pins its tile row height like the till does. */
 .mk-wrap[data-fixed-rows="1"] .mk-menu .grid,
 .mk-wrap[data-fixed-rows="1"] .mk-mob-menu .grid{ grid-auto-rows:var(--mk-row-h,64px); }
@@ -14924,7 +14931,9 @@ function renderSeatPop() {
           <button class="covers-pad-key util${assigned.has('all') ? ' assigned' : ''}" data-act="io-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
           ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${assigned.has(n) ? ' assigned' : ''}${multi && multi.includes(n) ? ' sel' : ''}" data-act="io-pick-seat" data-seat="${n}">${n}</button>`).join('')}
         </div>
+        ${io.noteOpen ? `<input id="io-extra-note" class="note-input-btn" type="text" placeholder="Extra note…" value="${esc((io.customText || {}).__extra || '')}" oninput="if (state.itemOptions) state.itemOptions.customText = { ...(state.itemOptions.customText || {}), __extra: this.value }">` : ''}
         <div class="qp-row qp-actions">
+          <button class="icon-action neutral${io.noteOpen ? ' active' : ''}" data-act="io-note-toggle" aria-label="Extra note" style="margin-right:auto;">${DKT_NOTE_SVG}</button>
           <button class="icon-action discard" data-act="close-item-options">${ACT_CROSS_SVG}</button>
           <button class="icon-action send" data-act="io-multi-confirm" ${multi ? '' : 'disabled'}>${ACT_TICK_SVG}</button>
         </div>
@@ -15765,7 +15774,7 @@ function syncPopupTileGrids() {
   // the cache below is warm before any popup opens.
   const ref = [...document.querySelectorAll('.menu-scroll .grid')].find(g => g.getBoundingClientRect().width > 0);
   let cols = 0, tileW = 0, gap = 10;
-  let hubRows = 0;
+  let hubRows = 0, tileH = 0;
   if (ref) {
     const refStyle = getComputedStyle(ref);
     cols = refStyle.gridTemplateColumns.split(' ').length;
@@ -15775,12 +15784,13 @@ function syncPopupTileGrids() {
     // How many whole tile rows the menu shows — the seat pop mirrors this.
     const scroller0 = ref.closest('.menu-scroll');
     const t0 = [...ref.children].find(c => c.offsetParent);
+    if (t0 && t0.offsetHeight) tileH = t0.offsetHeight;
     if (scroller0 && t0 && t0.offsetHeight) hubRows = Math.max(1, Math.floor((scroller0.clientHeight + gap) / (t0.offsetHeight + gap)));
   }
   // A floating pane squeezes the menu behind it, so the live measurement can
   // read one starved column — remember the last real geometry and use that.
-  if (cols >= 2 && tileW > 60) _lastMenuGridGeom = { cols, tileW, gap, hubRows };
-  else if (_lastMenuGridGeom) ({ cols, tileW, gap, hubRows } = _lastMenuGridGeom);
+  if (cols >= 2 && tileW > 60) _lastMenuGridGeom = { cols, tileW, gap, hubRows, tileH };
+  else if (_lastMenuGridGeom) ({ cols, tileW, gap, hubRows, tileH } = _lastMenuGridGeom);
   const grids = document.querySelectorAll('.modal-pane .note-preset-grid, .io-pop .io-size-grid, .io-pop .io-seat-grid, .qty-pop .seat-grid');
   if (!grids.length) return;
   if (!cols || cols < 2 || !tileW) return;
@@ -15811,7 +15821,15 @@ function syncPopupTileGrids() {
       let mult0 = parseFloat(pane.dataset.multBase);
       if (!mult0) { mult0 = parseFloat(ps3.getPropertyValue('--item-h-mult')) || 1; pane.dataset.multBase = mult0; }
       pane.style.setProperty('--item-h-mult', (mult0 * 0.5).toFixed(3));
-      paneGrids.forEach(g => { g.style.gridTemplateColumns = `repeat(${cols}, ${kW}px)`; g.style.gap = gap3 + 'px'; g.style.justifyContent = 'start'; });
+      paneGrids.forEach(g => {
+        // 1fr tracks so the keys always fit INSIDE the box (px tracks clipped
+        // the right column when the pane clamped), one gap both ways, rows
+        // packed to the top — even spacing vertically and horizontally.
+        g.style.gridTemplateColumns = `repeat(${cols}, minmax(0,1fr))`;
+        g.style.gap = gap3 + 'px';
+        g.style.justifyContent = 'stretch';
+        g.style.alignContent = 'start';
+      });
       pane.style.maxWidth = 'none';
       pane.style.width = Math.min(window.innerWidth * 0.94, Math.round(kW * cols + gap3 * (cols - 1) + pad3)) + 'px';
       const g3 = paneGrids[0];
@@ -15839,13 +15857,22 @@ function syncPopupTileGrids() {
       // Columns MATCH the order hub (owner, Aug '26) — as many as the screen
       // allows. The popup's width IS the grid plus the frame's padding, so no
       // dead strip ever sits to the right of the tiles.
-      const fitCols = Math.floor((window.innerWidth * 0.94 - pad2 + gap) / (tileW + gap));
+      // Same size as the covers/seat selection (owner, Aug '26): keys are
+      // HALF an order tile, half the gap, the hub's column count — one
+      // popup grammar for every picker.
+      const halfW = Math.max(44, Math.round(tileW / 2));
+      const halfGap = Math.max(4, Math.round(gap / 2));
+      const halfH = Math.max(44, Math.round((tileH || 92) / 2));
+      const fitCols = Math.floor((window.innerWidth * 0.94 - pad2 + halfGap) / (halfW + halfGap));
       const tabCols = Math.max(2, Math.min(cols, fitCols));
       paneGrids.forEach(g => {
-        g.style.gridTemplateColumns = `repeat(${tabCols}, ${tileW}px)`;
-        g.style.justifyContent = 'start';
+        g.style.gridTemplateColumns = `repeat(${tabCols}, minmax(0,1fr))`;
+        g.style.gap = halfGap + 'px';
+        g.style.gridAutoRows = halfH + 'px';
+        g.style.alignContent = 'start';
+        g.style.justifyContent = 'stretch';
       });
-      const w2 = Math.round(tileW * tabCols + gap * (tabCols - 1) + pad2);
+      const w2 = Math.round(halfW * tabCols + halfGap * (tabCols - 1) + pad2);
       pane.style.maxWidth = 'none';
       pane.style.width = Math.min(window.innerWidth * 0.94, Math.max(320, w2)) + 'px';
       // Height lands on a WHOLE ROW of tiles (owner: never a cut-off tile at
@@ -17218,8 +17245,9 @@ function renderNotesMiddle() {
 // 4-across grid, tiles one constant size, ghost slots padding the last rows —
 // so every tab of the popup is the same size and nothing balloons to fit.
 function notePresetSlots() {
-  const counts = [state.vipPresets.length, state.allergyPresets.length,
-    ...state.noteCategories.map(c => (c.presets || []).length)];
+  // +1: the "+ <name>" input rides the grid as a tile of its own.
+  const counts = [state.vipPresets.length + 1, state.allergyPresets.length + 1,
+    ...state.noteCategories.map(c => (c.presets || []).length + 1)];
   return Math.max(4, Math.ceil(Math.max(...counts, 1) / 4) * 4);
 }
 function noteGhostTiles(count) {
@@ -17233,11 +17261,11 @@ function renderVipTabContent() {
   if (!m) return '';
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-  ${state.vipPresets.length > 0 ? `
-    <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-      ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join(''); })()}${noteGhostTiles(state.vipPresets.length)}
-    </div>` : ''}
-  <input id="vip-type-input" class="note-input-btn" type="text" value="${m.type}" placeholder="+ Custom VIP type…">
+  <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
+      ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join(''); })()}
+      <div class="item-card allergy-item-card note-add-cell"><input id="vip-type-input" type="text" value="${m.type}" placeholder="+ ${esc(vipLabel())}"></div>
+      ${noteGhostTiles(state.vipPresets.length + 1)}
+  </div>
 `;
 }
 
@@ -17277,7 +17305,7 @@ function renderAllergyTabContent() {
       return `<button type="button" class="item-card allergy-item-card ${selected ? 'selected' : ''}" data-act="toggle-allergy-preset" data-allergy="${esc(p.name)}" ${presetCardStyle(p)}>
         <div class="item-name">${esc(p.name)}</div>
       </button>`;
-    }).join('')}${noteGhostTiles(state.allergyPresets.length)}
+    }).join('')}${state.settings.allergyCustomEnabled ? `<div class="item-card allergy-item-card note-add-cell"><input id="allergy-custom-input" type="text" placeholder="+ ${esc(allergyLabel())}" value="${m.customAllergy}"></div>` : ''}${noteGhostTiles(state.allergyPresets.length + (state.settings.allergyCustomEnabled ? 1 : 0))}
   </div>
   ${m.selectedAllergies.filter(name => {
     const preset = findAllergyPreset(name);
@@ -17290,10 +17318,7 @@ function renderAllergyTabContent() {
       ${preset.subTypes.map(st => `<option value="${esc(st)}" ${m.subTypeChoices[name] === st ? 'selected' : ''}>${esc(st)}</option>`).join('')}
     </select>`;
   }).join('')}
-  ${state.settings.allergyCustomEnabled ? `
-    <input id="allergy-custom-input" class="note-input-btn" type="text" placeholder="+ Other allergy…" value="${m.customAllergy}">` : ''}
   <input id="allergy-notes-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.notes)}" style="margin-top:8px;">
-  ${noteSeatChip(m, 'open-allergy-seat-pop')}
 `;
 }
 
@@ -17381,13 +17406,11 @@ function renderCustomNoteTabContent(categoryId) {
   const cat = state.noteCategories.find(c => c.id === categoryId);
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-  ${cat && (cat.presets || []).length ? `
-    <div class="grid note-preset-grid fixed4" style="margin-bottom:12px;">
-      ${cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${m.text === p.name ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('')}${noteGhostTiles(cat.presets.length)}
-    </div>` : ''}
-  <label>${cat ? esc(cat.name) : 'Note'}</label>
-  <input id="custom-note-text-input" class="note-input-btn" type="text" value="${esc(m.text)}" placeholder="+ Type a note…">
-  ${noteSeatChip(m, 'open-note-seat-pop')}
+  <div class="grid note-preset-grid fixed4" style="margin-bottom:12px;">
+      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${m.text === p.name ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
+      <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
+      ${noteGhostTiles((cat ? (cat.presets || []).length : 0) + 1)}
+  </div>
 `;
 }
 
@@ -21640,6 +21663,7 @@ function toggleAdminPin(key) {
 }
 // One place loads whatever data an admin page needs when it opens.
 function loadAdminTabData(key) {
+  if (key === 'settings-notes') setTimeout(() => { try { healNoteCategoryIds(); } catch (e) {} }, 200);
   if (key === 'audit') loadAuditLog();
   if (key === 'house' || key === 'stock-count') loadHouseLog();
   if (key === 'register') loadRegisterData();
@@ -21997,7 +22021,6 @@ function renderOrderNotesAdmin() {
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
         <span style="font-weight:700;font-size:var(--fs-md);">${esc(name)}</span>
         <span style="flex:1;"></span>
-        <span class="ts" style="flex-shrink:0;">${count} note${count === 1 ? '' : 's'}</span>
       </div>
       ${open ? `<div style="padding:0 12px 12px;">${
         builtin ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-builtin-name-input" data-id="${id}" type="text" value="${esc(name)}" placeholder="${id === 'vip' ? 'VIP' : 'Allergies'}" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>` : ''
@@ -23203,17 +23226,10 @@ function foldHeadHtml(key, label, count) {
 function renderMenuAdminRows() {
   const items = visibleMenuItemsForAdmin();
   if (items.length === 0) return `<div class="empty-hist">No items match.</div>`;
-  const grouped = !state.menuAdminCategoryFilter && !state.menuAdminSearch.trim() && !isListSorted('menu-items');
-  if (!grouped) return items.map(menuItemRowHtml).join('');
-  const groups = [];
-  for (const m of items) {
-    const k = m.category || 'No section';
-    let g = groups.find(x => x.k === k);
-    if (!g) { g = { k, rows: [] }; groups.push(g); }
-    g.rows.push(m);
-  }
-  return groups.map(g => foldHeadHtml('items:' + g.k, g.k, g.rows.length)
-    + (groupFolded('items:' + g.k) ? '' : g.rows.map(menuItemRowHtml).join(''))).join('');
+  // FLAT list, always: the section dropdown IS the grouping — a second layer
+  // of section fold-rows on top of it just hid the items (owner, Aug '26:
+  // "we already have a dropdown; all sections selected shows all items").
+  return items.map(menuItemRowHtml).join('');
 }
 
 // One Items-admin row (collapsed, or expanded with its inline edit panel).
@@ -28975,6 +28991,19 @@ function deleteSelectedNotePresets() {
   state.selectedNotePresetIdxs = [];
   saveNoteCategories(cats);
 }
+// Two categories sharing one id select and edit TOGETHER (owner, Aug '26:
+// "doubled up and gets selected together") — a sync merge can produce them.
+// Heal on sight: keep the first, re-id the shadow, persist once.
+function healNoteCategoryIds() {
+  const seen = new Set(); let fixed = false;
+  const cats = (state.noteCategories || []).map(c => {
+    if (!seen.has(c.id)) { seen.add(c.id); return c; }
+    fixed = true;
+    return { ...c, id: 'note-' + Date.now() + '-' + Math.floor(Math.random() * 100000) };
+  });
+  if (fixed) saveNoteCategories(cats);
+  return fixed;
+}
 function duplicateSelectedNoteTypes() {
   const sel = new Set(state.selectedNoteTypeIds || []);
   const dupes = state.noteCategories.filter(c => sel.has(c.id)).map(c => ({
@@ -31132,7 +31161,11 @@ function makeSortable(rowClass, onReorder, opts) {
     item.style.touchAction = 'pan-y';
     item.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
-      if (e.target.closest('button,input,select,textarea,a,[contenteditable],.mk-grip,.mk-railgrip')) return;
+      // The WHOLE row is a drag handle (owner, Aug '26: "only when I hold
+      // empty space can I drag") — a drag never begins without ~6px of real
+      // movement, so plain taps on buttons and checkboxes still click.
+      // Only fields that take typing keep the press to themselves.
+      if (e.target.closest('input[type="text"],input[type="number"],input:not([type]),select,textarea,a,[contenteditable],.mk-grip,.mk-railgrip')) return;
       // Universal rule: an expanded row never drags — collapse it first.
       if (item.classList.contains('open')) return;
       if (opts.canStart && !opts.canStart(item)) return;
@@ -32938,6 +32971,11 @@ function handleActClick(el, e) {
         if (inp) inp.focus();
       }
       else if (act === 'io-pick-seat') { pickIoSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
+      else if (act === 'io-note-toggle') {
+        state.itemOptions.noteOpen = !state.itemOptions.noteOpen;
+        render();
+        if (state.itemOptions.noteOpen) requestAnimationFrame(() => { const i = document.getElementById('io-extra-note'); if (i) i.focus(); });
+      }
       else if (act === 'io-multi-confirm') { confirmIoMultiSeats(); }
       else if (act === 'io-next-step') { state.itemOptions.step = (state.itemOptions.step || 0) + 1; render(); }
       else if (act === 'io-go-step') { state.itemOptions.step = parseInt(el.dataset.idx); render(); }

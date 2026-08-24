@@ -354,6 +354,9 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
 .size-slider-row{display:flex;align-items:center;gap:12px;max-width:300px;}
 .size-slider{flex:1;min-width:0;height:28px;accent-color:var(--orange);cursor:pointer;touch-action:pan-y;} /* vertical swipe = scroll, never an accidental resize */
 .size-slider-val{font-family:var(--font-mono);font-size:12.5px;font-weight:700;min-width:26px;text-align:center;color:var(--text-primary);}
+.size-ticks{display:flex;justify-content:space-between;max-width:262px;font-size:10.5px;color:var(--charcoal-soft);font-weight:700;padding:2px 6px 0;}
+.size-ticks .on{color:var(--orange);}
+.dkw-slider{flex:1;min-width:0;height:28px;accent-color:var(--orange);cursor:pointer;touch-action:pan-y;}
 /* Order type lives in the top bar; same quiet segmented control, on a slightly
    deeper track so it reads against the bar surface. */
 .field-inline{display:flex;align-items:center;gap:8px;font-size:var(--fs-md);color:var(--charcoal-soft);}
@@ -12164,6 +12167,47 @@ function themeSizePatch(field, val) {
 // many on screen; anything past the fold scrolls freely (owner: no paging).
 // A row is never squeezed under 44px tall — below that staff mis-tap.
 const GRID_DIM_MIN = 2, GRID_DIM_MAX = 12, GRID_ROW_MIN_H = 44;
+// The Design page's four-decision geometry: the menu panel's box for a
+// device, and from it the grid's computed limits. The 44px law sets the
+// ceiling; GRID_DIM_MIN the floor; "Auto" no longer exists as a mode — an
+// untouched grid just displays its derived count until first touch pins it.
+const SIZE_MIN_W = { xs: 80, sm: 94, md: 118, lg: 158, xl: 192 };
+const SIZE_TILE_H = { xs: 64, sm: 76, md: 92, lg: 116, xl: 138 };
+const SIZE_GAP_PX = { xs: 3, sm: 6, md: 10, lg: 16, xl: 24 };
+const SIZE_H_MULT = { xs: 0.6, sm: 0.8, md: 1, lg: 1.25, xl: 1.55 };
+function designFrame(dev) {
+  const tillW = Math.max(1080, window.innerWidth || 1080);
+  return dev === 'mobile' ? { w: 390, h: 844 } : { w: tillW, h: Math.round(tillW * 0.625) };
+}
+function designMenuBox(dev) {
+  const f = designFrame(dev);
+  const railPct = { xs: 5, sm: 6.11, md: 7.22, lg: 9.17, xl: 10.83 }[themeSizeFor('railSize', dev)] || 7.22;
+  const share = (state.theme.tktShare > 0.14 && state.theme.tktShare < 0.56) ? state.theme.tktShare : (state.theme.tktWidth || 360) / 1440;
+  const bottomDock = dev !== 'mobile' && (state.settings.ticketPos || {})[dev] === 'bottom';
+  const tkt = dev === 'mobile' ? 0 : f.w * share;
+  return { w: f.w - f.w * railPct / 100 - (bottomDock ? 0 : tkt) - 36, h: f.h - 150 - (bottomDock ? f.h * 0.3 : 0) };
+}
+function gridDimMax(field, dev) {
+  const box = designMenuBox(dev);
+  const gap = SIZE_GAP_PX[themeSizeFor('tileGap', dev)] || 10;
+  const span = field === 'gridCols' ? box.w : box.h;
+  return Math.max(GRID_DIM_MIN, Math.min(GRID_DIM_MAX, Math.floor((span + gap) / (44 + gap))));
+}
+function gridDimShown(field, dev) {
+  const set = gridDimFor(field, dev);
+  if (set) return set;
+  const box = designMenuBox(dev);
+  const gap = SIZE_GAP_PX[themeSizeFor('tileGap', dev)] || 10;
+  const size = themeSizeFor('itemSize', dev);
+  const unit = field === 'gridCols' ? (SIZE_MIN_W[size] || 118)
+    : (SIZE_TILE_H[size] || 92) * (SIZE_H_MULT[themeSizeFor('tileHeight', dev)] || 1);
+  const span = field === 'gridCols' ? box.w : box.h;
+  return Math.max(GRID_DIM_MIN, Math.min(gridDimMax(field, dev), Math.floor((span + gap) / (unit + gap))));
+}
+function setDocketWidth(v) {
+  const w = Math.max(240, Math.min(560, parseInt(v, 10) || 360));
+  setThemeDraft({ tktWidth: w, tktShare: w / Math.max(1080, window.innerWidth || 1080) });
+}
 function gridDimFor(field, dev) {
   const v = state.theme[field];
   const n = Number((v && typeof v === 'object') ? v[dev] : v);
@@ -24201,6 +24245,7 @@ function renderScreenMockup() {
   <div class="settings-card mock-card">
     <div class="seg" style="width:fit-content;margin-bottom:12px;">${devTab('pc', 'Tablet')}${devTab('mobile', 'Mobile')}</div>
     ${dev === 'mobile' ? `<div class="mk-duo">${wrap(phone)}${wrap(phoneDocket)}</div>` : wrap(desktop)}
+    <div class="ts" style="text-align:center;margin-top:8px;">tap a part of the preview to find its setting · hold to resize it · drag the docket's edge</div>
   </div>`;
 }
 
@@ -24211,68 +24256,104 @@ function renderScreenAdmin() {
   // the mockup — each card title says which one.
   const dev = state.mockDevice || 'pc';
   const devName = dev === 'mobile' ? 'Mobile' : 'Tablet';
-  // A plain line — no tick notches, no size letters. The mockup above IS the
-  // live preview, so the slider needs no annotation.
+  // Sliders say where they are (owner, Aug '26): notch letters under the
+  // track, the current one lit, plus the live value label at the end.
   const slider = (field) => {
     const cur = themeSizeFor(field, dev);
     return `
     <div class="size-slider-row">
       <input type="range" class="size-slider" data-field="${field}" min="0" max="4" step="1" value="${Math.max(0, SIZE_STEPS.indexOf(cur))}">
-    </div>`;
+      <span class="size-slider-val">${SIZE_LABELS[cur]}</span>
+    </div>
+    <div class="size-ticks">${SIZE_STEPS.map(s => `<span class="${s === cur ? 'on' : ''}">${SIZE_LABELS[s]}</span>`).join('')}</div>`;
+  };
+  const fold = (key, title, sub2, inner) => {
+    const open = (state.designFolds || {})[key];
+    return `
+  <div class="settings-card" data-fold="${key}">
+    <button data-act="design-fold" data-key="${key}" style="all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%;">
+      <span class="th" style="margin:0;">${title}</span>
+      <span style="flex:1;"></span>
+      <span class="ts" style="transform:rotate(${open ? 90 : 0}deg);transition:transform .15s;">▸</span>
+    </button>
+    ${open ? `<div style="margin-top:14px;">${inner}</div>` : `<div class="ts" style="margin-top:6px;">${sub2}</div>`}
+  </div>`;
   };
   return `
   ${renderScreenMockup()}
   <div class="screen-ctl-scroll">
-  <div class="settings-card" id="ctl-appearance">
-    <div class="th" style="margin-bottom:14px;">Theme</div>
-    <div class="pay-options">
-      ${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, lbl]) =>
-        `<div class="pay-opt ${(state.theme.mode || 'light') === v ? 'active' : ''}" data-act="set-theme-mode" data-val="${v}">${lbl}</div>`).join('')}
-    </div>
-  </div>
-  <div class="settings-card" id="ctl-rail">
-    <div class="th" style="margin-bottom:14px;">Menu bar — ${devName}</div>
-    ${slider('railSize')}
-    <div class="th" style="margin:18px 0 14px;">Button height</div>
-    ${slider('railHeight')}
-    <div class="th" style="margin:18px 0 14px;">Icon-only menu bar</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.catIconsOnly === true, 'set-cat-icons-only')}
-    </div>
-  </div>
   <div class="settings-card" id="ctl-tiles">
-    <div class="th" style="margin-bottom:14px;">Menu tiles — ${devName}</div>
-    ${slider('itemSize')}
+    <div class="th" style="margin-bottom:4px;">1 · The grid — ${devName}</div>
+    <div class="ts" style="margin-bottom:10px;">One decision sizes the till: menu tiles, the admin hub, popups and the seat pad all march on this grid. The + stops where tiles would drop below finger-safe.</div>
     ${(() => {
-      // Fixed grid steppers. Auto = the slider above runs the layout, as ever.
       const gstep = (field, label) => {
-        const cur = gridDimFor(field, dev);
+        const shown = gridDimShown(field, dev);
+        const max = gridDimMax(field, dev);
         return `
-        <div class="th" style="margin:18px 0 14px;">${label} — ${devName}</div>
+        <div class="th" style="margin:14px 0 10px;font-size:var(--fs-sm);">${label}</div>
         <div class="grid-stepper">
-          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="-1" ${cur === 0 ? 'disabled' : ''}>−</button>
-          <span class="grid-step-val">${cur === 0 ? 'Auto' : cur}</span>
-          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="1" ${cur >= GRID_DIM_MAX ? 'disabled' : ''}>+</button>
+          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="-1" ${shown <= GRID_DIM_MIN ? 'disabled' : ''}>−</button>
+          <span class="grid-step-val">${shown}</span>
+          <button class="btn-secondary sm" data-act="grid-dim" data-field="${field}" data-d="1" ${shown >= max ? 'disabled' : ''} title="${shown >= max ? 'More would make tiles too small to tap' : ''}>+</button>
         </div>`;
       };
       return gstep('gridCols', 'Tiles across') + gstep('gridRows', 'Tiles down');
     })()}
-    <div class="th" style="margin:16px 0 14px;">Tiles start at the bottom</div>
+  </div>
+  <div class="settings-card" id="ctl-text">
+    <div class="th" style="margin-bottom:4px;">2 · Text size — ${devName}</div>
+    <div class="ts" style="margin-bottom:10px;">The whole till at once — tiles, docket, menu bar.</div>
+    ${slider('fontSize')}
+  </div>
+  <div class="settings-card" id="ctl-appearance">
+    <div class="th" style="margin-bottom:14px;">3 · Theme</div>
     <div class="pay-options">
-      ${togglePill(state.settings.tilesBottomUp === true, 'set-tiles-bottom')}
+      ${[['light', 'Light'], ['dark', 'Dark'], ['auto', 'Auto']].map(([v, lbl]) =>
+        `<div class="pay-opt ${(state.theme.mode || 'light') === v ? 'active' : ''}" data-act="set-theme-mode" data-val="${v}">${lbl}</div>`).join('')}
+    </div>
+    <div class="th" style="margin:16px 0 10px;">Accent</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+      ${[['#3692E7', 'Ocean'], ['#22A7D0', 'Sky'], ['#2F5FC4', 'Cobalt'], ['#5B67D8', 'Indigo'], ['#64789B', 'Slate'], ['#C3559F', 'Magenta'], ['#D96A9B', 'Rose'], ['#3E4450', 'Ink']].map(([c, nm]) =>
+        `<button data-act="set-theme-accent" data-val="${c}" title="${nm}" aria-label="${nm}" style="width:34px;height:34px;border-radius:99px;background:${c};border:3px solid ${(state.theme.accent || '#3692E7').toLowerCase() === c.toLowerCase() ? 'var(--text-primary)' : 'transparent'};cursor:pointer;padding:0;"></button>`).join('')}
+    </div>
+    <div class="ts" style="margin-top:8px;">Green, red, orange and yellow stay reserved for table status.</div>
+  </div>
+  <div class="settings-card" id="ctl-docket">
+    ${dev !== 'mobile' ? `
+    <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>
+    <div class="pay-options" style="margin-bottom:18px;">
+      ${[['side', 'Side'], ['bottom', 'Bottom']].map(([v, l]) => `<div class="pay-opt ${((state.settings.ticketPos || {})[dev] === 'bottom' ? 'bottom' : 'side') === v ? 'active' : ''}" data-act="set-ticket-pos" data-val="${v}">${l}</div>`).join('')}
+    </div>
+    <div class="th" style="margin-bottom:10px;">Width</div>
+    <div class="size-slider-row">
+      <input type="range" class="dkw-slider" min="240" max="560" step="10" value="${Math.round(state.theme.tktWidth || 360)}" oninput="setDocketWidth(this.value)">
+      <span class="size-slider-val">${Math.round(state.theme.tktWidth || 360)}px</span>
+    </div>
+    <div class="ts" style="margin:2px 0 14px;">Dragging the preview's docket edge still works — this follows it.</div>` : `
+    <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>`}
+    <div class="th" style="margin-bottom:14px;">Selected line colour</div>
+    <div class="pay-options" style="margin-bottom:4px;align-items:center;">
+      ${colorDotButton('docket-sel', 'sel', state.settings.docketSelColor || null, { bg: state.settings.docketSelColor || null, title: 'Highlight colour for the line being edited' })}
+      <span class="ts" style="margin-left:8px;">Line being edited on the docket</span>
     </div>
   </div>
-  <div class="settings-card" id="ctl-subcat">
+  ${fold('extras', 'Extras', 'Icon pack · item icons · prices on tiles · subsection style · icon-only bar · tiles start at the bottom', `
+    <div id="ctl-subcat">
     <div class="th" style="margin-bottom:14px;">Subsection style</div>
     <div class="pay-options" style="margin-bottom:18px;">
       <div class="pay-opt ${(state.settings.subcatStyle || 'bar') === 'bar' ? 'active' : ''}" data-act="set-subcat-style" data-val="bar">Bar</div>
       <div class="pay-opt ${state.settings.subcatStyle === 'tiles' ? 'active' : ''}" data-act="set-subcat-style" data-val="tiles">Tiles</div>
     </div>
-    ${(state.settings.subcatStyle || 'bar') === 'bar' ? `
-    <div class="th" style="margin-bottom:14px;">Subsection bar — ${devName}</div>
-    ${slider('subcatSize')}` : ''}
-  </div>
-  <div class="settings-card" id="ctl-icons">
+    <div class="th" style="margin:0 0 14px;">Icon-only menu bar</div>
+    <div class="pay-options" style="margin-bottom:18px;">
+      ${togglePill(state.settings.catIconsOnly === true, 'set-cat-icons-only')}
+    </div>
+    <div class="th" style="margin:0 0 14px;">Tiles start at the bottom</div>
+    <div class="pay-options" style="margin-bottom:18px;">
+      ${togglePill(state.settings.tilesBottomUp === true, 'set-tiles-bottom')}
+    </div>
+    </div>
+  <div id="ctl-icons">
     <div class="th" style="margin-bottom:14px;">Icons</div>
     <div class="design-select-row" style="margin-bottom:12px;">
       <select class="pp-select" onchange="saveTicketSetting({ iconStyle: this.value }).then(() => applyPanelLayout())">
@@ -24297,43 +24378,50 @@ function renderScreenAdmin() {
       ${togglePill(state.settings.showTilePrices === true, 'set-tile-prices')}
     </div>
   </div>
-  <div class="settings-card" id="ctl-docket">
-    ${dev !== 'mobile' ? `
-    <div class="th" style="margin-bottom:14px;">Docket position — ${devName}</div>
-    <div class="pay-options" style="margin-bottom:18px;">
-      ${[['side', 'Side'], ['bottom', 'Bottom']].map(([v, l]) => `<div class="pay-opt ${((state.settings.ticketPos || {})[dev] === 'bottom' ? 'bottom' : 'side') === v ? 'active' : ''}" data-act="set-ticket-pos" data-val="${v}">${l}</div>`).join('')}
-    </div>` : ''}
-    <div class="th" style="margin-bottom:14px;">Selected line colour</div>
-    <div class="pay-options" style="margin-bottom:18px;align-items:center;">
-      ${colorDotButton('docket-sel', 'sel', state.settings.docketSelColor || null, { bg: state.settings.docketSelColor || null, title: 'Highlight colour for the line being edited' })}
-      <span class="ts" style="margin-left:8px;">Line being edited on the docket</span>
+  </div>`)}
+  ${fold('advanced', 'Advanced sizes', 'Tile size · height · spacing · menu bar · subsection · docket text & spacing — fine-grained overrides of the grid', `
+    <div class="ts" style="margin-bottom:14px;">These ride on top of the grid — most venues never need them.</div>
+    <div class="th" style="margin-bottom:14px;">Menu tile size — ${devName}</div>
+    ${slider('itemSize')}
+    <div class="th" style="margin:18px 0 14px;">Tile height</div>
+    ${slider('tileHeight')}
+    <div class="th" style="margin:18px 0 14px;">Tile spacing</div>
+    ${slider('tileGap')}
+    ${(state.settings.subcatStyle || 'bar') === 'bar' ? `
+    <div class="th" style="margin:18px 0 14px;">Subsection bar — ${devName}</div>
+    ${slider('subcatSize')}` : ''}
+    <div id="ctl-rail">
+    <div class="th" style="margin:18px 0 14px;">Menu bar — ${devName}</div>
+    ${slider('railSize')}
+    <div class="th" style="margin:18px 0 14px;">Menu bar button height</div>
+    ${slider('railHeight')}
     </div>
-    <div class="th" style="margin-bottom:14px;">Docket text — ${devName}</div>
+    <div class="th" style="margin:18px 0 14px;">Docket text — ${devName}</div>
     ${slider('tktFontSize')}
     <div class="th" style="margin:18px 0 14px;">Docket spacing — ${devName}</div>
-    ${slider('tktGap')}
-  </div>
-  <div class="settings-card" id="ctl-extras">
+    ${slider('tktGap')}`)}
+  ${fold('service', 'Service & behaviour', 'Quantity pad · menu search · log off · order types', `
+    <div id="ctl-extras">
     <div class="th" style="margin-bottom:14px;">Quantity number pad</div>
     <div class="pay-options" style="margin-bottom:18px;">
       ${togglePill(state.settings.qtyPadEnabled, 'set-qtypad-enabled')}
     </div>
     <div class="th" style="margin-bottom:14px;">Menu search</div>
-    <div class="pay-options">
+    <div class="pay-options" style="margin-bottom:18px;">
       ${togglePill(state.settings.searchEnabled !== false, 'set-search-enabled')}
     </div>
-  </div>
-  <div class="settings-card" id="ctl-logoff-send">
+    </div>
+    <div id="ctl-logoff-send">
     <div class="th" style="margin-bottom:14px;">Log off after send</div>
     <div class="pay-options">
       ${togglePill(state.settings.logoffAfterSend === true, 'set-logoff-after-send')}
     </div>
     <div class="th" style="margin:18px 0 6px;">Idle log-off</div>
-    <div class="pay-options">
+    <div class="pay-options" style="margin-bottom:18px;">
       ${[['0', 'Off'], ['2', '2 min'], ['3', '3 min'], ['5', '5 min'], ['10', '10 min']].map(([v, l]) => `<div class="pay-opt ${String(idleMinutes()) === v ? 'active' : ''}" data-act="set-idle-logoff" data-val="${v}">${l}</div>`).join('')}
     </div>
-  </div>
-  <div class="settings-card" id="ctl-ordertypes">
+    </div>
+    <div id="ctl-ordertypes">
     <div class="th" style="margin-bottom:10px;">Order types</div>
     <div class="th" style="margin-bottom:8px;font-size:var(--fs-sm);">Takeaway</div>
     <div class="pay-options" style="margin-bottom:14px;">
@@ -24343,7 +24431,7 @@ function renderScreenAdmin() {
     <div class="pay-options">
       ${togglePill(state.settings.deliveryEnabled !== false, 'set-delivery-enabled')}
     </div>
-  </div>
+    </div>`)}
   </div>`;
 }
 
@@ -33025,16 +33113,18 @@ function handleActClick(el, e) {
       else if (act === 'save-modifier-group-modal') { saveModifierGroupModal(); }
       else if (act === 'add-mod-option') { addModOption(); }
       else if (act === 'remove-mod-option') { removeModOption(parseInt(el.dataset.oidx)); }
+      else if (act === 'set-theme-accent') { setThemeDraft({ accent: el.dataset.val }); }
+      else if (act === 'design-fold') { const k = el.dataset.key; state.designFolds = { ...(state.designFolds || {}), [k]: !(state.designFolds || {})[k] }; render(); }
       else if (act === 'set-theme-mode') { setThemeModeDraft(el.dataset.val); }
       else if (act === 'grid-dim') {
         const field = el.dataset.field;
         const dev = state.mockDevice === 'mobile' ? 'mobile' : 'pc';
-        const cur = gridDimFor(field, dev);
+        // No Auto mode any more (owner, Aug '26): the stepper always shows a
+        // NUMBER — untouched, it displays the derived count; first touch pins
+        // it. Ceiling = the 44px law on this device's menu panel.
+        const shown = gridDimShown(field, dev);
         const d = parseInt(el.dataset.d, 10);
-        // Auto → 5 on first +; stepping below the minimum lands back on Auto.
-        let next = cur === 0 ? (d > 0 ? 5 : 0) : cur + d;
-        if (next < GRID_DIM_MIN) next = 0;
-        if (next > GRID_DIM_MAX) next = GRID_DIM_MAX;
+        const next = Math.max(GRID_DIM_MIN, Math.min(gridDimMax(field, dev), shown + d));
         setThemeDraft({ [field]: gridDimPatch(field, next) });
       }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
@@ -33374,8 +33464,15 @@ function handleActClick(el, e) {
         if (e.target.closest('.mk-grip,.mk-railgrip')) return; // edge drag, not a jump
         if (_mkHoldFired) { _mkHoldFired = false; return; } // hold-edit release, not a jump
         e.stopPropagation(); // innermost region wins over its parent panel
-        const t = document.getElementById(el.dataset.target);
+        let t = document.getElementById(el.dataset.target);
         if (t) {
+          // A target living inside a CLOSED fold gets its fold opened first.
+          const foldEl = t.closest('[data-fold]');
+          if (foldEl && !(state.designFolds || {})[foldEl.dataset.fold]) {
+            state.designFolds = { ...(state.designFolds || {}), [foldEl.dataset.fold]: true };
+            render();
+            t = document.getElementById(el.dataset.target) || t;
+          }
           // The mockup is STICKY: scrollIntoView centres the card under it and
           // the control lands hidden behind the preview (found Aug '26). Scroll
           // the pane by hand so the card's top sits just below the pinned mock.

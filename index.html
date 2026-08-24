@@ -2342,10 +2342,12 @@ body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
 }
 /* Phone: the floor map fills the screen height and pans sideways with a
    finger — markers render finger-sized instead of shrinking with the
-   viewport width. Desktop keeps the fit-to-width map. */
+   viewport width. Desktop keeps the fit-to-width map. Any touch screen can
+   pinch the map bigger (--tp-zoom, set by the pinch handler) and pan it. */
+.tp-canvas-wrap{ overflow:auto; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y; }
 @media (max-width:768px){
-  .tp-canvas-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:10px; touch-action:pan-x pan-y; }
-  .tp-canvas-wrap .floor-canvas{ height:56vh; width:auto !important; max-width:none !important; min-width:100%; }
+  .tp-canvas-wrap{ border-radius:10px; }
+  .tp-canvas-wrap .floor-canvas{ height:calc((100dvh - 125px) * var(--tp-zoom,1)); width:auto !important; max-width:none !important; min-width:100%; }
 }
 
 /* Compact item label where a middle pane needs the item's name (no header row). */
@@ -25032,7 +25034,7 @@ function renderTablePickerMiddle() {
       })() : `
       ${fp ? `
       <div class="tp-canvas-wrap">
-      <div class="floor-canvas" style="position:relative;width:min(100%, calc((100dvh - 180px) * 900 / ${STD_FLOOR_H}));max-width:100%;margin:0 auto;aspect-ratio:900 / ${STD_FLOOR_H};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;">
+      <div class="floor-canvas" style="position:relative;width:calc(min(100%, calc((100dvh - 180px) * 900 / ${STD_FLOOR_H})) * var(--tp-zoom,1));margin:0 auto;aspect-ratio:900 / ${STD_FLOOR_H};background:${fp.bgColor || 'var(--steel-100)'};border-radius:10px;">
         ${fp.tables.filter(t => t.type === 'decor').map(t => `
           <div class="floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').map(t => {
@@ -27146,6 +27148,42 @@ document.addEventListener('wheel', (e) => {
   e.preventDefault();
   sc.scrollTop += e.deltaY * 0.5;
 }, { passive: false });
+// ---------- Pinch-zoom on the table map (owner, Aug '26) ----------
+// Two fingers on the picker's floor grow the map up to 3× (--tp-zoom —
+// every marker is %-sized, so the whole room scales together). One finger
+// pans as before; the zoom sticks until pinched back. The map stays
+// anchored under the pinch, and the fingers' parting click never lands on
+// a table (same ghost-click law as the keyboard).
+let _tpPinch = null, _tpPinchGuard = 0;
+function tpZoom() { return parseFloat(document.documentElement.style.getPropertyValue('--tp-zoom')) || 1; }
+document.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 2) { _tpPinch = null; return; }
+  const wrap = e.target.closest && e.target.closest('.tp-canvas-wrap');
+  if (!wrap) return;
+  const [a, b] = e.touches;
+  _tpPinch = { wrap, dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom: tpZoom() };
+  _tpPinchGuard = Date.now() + 600;
+}, { passive: true });
+document.addEventListener('touchmove', (e) => {
+  if (!_tpPinch || e.touches.length !== 2) return;
+  e.preventDefault(); // the browser must neither scroll nor page-zoom mid-pinch
+  const [a, b] = e.touches;
+  const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  const z = Math.min(3, Math.max(1, _tpPinch.zoom * d / _tpPinch.dist));
+  const old = tpZoom();
+  if (Math.abs(z - old) < 0.01) return;
+  const w = _tpPinch.wrap, r = w.getBoundingClientRect();
+  const midX = (a.clientX + b.clientX) / 2 - r.left, midY = (a.clientY + b.clientY) / 2 - r.top;
+  const ox = w.scrollLeft + midX, oy = w.scrollTop + midY;
+  document.documentElement.style.setProperty('--tp-zoom', z);
+  w.scrollLeft = ox * (z / old) - midX;
+  w.scrollTop = oy * (z / old) - midY;
+  _tpPinchGuard = Date.now() + 600;
+}, { passive: false });
+document.addEventListener('touchend', () => { if (_tpPinch) { _tpPinch = null; _tpPinchGuard = Date.now() + 400; } }, { passive: true });
+document.addEventListener('click', (e) => {
+  if (Date.now() < _tpPinchGuard && e.target.closest && e.target.closest('.tp-canvas-wrap')) { e.preventDefault(); e.stopPropagation(); }
+}, true);
 document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.target.closest('.item-card, .simple-table-btn, .floor-marker, .course-tab, .icon-action.send, .acct-tile[data-act="admin-tab"], .acct-tile[data-act="mgr-quick-go"], .admin-nav-group-btn, .staff-badge button[data-act="open-admin-pin"], .staff-badge button[data-act="open-search"], .staff-badge button[data-act="close-search"], .staff-badge button[data-act="admin-search-toggle"]')) e.preventDefault(); });
 // HOLD an admin tile → pin/unpin its page in the topbar (next to power).
 // Works on hub tiles and single-page rail groups (Daily). The hold both

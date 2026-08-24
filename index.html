@@ -14841,6 +14841,31 @@ function confirmCoversPad() {
   state.pickFlashId = null; // the held pick sweep ends with the prompt
   render();
 }
+function cancelCoversPad() {
+  const cp = state.coversPad; if (!cp) return;
+  const fp = cp.fromPick;
+  state.coversPad = null;
+  state.pickFlashId = null;
+  if (fp) {
+    // ✕ backs OUT of the seat, not past the question. The tap claimed the
+    // table before asking for covers, which left a half-entered limbo: the
+    // picker's Close button appeared and walked you into the table with no
+    // covers (owner, Aug '26). Un-claim it — release the lock, restore
+    // whatever table was current before, and stay on the floor.
+    releaseTableLock(state.table);
+    state.table = fp.prev || null;
+    const pt = fp.prev ? findTableById(fp.prev) : null;
+    const po = pt ? state.orders.find(o => o.status === 'open' && o.table === pt.label) : null;
+    state.covers = (pt && pt.covers) || (po && po.covers) || 0;
+    state.allergies = (pt && pt.allergies) || [];
+    state.notes = (pt && pt.notes) || [];
+    state.vipType = (pt && pt.vipType) || '';
+    state.openOrderId = (po && po.id) || null;
+    if (fp.prev) claimTableLock(fp.prev);
+    state.showTablePicker = true; // still choosing a table
+  }
+  render();
+}
 // Covers: the SAME centred popup as the item hold pad, floating OVER the
 // current screen (table select or order) — never its own page.
 function renderCoversPop() {
@@ -25748,7 +25773,8 @@ function pickTable(id) {
   const proceed = (forceLock) => {
     if (id !== state.table) releaseTableLock(state.table);
     claimTableLock(id, forceLock);
-    const hadTable = !!state.table;
+    const prevTable = state.table;
+    const hadTable = !!prevTable;
     state.table = id;
     const t = findTableById(id);
     // Keep an unsent cart when this is the FIRST table picked (fresh login has
@@ -25765,13 +25791,17 @@ function pickTable(id) {
     state.openOrderId = (oo && oo.id) || null;
     // Ask for covers at the natural moment ONLY: seating a FRESH table
     // (covers enabled, none recorded, no order in progress). The pad POPS
-    // OVER the table screen — ✓ moves on to the order, ✕ skips (asked once).
+    // OVER the table screen — ✓ moves on to the order, ✕ backs out of the pick.
     // Entering a table always starts at the MENU on phones. MUST run before
     // the covers branch: dropMobileDrawer also clears any floating covers pad,
     // so calling it after openCoversPad silently ate the pad and left the
     // picker stuck open ("cannot enter a table", owner, Aug '26).
     dropMobileDrawer();
-    if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers && !oo) openCoversPad();
+    if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers && !oo) {
+      openCoversPad();
+      // The seat isn't real until ✓ — remember what to put back if ✕ bails.
+      state.coversPad.fromPick = { prev: prevTable || null };
+    }
     else { state.showTablePicker = false; state.pickFlashId = null; }
     render();
   };
@@ -28205,7 +28235,7 @@ document.addEventListener('keydown', (e) => {
     if (digit) tapCoversKey(k);
     else if (k === 'Backspace') tapCoversKey('back');
     else if (k === 'Enter') confirmCoversPad();
-    else if (k === 'Escape') { state.coversPad = null; render(); }
+    else if (k === 'Escape') { cancelCoversPad(); }
     else return;
     e.preventDefault(); return;
   }
@@ -33237,7 +33267,7 @@ function handleActClick(el, e) {
       else if (act === 'covers-pad-key') { tapCoversKey(el.dataset.key); }
       else if (act === 'covers-clear') { if (state.coversPad) { state.coversPad.buffer = ''; render(); } }
       else if (act === 'confirm-covers-pad') { confirmCoversPad(); }
-      else if (act === 'close-covers-pad') { state.coversPad = null; state.pickFlashId = null; render(); }
+      else if (act === 'close-covers-pad') { cancelCoversPad(); }
       else if (act === 'set-tax-mode') { saveTaxSettings({ mode: el.dataset.val }); }
       else if (act === 'backup-now') { backupNow(); }
       else if (act === 'restore-backup') { restoreBackup(el.dataset.file); }

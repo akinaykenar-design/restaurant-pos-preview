@@ -26521,6 +26521,30 @@ function ioModifierObjects(io, item) {
 // Long enough to see it land, short enough to never feel like waiting —
 // the same beat on every screen (owner: 400ms read as too slow on the phone).
 const IO_PICK_BEAT = 150;
+// Hold "All" while placing a qty>1 item serving-by-serving: every remaining
+// serving lands there as ONE line, instead of ten taps (owner, Aug '26).
+function ioAssignRestTo(seat) {
+  const io = state.itemOptions;
+  if (!io || io._done) return;
+  if (!(itemAddNeedsSeatPrompt() && Number.isInteger(io.qty) && io.qty > 1 && !ioHasChoiceButton())) return;
+  const item = state.menu.find(m => m.id === io.itemId);
+  if (!item) return;
+  if (!state._allergenAck) {
+    const hits = allergenMatches(item, seat);
+    if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, seat, hits, resume: 'io-seat' }; render(); return; }
+  }
+  state._allergenAck = false;
+  const remaining = io.qty - (io.assigned || 0);
+  if (remaining <= 0) return;
+  const variant = item.variants.find(v => v.id === io.variantId);
+  pushCartLine(item, variant, ioModifierObjects(io, item), seat, remaining, ioCustomNote(io));
+  io.assigned = io.qty;
+  io.assignedSeats = [...(io.assignedSeats || []), seat];
+  state.toast = `${remaining} × ${item.name} → ${seat === 'all' ? (state.settings.sharedSeatLabel || 'All') : 'seat ' + seat}`;
+  io._done = true; io.seat = null; render();
+  armToastTimer(2200);
+  setTimeout(() => { if (state.itemOptions === io) { state.itemOptions = null; render(); } }, IO_PICK_BEAT);
+}
 function pickIoSeat(seat) {
   const io = state.itemOptions;
   if (!io) return;
@@ -27887,14 +27911,18 @@ document.addEventListener('pointerdown', (e) => {
   const io = state.itemOptions;
   if (!io || !io.seatOnly) return;
   const btn = e.target.closest && e.target.closest('[data-act="io-pick-seat"]');
-  if (!btn || btn.dataset.seat === 'all') return;
-  const seat = parseInt(btn.dataset.seat, 10);
-  if (!Number.isFinite(seat)) return;
+  if (!btn) return;
+  const isAll = btn.dataset.seat === 'all';
+  const seat = isAll ? 'all' : parseInt(btn.dataset.seat, 10);
+  if (!isAll && !Number.isFinite(seat)) return;
+  // Hold on All only means something while placing serving-by-serving.
+  if (isAll && !(itemAddNeedsSeatPrompt() && Number.isInteger(io.qty) && io.qty > 1 && !ioHasChoiceButton())) return;
   const x0 = e.clientX, y0 = e.clientY;
   _seatHoldFired = false;
   const myTimer = setTimeout(() => {
     _seatHoldFired = true;
     const cur = state.itemOptions; if (!cur) return;
+    if (isAll) { ioAssignRestTo('all'); return; } // every remaining serving → All, one hold
     const set = cur.multiSeats && cur.multiSeats.length ? cur.multiSeats : [];
     cur.multiSeats = set.includes(seat) ? set : [...set, seat];
     render();
@@ -28054,7 +28082,16 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) _clea
 // only the big notch jumps; trackpads (small smooth deltas) are untouched.
 document.addEventListener('wheel', (e) => {
   if (e.deltaMode !== 0 || Math.abs(e.deltaY) < 80 || e.ctrlKey) return;
-  const sc = e.target.closest && e.target.closest('.menu-scroll, .admin-content, .screen-ctl-scroll');
+  let sc = e.target.closest && e.target.closest('.menu-scroll, .admin-content, .screen-ctl-scroll');
+  if (!sc) return;
+  // The matched pane may not be the one that actually scrolls (the Design
+  // page's control column is overflow:visible on a till — its parent
+  // .admin-content owns the scroll). Walk up to a pane with real overflow,
+  // or the wheel died here: prevented, then scrolling nothing (owner,
+  // Aug '26: Design page wheel felt broken/too fast).
+  while (sc && !(sc.scrollHeight > sc.clientHeight + 2)) {
+    sc = sc.parentElement && sc.parentElement.closest('.menu-scroll, .admin-content, .screen-ctl-scroll');
+  }
   if (!sc) return;
   e.preventDefault();
   sc.scrollTop += e.deltaY * 0.5;

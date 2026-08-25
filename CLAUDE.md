@@ -137,6 +137,17 @@ sources.
 
 ## Icons
 
+NO ICON PACKS (owner, Aug '26: "lets remove icon packs in general until we
+can design some"). There is no pack chooser: the "Icons" pair of dropdowns
+in Design → Extras (`settings.iconStyle` — a CSS filter over emoji — and
+`settings.venueStyle` — a 12-emoji suggestion set) is deleted, along with
+its CSS filters and its server fields. Emoji render as themselves. Picking
+an icon for an item, a section or a subsection is untouched: one preset
+grid plus a paste-your-own field. `SBW`'s drawn black-and-white glyphs are
+kept in the file, wired to nothing, as the seed of a real drawn set — the
+next icon work replaces the emoji, it does not add a second pack to choose
+between.
+
 A drawn icon may not repeat: two different pages/actions never share a
 glyph (e.g. Discounts' tag ≠ Categories; typed-note ≠ order-notes).
 NO ARROWS, EVER (owner rule, Aug '26): no drawn icon uses arrow motifs —

@@ -28262,9 +28262,12 @@ document.addEventListener('pointerdown', (e) => {
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 // Phone: swipe right-to-left over the menu to pull the docket in, left-to-right
-// to push it back. Read from the content (not the raw screen edge), so it never
-// fights the phone's own edge panel/back gesture. Horizontal-dominant only, so
-// vertical scrolling and the sideways category rail are untouched.
+// to push it back — and once the docket is already away, another left-to-right
+// swipe steps back one more room, to the table map (owner ask, Aug '26). One
+// gesture walks the whole way out: docket → menu → tables.
+// Read from the content (not the raw screen edge), so it never fights the
+// phone's own edge panel/back gesture. Horizontal-dominant only, so vertical
+// scrolling and the sideways category rail are untouched.
 (function () {
   let sx = 0, sy = 0, armed = false;
   document.addEventListener('touchstart', (e) => {
@@ -28273,6 +28276,9 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }
     if (!state.currentStaff || state.view !== 'order') return;
     const t = e.target;
     if (t && t.closest && t.closest('.catrail, input, textarea, select, .floor-canvas, .tp-canvas-wrap, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk')) return;
+    // Typing owns the screen: a swipe while the keyboard is up is a stray
+    // thumb, never a request to change rooms (owner, Aug '26).
+    if (document.body.classList.contains('osk-open')) return;
     // Leave a thin strip on the far left to the OS back gesture.
     if (e.touches[0].clientX < 18) return;
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; armed = true;
@@ -28284,6 +28290,12 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }
     if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return; // not a clear sideways swipe
     if (dx < 0 && !state.mobileCartOpen) openMobileCart();
     else if (dx > 0 && state.mobileCartOpen) closeMobileCart();
+    // Docket already away → the same swipe opens the table map. Never while
+    // one is open, mid-transfer, or with a half-built pane in the way — the
+    // picker is the one door and openTablePicker() is how it opens.
+    else if (dx > 0 && !state.showTablePicker && !state.itemOptions && !state.notesPanel
+      && !state.editLine && !state.editSent && !state.showCheckout && !state.billSplit
+      && !state.moveItems && !state.callAway && !state.quickNotePad && !state.coversPad) openTablePicker();
   }, { passive: true });
 })();
 
@@ -32485,17 +32497,25 @@ function bindEvents() {
     // A finger aiming to SCROLL that lands on the slider still jumps the value
     // (native range behaviour). If the touch turns out vertical, put the value
     // back before the change commits — scrolling never edits a setting.
-    let _tx = null, _tv = null, _tcancel = false;
-    el.addEventListener('touchstart', (e) => { _tx = [e.touches[0].clientX, e.touches[0].clientY]; _tv = el.value; _tcancel = false; }, { passive: true });
+    // A range input jumps its value the INSTANT a finger lands on the track —
+    // so a scroll that happens to start on a slider was already resizing the
+    // till before it moved (owner, Aug '26: "scrolling catches the sliders").
+    // The value is LOCKED at its old setting until the finger has travelled
+    // 8px sideways; until then any jump is put straight back, so a scroll —
+    // or a stray tap — leaves the setting exactly as it was.
+    let _tx = null, _tv = null, _tfree = false;
+    const _restore = () => { if (_tv != null && el.value !== _tv) { el.value = _tv; el.dispatchEvent(new Event('input')); } };
+    el.addEventListener('touchstart', (e) => { _tx = [e.touches[0].clientX, e.touches[0].clientY]; _tv = el.value; _tfree = false; }, { passive: true });
     el.addEventListener('touchmove', (e) => {
-      if (!_tx || _tcancel) return;
-      const dx = Math.abs(e.touches[0].clientX - _tx[0]), dy = Math.abs(e.touches[0].clientY - _tx[1]);
-      if (dy > 12 && dy > dx * 1.2) _tcancel = true;
+      if (!_tx) return;
+      if (!_tfree) {
+        const dx = Math.abs(e.touches[0].clientX - _tx[0]), dy = Math.abs(e.touches[0].clientY - _tx[1]);
+        if (dx >= 8 && dx > dy) _tfree = true; // a deliberate sideways drag — hand it over
+        else _restore();
+      }
     }, { passive: true });
-    el.addEventListener('touchend', () => {
-      if (_tcancel && _tv != null && el.value !== _tv) { el.value = _tv; el.dispatchEvent(new Event('input')); }
-      _tx = null;
-    }, { passive: true });
+    el.addEventListener('touchend', () => { if (!_tfree) _restore(); _tx = null; }, { passive: true });
+    el.addEventListener('touchcancel', () => { if (!_tfree) _restore(); _tx = null; }, { passive: true });
   });
   // Pointer-drag sortable for the admin reorder lists.
   makeSortable('size-preset-row', reorderSizePresets, { canStart: () => !isListSorted('sizes') });

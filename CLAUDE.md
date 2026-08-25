@@ -91,7 +91,11 @@ was deleted (Aug '26); never add one. The single exception: the OPEN
 dropdown picker highlights the option under the pointer (an open menu
 tracks the pointer like the OS's own menus). A belt rule in the CSS
 (`@media (hover:hover)`) also kills transitions/transforms on hover in
-case something slips in.
+case something slips in — scoped to `body:not(.sorting)` so it never
+fights an active drag's transforms. The finger cursor is part of this
+law: the pointer never changes shape over a control (`cursor:default`
+everywhere on mouse devices; text fields keep the I-beam, an active
+drag keeps the grabbing fist).
 
 ## Icons
 

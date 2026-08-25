@@ -119,7 +119,11 @@ size inside a 44px bordered box (owner flipped inside→outside, Aug '26:
 "put headers outside the box"). Number pads are one family too: keys
 are HALF an order tile (synced from the grid like the seat pop), the
 decimal key is a permanent slot (dimmed on whole-number fields), and
-the 64px square ✕/✓ always read larger than the keys. A pick's options open in a popup — never an always-open pill
+the ✕/✓ ARE keys — the action row repeats the key grid's columns and gap
+and each button is a key-sized cell in the last two columns, whatever the
+pad's column count (owner flipped this, Aug '26: "i dont like the numbers
+being larger than cross and tick ... everything uniform"). Set
+`--pad-cols` on the POP, never on the grid, so the action row follows. A pick's options open in a popup — never an always-open pill
 cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.

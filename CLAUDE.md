@@ -81,14 +81,17 @@ never a loose field outside the grid. The Items editor is the model
 (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge other
 editors on it rather than inventing new layouts.
 
-## No hover animation, EVER (owner rule, Aug '26)
+## No hover, EVER (owner rule, Aug '26 — total)
 
-Nothing moves, grows, shrinks, lifts, or transitions on hover — no
-transform, no animated shadow, no eased colour fade. This is a till:
-fingers don't hover, and a mouse gliding over the screen must never
-make the UI stir. At most a hover may swap a flat colour INSTANTLY
-(no transition). When adding any control, check it inherits no hover
-animation from a shared class; kill it if it does.
+Nothing changes on hover. Not a colour, not a border, not a shadow, not
+a transform — the owner flagged even a flat background swap ("stil
+hover?!"). This is a till: fingers don't hover, and a mouse gliding
+over the screen must never make the UI stir. Every visual `:hover` rule
+was deleted (Aug '26); never add one. The single exception: the OPEN
+dropdown picker highlights the option under the pointer (an open menu
+tracks the pointer like the OS's own menus). A belt rule in the CSS
+(`@media (hover:hover)`) also kills transitions/transforms on hover in
+case something slips in.
 
 ## Icons
 

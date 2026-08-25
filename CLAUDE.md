@@ -70,6 +70,15 @@ style; non-Chromium browsers fall back to the system picker. The page
 runs in STANDARDS mode — the `<!DOCTYPE html>` on line 1 is
 load-bearing (quirks mode disables base-select); never remove it.
 
+## The expanded-editor recipe (owner, Aug '26)
+
+Every expanded row editor is: two identity rows (text you type), then ONE
+grid of labelled 44px chips (everything you pick), then a single footer
+row. A pick's options open in a popup — never an always-open pill cloud,
+never a loose field outside the grid. The Items editor is the model
+(`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge other
+editors on it rather than inventing new layouts.
+
 ## Icons
 
 A drawn icon may not repeat: two different pages/actions never share a

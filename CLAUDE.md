@@ -66,6 +66,24 @@ handles). Stored theme values are untouched — there is simply no UI to
 fight the grid with. Never re-add a size slider outside the four
 decisions.
 
+## Prices (owner, Aug '26)
+
+Hard-wired, not a setting: a price NEVER appears on a menu tile, and ALWAYS
+appears on the docket and in the line editor. A tile is a target hit from
+muscle memory — a price on it is one more thing to read, and it faces the
+room. `settings.showPrices` and `settings.showTilePrices` are deleted along
+with their toggles; item editing in admin shows price as it always did.
+Never re-add a switch for this.
+
+## Practice orders (owner, Aug '26)
+
+A trainee is the only practice there is: an order is practice when the
+person who rang it was `staff.trainee` at the time, so it never prints and
+never counts. The venue-wide `settings.practiceMode` is deleted — it had no
+UI at all, so once set (by an old client or an import) every order from
+everyone would silently stop counting with nothing on screen to explain it.
+Never re-add a whole-venue practice switch.
+
 ## Reserved colours
 
 Green (open table), red (needs you), orange (locked/selection), yellow

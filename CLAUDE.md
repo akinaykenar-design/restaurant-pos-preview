@@ -72,6 +72,13 @@ Green (open table), red (needs you), orange (locked/selection), yellow
 (running long) and violet (over time) are status vocabulary — never usable
 as accents or decoration. Accents come from the curated set only.
 
+Selection is the ACCENT, never a picked colour (owner, Aug '26: "it should
+be default accent? no?"). The docket line being edited draws
+`var(--orange-dim)` / `var(--orange)` — and `--orange` IS `theme.accent` at
+runtime — so it follows the accent everywhere. The old Design → Docket →
+"Selected line colour" override is deleted; never re-add a per-thing colour
+picker for something the accent already answers.
+
 ## The standard dropdown (owner pick B, Aug '26)
 
 ONE dropdown everywhere: the closed control is a 44px chip (radius 10,

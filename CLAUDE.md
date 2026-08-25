@@ -104,6 +104,17 @@ law: the pointer never changes shape over a control (`cursor:default`
 everywhere on mouse devices; text fields keep the I-beam, an active
 drag keeps the grabbing fist).
 
+## Item Alerts (owner, Aug '26)
+
+The item editor's flag chip is GENERIC and stable: it is always called
+"Alerts" (`settings.itemFlagName` can rename the word itself), never the
+name of a note category. What it MEANS is decided in Order notes: the
+"Points to" picker inside the Alerts popup selects which order-note
+category supplies its vocabulary and warnings (`settings.itemFlagCategoryId`,
+'' = the Allergies builtin). Warnings from recorded seat allergies always
+fire regardless of where the chip points. The item side never renames
+when the category does — generic container, pointed source.
+
 ## Icons
 
 A drawn icon may not repeat: two different pages/actions never share a

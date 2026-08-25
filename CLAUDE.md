@@ -128,6 +128,34 @@ cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.
 
+## Undo in admin (owner, Aug '26)
+
+Every delete under `/api` is undoable. The server snapshots the SETUP
+collections before the delete (menu, sections, staff, floor plans, presets…)
+and `POST /api/undo` puts them back exactly — same ids, same order. The
+trading collections are deliberately never snapshotted (`UNDO_SKIP`: orders,
+register, timeclock, audit/house logs, roster, time off), so undoing a
+deleted item can never roll back money taken or hours worked. A burst of
+DELETEs inside 4s shares one snapshot, so a bulk delete undoes whole.
+Client side it is armed in ONE place — `api()` sees a successful admin
+DELETE and calls `offerUndo`.
+
+The preview's express shim used to drop `app.use()` on the floor (`use:
+function () {}`), so real middleware silently did nothing. It now runs
+middleware ahead of the route — but only functions of EXACTLY three args:
+a four-arg `(err, req, res, next)` is Express's error handler, and running
+it in the chain hands it the request as its error and breaks every call.
+
+## Mouse wheel (owner, Aug '26, twice)
+
+The wheel is damped EVERYWHERE, not in named panes: a notch (`deltaMode 0`,
+|deltaY| ≥ 30) scrolls 40% of what the browser wanted, applied to whatever
+actually scrolls under the pointer — walk up from the target to the first
+ancestor with real overflow, the page included. Trackpad streams (small
+deltas) are untouched, an open `select` is never fought, and the event is
+only swallowed if something actually moved, or the wheel dies at the end of
+a list instead of passing the scroll up.
+
 ## No native drag, and no flashing borders (owner, Aug '26)
 
 Sorting is OURS (`makeSortable` / `beginSortDrag`, pointer events). No

@@ -3897,8 +3897,17 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
     });
     return { regex: new RegExp('^' + pattern + '$'), keys: keys };
   }
+  var middlewares = [];
   function makeApp() {
-    var app = { use: function () {} };
+    // Only real (req, res, next) middleware is kept — express.json()/static()
+    // are stubs here and take no next, so they stay ignored.
+    var app = { use: function () {
+      var fn = arguments[arguments.length - 1];
+      // EXACTLY three: a four-arg (err, req, res, next) function is Express's
+      // error handler, not middleware — running it in the chain would hand it
+      // the request as its error and break every call.
+      if (typeof fn === 'function' && fn.length === 3) middlewares.push(fn);
+    } };
     ['get', 'post', 'put', 'delete', 'patch'].forEach(function (m) {
       app[m] = function (path) {
         var handlers = Array.prototype.slice.call(arguments, 1);
@@ -3986,10 +3995,11 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
         },
       };
       try {
+        var chain = middlewares.concat(route.handlers);
         var idx = 0;
         var next = function (err) {
           if (err) throw err;
-          var h = route.handlers[idx++];
+          var h = chain[idx++];
           if (h) h(req, res, next);
         };
         next();
@@ -5160,6 +5170,39 @@ const PORT = 3000;
 // store.json or spikes memory. Menu/order payloads are tiny; 1mb is generous.
 // (Uploaded photos are resized client-side to well under this before posting.)
 app.use(express.json({ limit: '8mb' }));
+// Undo the last admin delete (owner, Aug '26: "put the undo toast in admin to
+// undo last thing"). Every DELETE under /api snapshots the SETUP collections
+// first — menu, sections, staff, floor plans and the rest — so one POST to
+// /api/undo puts back exactly what went, ids and order included. The trading
+// collections are deliberately NOT snapshotted: undoing a deleted item must
+// never roll back orders rung, money taken or hours clocked in the meantime.
+const UNDO_SKIP = new Set(['orders', 'register', 'timeclock', 'auditLog', 'houseLog', 'ticketCounter', 'roster', 'timeoff']);
+let _undoSnap = null, _undoSnapAt = 0;
+app.use((req, res, next) => {
+  if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
+    // A bulk delete is many DELETEs in a burst. Snapshot before the FIRST of
+    // them and keep it for the rest, or Undo would put back only the last row.
+    const burst = _undoSnap && (Date.now() - _undoSnapAt) < 4000;
+    if (!burst) {
+      try {
+        const d = readData();
+        const snap = {};
+        for (const k of Object.keys(d)) if (!UNDO_SKIP.has(k)) snap[k] = d[k];
+        _undoSnap = JSON.parse(JSON.stringify(snap));
+      } catch (e) { _undoSnap = null; }
+    }
+    _undoSnapAt = Date.now();
+  }
+  next();
+});
+app.post('/api/undo', (req, res) => {
+  if (!_undoSnap) return res.status(404).json({ error: 'Nothing to undo' });
+  const d = readData();
+  Object.assign(d, _undoSnap);
+  _undoSnap = null;
+  writeData(d);
+  res.json({ ok: true });
+});
 // Serve the app files with `Cache-Control: no-cache` so the browser always
 // revalidates (cheap 304 via ETag) and can never show a stale app.js/style.css
 // after an update — the cause of "the fix isn't there" on already-open devices.
@@ -11485,6 +11528,11 @@ async function api(path, opts) {
     throw e;
   }
   state.online = true;
+  // Any admin delete that succeeds offers its undo (owner, Aug '26). One
+  // hook here rather than in each of the twenty-odd delete calls.
+  if (res.ok && opts.method === 'DELETE' && state.view === 'admin' && path.indexOf('/api/') === 0) {
+    setTimeout(() => offerUndo('Deleted', undoLastAdminDelete), 0);
+  }
   if (!res.ok) {
     let message = 'Request failed';
     try {
@@ -14343,6 +14391,22 @@ function armToastTimer(ms) {
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
   state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; render(); }, ms);
+}
+// Put back whatever the last admin delete took out. The server holds the
+// snapshot; this just asks for it and re-reads everything on screen.
+async function undoLastAdminDelete() {
+  try {
+    await api('/api/undo', { method: 'POST' });
+    await loadInitial();
+    // loadInitial covers the menu side; the people/stock lists fetch their own.
+    try { state.staffList = await api('/api/staff'); } catch (e) {}
+    try { if (state.inventoryItems) state.inventoryItems = await api('/api/inventory-items'); } catch (e) {}
+    state.toast = 'Put back';
+    armToastTimer(2000);
+  } catch (e) {
+    state.toast = 'Could not undo that.';
+  }
+  render();
 }
 // Gmail-style "· Undo" toast. Captures the reverse of a destructive action as a
 // closure; tapping Undo (act: 'undo-last') runs it. The toast holds ~6s.
@@ -28226,21 +28290,37 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) _clea
 // Notched PC mice fling 100-120px a click, which tears past menu tiles and
 // admin cards (owner, Aug '26: "scrolling with pc mouse is too fast"). Halve
 // only the big notch jumps; trackpads (small smooth deltas) are untouched.
-document.addEventListener('wheel', (e) => {
-  if (e.deltaMode !== 0 || Math.abs(e.deltaY) < 80 || e.ctrlKey) return;
-  let sc = e.target.closest && e.target.closest('.menu-scroll, .admin-content, .screen-ctl-scroll');
-  if (!sc) return;
-  // The matched pane may not be the one that actually scrolls (the Design
-  // page's control column is overflow:visible on a till — its parent
-  // .admin-content owns the scroll). Walk up to a pane with real overflow,
-  // or the wheel died here: prevented, then scrolling nothing (owner,
-  // Aug '26: Design page wheel felt broken/too fast).
-  while (sc && !(sc.scrollHeight > sc.clientHeight + 2)) {
-    sc = sc.parentElement && sc.parentElement.closest('.menu-scroll, .admin-content, .screen-ctl-scroll');
+// Damp the mouse wheel EVERYWHERE, not in three named panes (owner, Aug '26,
+// twice: "scrolling with pc mouse is too fast", then "mouse scroll speed is
+// too fast"). A mouse notch arrives as one big jump; a trackpad sends a
+// stream of small ones and is left alone. Whatever actually scrolls under
+// the pointer gets the damped amount — walk up from the target to the first
+// ancestor with real overflow, the page itself included.
+const WHEEL_DAMP = 0.4;      // a notch moves 40% of what the browser wanted
+const WHEEL_NOTCH = 30;      // below this it's a trackpad, not a notch
+function _wheelScroller(from) {
+  let el = from;
+  while (el && el.nodeType === 1) {
+    if (el.scrollHeight > el.clientHeight + 2) {
+      const ov = getComputedStyle(el).overflowY;
+      if (ov === 'auto' || ov === 'scroll' || el === document.scrollingElement) return el;
+    }
+    el = el.parentElement;
   }
+  const se = document.scrollingElement;
+  return (se && se.scrollHeight > se.clientHeight + 2) ? se : null;
+}
+document.addEventListener('wheel', (e) => {
+  if (e.deltaMode !== 0 || e.ctrlKey || Math.abs(e.deltaY) < WHEEL_NOTCH) return;
+  // An open dropdown picker scrolls itself; never fight it.
+  if (e.target.closest && e.target.closest('select')) return;
+  const sc = _wheelScroller(e.target);
   if (!sc) return;
-  e.preventDefault();
-  sc.scrollTop += e.deltaY * 0.5;
+  const before = sc.scrollTop;
+  sc.scrollTop = before + e.deltaY * WHEEL_DAMP;
+  // Only swallow the event if we actually moved something, or the wheel
+  // dies at the end of a list instead of passing the scroll up.
+  if (sc.scrollTop !== before) e.preventDefault();
 }, { passive: false });
 // ---------- Pinch-zoom on the table map (owner, Aug '26) ----------
 // Two fingers on the picker's floor grow the map up to 3× (--tp-zoom —

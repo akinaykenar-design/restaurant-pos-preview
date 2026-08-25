@@ -231,6 +231,15 @@ kept in the file, wired to nothing, as the seed of a real drawn set — the
 next icon work replaces the emoji, it does not add a second pack to choose
 between.
 
+Order notes are a POST-IT (`DKT_POSTIT_SVG`, owner Aug '26): a square with
+its bottom corner peeling off and writing on it. The item's own typed note
+keeps the plain page (`DKT_NOTE_SVG`). Until now BOTH drew the page — the
+very pair the no-repeat rule names. The panel keeps the name "Order notes":
+"Guest notes" collides with reservations (which have a Guest name and their
+own notes field), "Pinned notes" collides twice over with staff PINs and the
+hub's pinned shortcuts, and "Table notes" would be wrong on takeaway and
+delivery, where the button is there but no table is.
+
 A drawn icon may not repeat: two different pages/actions never share a
 glyph (e.g. Discounts' tag ≠ Categories; typed-note ≠ order-notes).
 NO ARROWS, EVER (owner rule, Aug '26): no drawn icon uses arrow motifs —

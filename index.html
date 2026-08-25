@@ -6290,6 +6290,7 @@ app.put('/api/settings', (req, res) => {
   // Allergies). The item editor's chip renames and repopulates from this
   // category (owner, Aug '26: "an option inside that ties to an ordernote").
   if (typeof req.body.itemFlagCategoryId === 'string') data.settings.itemFlagCategoryId = req.body.itemFlagCategoryId.slice(0, 60);
+  if (Array.isArray(req.body.itemFlagCategoryIds)) data.settings.itemFlagCategoryIds = req.body.itemFlagCategoryIds.map(x => String(x).slice(0, 60)).slice(0, 30);
   if (typeof req.body.itemFlagName === 'string') data.settings.itemFlagName = req.body.itemFlagName.trim().slice(0, 30) || null;
   if (req.body.appBarPos && typeof req.body.appBarPos === 'object') {
     const next = Object.assign({}, data.settings.appBarPos);
@@ -13990,12 +13991,12 @@ function allergenMatches(item, seat) {
     const base = String(a.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
     if (names.includes(base)) hits.push(a);
   }
-  // The tied note category's seat notes warn exactly like allergies - the
-  // flag system follows the tie (owner, Aug '26).
-  const tiedId = (state.settings && state.settings.itemFlagCategoryId) || '';
-  if (tiedId) {
+  // Seat notes from ANY category feeding the Alerts chip warn exactly like
+  // allergies (owner, Aug '26: multi-pick sources).
+  const tied = new Set(itemFlagCatIds().filter(id => id !== 'allergy'));
+  if (tied.size) {
     for (const nte of (state.notes || [])) {
-      if (nte.categoryId !== tiedId || !seatOk(nte.seat)) continue;
+      if (!tied.has(nte.categoryId) || !seatOk(nte.seat)) continue;
       const base = String(nte.text || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
       if (names.includes(base)) hits.push({ seat: nte.seat == null ? null : nte.seat, allergy: nte.text });
     }
@@ -14540,20 +14541,32 @@ function allergyLabel() { return (state.settings && state.settings.allergyLabel)
 // The item flag picker's tie: '' = the Allergies builtin, else a custom note
 // category id. Chip label + tile set follow the tied category, so renaming the
 // note category renames the picker with it. Deleted category = fall back.
-function itemFlagCat() {
-  const id = (state.settings && state.settings.itemFlagCategoryId) || '';
-  return id ? ((state.noteCategories || []).find(c => c.id === id) || null) : null;
-}
 function itemFlagLabel() { return (state.settings && state.settings.itemFlagName) || 'Alerts'; }
-function itemFlagPresets() {
-  const c = itemFlagCat();
-  if (!c) return state.allergyPresets || [];
-  return (c.presets || []).filter(p => p && p.name).map(p => ({ name: p.name, color: p.color || null, subTypes: [] }));
+// Which order-note categories feed the Alerts chip - any number of them
+// ('allergy' = the builtin). Falls back to the old single-pointer setting,
+// then to Allergies alone.
+function itemFlagCatIds() {
+  const ids = state.settings && state.settings.itemFlagCategoryIds;
+  if (Array.isArray(ids)) return ids;
+  const one = (state.settings && state.settings.itemFlagCategoryId) || '';
+  return one ? [one] : ['allergy'];
 }
-function saveItemFlagCategory(id) {
-  state.settings.itemFlagCategoryId = id || '';
+function itemFlagPresets() {
+  const out = []; const seen = new Set();
+  for (const id of itemFlagCatIds()) {
+    const list = id === 'allergy' ? (state.allergyPresets || [])
+      : (((state.noteCategories || []).find(c => c.id === id) || {}).presets || [])
+          .filter(p => p && p.name).map(p => ({ name: p.name, color: p.color || null, subTypes: [] }));
+    for (const p of list) { const k = p.name.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(p); } }
+  }
+  return out;
+}
+function toggleItemFlagCategory(id) {
+  const cur = itemFlagCatIds();
+  const next = cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id];
+  state.settings.itemFlagCategoryIds = next;
   render();
-  saveSettingsPart({ itemFlagCategoryId: id || '' }, 'Could not save the tie.');
+  saveSettingsPart({ itemFlagCategoryIds: next }, 'Could not save.');
 }
 function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
 function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', seats: [], wholeTable: false }; }
@@ -23514,11 +23527,12 @@ function menuItemRowHtml(m) {
               <span style="display:flex;align-items:center;gap:8px;white-space:nowrap;"><label class="field-label" style="margin:0;">New row</label>${togglePill(!!m.rowBreak, 'toggle-item-rowbreak', `data-id="${m.id}"`)}</span>
             </div>
             ${pillsOpen[m.id + ':allergens'] ? pop(m.id + ':allergens', esc(itemFlagLabel()), `
-              <label class="ie-chip" style="margin:0 0 10px;max-width:240px;"><small>Points to</small>
-                <select style="${selStyle}" onchange="saveItemFlagCategory(this.value)">
-                  <option value="" ${!(state.settings.itemFlagCategoryId || '') ? 'selected' : ''}>${esc(allergyLabel())}</option>
-                  ${(state.noteCategories || []).map(c => `<option value="${c.id}" ${(state.settings.itemFlagCategoryId || '') === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
-                </select></label>
+              <div style="margin:0 0 10px;">
+                <div class="field-label" style="margin:0 0 6px;">Order notes</div>
+                <div class="ie-pills" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));">
+                  ${[{ id: 'allergy', name: allergyLabel() }, ...(state.noteCategories || [])].map(c => `<button type="button" class="pay-opt xs ${itemFlagCatIds().includes(c.id) ? 'active' : ''}" data-act="item-flag-cat-toggle" data-val="${c.id}">${esc(c.name)}</button>`).join('')}
+                </div>
+              </div>
               <div class="item-allergen-pills ie-pills">
                 ${itemFlagPresets().map(ap => {
                   const t = tags.find(x => x.name === ap.name);
@@ -33899,6 +33913,7 @@ function handleActClick(el, e) {
         state.itemPillsOpen = was ? {} : { [k]: true }; // one popup at a time
         render();
       }
+      else if (act === 'item-flag-cat-toggle') { toggleItemFlagCategory(el.dataset.val); }
       else if (act === 'item-pills-cancel') {
         const snap = state._iePillsSnap;
         if (snap) {

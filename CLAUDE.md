@@ -109,11 +109,13 @@ drag keeps the grabbing fist).
 The item editor's flag chip is GENERIC and stable: it is always called
 "Alerts" (`settings.itemFlagName` can rename the word itself), never the
 name of a note category. What it MEANS is decided in Order notes: the
-"Points to" picker inside the Alerts popup selects which order-note
-category supplies its vocabulary and warnings (`settings.itemFlagCategoryId`,
-'' = the Allergies builtin). Warnings from recorded seat allergies always
-fire regardless of where the chip points. The item side never renames
-when the category does — generic container, pointed source.
+Alerts popup carries toggle tiles for the note categories — pick as many
+or as few as wanted (`settings.itemFlagCategoryIds`, default
+['allergy']); the chip's vocabulary is the union of the picked
+categories' presets and their seat notes all warn. Warnings from
+recorded seat allergies always fire regardless of the picks. The item
+side never renames when a category does — generic container, picked
+sources.
 
 ## Icons
 

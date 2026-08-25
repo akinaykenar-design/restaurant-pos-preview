@@ -1900,14 +1900,19 @@ input:focus, select:focus, textarea:focus{
     box-shadow: 0 10px 25px rgba(0,0,0,.12), 0 30px 60px rgba(0,0,0,.22);
     padding: 8px;
     margin-top: 4px;
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
     width: max-content;
     min-width: 300px;
     max-width: min(560px, 92vw);
     max-height: 60vh;
     overflow-y: auto;
+  }
+  /* display ONLY while open — an unconditional display on ::picker overrides
+     the UA's closed state and every picker on the page pops at once
+     (owner, Aug '26). */
+  select:open::picker(select){
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
   }
   select option{
     display: flex;
@@ -15557,6 +15562,11 @@ function render() {
   // render(), so guarding here covers every trigger. The pending render is
   // replayed the moment the drag ends (see endSortDrag/up()).
   if (state._sortDragging || state._mockDragging) { state._renderQueuedDuringDrag = true; return; }
+  // A render while a dropdown's app-drawn picker is open replaces the select
+  // under it and ORPHANS the picker in the top layer — they piled up on
+  // screen ("this all pops up at once", owner Aug '26). Queue the render;
+  // it flushes the moment the picker closes.
+  try { if (document.querySelector('select:open')) { state._renderQueuedDuringPicker = true; return; } } catch (err) {}
 
   // Every visible toast gets a dismiss timer keyed to its message — set a
   // toast anywhere, it shows for ~4s (or the site's own armToastTimer span).
@@ -27925,6 +27935,21 @@ document.addEventListener('pointerdown', (e) => {
 // Hold a cover in the item's seat pop to start multi-select — arm several
 // covers, then ✓ adds the dish to each. Only in the seat-only pop; 'All' is
 // already everyone so it's skipped.
+// Deferred renders from the open-picker gate above: flush shortly after any
+// picker closes (toggle/change/pointerdown all signal that moment), but only
+// once NO picker is open — a new one may have opened in the same gesture.
+function _flushPickerRender() {
+  if (!state._renderQueuedDuringPicker) return;
+  setTimeout(() => {
+    if (!state._renderQueuedDuringPicker) return;
+    try { if (document.querySelector('select:open')) return; } catch (err) {}
+    state._renderQueuedDuringPicker = false;
+    render();
+  }, 80);
+}
+document.addEventListener('toggle', (e) => { if (e.target && e.target.tagName === 'SELECT') _flushPickerRender(); }, true);
+document.addEventListener('change', (e) => { if (e.target && e.target.tagName === 'SELECT') _flushPickerRender(); }, true);
+document.addEventListener('pointerdown', () => _flushPickerRender(), true);
 let _seatHoldFired = false;
 document.addEventListener('pointerdown', (e) => {
   if (e.isPrimary === false) return; // second finger never arms a hold

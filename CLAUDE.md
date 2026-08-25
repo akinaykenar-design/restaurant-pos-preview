@@ -59,6 +59,17 @@ Green (open table), red (needs you), orange (locked/selection), yellow
 (running long) and violet (over time) are status vocabulary — never usable
 as accents or decoration. Accents come from the curated set only.
 
+## The standard dropdown (owner pick B, Aug '26)
+
+ONE dropdown everywhere: the closed control is a 44px chip (radius 10,
+bold value, no chevron — no arrows ever); the open list is the app-drawn
+key-tile popup (Chromium base-select `::picker` — dark surface, bordered
+44px key tiles, current value ringed green), the same popup grammar as
+covers/seats/notes. Never ship a bare native select or a third menu
+style; non-Chromium browsers fall back to the system picker. The page
+runs in STANDARDS mode — the `<!DOCTYPE html>` on line 1 is
+load-bearing (quirks mode disables base-select); never remove it.
+
 ## Icons
 
 A drawn icon may not repeat: two different pages/actions never share a

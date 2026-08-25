@@ -146,6 +146,19 @@ middleware ahead of the route — but only functions of EXACTLY three args:
 a four-arg `(err, req, res, next)` is Express's error handler, and running
 it in the chain hands it the request as its error and breaks every call.
 
+## Phone drawers (owner, Aug '26)
+
+Two drawers, mirror images, one grammar. The docket rolls in from the RIGHT
+(`.ticket-panel` → `translateX(100%)` → 0); the table map rolls in from the
+LEFT (`.middle-view.tp-view`). Both .28s ease, both opened and closed by the
+same sideways swipe: swipe left for the docket and right to put it back;
+swipe right for the map and left to put it back. Both mount parked at their
+edge for one unpainted frame (`.tp-entering` / `_sheetEntering`) and are
+released on the second rAF, so the roll-in starts from the edge instead of
+jumping. The map RESTS open and only sits off-screen while a class says so —
+if the animation never runs (reduced motion, an old browser) it is simply
+there, never stranded off the edge.
+
 ## Mouse wheel (owner, Aug '26, twice)
 
 The wheel is damped EVERYWHERE, not in named panes: a notch (`deltaMode 0`,

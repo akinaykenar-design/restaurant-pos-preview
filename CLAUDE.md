@@ -21,6 +21,8 @@ where a button WAS, before their eyes confirm where it is. So:
   columns and rows, centred the same way, regardless of what's inside.
 - **Actions live in fixed corners.** ✕ then ✓, bottom-right, in that order,
   everywhere. Destructive red never swaps sides with confirm green.
+  And they are SQUARE — the docket panel's grammar (~64-76px squares,
+  icon with its small word), never stretched wide bars (owner, Aug '26).
 - **Nothing shifts under a finger.** No layout jump on state change, no
   control that appears where another one just was, no async re-render that
   moves a row mid-tap. A late-appearing element must claim reserved space,

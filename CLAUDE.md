@@ -55,6 +55,17 @@ are banned: a setting always displays a real number (derived until first
 touch pins it). Every popup (covers, seats, notes) draws the order grid's
 half-scale frame — one grammar.
 
+No slider may OVERRIDE the grid (owner, Aug '26: "gone ty"). The old
+"Advanced sizes" card — tile size, tile height, tile spacing, menu bar,
+subsection bar, docket text, docket spacing — is deleted: a venue could
+pin 4 columns there and then drag tiles into breaking its own grid. Tile
+width and height are the grid's (tiles across × down); text is the one
+Text size decision; the menu bar, subsection bar, docket text and docket
+width are resized by HOLDING them in the Design preview (the `data-mkel`
+handles). Stored theme values are untouched — there is simply no UI to
+fight the grid with. Never re-add a size slider outside the four
+decisions.
+
 ## Reserved colours
 
 Green (open table), red (needs you), orange (locked/selection), yellow

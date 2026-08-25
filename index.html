@@ -1518,7 +1518,7 @@ body[data-theme="dark"] .dk-linepop{background:var(--surface);border-color:var(-
 .dk-menu-scrim{position:fixed;inset:0;z-index:60;touch-action:pan-y;}
 .dk-menu{position:absolute;top:calc(100% + 6px);left:0;z-index:61;background:var(--surface);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25);padding:5px;min-width:150px;display:flex;flex-direction:column;gap:2px;max-height:56vh;overflow-y:auto;}
 .dk-menu-item{display:flex;align-items:center;gap:8px;border:none;background:none;padding:9px 12px;min-height:38px;border-radius:8px;font-size:var(--fs-sm);font-weight:600;color:var(--charcoal-soft);cursor:pointer;text-align:left;white-space:nowrap;}
-.dk-menu-item.active{background:var(--orange-dim);color:var(--orange);}
+.dk-menu-item.active{background:var(--orange);color:#fff;} /* the accent bar, like .fp-dd-item.on */
 .dk-mi-check{width:15px;flex:none;font-weight:800;}
 /* The line list: a number, then the line's own text. Sub-lines (seat, build,
    note) indent under their item, the way they sit on the paper. */
@@ -1644,9 +1644,9 @@ body[data-theme="dark"] .denom-cell{background:var(--steel-200);}
 .btn-secondary svg{ margin-right:6px; vertical-align:-3px; }
 .btn-secondary svg:last-child:first-child{ margin-right:0; } /* icon-only (print docket) stays centred */
 .sort-btn.on{border-color:var(--orange);color:var(--orange);background:var(--orange-dim);}
-.sort-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--surface);border:1px solid var(--steel-200);border-radius:12px;box-shadow:var(--shadow);padding:8px;min-width:190px;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;} /* same key-grid grammar as every popup */
-.sort-opt{text-align:center;min-height:44px;padding:6px 10px;border:1px solid var(--steel-200);background:var(--surface);border-radius:8px;font-size:var(--fs-md);font-weight:700;color:var(--text-primary);cursor:pointer;font-family:inherit;}
-.sort-opt.active{background:var(--surface);border-color:var(--green);box-shadow:inset 0 0 0 1px var(--green);color:var(--green);} /* current value lit green, same as every picker */
+.sort-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--surface);border:1px solid var(--steel-200);border-radius:12px;box-shadow:var(--shadow);padding:6px;min-width:170px;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:2px;} /* the house dropdown (.fp-dd) */
+.sort-opt{text-align:left;min-height:44px;padding:11px 14px;border:none;background:none;border-radius:8px;font-size:var(--fs-md);font-weight:400;color:var(--text-primary);cursor:pointer;font-family:inherit;white-space:nowrap;}
+.sort-opt.active{background:var(--orange);color:#fff;} /* the accent bar, like .fp-dd-item.on */
 /* Select all: one compact ☑ icon button (no text) — same box as the other
    toolbar icons. The native checkbox stays underneath, invisible, so every
    list's existing wiring is untouched. Checked = orange, like selection. */
@@ -5294,12 +5294,49 @@ app.put('/api/allergy-presets', (req, res) => {
     }))
     .filter(p => p.name)
     .slice(0, 30);
+  {
+    const oldNames = (data.allergyPresets || []).map(p => p.name);
+    const newNames = cleaned.map(p => p.name);
+    const gone = oldNames.filter(nm => !newNames.includes(nm));
+    const came = newNames.filter(nm => !oldNames.includes(nm));
+    if (gone.length === 1 && came.length === 1) sweepPresetRename(data, gone[0], came[0], null);
+  }
   data.allergyPresets = cleaned;
   logAudit(data, staffFromReq(req), 'Updated allergy presets');
   writeData(data);
   res.json(data.allergyPresets);
 });
 
+// ONE preset renamed (exactly one old name vanished, one new appeared):
+// sweep every item Alert tag - and standing table notes - to the new name,
+// so the name-based tie can never silently break (owner ask, Aug '26).
+// A reorder or add/delete is never mistaken for a rename: the 1-in/1-out
+// shape is required.
+function sweepPresetRename(data, from, to, noteCategoryId) {
+  for (const m of data.menu || []) {
+    if (!Array.isArray(m.allergens)) continue;
+    m.allergens = m.allergens.map(a => {
+      if (typeof a === 'string') return a === from ? to : a;
+      if (a && a.name === from) return Object.assign({}, a, { name: to });
+      return a;
+    });
+  }
+  for (const fp of data.floorPlans || []) for (const t of fp.tables || []) {
+    if (!noteCategoryId) {
+      for (const al of t.allergies || []) {
+        if (typeof al.allergy !== 'string') continue;
+        if (al.allergy === from) al.allergy = to;
+        else if (al.allergy.indexOf(from + ' (') === 0) al.allergy = to + al.allergy.slice(from.length);
+      }
+    } else {
+      for (const nt of t.notes || []) {
+        if (nt.categoryId !== noteCategoryId || typeof nt.text !== 'string') continue;
+        if (nt.text === from) nt.text = to;
+        else if (nt.text.indexOf(from + ' (') === 0) nt.text = to + nt.text.slice(from.length);
+      }
+    }
+  }
+}
 // Item allergen tags: legacy plain strings ("Gluten" = contains) or objects
 // { name, level: 'contains'|'removable', note } matching the venue's allergy
 // matrix — red cannot be removed, yellow can be removed or substituted.
@@ -5408,6 +5445,15 @@ app.put('/api/note-categories', (req, res) => {
     }))
     .filter(c => c.name)
     .slice(0, 20);
+  for (const nc of cleaned) {
+    const old = (data.noteCategories || []).find(c => c.id === nc.id);
+    if (!old) continue;
+    const oldN = (old.presets || []).map(p => (p && p.name) || (typeof p === 'string' ? p : '')).filter(Boolean);
+    const newN = (nc.presets || []).map(p => p.name);
+    const gone = oldN.filter(nm => !newN.includes(nm));
+    const came = newN.filter(nm => !oldN.includes(nm));
+    if (gone.length === 1 && came.length === 1) sweepPresetRename(data, gone[0], came[0], nc.id);
+  }
   data.noteCategories = cleaned;
   logAudit(data, staffFromReq(req), 'Updated note categories');
   writeData(data);
@@ -28942,6 +28988,8 @@ async function saveAllergyPresets(presets) {
   render();
   try {
     state.allergyPresets = await api('/api/allergy-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
+    // A rename sweeps item tags and table notes server-side - pull them in.
+    try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); } catch (e2) {}
     render();
   } catch (e) {}
 }
@@ -29221,6 +29269,8 @@ async function saveNoteCategories(categories) {
   render();
   try {
     state.noteCategories = normNoteCategories(await api('/api/note-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ categories }) }));
+    // A rename sweeps item tags and table notes server-side - pull them in.
+    try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); } catch (e2) {}
     render();
   } catch (e) {}
 }

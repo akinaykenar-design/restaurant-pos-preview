@@ -64,11 +64,12 @@ as accents or decoration. Accents come from the curated set only.
 ## The standard dropdown (owner pick B, Aug '26)
 
 ONE dropdown everywhere: the closed control is a 44px chip (radius 10,
-bold value, no chevron — no arrows ever); the open list is the app-drawn
-menu (Chromium base-select `::picker`): the browser's OLD menu made ours
-(owner, Aug '26) — ONE left-aligned column of bordered 44px tiles on our
-surface, the current value on a SOLID accent bar with white text (the
-old menu's blue bar; green stays reserved for status). Never ship a bare native select or a third menu
+bold value, no chevron — no arrows ever); the open list is the ORIGINAL
+house dropdown (`.fp-dd`, the Aug 17 "Dropdown law", still used by the
+floor-view picker): a surface card of PLAIN borderless left-aligned rows
+(radius 8, normal weight, 44px min), the current value on a SOLID accent
+bar with white text. Chromium base-select `::picker` draws it for every
+real <select>; match `.fp-dd-item` exactly, never bordered key tiles. Never ship a bare native select or a third menu
 style; non-Chromium browsers fall back to the system picker. The page
 runs in STANDARDS mode — the `<!DOCTYPE html>` on line 1 is
 load-bearing (quirks mode disables base-select); never remove it.

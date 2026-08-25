@@ -109,5 +109,6 @@ glyph (e.g. Discounts' tag ≠ Categories; typed-note ≠ order-notes).
 NO ARROWS, EVER (owner rule, Aug '26): no drawn icon uses arrow motifs —
 no direction arrows, no up/down trend arrows, no arrow-circles. Express
 "more/less" with +/−, movement with position or colour, never an arrow.
-(The table-transfer swap glyph the owner picked earlier is the single
-grandfathered exception unless they say otherwise.)
+(Two owner-approved exceptions: the table-transfer swap glyph, and the
+sort menu's "$ ↑" / "$ ↓" price labels — the owner asked for the $arrow
+form back, Aug '26.)

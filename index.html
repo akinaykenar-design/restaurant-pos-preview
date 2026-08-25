@@ -11866,7 +11866,7 @@ async function saveMenuItemCountdown(id, value) {
   try {
     await api('/api/menu/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     state.menu = await api('/api/menu');
-    render();
+    renderItemRow(id);
   } catch (e) { state.toast = 'Could not update countdown.'; render(); }
 }
 // "Prints at": this item's docket line goes only to that station (blank =
@@ -14619,7 +14619,8 @@ function toggleItemFlagCategory(id) {
   const cur = itemFlagCatIds();
   const next = cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id];
   state.settings.itemFlagCategoryIds = next;
-  render();
+  const pk = Object.keys(state.itemPillsOpen || {})[0];
+  if (pk) renderItemRow(pk.split(':')[0]); else render();
   saveSettingsPart({ itemFlagCategoryIds: next }, 'Could not save.');
 }
 function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
@@ -29880,7 +29881,7 @@ async function toggleItemModifierGroup(itemId, groupId) {
   const ids = (item.modifierGroupIds || []);
   const next = ids.includes(groupId) ? ids.filter(id => id !== groupId) : [...ids, groupId];
   item.modifierGroupIds = next; // optimistic
-  render();
+  renderItemRow(itemId);
   try {
     await api(`/api/menu/${itemId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ modifierGroupIds: next }) });
   } catch (e) { state.toast = 'Could not update modifiers.'; render(); }
@@ -30081,11 +30082,11 @@ async function toggleMenuItemActive(id) {
   if (!it) return;
   const disabled = !it.disabled;
   it.disabled = disabled; // optimistic
-  render();
+  renderItemRow(id);
   try {
     await api(`/api/menu/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: it.name, category: it.category, disabled }) });
     state.menu = await api('/api/menu');
-    render();
+    renderItemRow(id);
   } catch (e) { it.disabled = !disabled; state.toast = 'Could not update that item.'; render(); }
 }
 async function toggleCategoryActive(id) {
@@ -30363,7 +30364,7 @@ async function commitItemSizes(itemId) {
   } catch (e) {
     state.toast = 'Could not save sizes.';
   }
-  render();
+  renderItemRow(itemId);
 }
 
 function toggleItemSizePreset(itemId, preset) {
@@ -30484,6 +30485,15 @@ function armMenuItemRow(row) {
     el._actBound = true;
     el.addEventListener('click', (e) => handleActClick(el, e));
   });
+  row.querySelectorAll('.item-size-price-input').forEach(el => {
+    if (el._szBound) return; el._szBound = true;
+    el.addEventListener('input', (e) => { updateItemSizePrice(el.dataset.id, el.dataset.preset, e.target.value); });
+    el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
+  });
+  row.querySelectorAll('.menu-item-price-quick-edit').forEach(el => {
+    if (el._pkBound) return; el._pkBound = true;
+    el.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.blur(); });
+  });
   // Drag reorder — collapsed rows only (same rule as makeSortable's open guard).
   row.style.touchAction = 'pan-y';
   row.addEventListener('pointerdown', (e) => {
@@ -30501,6 +30511,19 @@ function armMenuItemRows() {
   document.querySelectorAll('#menu-admin-list .menu-item-expandable').forEach(armMenuItemRow);
 }
 
+// Repaint ONE item row in place - the whole list is ~700 rows and a full
+// render costs hundreds of ms (owner: "lag when all items are showing",
+// Aug '26). Falls back to a full render when the row isn't on screen.
+function renderItemRow(itemId) {
+  const list = document.getElementById('menu-admin-list');
+  const item = state.menu.find(m => m.id === itemId);
+  const row = list && item && list.querySelector(`.menu-item-expandable[data-id="${itemId}"]`);
+  if (!row) { render(); return; }
+  row.insertAdjacentHTML('beforebegin', menuItemRowHtml(item));
+  const fresh = row.previousElementSibling;
+  row.remove();
+  armMenuItemRow(fresh);
+}
 // Rebuild ONLY the Items list (used by the item search box), then re-arm rows.
 function refreshMenuAdminList() {
   const list = document.getElementById('menu-admin-list');
@@ -30564,7 +30587,10 @@ async function saveMenuItemQuickEdit(itemId, field, value) {
   } catch (e) {
     state.toast = `Could not save ${field}.`;
   }
-  render();
+  // A section move can change what the active filter shows - only then does
+  // the list rebuild; otherwise the one row repaints (700-row lag fix).
+  if ((field === 'category' || field === 'subcategoryId') && (state.menuAdminCategoryFilter || state.menuAdminSubcategoryFilter || state.menuAdminSubsubFilter)) render();
+  else renderItemRow(itemId);
 }
 
 function toggleMenuItemEdit(itemId) {
@@ -33032,7 +33058,7 @@ function handleActClick(el, e) {
           const next = !t ? [...cur, { name: el.dataset.val, level: 'contains', note: '' }]
             : t.level === 'contains' ? cur.map(x => x.name === t.name ? { ...x, level: 'removable' } : x)
             : cur.filter(x => x.name !== t.name);
-          it.allergens = next; render();
+          it.allergens = next; renderItemRow(it.id);
           api('/api/menu/' + it.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allergens: next }) }).catch(() => {});
         }
       }
@@ -33946,7 +33972,7 @@ function handleActClick(el, e) {
         const item = state.menu.find(m => m.id === el.dataset.id);
         if (item) {
           item.rowBreak = el.dataset.val === 'true';
-          render();
+          renderItemRow(item.id);
           api(`/api/menu/${item.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ rowBreak: item.rowBreak }) }).catch(() => {});
         }
       }
@@ -33972,7 +33998,7 @@ function handleActClick(el, e) {
           state._iePillsSnap = it ? { id: it.id, allergens: JSON.parse(JSON.stringify(it.allergens || [])), variants: JSON.parse(JSON.stringify(it.variants || [])), modifierGroupIds: [...(it.modifierGroupIds || [])] } : null;
         } else state._iePillsSnap = null;
         state.itemPillsOpen = was ? {} : { [k]: true }; // one popup at a time
-        render();
+        renderItemRow(k.split(':')[0]);
       }
       else if (act === 'item-flag-cat-toggle') { toggleItemFlagCategory(el.dataset.val); }
       else if (act === 'item-pills-cancel') {
@@ -33984,7 +34010,7 @@ function handleActClick(el, e) {
             api('/api/menu/' + it.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allergens: snap.allergens, variants: snap.variants, modifierGroupIds: snap.modifierGroupIds }) }).catch(() => {});
           }
         }
-        state._iePillsSnap = null; state.itemPillsOpen = {}; render();
+        state._iePillsSnap = null; const pk = Object.keys(state.itemPillsOpen || {})[0]; state.itemPillsOpen = {}; renderItemRow((el.dataset.key || pk || ':').split(':')[0]);
       }
       else if (act === 'toggle-sort') { state.sortMenuOpen = state.sortMenuOpen === el.dataset.list ? null : el.dataset.list; state.maDdOpen = null; render(); }
       else if (act === 'ma-dd') { state.maDdOpen = state.maDdOpen === el.dataset.dd ? null : el.dataset.dd; state.sortMenuOpen = null; render(); }

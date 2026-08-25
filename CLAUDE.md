@@ -76,10 +76,12 @@ load-bearing (quirks mode disables base-select); never remove it.
 
 Every expanded row editor is: two identity rows, then ONE grid of picks,
 then a single footer row — and EVERY cell is the same labelled chip
-(`.ie-chip`): small-caps label INSIDE the box, bold value under it,
-borderless control (owner, Aug '26: "all font bold etc consistent,
-headers not inside the selection box" — no naked label-above-field
-cells). A pick's options open in a popup — never an always-open pill
+(`.ie-chip`): small-caps header OUTSIDE (above) the box, one bold value
+size inside a 44px bordered box (owner flipped inside→outside, Aug '26:
+"put headers outside the box"). Number pads are one family too: keys
+are HALF an order tile (synced from the grid like the seat pop), the
+decimal key is a permanent slot (dimmed on whole-number fields), and
+the 64px square ✕/✓ always read larger than the keys. A pick's options open in a popup — never an always-open pill
 cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.

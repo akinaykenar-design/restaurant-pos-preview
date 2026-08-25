@@ -128,6 +128,26 @@ cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.
 
+## No native drag, and no flashing borders (owner, Aug '26)
+
+Sorting is OURS (`makeSortable` / `beginSortDrag`, pointer events). No
+element may carry `draggable="true"`, and a global capture-phase
+`dragstart` handler refuses the browser's own drag outright. The old HTML5
+drag-and-drop left admin rows marked draggable long after its handlers were
+deleted, so the browser started a ghost drag on press — the red no-drop
+cursor, then a `dragend` that ran `_clearStuckDragState` and tore the real
+drag out mid-gesture. Only rows repainted after bind time misbehaved (the
+one-row refresh), which is why it felt random. Never re-add native DnD.
+`will-change` goes on the DRAGGED row only — putting it on every neighbour
+made 712 compositor layers and froze the full items list.
+
+Rings never move. No border or ring may blink, pulse, bloom or breathe
+(owner: "remove flashing borders everywhere") — a ring states something by
+sitting there. Deleted: the Design jump flash (`ctl-flash`), the attention
+table's glow pulse (the glow stays, still), the armed move-source ring pulse
+(the ring stays), the transfer landing bloom (the chip says it), and Send's
+white ring-pop on press.
+
 ## No hover, EVER (owner rule, Aug '26 — total)
 
 Nothing changes on hover. Not a colour, not a border, not a shadow, not

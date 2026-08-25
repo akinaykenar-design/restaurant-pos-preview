@@ -192,7 +192,9 @@ html,body{touch-action:pan-x pan-y;overscroll-behavior:none;}
    the whole app UI; re-enable both only where the owner genuinely types or
    needs to select (inputs, textareas, contenteditable). */
 html{-webkit-touch-callout:none;-webkit-user-select:none;-moz-user-select:none;user-select:none;}
-input,textarea,select,[contenteditable="true"]{-webkit-touch-callout:default;-webkit-user-select:text;-moz-user-select:text;user-select:text;}
+input,textarea,[contenteditable="true"]{-webkit-touch-callout:default;-webkit-user-select:text;-moz-user-select:text;user-select:text;}
+/* selects stay user-select:none - a double-click on a dropdown chip must not
+   paint its label blue (owner, Aug '26: "these turn blue when double clicked") */
 /* FONT LAW: form controls NEVER fall back to the operating system's font —
    they inherit the app's. Lowest specificity, so every deliberate font
    (e.g. the mono inputs in modals) still wins. */
@@ -2487,7 +2489,7 @@ body[data-fs-picker] .tp-actions{ flex:none; }
 /* One-row ticket head: table button + covers chip + notes + call-away */
 /* Quick shortcuts share the panel width — proportional, ONE row, never cut
    or wrapped (owner, Aug '26). Height stays fixed; only width flexes. */
-.ticket-head-row{display:flex;flex-wrap:nowrap;gap:6px;margin-top:2px;align-items:stretch;justify-content:space-evenly;}
+.ticket-head-row{display:flex;flex-wrap:nowrap;gap:6px;margin-top:2px;align-items:stretch;justify-content:flex-start;} /* icons hug the LEFT - a lone icon never floats centred (owner, Aug '26) */
 /* Pinned docket buttons never STRETCH (one pin used to fill the whole row —
    owner, Aug '26): each keeps its size, the row spaces them evenly, and with
    plenty of pins they shrink just enough to fill edge to edge. */
@@ -3033,6 +3035,12 @@ body[data-fixed-cols="1"] .admin-content .acct-grid{ grid-template-columns:repea
 @media (max-width:768px){
   .admin-content .acct-grid{ grid-template-columns:repeat(auto-fill,minmax(var(--item-min-w,118px),1fr)); }
 }
+/* Admin LISTS march on the hub width too (owner, Aug '26: "same length as
+   order/admin hub") - row cards end where the tile grid ends. !important
+   beats the inline --admin-list-w caps on the list containers. */
+.admin-content .hub-w{ width:calc(100% - var(--ticket-w,360px)); max-width:none !important; }
+body[data-ticket-pos="bottom"] .admin-content .hub-w{ width:100%; }
+@media (max-width:768px){ .admin-content .hub-w{ width:auto; } }
 .acct-tile{ border-radius:10px; /* same corner as .item-card (owner: tiles match) */
   display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
   background:var(--surface); border:1px solid var(--steel-200); cursor:pointer;
@@ -3349,6 +3357,13 @@ body[data-theme="dark"] .menu-item-name-quick-edit:hover, body[data-theme="dark"
 .scrmock [data-mkel]:hover:not(:has([data-mkel]:hover)){outline:1.5px dashed var(--orange);outline-offset:1px;cursor:pointer;}
 .mk-railgrip:hover::after{background:var(--orange);}
 .btn-add:hover, .btn-secondary:hover, .btn-confirm:hover, .btn-danger:hover, .icon-sq:hover, .color-dot-btn:hover, .shape-chip:hover, .staff-tile:hover, .item-card:hover, .acct-tile:hover, .pay-opt:hover, .switch:hover, .dup-icon-btn:hover, .pin-pad button:hover, .simple-table-btn:hover, .sort-btn:hover{transform: none !important;}
+/* NO HOVER ANIMATION, EVER (owner rule, Aug '26): a mouse gliding over the
+   till must not make it stir. A hovered element may swap a flat colour but
+   it swaps INSTANTLY - nothing eases, fades, lifts or scales on hover. */
+@media (hover:hover){
+  :hover, :hover::before, :hover::after{ transition:none !important; }
+  button:hover, [data-act]:hover, .item-card:hover, .acct-tile:hover{ transform:none !important; animation:none !important; }
+}
 }
 
 
@@ -6301,6 +6316,10 @@ app.put('/api/settings', (req, res) => {
   // The built-in VIP / Allergies note sections can be renamed (empty = default).
   if (typeof req.body.vipLabel === 'string') data.settings.vipLabel = req.body.vipLabel.trim().slice(0, 40) || null;
   if (typeof req.body.allergyLabel === 'string') data.settings.allergyLabel = req.body.allergyLabel.trim().slice(0, 40) || null;
+  // Which order-note category the ITEM flag picker ties to ('' = the built-in
+  // Allergies). The item editor's chip renames and repopulates from this
+  // category (owner, Aug '26: "an option inside that ties to an ordernote").
+  if (typeof req.body.itemFlagCategoryId === 'string') data.settings.itemFlagCategoryId = req.body.itemFlagCategoryId.slice(0, 60);
   if (req.body.appBarPos && typeof req.body.appBarPos === 'object') {
     const next = Object.assign({}, data.settings.appBarPos);
     for (const dev of ['pc', 'tablet']) {
@@ -13972,13 +13991,24 @@ function itemAllergens(item) {
 // "any seat" (no target known).
 function allergenMatches(item, seat) {
   const tags = itemAllergens(item);
-  if (!tags.length || !(state.allergies || []).length) return [];
+  if (!tags.length) return [];
   const names = tags.map(t => t.name.toLowerCase());
   const hits = [];
-  for (const a of state.allergies) {
-    if (seat !== undefined && a.seat != null && !(seat == null || seat === 'all' || a.seat === seat)) continue;
+  const seatOk = (s) => !(seat !== undefined && s != null && !(seat == null || seat === 'all' || s === seat));
+  for (const a of (state.allergies || [])) {
+    if (!seatOk(a.seat)) continue;
     const base = String(a.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
     if (names.includes(base)) hits.push(a);
+  }
+  // The tied note category's seat notes warn exactly like allergies - the
+  // flag system follows the tie (owner, Aug '26).
+  const tiedId = (state.settings && state.settings.itemFlagCategoryId) || '';
+  if (tiedId) {
+    for (const nte of (state.notes || [])) {
+      if (nte.categoryId !== tiedId || !seatOk(nte.seat)) continue;
+      const base = String(nte.text || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
+      if (names.includes(base)) hits.push({ seat: nte.seat == null ? null : nte.seat, allergy: nte.text });
+    }
   }
   return hits;
 }
@@ -14517,6 +14547,24 @@ function presetCardStyle(p) {
 // The built-in VIP / Allergies note sections can be renamed in admin.
 function vipLabel() { return (state.settings && state.settings.vipLabel) || 'VIP'; }
 function allergyLabel() { return (state.settings && state.settings.allergyLabel) || 'Allergies'; }
+// The item flag picker's tie: '' = the Allergies builtin, else a custom note
+// category id. Chip label + tile set follow the tied category, so renaming the
+// note category renames the picker with it. Deleted category = fall back.
+function itemFlagCat() {
+  const id = (state.settings && state.settings.itemFlagCategoryId) || '';
+  return id ? ((state.noteCategories || []).find(c => c.id === id) || null) : null;
+}
+function itemFlagLabel() { const c = itemFlagCat(); return c ? c.name : allergyLabel(); }
+function itemFlagPresets() {
+  const c = itemFlagCat();
+  if (!c) return state.allergyPresets || [];
+  return (c.presets || []).filter(p => p && p.name).map(p => ({ name: p.name, color: p.color || null, subTypes: [] }));
+}
+function saveItemFlagCategory(id) {
+  state.settings.itemFlagCategoryId = id || '';
+  render();
+  saveSettingsPart({ itemFlagCategoryId: id || '' }, 'Could not save the tie.');
+}
 function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
 function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', seats: [], wholeTable: false }; }
 
@@ -23328,14 +23376,14 @@ function renderMenuAdmin() {
     ${subsubOptions.length > 0 ? maFilterDd('subsub', 'Sub-subsection…', [{ v: '', l: 'All sub-subsections' }].concat(subsubOptions.map(s => ({ v: s.id, l: s.name }))), state.menuAdminSubsubFilter) : ''}
     <input id="menu-admin-search-input" class="tb-ctl" type="text" placeholder="Search items…" value="${state.menuAdminSearch}" style="width:160px;">
   </div>
-  <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${sortControl('menu-items')}${state.selectedMenuItemIds.length > 0 ? `
+  <div class="select-all-row hub-w"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${sortControl('menu-items')}${state.selectedMenuItemIds.length > 0 ? `
       
       <button class="icon-sq" data-act="open-bulk-edit">${ACT_PENCIL_SVG}</button>
       <button class="icon-sq" data-act="duplicate-selected-menu-items">${ACT_COPY_SVG}</button>
       <button class="icon-sq" data-act="delete-selected-menu-items">${ACT_TRASH_SVG}</button>
       <button class="icon-sq" data-act="clear-menu-selection">${ACT_X_SVG}</button>
     ` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-menu-item">+ Item</button></div>
-  <div class="menu-items-list" id="menu-admin-list" style="max-width:var(--admin-list-w,560px);display:flex;flex-direction:column;gap:8px;">${renderMenuAdminRows()}</div>
+  <div class="menu-items-list hub-w" id="menu-admin-list" style="display:flex;flex-direction:column;gap:8px;">${renderMenuAdminRows()}</div>
   `;
 }
 
@@ -23444,7 +23492,7 @@ function menuItemRowHtml(m) {
                 </select></div>` : ''}` : ''}
             </div>
             <div class="ie-chips">
-              <button type="button" class="ie-chip" data-act="toggle-item-pills" data-key="${m.id}:allergens"><small>Allergens</small><b class="${tags.length ? 'alg' : ''}">${esc(sum(tags.map(t => t.name)))}</b></button>
+              <button type="button" class="ie-chip" data-act="toggle-item-pills" data-key="${m.id}:allergens"><small>${esc(itemFlagLabel())}</small><b class="${tags.length ? 'alg' : ''}">${esc(sum(tags.map(t => t.name)))}</b></button>
               ${state.sizePresets.length ? `<button type="button" class="ie-chip" data-act="toggle-item-pills" data-key="${m.id}:sizes"><small>Sizes</small><b>${esc(sum(sizeSel))}</b></button>` : ''}
               <button type="button" class="ie-chip" data-act="toggle-item-pills" data-key="${m.id}:mods"><small>Modifiers</small><b>${esc(sum(attached.map(g => g.name)))}</b></button>
               ${(state.printerStations || []).length ? `
@@ -23468,9 +23516,14 @@ function menuItemRowHtml(m) {
               <label class="field-label" style="margin:0;">New row</label>
               ${togglePill(!!m.rowBreak, 'toggle-item-rowbreak', `data-id="${m.id}"`)}
             </div>
-            ${pillsOpen[m.id + ':allergens'] ? pop(m.id + ':allergens', 'Allergens', `
+            ${pillsOpen[m.id + ':allergens'] ? pop(m.id + ':allergens', esc(itemFlagLabel()), `
+              <label class="ie-chip" style="margin:0 0 10px;max-width:240px;"><small>Ties to</small>
+                <select style="${selStyle}" onchange="saveItemFlagCategory(this.value)">
+                  <option value="" ${!(state.settings.itemFlagCategoryId || '') ? 'selected' : ''}>${esc(allergyLabel())}</option>
+                  ${(state.noteCategories || []).map(c => `<option value="${c.id}" ${(state.settings.itemFlagCategoryId || '') === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+                </select></label>
               <div class="item-allergen-pills ie-pills">
-                ${state.allergyPresets.map(ap => {
+                ${itemFlagPresets().map(ap => {
                   const t = tags.find(x => x.name === ap.name);
                   return `<button type="button" class="pay-opt xs ${t ? 'active algn-' + t.level : ''}" data-act="toggle-item-allergen" data-id="${m.id}" data-val="${esc(ap.name)}">${esc(ap.name)}</button>`;
                 }).join('')}
@@ -25178,7 +25231,7 @@ function renderBulkEditModal() {
       </div>
       ${(m.allergenMode === 'set' || m.allergenMode === 'add') ? `
         <div style="display:flex;flex-wrap:wrap;gap:6px;">
-          ${state.allergyPresets.map(ap => `<button type="button" class="pay-opt xs ${m.allergens.includes(ap.name) ? 'active' : ''}" data-act="bulk-allergen-toggle" data-val="${esc(ap.name)}">${esc(ap.name)}</button>`).join('')}
+          ${itemFlagPresets().map(ap => `<button type="button" class="pay-opt xs ${m.allergens.includes(ap.name) ? 'active' : ''}" data-act="bulk-allergen-toggle" data-val="${esc(ap.name)}">${esc(ap.name)}</button>`).join('')}
         </div>` : ''}
       <div class="modal-actions">
         <button class="icon-action discard" data-act="close-bulk-edit">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>

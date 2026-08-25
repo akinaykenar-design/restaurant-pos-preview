@@ -81,6 +81,15 @@ never a loose field outside the grid. The Items editor is the model
 (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge other
 editors on it rather than inventing new layouts.
 
+## No hover animation, EVER (owner rule, Aug '26)
+
+Nothing moves, grows, shrinks, lifts, or transitions on hover — no
+transform, no animated shadow, no eased colour fade. This is a till:
+fingers don't hover, and a mouse gliding over the screen must never
+make the UI stir. At most a hover may swap a flat colour INSTANTLY
+(no transition). When adding any control, check it inherits no hover
+animation from a shared class; kill it if it does.
+
 ## Icons
 
 A drawn icon may not repeat: two different pages/actions never share a

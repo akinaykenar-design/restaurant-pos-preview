@@ -132,10 +132,7 @@ the ✕/✓ ARE keys — the action row repeats the key grid's columns and gap
 and each button is a key-sized cell in the last two columns, whatever the
 pad's column count (owner flipped this, Aug '26: "i dont like the numbers
 being larger than cross and tick ... everything uniform"). Set
-`--pad-cols` on the POP, never on the grid, so the action row follows. The
-seat pad's keys STRETCH to fill the frame (`grid-auto-rows:minmax(44px,1fr)`)
-— the box keeps its one size and position, and two covers give two big keys
-instead of two small ones over 250px of nothing. Every button in an action
+`--pad-cols` on the POP, never on the grid, so the action row follows. Every button in an action
 row is a full cell, the note button included. A pick's options open in a popup — never an always-open pill
 cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge

@@ -360,12 +360,16 @@ same word. No word names two things (that is why the docket's button row is
 "Docket tiles" and not "Quick tiles" — one of the tiles is the Quick note).
 
 - **The bar** — the band with Order / Admin / search / power (`.topbar`).
-  It is NOT "the nav" (owner, Aug '26, correcting exactly this mix-up).
-- **The nav** — admin's list of pages: Daily, Dashboard, Reservations, Menu,
-  Inventory, Staff, Finance, Integrations, Settings (`.admin-sidebar`). A
-  column on PC and tablet, a sideways strip on the phone — same nav, same
-  colours, only the direction changes.
-- **Menu bar** — the section rail (`catrail`). **Subsection bar** below it.
+  It is NOT a nav (owner, Aug '26, correcting exactly this mix-up).
+- **Admin nav** — admin's list of pages: Daily, Dashboard, Reservations, Menu,
+  Inventory, Staff, Finance, Integrations, Settings (`.admin-sidebar`).
+- **Menu nav** — the order screen's section rail (`.catrail`). **Subsection
+  bar** below it (a filter inside one section, not navigation).
+  A nav is a COLUMN on PC and tablet and a sideways STRIP on the phone. The
+  direction changes; the colours must not (owner, Aug '26: "a looks good") —
+  not selected is the plain surface, selected is the accent TINT with accent
+  text, on every device. The phone was painting a cream chip and a SOLID
+  accent chip: a second visual language for the same control.
 - **Menu tile** — one item on the order grid. **Subsection tile** likewise.
 - **Docket** — the order panel. **Docket text**, **Docket tiles**.
 - **Docket tiles** — the button row across the docket's head: Table, Covers,

@@ -75,6 +75,16 @@ where the docket sits inside the preview. Four cards read at once instead of
 one and a half, and the empty right half is gone. Below 1100px it falls back
 to the stacked column, and the phone's cut-in-half layout is untouched.
 
+## Asking who it's for is PER SECTION (owner, Aug '26)
+
+A round of drinks belongs to a person; a shared plate of mezze goes to the
+middle of the table. So each section carries `askSeat`: absent means ask,
+`false` means this section never asks. Set it in Menu → Sections, next to
+Default course. The venue's own `promptSeatOnAdd` stays the master — a
+section can only opt OUT, never in — and `itemAddNeedsSeatPrompt(item)`
+takes the item so the gate can see which section it came from (with no
+argument it falls back to whatever the open options pane is holding).
+
 ## Prices (owner, Aug '26)
 
 Hard-wired, not a setting: a price NEVER appears on a menu tile, and ALWAYS

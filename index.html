@@ -5682,6 +5682,8 @@ app.put('/api/categories/:id', (req, res) => {
   if (disabled !== undefined) cat.disabled = !!disabled;
   if (image !== undefined) cat.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) cat.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
+  // Only the OFF state is stored; absent means "ask, like the venue says".
+  if (req.body.askSeat !== undefined) cat.askSeat = req.body.askSeat === false ? false : undefined;
   if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
   const oldName = cat.name;
   cat.name = name.trim();
@@ -13940,8 +13942,19 @@ function tableSquareLabel(id) {
   return `<span class="tbl-sq">${t ? esc(String(t.label)) : '—'}</span>${fp ? `<span class="tbl-sq-plan">${esc(fp.name)}</span>` : ''}`;
 }
 
-function itemAddNeedsSeatPrompt() {
-  return state.settings.seatNumbersEnabled && state.settings.promptSeatOnAdd && state.covers > 1;
+// A section can switch position-asking off for itself: food goes to the
+// middle of the table, drinks belong to a person (owner, Aug '26). The venue
+// switch is still the master — this can only opt out, never in.
+function sectionAsksSeat(item) {
+  if (!item) return true;
+  const cat = (state.categories || []).find(c => c.name === item.category);
+  return !cat || cat.askSeat !== false;
+}
+function itemAddNeedsSeatPrompt(item) {
+  // No item given → the one whose options pane is open.
+  if (item === undefined && state.itemOptions) item = (state.menu || []).find(m => m.id === state.itemOptions.itemId);
+  return state.settings.seatNumbersEnabled && state.settings.promptSeatOnAdd
+    && state.covers > 1 && sectionAsksSeat(item);
 }
 // Human label for a line/allergy/note seat value. A number → the configurable
 // prefix + number ("Seat 3" or just "3"); 'all' → the shared label ("Share");
@@ -14130,7 +14143,7 @@ function addToCart(item, variant, modifiers, seat) {
   // Only 'ordering' groups force the options pane; 'default' groups auto-apply
   // and 'later' groups wait for the line editor.
   const needsModifiers = (item.modifierGroupIds || []).some(gid => { const g = state.modifierGroups.find(x => x.id === gid); return g && (g.promptAt || 'ordering') === 'ordering'; });
-  const needsSeat = itemAddNeedsSeatPrompt();
+  const needsSeat = itemAddNeedsSeatPrompt(item);
   // A persistent "active seat" (chosen in the ticket head) is applied to every
   // add, so there's no per-item seat pop-up unless the active seat is "Ask".
   const activeSeat = state.activeSeat === 'all' ? 'all' : ((state.activeSeat && state.activeSeat <= state.covers) ? state.activeSeat : null);
@@ -23016,6 +23029,16 @@ async function saveSectionCourse(kind, id, val) {
     render();
   } catch (e) { state.toast = 'Could not save course.'; render(); }
 }
+async function saveSectionAskSeat(id, val) {
+  const cat = state.categories.find(c => c.id === id);
+  if (!cat) return;
+  try {
+    await api('/api/categories/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: cat.name, askSeat: val === '1' }) });
+    state.categories = await api('/api/categories');
+    render();
+  } catch (e) { state.toast = 'Could not save that.'; render(); }
+}
 // <option> list for assigning an item to a subsection, indented by depth.
 function subcatOptionsHtml(categoryId, selectedId) {
   return subcatTreeOrdered(categoryId).map(({ sub, depth }) =>
@@ -23121,6 +23144,11 @@ function renderCategoriesAdmin() {
               <input class="category-name-quick-input" data-id="${cat.id}" type="text" value="${esc(cat.name)}"></label>
             <label class="ie-chip"><small>Default course</small>
               <select class="pp-select" onchange="saveSectionCourse('category', '${cat.id}', this.value)">${courseOptionsHtml(cat.defaultCourse)}</select></label>
+            <label class="ie-chip"><small>Ask position</small>
+              <select class="pp-select" onchange="saveSectionAskSeat('${cat.id}', this.value)">
+                <option value="1" ${cat.askSeat === false ? '' : 'selected'}>Ask</option>
+                <option value="0" ${cat.askSeat === false ? 'selected' : ''}>Never</option>
+              </select></label>
           </div>
           ${renderAdminSubcatTree(cat.id, null, 0)}
           <button class="btn-add inline" data-act="add-subcategory-for" data-category="${cat.id}" style="align-self:flex-end;margin-top:2px;">+ Subsection</button>

@@ -142,7 +142,14 @@ the ✕/✓ ARE keys — the action row repeats the key grid's columns and gap
 and each button is a key-sized cell in the last two columns, whatever the
 pad's column count (owner flipped this, Aug '26: "i dont like the numbers
 being larger than cross and tick ... everything uniform"). Set
-`--pad-cols` on the POP, never on the grid, so the action row follows. Every button in an action
+`--pad-cols` on the POP, never on the grid, so the action row follows. Seats
+a table hasn't got are DRAWN as ghost cells (`.seat-ghost`, dashed and
+untappable, same size as a key), rebuilt on every sync from `cols * R3`:
+the box keeps its one size and place, every key stays exactly where it was,
+and a two-cover table reads as "this table only has two" instead of a void
+(owner, Aug '26: "ghost slots is good"). A party bigger than the frame
+scrolls inside it, as before. Same trick the notes popup uses for its short
+tabs — never solve an empty pad by resizing the box or stretching the keys. Every button in an action
 row is a full cell, the note button included. A pick's options open in a popup — never an always-open pill
 cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge

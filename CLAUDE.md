@@ -263,6 +263,31 @@ recorded seat allergies always fire regardless of the picks. The item
 side never renames when a category does — generic container, picked
 sources.
 
+## The vocabulary — every element has ONE proper name
+
+Owner rule, Aug '26: "I want every element to be named proper." A name is
+picked once and reused everywhere — the Design preview's `data-mkname`, the
+settings card that controls it, and the button's own `aria-label` all say the
+same word. No word names two things (that is why the docket's button row is
+"Docket tiles" and not "Quick tiles" — one of the tiles is the Quick note).
+
+- **Menu bar** — the section rail (`catrail`). **Subsection bar** below it.
+- **Menu tile** — one item on the order grid. **Subsection tile** likewise.
+- **Docket** — the order panel. **Docket text**, **Docket tiles**.
+- **Docket tiles** — the button row across the docket's head: Table, Covers,
+  Order notes, Quick note, Call away, Auto course, Customer, Reprint, Move
+  items. Set in Design → Docket tiles (Covers lives on the Covers page,
+  since it is a covers decision, not a docket one). Stored as
+  `settings.docketShortcuts` — code-only, never shown.
+- **Courses**, **Order notes**, **Quick note**, **Call away**.
+- **Position** — who an item is for. The **position pad** asks it; the
+  **covers pad** counts the party.
+- **Covers** — how many people. **Seat** — one of them; the word itself is
+  the venue's (`seatPrefix`).
+
+When you name a new element, add it here and use the same word in all three
+places.
+
 ## Icons
 
 NO ICON PACKS (owner, Aug '26: "lets remove icon packs in general until we

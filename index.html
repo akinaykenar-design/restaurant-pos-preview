@@ -4898,6 +4898,12 @@ function loadAndMigrate() {
     data.settings = DEFAULT_SETTINGS;
     writeData(data);
   }
+  if (data.settings.askSeatOff === undefined) {
+    const carried = (data.categories || []).filter(c => c.askSeat === false).map(c => c.id);
+    data.settings.askSeatOff = { salesCategoryIds: [], sectionIds: carried, itemIds: [] };
+    (data.categories || []).forEach(c => { delete c.askSeat; });
+    writeData(data);
+  }
   if (data.settings.tableMode === undefined) {
     data.settings.tableMode = 'floorplan';
     data.settings.simpleTableCount = 12;
@@ -5686,8 +5692,6 @@ app.put('/api/categories/:id', (req, res) => {
   if (disabled !== undefined) cat.disabled = !!disabled;
   if (image !== undefined) cat.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) cat.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
-  // Only the OFF state is stored; absent means "ask, like the venue says".
-  if (req.body.askSeat !== undefined) cat.askSeat = req.body.askSeat === false ? false : undefined;
   if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
   const oldName = cat.name;
   cat.name = name.trim();
@@ -5903,6 +5907,11 @@ app.put('/api/settings', (req, res) => {
   if (req.body.tileColors !== undefined) data.settings.tileColors = !!req.body.tileColors;
   if (req.body.floorStatusEnabled !== undefined) data.settings.floorStatusEnabled = !!req.body.floorStatusEnabled;
   if (req.body.washOpacity !== undefined) { const w = parseFloat(req.body.washOpacity); data.settings.washOpacity = (w > 0 && w <= 1) ? w : null; }
+  if (req.body.askSeatOff !== undefined) {
+    const o = req.body.askSeatOff || {};
+    const ids = (v) => Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 2000) : [];
+    data.settings.askSeatOff = { salesCategoryIds: ids(o.salesCategoryIds), sectionIds: ids(o.sectionIds), itemIds: ids(o.itemIds) };
+  }
   if (typeof req.body.searchEnabled === 'boolean') data.settings.searchEnabled = req.body.searchEnabled;
   if (req.body.burnMinutes !== undefined) data.settings.burnMinutes = req.body.burnMinutes === null ? null : req.body.burnMinutes === 'booking' ? 'booking' : Math.max(10, Math.min(600, parseInt(req.body.burnMinutes) || 90));
   if (req.body.tableNumSize !== undefined) data.settings.tableNumSize = ['xs', 'sm', 'md', 'lg', 'xl'].includes(req.body.tableNumSize) ? req.body.tableNumSize : 'md';
@@ -13949,10 +13958,30 @@ function tableSquareLabel(id) {
 // A section can switch position-asking off for itself: food goes to the
 // middle of the table, drinks belong to a person (owner, Aug '26). The venue
 // switch is still the master — this can only opt out, never in.
+function askSeatOff() {
+  const o = (state.settings && state.settings.askSeatOff) || {};
+  return { salesCategoryIds: o.salesCategoryIds || [], sectionIds: o.sectionIds || [], itemIds: o.itemIds || [] };
+}
+// Most specific wins: the item itself, then its section, then its sales
+// category. Nothing listed → the venue's own switch decides.
 function sectionAsksSeat(item) {
   if (!item) return true;
-  const cat = (state.categories || []).find(c => c.name === item.category);
-  return !cat || cat.askSeat !== false;
+  const off = askSeatOff();
+  if (off.itemIds.includes(item.id)) return false;
+  const sec = (state.categories || []).find(c => c.name === item.category);
+  if (sec && off.sectionIds.includes(sec.id)) return false;
+  if (item.salesCategoryId && off.salesCategoryIds.includes(item.salesCategoryId)) return false;
+  return true;
+}
+async function toggleAskSeatOff(kind, id) {
+  const off = askSeatOff();
+  const key = kind === 'cat' ? 'salesCategoryIds' : kind === 'section' ? 'sectionIds' : 'itemIds';
+  const list = off[key].includes(id) ? off[key].filter(x => x !== id) : [...off[key], id];
+  const next = { ...off, [key]: list };
+  state.settings = { ...state.settings, askSeatOff: next };
+  render();
+  try { await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ askSeatOff: next }) }); }
+  catch (e) { state.toast = 'Could not save that.'; render(); }
 }
 function itemAddNeedsSeatPrompt(item) {
   // No item given → the one whose options pane is open.
@@ -21849,6 +21878,7 @@ const ADMIN_SECTIONS = [
     { key: 'settings-devices', label: 'Devices' },
     { key: 'screen', label: 'Design' },
     { key: 'floorplan', label: 'Floor layout' },
+    { key: 'settings-covers', label: 'Covers' },
     { key: 'settings-courses', label: 'Courses' },
     { key: 'settings-void', label: 'Void Reasons' },
     { key: 'settings-backups', label: 'Backups' },
@@ -21870,7 +21900,8 @@ const SETTINGS_INDEX = [
   { page: 'screen', label: 'Menu tile size', terms: 'tile size item button small medium large' },
   { page: 'screen', label: 'Order screen mockup', terms: 'screen mockup preview order font text size docket width panel resize' },
   { page: 'screen', label: 'Item prices on tiles', terms: 'price prices hide show item tile menu' },
-  { page: 'settings-courses', label: 'Covers & seat numbers', terms: 'covers seats seat numbers share prompt guests' },
+  { page: 'settings-covers', label: 'Covers & seat numbers', terms: 'covers seats seat numbers share prompt guests position ask who' },
+  { page: 'settings-covers', label: 'Never ask position for', terms: 'ask position seat off section category item drinks food exclude' },
   { page: 'screen', label: 'Quantity pad', terms: 'quantity pad 123 qty numbers' },
   { page: 'screen', label: 'Icon pack', terms: 'icons icon pack confetti black white emoji style glyphs' },
   { page: 'screen', label: 'Menu item icons', terms: 'item icons show hide menu' },
@@ -21948,6 +21979,7 @@ const PIN_PAGE_ICON = {
   'screen': '<circle cx="8.67" cy="9.22" r="1.11"/><circle cx="14.78" cy="7.56" r="1.11"/><path d="M12 22a10 10 0 1 1 10 -10c0 2.22 -1.67 3.89 -3.89 3.89H15.33a2.22 2.22 0 0 0 -1.67 3.67c0.44 0.56 0.33 2.44 -1.67 2.44z"/>',
   'floorplan': '<path d="M8.67 2 2 4.22v17.78l6.67 -2.22 6.67 2.22 6.67 -2.22V2l-6.67 2.22 -6.67 -2.22z"/><path d="M8.67 2v17.78M15.33 4.22v17.78"/>',
   'settings-courses': '<path d="M12 3.67l10 5.56 -10 5.56 -10 -5.56 10 -5.56z"/><path d="M2 14.78l10 5.56 10 -5.56"/>',
+  'settings-covers': '<circle cx="9" cy="7.5" r="3.2"/><path d="M2.8 19.5c0 -3.4 2.8 -6.2 6.2 -6.2s6.2 2.8 6.2 6.2"/><circle cx="17.4" cy="8.4" r="2.4"/><path d="M15.4 13.7a5 5 0 0 1 5.8 4.6"/>',
   'settings-backups': '<path d="M12 2v13.33"/><path d="M6.44 9.78l5.56 5.56 5.56 -5.56"/><rect x="2" y="17.56" width="20" height="4.44" rx="1.11"/>',
   'audit': '<path d="M7.56 5.33h14.44M7.56 12h14.44M7.56 18.67h14.44"/><path d="M2 5.33h0.01M2 12h0.01M2 18.67h0.01"/>',
   'settings-venue': '<path d="M2 22h20"/><path d="M4.22 22V6.44l7.78 -4.44 7.78 4.44v15.56"/><path d="M8.67 22v-6.67h6.67v6.67"/>',
@@ -22146,6 +22178,7 @@ function renderAdminView() {
         : state.adminTab === 'floorplan' ? renderFloorPlanAdmin()
         : state.adminTab === 'audit' ? renderAuditLogAdmin()
         : state.adminTab === 'briefing' ? renderBriefingAdmin()
+        : state.adminTab === 'settings-covers' ? renderCoversSettingsAdmin()
         : state.adminTab === 'settings-courses' ? renderCoursesSettingsAdmin()
         : state.adminTab === 'settings-allergies' ? renderAllergySettingsAdmin()
         : state.adminTab === 'settings-vip' ? renderVipSettingsAdmin()
@@ -22216,6 +22249,60 @@ function renderAllergySettingsAdmin() {
   `;
 }
 
+// Covers & positions live on their own page (owner, Aug '26: "we have a
+// courses settings. how about a covers settings?"). The Courses page had been
+// carrying them - its own search entry already called it "Covers & seat
+// numbers" - so Courses keeps courses and this keeps people.
+function renderCoversSettingsAdmin() {
+  const off = askSeatOff();
+  const tile = (kind, id, label) => {
+    const key = kind === 'cat' ? 'salesCategoryIds' : kind === 'section' ? 'sectionIds' : 'itemIds';
+    return `<button class="pay-opt ${off[key].includes(id) ? 'active' : ''}" data-act="ask-seat-off" data-kind="${kind}" data-id="${id}">${esc(label)}</button>`;
+  };
+  const q = (state.askSeatItemSearch || '').trim().toLowerCase();
+  const hits = q ? (state.menu || []).filter(m => m.name.toLowerCase().includes(q) && !off.itemIds.includes(m.id)).slice(0, 12) : [];
+  const chosen = (state.menu || []).filter(m => off.itemIds.includes(m.id));
+  return `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Seat numbers</div>
+    <div class="ts" style="margin:-8px 0 10px;">Off means nothing is ever asked or printed per person.</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.seatNumbersEnabled, 'set-seatnumbers-enabled')}
+    </div>
+  </div>
+  ${state.settings.seatNumbersEnabled ? `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Ask who it's for when adding</div>
+    <div class="ts" style="margin:-8px 0 10px;">The master switch. Off, and nothing below matters.</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.promptSeatOnAdd, 'set-promptseatonadd-enabled')}
+    </div>
+  </div>
+  ${state.settings.promptSeatOnAdd ? `
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:4px;">Never ask for…</div>
+    <div class="ts" style="margin-bottom:12px;">Tap anything to stop it asking. A drink belongs to a person; a plate for the middle of the table does not. The most specific rule wins — an item beats its section, a section beats its category.</div>
+    <div class="th" style="margin:14px 0 8px;font-size:var(--fs-sm);">Categories</div>
+    <div class="pay-options" style="flex-wrap:wrap;">
+      ${(state.salesCategories || []).length ? (state.salesCategories || []).map(c => tile('cat', c.id, c.name)).join('') : `<span class="ts">No categories yet.</span>`}
+    </div>
+    <div class="th" style="margin:16px 0 8px;font-size:var(--fs-sm);">Sections</div>
+    <div class="pay-options" style="flex-wrap:wrap;">
+      ${(state.categories || []).map(c => tile('section', c.id, c.name)).join('')}
+    </div>
+    <div class="th" style="margin:16px 0 8px;font-size:var(--fs-sm);">Single items</div>
+    ${chosen.length ? `<div class="pay-options" style="flex-wrap:wrap;margin-bottom:8px;">${chosen.map(m => tile('item', m.id, m.name)).join('')}</div>` : ''}
+    <input id="ask-seat-item-search" type="text" placeholder="Search an item…" value="${esc(state.askSeatItemSearch || '')}" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300); box-sizing:border-box;max-width:320px;">
+    ${hits.length ? `<div class="pay-options" style="flex-wrap:wrap;margin-top:8px;">${hits.map(m => tile('item', m.id, m.name)).join('')}</div>` : ''}
+  </div>` : ''}
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:12px;">Seat labels</div>
+    <label class="field-label">Prefix</label>
+    <input id="seat-prefix-input" type="text" value="${esc(state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat')}" placeholder="Seat" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);">
+    <label class="field-label">Shared / all label</label>
+    <input id="shared-seat-input" type="text" value="${esc(state.settings.sharedSeatLabel || 'All')}" placeholder="All" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);">
+  </div>` : ''}`;
+}
 function renderCoursesSettingsAdmin() {
   return `
   <div class="settings-card">
@@ -22224,26 +22311,6 @@ function renderCoursesSettingsAdmin() {
       ${togglePill(state.settings.coursePagedDocket === true, 'set-course-paged')}
     </div>
   </div>
-  <div class="settings-card">
-    <div class="th" style="margin-bottom:14px;">Seat numbers</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.seatNumbersEnabled, 'set-seatnumbers-enabled')}
-    </div>
-  </div>
-  ${state.settings.seatNumbersEnabled ? `
-  <div class="settings-card">
-    <div class="th" style="margin-bottom:14px;">Prompt seat when adding items</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.promptSeatOnAdd, 'set-promptseatonadd-enabled')}
-    </div>
-  </div>
-  <div class="settings-card">
-    <div class="th" style="margin-bottom:12px;">Seat labels</div>
-    <label class="field-label">Prefix</label>
-    <input id="seat-prefix-input" type="text" value="${esc(state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat')}" placeholder="Seat" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);">
-    <label class="field-label">Shared / all label</label>
-    <input id="shared-seat-input" type="text" value="${esc(state.settings.sharedSeatLabel || 'All')}" placeholder="All" style="width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);">
-  </div>` : ''}
   <div class="settings-card">
     <div class="th" style="margin-bottom:10px;">Courses</div>
     <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-course" ${state.settings.courses.length > 0 && state.settings.courses.every((_, i) => (state.selectedCourseIdxs || []).includes(i)) ? 'checked' : ''}></label>${(state.selectedCourseIdxs || []).length > 0 ? `
@@ -23046,16 +23113,6 @@ async function saveSectionCourse(kind, id, val) {
     render();
   } catch (e) { state.toast = 'Could not save course.'; render(); }
 }
-async function saveSectionAskSeat(id, val) {
-  const cat = state.categories.find(c => c.id === id);
-  if (!cat) return;
-  try {
-    await api('/api/categories/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: cat.name, askSeat: val === '1' }) });
-    state.categories = await api('/api/categories');
-    render();
-  } catch (e) { state.toast = 'Could not save that.'; render(); }
-}
 // <option> list for assigning an item to a subsection, indented by depth.
 function subcatOptionsHtml(categoryId, selectedId) {
   return subcatTreeOrdered(categoryId).map(({ sub, depth }) =>
@@ -23161,11 +23218,6 @@ function renderCategoriesAdmin() {
               <input class="category-name-quick-input" data-id="${cat.id}" type="text" value="${esc(cat.name)}"></label>
             <label class="ie-chip"><small>Default course</small>
               <select class="pp-select" onchange="saveSectionCourse('category', '${cat.id}', this.value)">${courseOptionsHtml(cat.defaultCourse)}</select></label>
-            <label class="ie-chip"><small>Ask position</small>
-              <select class="pp-select" onchange="saveSectionAskSeat('${cat.id}', this.value)">
-                <option value="1" ${cat.askSeat === false ? '' : 'selected'}>Ask</option>
-                <option value="0" ${cat.askSeat === false ? 'selected' : ''}>Never</option>
-              </select></label>
           </div>
           ${renderAdminSubcatTree(cat.id, null, 0)}
           <button class="btn-add inline" data-act="add-subcategory-for" data-category="${cat.id}" style="align-self:flex-end;margin-top:2px;">+ Subsection</button>
@@ -32805,6 +32857,16 @@ function bindEvents() {
   }
   const seatPrefixInput = document.getElementById('seat-prefix-input');
   if (seatPrefixInput) seatPrefixInput.addEventListener('change', (e) => { saveTicketSetting({ seatPrefix: e.target.value.trim() }); });
+  // Typing filters the item list live; the caret survives the re-render the
+  // same way the menu search does.
+  const askSeatSearch = document.getElementById('ask-seat-item-search');
+  if (askSeatSearch) askSeatSearch.addEventListener('input', (e) => {
+    state.askSeatItemSearch = e.target.value;
+    const pos = e.target.selectionStart;
+    render();
+    const again = document.getElementById('ask-seat-item-search');
+    if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (err) {} }
+  });
   const sharedSeatInput = document.getElementById('shared-seat-input');
   if (sharedSeatInput) sharedSeatInput.addEventListener('change', (e) => { saveTicketSetting({ sharedSeatLabel: e.target.value.trim() || 'All' }); });
   const subcategoryParentInput = document.getElementById('subcategory-parent-input');
@@ -33825,6 +33887,7 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'set-floor-cat') { state.floorAddCat = el.dataset.val; state.floorPlacing = null; render(); }
+      else if (act === 'ask-seat-off') { toggleAskSeatOff(el.dataset.kind, el.dataset.id); }
       else if (act === 'mock-jump') {
         if (e.target.closest('.mk-grip,.mk-railgrip')) return; // edge drag, not a jump
         if (_mkHoldFired) { _mkHoldFired = false; return; } // hold-edit release, not a jump

@@ -75,15 +75,27 @@ where the docket sits inside the preview. Four cards read at once instead of
 one and a half, and the empty right half is gone. Below 1100px it falls back
 to the stacked column, and the phone's cut-in-half layout is untouched.
 
-## Asking who it's for is PER SECTION (owner, Aug '26)
+## Covers settings, and where position-asking is switched off
 
-A round of drinks belongs to a person; a shared plate of mezze goes to the
-middle of the table. So each section carries `askSeat`: absent means ask,
-`false` means this section never asks. Set it in Menu → Sections, next to
-Default course. The venue's own `promptSeatOnAdd` stays the master — a
-section can only opt OUT, never in — and `itemAddNeedsSeatPrompt(item)`
-takes the item so the gate can see which section it came from (with no
-argument it falls back to whatever the open options pane is holding).
+Covers have their OWN settings page (owner, Aug '26: "we have a courses
+settings. how about a covers settings?") — Courses had been carrying them,
+its own search entry already called it "Covers & seat numbers". Courses
+keeps courses; `settings-covers` keeps people: seat numbers, the ask-when-
+adding master, the never-ask rules, seat labels.
+
+A round of drinks belongs to a person; a plate for the middle of the table
+does not — and that line falls in a different place at every venue. So
+`settings.askSeatOff` holds three lists — `salesCategoryIds`, `sectionIds`,
+`itemIds` — and MOST SPECIFIC WINS: item, then section, then sales category,
+then the venue's `promptSeatOnAdd`. A rule can only opt OUT, never in.
+
+It all lives on the one page as tap-to-exclude tiles (items via a search
+box, since there are hundreds). NOTHING is added to the section or item
+editors — the owner wants those kept clean, and a per-item setting nobody
+would ever visit 712 times is worse than useless. `itemAddNeedsSeatPrompt(item)`
+takes the item so the gate can resolve it; with no argument it falls back to
+whatever the open options pane is holding. The old per-section `askSeat`
+field migrates into `sectionIds` on first read.
 
 ## Prices (owner, Aug '26)
 

@@ -182,6 +182,29 @@ cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.
 
+## The seat pad is sized by the VENUE (owner, Aug '26)
+
+Key SIZE and key COUNT are two different decisions and only one of them
+comes from the order hub. SIZE does: a pad key is half a menu tile, always,
+so every pad keeps the hub's rhythm. COUNT does NOT (owner: "i don't think
+we should follow that rule of matching rows and columns with the order
+hub") — the hub's column count answers "how many dish names fit across",
+while the pad's question is "how many seat numbers do I need". Different
+questions, different answers.
+
+So the seat pad holds **All + the biggest table in the venue**, laid out as
+square as it goes, **never narrower than three keys** — 8-top venue → 9
+slots → 3 x 3, the same 3 x 3 on phone and on tablet. `venueMaxSeats()` and
+`seatPadShape()` decide it; the seat-pop branch of `syncPopupTileGrids()`
+uses nothing else. Rows are still clamped to the screen, so a 30-top venue
+scrolls rather than running off the bottom.
+
+One box, one position, never changes during service. It changes only when
+you add a bigger table — a setup decision, not a service one. A party
+bigger than your biggest table scrolls INSIDE the box, as always. Empty
+slots stay drawn as ghosts; never fix an empty pad by resizing the box or
+stretching the keys.
+
 ## Undo in admin (owner, Aug '26)
 
 Every delete under `/api` is undoable. The server snapshots the SETUP

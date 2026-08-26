@@ -198,6 +198,20 @@ jumping. The map RESTS open and only sits off-screen while a class says so —
 if the animation never runs (reduced motion, an old browser) it is simply
 there, never stranded off the edge.
 
+## Editing on the docket keeps you on the docket (owner, Aug '26)
+
+On a phone, a pane opened FROM the docket rides ABOVE the drawer instead of
+dismissing it: `keepMobileDrawer()` leaves `mobileCartOpen` alone,
+`paneOverDocket()` stamps `body[data-mob-pane]`, and that lifts
+`.middle-view` to z-index 50 over the drawer's 45. Close the pane and the
+docket is still there, exactly where you left it. Before this, tapping a
+docket line dismissed the drawer and dumped you back at the menu (owner:
+"you should stay on the page you are editing").
+
+`dropMobileDrawer()` still exists and is still right for the TABLE PICKER,
+which is its own drawer coming in from the left — it must not open behind
+the docket.
+
 ## Mouse wheel (owner, Aug '26, twice)
 
 The wheel is damped EVERYWHERE, not in named panes: a notch (`deltaMode 0`,

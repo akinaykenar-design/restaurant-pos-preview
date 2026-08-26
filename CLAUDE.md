@@ -208,6 +208,16 @@ Full-screen panes are not the hub card: the phone's table-map drawer
 (`body[data-fs-picker] .tp-view`) and an editor held over the docket
 (`body[data-mob-pane] .middle-view`) own the whole frame, so margin 0, radius 0.
 
+**Admin wears the same rule** — `.admin-sidebar` is the flat bar, `.admin-content`
+is the cream card. Before this, admin was white-on-white and every settings card
+had to draw a border just to be visible.
+
+**The Design preview wears it too.** The mock (`.scrmock`) is a carbon copy of
+the till, so when the till changes shape the mock changes with it — it had gone
+on drawing the old straight-edged screen, which is the preview lying about the
+product. Anything that changes the till's outline has to be mirrored there in
+the same commit.
+
 ## The seat pad is sized by the VENUE (owner, Aug '26)
 
 Key SIZE and key COUNT are two different decisions and only one of them

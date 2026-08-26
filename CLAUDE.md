@@ -218,9 +218,15 @@ over the screen must never make the UI stir. Every visual `:hover` rule
 was deleted (Aug '26); never add one. The single exception: the OPEN
 dropdown picker highlights the option under the pointer (an open menu
 tracks the pointer like the OS's own menus). A belt rule in the CSS
-(`@media (hover:hover)`) also kills transitions/transforms on hover in
+(`@media (hover:hover)`) also kills transitions and animations on hover in
 case something slips in — scoped to `body:not(.sorting)` so it never
-fights an active drag's transforms. The finger cursor is part of this
+fights an active drag's transforms. It must NEVER force `transform:none`:
+a floor marker is POSITIONED by transform (`translate(-50%,-50%)
+rotate(Xdeg)`), so that rule threw away its centring and its angle on
+hover — every table jumped half its own size down and right and snapped
+back when the pointer left, which is the "jittering tables" the owner
+reported (Aug '26, measured at 62px). Structural transforms are none of
+hover's business. The finger cursor is part of this
 law: the pointer never changes shape over a control (`cursor:default`
 everywhere on mouse devices; text fields keep the I-beam, an active
 drag keeps the grabbing fist).

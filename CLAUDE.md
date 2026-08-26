@@ -276,8 +276,11 @@ same word. No word names two things (that is why the docket's button row is
 - **Docket** — the order panel. **Docket text**, **Docket tiles**.
 - **Docket tiles** — the button row across the docket's head: Table, Covers,
   Order notes, Quick note, Call away, Auto course, Customer, Reprint, Move
-  items. Set in Design → Docket tiles (Covers lives on the Covers page,
-  since it is a covers decision, not a docket one). Stored as
+  items. They are PINNED, not configured: hold a tile on the order screen's
+  account pane and it pins to (or unpins from) the docket head. There is no
+  settings card for this and there must not be — a second way to set the
+  same thing is the duplication this app keeps deleting (owner, Aug '26:
+  "we dont need that in settings they are pinnable in admin"). Stored as
   `settings.docketShortcuts` — code-only, never shown.
 - **Courses**, **Order notes**, **Quick note**, **Call away**.
 - **Position** — who an item is for. The **position pad** asks it; the

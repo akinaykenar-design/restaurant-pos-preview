@@ -75,6 +75,21 @@ where the docket sits inside the preview. Four cards read at once instead of
 one and a half, and the empty right half is gone. Below 1100px it falls back
 to the stacked column, and the phone's cut-in-half layout is untouched.
 
+## Covers is ONE TAP (owner pick A, Aug '26)
+
+The covers pad is a tile per party size, 1–12, and tapping one sets it and
+closes — the tap IS the confirmation, so there is no tick. The table's
+current covers wears `.sel` (the blue key) so the thumb knows where to go
+before the eyes catch up. "13 or more" falls through to the digit pad, which
+keeps its ✕/✓. A pad whose only action is Cancel puts ✕ in the corner every
+other pad uses (`:only-child` → last column), never floating mid-row.
+
+The SEAT pad is never narrower than three keys (`Math.max(3, cols)`). A
+phone's menu is 2 columns because a MENU TILE holds a dish name; a seat key
+holds "4", so copying that 2 copies the wrong number and the pad came out a
+narrow strip (owner: the position popup "looks weird" on mobile). Keys stay
+half a tile — the rhythm is untouched — only the column count gets a floor.
+
 ## Covers settings, and where position-asking is switched off
 
 Covers have their OWN settings page (owner, Aug '26: "we have a courses

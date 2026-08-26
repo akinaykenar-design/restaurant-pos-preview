@@ -2686,8 +2686,15 @@ body[data-fs-picker] .tp-actions{ flex:none; }
 /* Full-screen table select: while picking, the rail and docket are dead
    weight — hide them and let the chips grow. One exit: the red Close
    bottom-right (plus Escape / dead space / tapping any other button). */
-body[data-fs-picker] .catrail,
-body[data-fs-picker] .ticket-panel{ display:none !important; }
+/* Picking a table takes the whole screen on desk and tablet, so the rail and
+   docket stand down. On a PHONE the floor is a fixed sheet that covers
+   everything already — so nothing underneath moves, and sliding the floor away
+   REVEALS the hub exactly as it was instead of reflowing it (owner, Aug '26:
+   "should the floor slide over the hub just the same"). */
+@media (min-width:769px){
+  body[data-fs-picker] .catrail,
+  body[data-fs-picker] .ticket-panel{ display:none !important; }
+}
 body[data-fs-picker] .main{ display:flex !important; }
 body[data-fs-picker] .middle-view{ max-width:100%; }
 body[data-fs-picker] .simple-table-grid{ grid-template-columns:repeat(auto-fill, minmax(168px, 1fr)); gap:14px; max-width:100%; }
@@ -17025,14 +17032,27 @@ function renderOrderView() {
   if (state.accountMenuOpen) return shell(renderAccountMiddle());
   // customerPane / moveItems / notesPanel now float as popups (in the modal
   // list) so the docket panel stays put behind them on phones.
-  if (state.showTablePicker) return shell(renderTablePickerMiddle());
+  // The floor COVERS the hub on phones, exactly as the docket does: the hub
+  // stays mounted underneath, so the slide reveals what was already there
+  // instead of rebuilding it. On bigger screens the floor is the middle pane
+  // in its own right and takes the hub's place (owner, Aug '26).
+  if (state.showTablePicker) {
+    return shell(window.innerWidth <= 768
+      ? renderHubMiddle() + renderTablePickerMiddle()
+      : renderTablePickerMiddle());
+  }
 
-  return shell(`
+  return shell(renderHubMiddle());
+}
+
+// The hub: the qty pad and the scrolling field of tiles.
+function renderHubMiddle() {
+  return `
     <div class="menu-panel">
       ${renderQtyPad()}
       <div class="menu-scroll">${renderMenuScrollBody()}</div>
     </div>
-  `);
+  `;
 }
 
 // §§ Editing an item already sent
@@ -26472,7 +26492,14 @@ function openTablePicker() {
   const current = findTableById(state.table);
   const owningFp = current && state.floorPlans.find(f => f.tables.some(t => t.id === current.id));
   dropMobileDrawer();
-  refreshTableLocks().then(() => { if (state.showTablePicker) render(); });
+  // render() rebuilds the WHOLE screen, so a re-render landing mid-slide
+  // replaces the sliding sheet with a fresh one already at rest — the slide
+  // vanished. The lock refresh waits for the slide to finish (owner, Aug '26:
+  // the floor must behave exactly like the docket).
+  refreshTableLocks().then(() => {
+    const wait = Math.max(0, (state._tpAnimUntil || 0) - Date.now());
+    setTimeout(() => { if (state.showTablePicker) render(); }, wait);
+  });
   state.pickerFloorPlanId = owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
   state.showTablePicker = true;
   state.tablesCallAway = false;
@@ -26485,6 +26512,7 @@ function openTablePicker() {
   state.customNoteDraft = null;
   if (tpDrawerOn()) {
     state._tpEntering = true;
+    state._tpAnimUntil = Date.now() + 320; // .28s slide plus a frame either side
     render();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       state._tpEntering = false;

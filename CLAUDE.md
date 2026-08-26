@@ -182,6 +182,32 @@ cloud, never a loose field outside the grid. The Items editor is the
 model (`.ie-grid` / `.ie-chips` / `.ie-chip` / `.ie-pop`); converge
 other editors on it rather than inventing new layouts.
 
+## Curved hub, straight bars — the Word look (owner, Aug '26)
+
+Bars are FLAT, straight and full-bleed. The one panel you WORK in — the order
+hub (`.menu-panel`, and `.middle-view` when the table map takes its place) —
+is a rounded card: `--hub-radius` 18px, `--hub-gap` 10px of margin.
+
+There is **no darker tray** behind it (owner: "without the padding colour ...
+the whites around it blend"). `.main` is `var(--surface)` — the same white the
+menu bar, the docket and the app bar already are — so the chrome runs into the
+surround with nothing marking the join. The only things that pick the hub out
+are its cream (`--steel-100`) and its corners. Every hairline between the
+chrome and the card is gone with the tray: no border on `.catrail`, none on
+`.topbar`, none on `.ticket-panel`.
+
+The gap is measured **ink to card**, and it is the same on all four sides. That
+only holds if ONE thing owns it, so each bar drops the padding on the side
+facing the card and the card's margin owns the whole gap. Before this rule the
+top read 18px (the rail's own 8px stacked on the card's 10px) against 10px at
+the sides (owner: "too much padding at the top"). If you ever add a bar beside
+the hub, zero its facing padding or the gap goes lopsided again — and measure
+it, don't eyeball it.
+
+Full-screen panes are not the hub card: the phone's table-map drawer
+(`body[data-fs-picker] .tp-view`) and an editor held over the docket
+(`body[data-mob-pane] .middle-view`) own the whole frame, so margin 0, radius 0.
+
 ## The seat pad is sized by the VENUE (owner, Aug '26)
 
 Key SIZE and key COUNT are two different decisions and only one of them

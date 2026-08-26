@@ -359,6 +359,12 @@ settings card that controls it, and the button's own `aria-label` all say the
 same word. No word names two things (that is why the docket's button row is
 "Docket tiles" and not "Quick tiles" — one of the tiles is the Quick note).
 
+- **The bar** — the band with Order / Admin / search / power (`.topbar`).
+  It is NOT "the nav" (owner, Aug '26, correcting exactly this mix-up).
+- **The nav** — admin's list of pages: Daily, Dashboard, Reservations, Menu,
+  Inventory, Staff, Finance, Integrations, Settings (`.admin-sidebar`). A
+  column on PC and tablet, a sideways strip on the phone — same nav, same
+  colours, only the direction changes.
 - **Menu bar** — the section rail (`catrail`). **Subsection bar** below it.
 - **Menu tile** — one item on the order grid. **Subsection tile** likewise.
 - **Docket** — the order panel. **Docket text**, **Docket tiles**.

@@ -364,6 +364,32 @@ sources.
 4. **Short.** Say what changed, the numbers that prove it, and stop.
 5. **Show it.** Rendered screenshots of the real app, never a description.
 
+## The finger law — and how rules are actually kept (owner, Aug '26)
+
+Nothing you tap is smaller than `--tap` (44px) on either axis. 44 is Apple's
+own minimum (Human Interface Guidelines); Material says 48, WCAG 2.2 AAA says
+44. It was not invented here.
+
+**No halos.** There used to be a system that let a small control keep its look
+and grow an invisible box to catch the tap. It is deleted (owner: "i dont like
+the idea of halos shoud we rid and adjsut?"). A hidden box that behaves
+differently from what you can see is a lie to the user, and it let the app be
+drawn tighter than it really is. Controls are the size they claim. Where a
+control cannot grow because a neighbour is closer than 44px, the fix is the
+SPACING, not a bigger invisible box.
+
+**Rules are kept by `design/check-design.js`, not by good intentions.** It
+walks nine screens at two widths and fails on any control under `--tap` or any
+colour swatch that breaks the swatch rule. Run it before pushing anything that
+touches a control:
+
+    NODE_PATH=<wherever playwright-core lives> node design/check-design.js
+
+The lesson is in the file's own header: a comment in index.html cited a
+checker called `check-tap-targets.js` for months, that file never existed, and
+40 controls drifted under size with nobody noticing. **A rule with no check is
+a wish.** When you add a rule to this document, add it to that script too.
+
 ## ONE swatch, wherever a colour is picked (owner, Aug '26)
 
 Picking a colour is the same job in all five places it happens — the accent

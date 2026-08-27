@@ -108,6 +108,39 @@ function RULES(label) {
     if (!H_OK.has(h)) out.push(`${label}  height ${(el.className || el.tagName).toString().split(' ')[0]} is ${h}px, must be ${[...H_OK].join(' or ')} (or a named derivation)`);
   });
 
+  // THE TYPE SCALE — five steps, plus families that are DERIVED from
+  // something (a tile's own scale, the docket text slider, the rail, the
+  // floor zoom). Anything else invented its own size.
+  // A custom property holds its TEXT (a calc), not a length — so resolve each
+  // step by actually applying it to a probe and reading the computed size.
+  const probe = document.createElement('span');
+  probe.style.cssText = 'position:absolute;visibility:hidden;';
+  document.body.appendChild(probe);
+  const STEPS = ['--fs-chip', '--fs-md', '--fs-lg', '--fs-xl', '--fs-num'].map(v => {
+    probe.style.fontSize = `var(${v})`;
+    return Math.round(parseFloat(getComputedStyle(probe).fontSize) * 10) / 10;
+  });
+  probe.remove();
+  const TYPE_DERIVED = [
+    '.item-name', '.acct-tile-label', '.item-tile-price',       // the tile's scale
+    '.ticket-line', '.tot-row', '.course-tab', '.tl-qty',       // --tkt-fs
+    '.tl-name', '.tl-sub', '.tl-price-btn', '.item-opt-dots', '.seat-chip',
+    '.ang-em', '.ang-label', '.fp-chip', '.cat-btn', '.subcat-seg',  // --rail-fs / --rail-icon
+    '.fm-num', '.tbl-cpill', '.floor-marker', '.ico-g',         // the floor's zoom
+    '.covers-pad-key', '.qty-pad-key', '.qp-display',   // sized off --pad-key-h
+    '.osk', '.brand-mark',
+  ].join(', ');
+  document.querySelectorAll('*').forEach(el => {
+    if (skip(el)) return;
+    if (el.children.length) return;
+    if (!(el.textContent || '').trim()) return;
+    if (el.matches(TYPE_DERIVED) || el.closest(TYPE_DERIVED)) return;
+    if (el.parentElement === document.body) return;             // dev-only pills
+    const r = el.getBoundingClientRect(); if (r.width < 4 || r.height < 4) return;
+    const fs = Math.round(parseFloat(getComputedStyle(el).fontSize) * 10) / 10;
+    if (!STEPS.includes(fs)) out.push(`${label}  type ${(el.className || el.tagName).toString().split(' ')[0]} is ${fs}px, must be one of ${STEPS.join(' / ')} (or a named derivation)`);
+  });
+
   // THE FINGER LAW — ink >= --tap, or nothing interactive within --tap.
   const tap = parseInt(root.getPropertyValue('--tap')) || 44;
   const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {

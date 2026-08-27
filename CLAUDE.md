@@ -400,6 +400,37 @@ editor's qty steppers were 40px. It now walks pay, split, line edit, notes,
 covers pad and checkout as well — 30 views, not 18 — and it caught the 40px
 stepper the moment those were added. If you add a pane, add it to `DEEP`.
 
+## The type scale — five steps (owner, Aug '26)
+
+    --fs-chip  10.5   badges, field labels, action words
+    --fs-md    13.5   body — the default
+    --fs-lg    15     card and section headers
+    --fs-xl    19     screen and pane titles
+    --fs-num   24     dashboard figures
+
+227 font sizes were hard-coded across 20 different values (7, 9, 9.5, 10,
+10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 16, 17, 18, 19, 20, 22).
+All swept onto the five.
+
+**`--fs-sm` is gone.** It was 12.5 against `--fs-md`'s 13.5 — one pixel apart,
+which nobody can see, so it was not two steps, it was one step written twice,
+and 67 places used it. Secondary text is separated by COLOUR and WEIGHT, which
+is what should have been carrying it all along.
+
+**`--fs-xl` is new.** Nothing sat between 15 and 24, so every heading at 18,
+19, 20 and 22 invented its own size.
+
+**Derived, and named in the checker:** a menu tile's name follows the tile
+(`--item-name-size` x `--menu-fs`), docket text follows the docket slider
+(`--tkt-fs`), nav chips follow the rail (`--rail-fs`), floor numbers follow the
+table's size and zoom, pad keys follow `--pad-key-h`. Those are rules, so they
+land wherever they land. Everything else must be one of the five.
+
+Wiring the check surfaced three faults nobody had noticed: a segment button in
+the floor editor was borrowing the MENU NAV's font size, the split pane's
+**amount** had no size at all and was inheriting the browser's 16px, and the
+covers pad needed naming as derived.
+
 ## The corner family — three, and only three (owner, Aug '26)
 
     --r-control  10px

@@ -7791,7 +7791,7 @@ async function doshiiPollOnce() {
         doshiiId,
         source: 'doshii',
       };
-      adjustStockForItems(data, items, -1);
+      adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
       data.orders.push(order);
       data.ticketCounter += 1;
       logAudit(data, 'Doshii', `App order received — Order #${order.id} (${meta.customerName || meta.table || meta.orderType})`);
@@ -8450,7 +8450,7 @@ app.put('/api/inventory-items/:id', (req, res) => {
   if (category !== undefined) item.category = category;
   if (sku !== undefined) item.sku = sku;
   if (unit !== undefined) item.unit = unit;
-  if (currentStock !== undefined) item.currentStock = Math.max(0, parseInt(currentStock) || 0);
+  if (currentStock !== undefined) item.currentStock = Math.max(0, round3(currentStock));
   if (minStock !== undefined) item.minStock = minStock;
   if (maxStock !== undefined) item.maxStock = maxStock;
   if (costPerUnit !== undefined) item.costPerUnit = parseFloat(costPerUnit) || 0;
@@ -8476,21 +8476,23 @@ app.post('/api/inventory-items/:id/adjust', (req, res) => {
   const item = (data.inventoryItems || []).find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const { change, reason, staffName } = req.body;
-  const newStock = Math.max(0, item.currentStock + parseInt(change));
+  // Ingredients are weighed: a 2.5kg delivery must not land as 2.
+  const delta = round3(change);
+  const newStock = Math.max(0, round3((item.currentStock || 0) + delta));
   item.currentStock = newStock;
   item.lastRestockDate = Date.now();
   data.inventoryAdjustments = [...(data.inventoryAdjustments || []), {
     id: 'iadj' + Date.now(),
     inventoryItemId: item.id,
     itemName: item.name,
-    previousStock: item.currentStock - parseInt(change),
+    previousStock: round3(newStock - delta),
     newStock: newStock,
-    change: parseInt(change),
+    change: delta,
     reason: reason || 'Stock adjustment',
     staffName: staffName || 'System',
     timestamp: Date.now()
   }];
-  logAudit(data, staffName || staffFromReq(req), `Adjusted stock for ${item.name}: ${parseInt(change) > 0 ? '+' : ''}${change} (${reason || 'adjustment'})`);
+  logAudit(data, staffName || staffFromReq(req), `Adjusted stock for ${item.name}: ${delta > 0 ? '+' : ''}${delta} (${reason || 'adjustment'})`);
   recomputeAutoOut(data);
   writeData(data);
   res.json({ item });
@@ -8894,17 +8896,66 @@ app.get('/api/orders/export.csv', (req, res) => {
   res.send(csv);
 });
 
-// Adjusts stock for tracked menu items referenced by order line items.
-// sign is +1 to restore stock (e.g. on void) or -1 to consume it (on sale).
-function adjustStockForItems(data, items, sign) {
-  items.forEach(i => {
+// Adjusts stock for order line items. sign is +1 to restore stock (e.g. on
+// void) or -1 to consume it (on sale).
+//
+// TWO counters move, not one (owner, Aug '26). Selling a dish used to tick
+// only that dish's own stockCount, and never the ingredients underneath it —
+// so the ingredient numbers only ever moved when somebody typed into them by
+// hand, and the auto-86 that reads those numbers was judging a service that
+// had already happened on stock nobody had touched. A dish now eats its
+// recipe: sell 3 burgers at 0.15kg of mince each and the mince drops 0.45.
+// An ingredient the customer sent back ("no pickle" — it is in line.removed)
+// is not eaten, and a void or a removed line puts everything back.
+const INV_LOG_KEEP = 2000;   // the store is one file; the screen shows 100
+
+function adjustStockForItems(data, items, sign, ref) {
+  const used = {};                       // inventoryItemId -> quantity moved
+  (items || []).forEach(i => {
     if (!i.menuItemId) return;
     const menuItem = data.menu.find(m => m.id === i.menuItemId);
-    if (!menuItem || !menuItem.trackStock) return;
-    menuItem.stockCount = Math.max(0, menuItem.stockCount + sign * i.qty);
-    menuItem.out = menuItem.stockCount <= 0;
+    if (!menuItem) return;
+    if (menuItem.trackStock) {
+      menuItem.stockCount = Math.max(0, menuItem.stockCount + sign * i.qty);
+      menuItem.out = menuItem.stockCount <= 0;
+    }
+    const off = Array.isArray(i.removed) ? i.removed : [];
+    (menuItem.recipes || []).forEach(r => {
+      const q = parseFloat(r.quantity) || 0;
+      if (!r.inventoryItemId || q <= 0 || off.includes(r.inventoryItemId)) return;
+      used[r.inventoryItemId] = (used[r.inventoryItemId] || 0) + q * (i.qty || 0);
+    });
   });
+
+  const ids = Object.keys(used);
+  if (!ids.length) return;
+  const stamp = Date.now();
+  const log = [];
+  ids.forEach((id, n) => {
+    const inv = (data.inventoryItems || []).find(x => x.id === id);
+    if (!inv) return;
+    const before = round3(inv.currentStock || 0);
+    const change = round3(sign * used[id]);
+    const after = Math.max(0, round3(before + change));
+    if (after === before) return;
+    inv.currentStock = after;
+    log.push({
+      id: 'iadj' + stamp + '-' + n,
+      inventoryItemId: inv.id, itemName: inv.name,
+      previousStock: before, newStock: after, change: round3(after - before),
+      reason: (sign < 0 ? 'Sold' : 'Returned') + (ref ? ' — ' + ref : ''),
+      staffName: 'Sales', timestamp: stamp,
+    });
+  });
+  if (log.length) {
+    data.inventoryAdjustments = [...(data.inventoryAdjustments || []), ...log].slice(-INV_LOG_KEEP);
+    recomputeAutoOut(data);
+  }
 }
+
+// Ingredients are weighed, not counted — 0.15kg of mince is a real recipe
+// line, so the numbers that carry them keep three decimals.
+function round3(n) { return Math.round((parseFloat(n) || 0) * 1000) / 1000; }
 
 // What a scoped discount is worked out on: only the lines whose menu section
 // is in the scope. An unscoped discount (the normal case) uses the whole
@@ -9047,7 +9098,7 @@ app.post('/api/orders', (req, res) => {
       staffName: staffName || 'Unknown',
       customerId: customerId || null,
     };
-    adjustStockForItems(data, items, -1);
+    adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
@@ -9096,7 +9147,7 @@ app.post('/api/orders', (req, res) => {
     customerId: customerId || null,
   };
 
-  adjustStockForItems(data, items, -1);
+  adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
   data.orders.push(order);
   data.ticketCounter += 1;
   if (discountRecord) {
@@ -9143,7 +9194,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
-  adjustStockForItems(data, items, -1);
+  adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
   writeData(data);
   // Later rounds ALWAYS print only the added items — reprinting the whole
@@ -9180,7 +9231,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     if (removed.length === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
     order.items = (order.items || []).filter(i => !matches(i));
     (order.rounds || []).forEach(r => { r.items = (r.items || []).filter(i => !matches(i)); });
-    adjustStockForItems(data, removed, 1);
+    adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
     const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
     const why = reason ? ` (${reason})` : '';
@@ -9387,7 +9438,7 @@ app.post('/api/orders/:id/void', (req, res) => {
   order.voidedBy = req.body.staffName || 'Unknown';
   order.voidReason = reason || null;
   order.voidNote = note || '';
-  adjustStockForItems(data, order.items, 1);
+  adjustStockForItems(data, order.items, 1, `Void #${order.id}`);
   logAudit(data, order.voidedBy, `Voided order #${order.id} (${order.total.toFixed(2)})${reason ? ' — ' + reason : ''}${note ? ': ' + note : ''}`);
   writeData(data);
   res.json(order);

@@ -7038,6 +7038,9 @@ app.delete('/api/subcategories/:id', (req, res) => {
 // ---------- Menu ----------
 app.get('/api/menu', (req, res) => {
   const data = readData();
+  // Worked out on the way out, so the till's count is right even after stock
+  // moved somewhere this copy of the menu never heard about.
+  recomputeServingsLeft(data);
   res.json(data.menu);
 });
 
@@ -7116,7 +7119,7 @@ app.put('/api/menu/:id', (req, res) => {
   } else {
     logAudit(data, staffFromReq(req), `Updated menu item: ${item.name}`);
   }
-  if (Array.isArray(recipes)) recomputeAutoOut(data);
+  if (Array.isArray(recipes)) recomputeServingsLeft(data);
   writeData(data);
   res.json(item);
 });
@@ -8427,17 +8430,27 @@ app.post('/api/inventory-items', (req, res) => {
   res.json(item);
 });
 
-// Auto-86 tied to inventory: an item whose recipe ingredient is out of stock
-// goes sold-out automatically, and comes back on restock. A manual 86 (no
-// autoOut marker) is left alone, as is menu-level trackStock depletion.
-function recomputeAutoOut(data) {
+// EMPTY WARNS, IT DOES NOT BLOCK (owner, Aug '26). An ingredient running out
+// used to pull every dish that needs it off the menu by itself, mid-service,
+// off numbers that are only ever as good as the last stock count. The manual
+// countdown has always been soft - it warns and lets the waiter through - and
+// the ingredients behave the same way now: each dish carries how many it can
+// still make (servingsLeft), the till shows it in the SAME pill as the manual
+// countdown, and the send warns when the docket asks for more than that.
+// Nothing is 86'd but by hand.
+function recomputeServingsLeft(data) {
   const stock = {};
   (data.inventoryItems || []).forEach(i => { stock[i.id] = i.currentStock || 0; });
   (data.menu || []).forEach(m => {
     const rec = (m.recipes || []).filter(r => (r.quantity || 0) > 0 && stock[r.inventoryItemId] !== undefined);
-    const missing = rec.some(r => stock[r.inventoryItemId] <= 0);
-    if (missing) { if (!m.out) { m.out = true; m.autoOut = true; } }
-    else if (m.autoOut) { m.autoOut = false; if (!(m.trackStock && m.stockCount <= 0)) m.out = false; }
+    // The ingredient that runs out first decides how many are left.
+    m.servingsLeft = rec.length
+      ? rec.reduce((least, r) => Math.min(least, Math.floor(stock[r.inventoryItemId] / r.quantity)), Infinity)
+      : null;
+    if (m.servingsLeft === Infinity) m.servingsLeft = null;
+    // Anything the old auto-86 had switched off comes back on: it is a warning
+    // now, and a dish left sold-out by a rule nobody chose is lost money.
+    if (m.autoOut) { delete m.autoOut; if (!(m.trackStock && m.stockCount <= 0)) m.out = false; }
   });
 }
 
@@ -8455,7 +8468,7 @@ app.put('/api/inventory-items/:id', (req, res) => {
   if (maxStock !== undefined) item.maxStock = maxStock;
   if (costPerUnit !== undefined) item.costPerUnit = parseFloat(costPerUnit) || 0;
   if (supplierId !== undefined) item.supplierId = supplierId;
-  recomputeAutoOut(data);
+  recomputeServingsLeft(data);
   writeData(data);
   res.json(item);
 });
@@ -8493,7 +8506,7 @@ app.post('/api/inventory-items/:id/adjust', (req, res) => {
     timestamp: Date.now()
   }];
   logAudit(data, staffName || staffFromReq(req), `Adjusted stock for ${item.name}: ${delta > 0 ? '+' : ''}${delta} (${reason || 'adjustment'})`);
-  recomputeAutoOut(data);
+  recomputeServingsLeft(data);
   writeData(data);
   res.json({ item });
 });
@@ -8949,7 +8962,7 @@ function adjustStockForItems(data, items, sign, ref) {
   });
   if (log.length) {
     data.inventoryAdjustments = [...(data.inventoryAdjustments || []), ...log].slice(-INV_LOG_KEEP);
-    recomputeAutoOut(data);
+    recomputeServingsLeft(data);
   }
 }
 
@@ -15735,17 +15748,32 @@ function openCheckout() {
 }
 function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
 
-// Items whose ordered quantity exceeds the tracked stock count — the "inventory
-// vs actual stock don't align" case. Soft: warned, never blocked.
+// How many of this dish the ingredients can still make — worked out by the
+// server off the recipe, null when the dish has no recipe.
+function itemServingsLeft(item) {
+  return item && typeof item.servingsLeft === 'number' ? item.servingsLeft : null;
+}
+// What is left, however it is counted: the manual countdown, the ingredients,
+// or the tighter of the two when a dish carries both.
+function itemStockLeft(item) {
+  const rec = itemServingsLeft(item);
+  const man = item && item.trackStock ? (item.stockCount || 0) : null;
+  if (man === null) return rec === null ? 0 : rec;
+  return rec === null ? man : Math.min(man, rec);
+}
+// Does anything on the docket ask for more than there is? Counts the manual
+// countdown AND the ingredients underneath — an ingredient running out warns
+// exactly like a countdown running out. Soft: warned, never blocked.
 function stockMisalignments() {
   const byItem = {};
   state.cart.forEach(c => { byItem[c.menuItemId] = (byItem[c.menuItemId] || 0) + c.qty; });
   const out = [];
   Object.keys(byItem).forEach(id => {
     const item = state.menu.find(m => m.id === id);
-    if (item && item.trackStock && byItem[id] > (item.stockCount || 0)) {
-      out.push({ name: item.name, ordered: byItem[id], stock: item.stockCount || 0 });
-    }
+    if (!item) return;
+    if (!item.trackStock && itemServingsLeft(item) === null) return;
+    const left = itemStockLeft(item);
+    if (byItem[id] > left) out.push({ name: item.name, ordered: byItem[id], stock: left });
   });
   return out;
 }
@@ -17421,10 +17449,12 @@ function renderMenuScrollBody() {
               ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
               ${inCartQty ? `<span class="tile-qn">${inCartQty}</span>` : ''}
               <div class="item-name">${esc(item.name)}</div>${warnMark}
-              ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots${item.trackStock ? ' shift' : ''}">⋯</span>` : ''}
-              ${item.trackStock ? (() => {
+              ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots${item.trackStock || itemServingsLeft(item) !== null ? ' shift' : ''}">⋯</span>` : ''}
+              ${item.trackStock || itemServingsLeft(item) !== null ? (() => {
                 // Countdown: live remaining = stock minus what's on this docket.
-                const left = Math.max(0, (item.stockCount || 0) - inCartQty);
+                // A dish with a recipe counts the same way, off its ingredients
+                // - one pill, one meaning, whichever number is the tighter.
+                const left = Math.max(0, itemStockLeft(item) - inCartQty);
                 return `<span class="tile-count${left <= (item.lowStockThreshold || 5) ? ' low' : ''}">${left}</span>`;
               })() : ''}
             </button>`;

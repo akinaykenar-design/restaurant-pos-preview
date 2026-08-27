@@ -517,12 +517,13 @@ a section's, a table's, the floor background, and now the ACCENT — is one
 swatch that opens the same popover. The accent used to be eight swatches laid
 out in the settings card, which was a second way to do the same job.
 
-The popover's PALETTE still changes with the kind, because the job changes:
-`PRESET_COLORS` for general use, `TABLE_MATERIAL_COLORS` for tables (woods,
-cloths, stone), `ACCENT_COLORS` for the accent — an accent has to read as
-"chosen" against every surface and must not collide with the reserved
-table-status colours. Same box, same swatch, different contents. The accent
-offers no Clear, because the app always has an accent.
+**And ONE palette.** `PRESET_COLORS` — the twelve you get on an item — is
+what every colour picker shows, the accent included (owner, Aug '26: "the
+preset colours same as item presetting colours"). There is exactly one
+exception, `TABLE_MATERIAL_COLORS` on the floor plan, because a table needs
+real materials (woods, cloths, stone), not hues. Do not add a third palette:
+a bespoke set for one control is the same mistake as a bespoke control.
+The accent offers no Clear, because the app always has an accent.
 
 Picking a colour is the same job in all five places it happens — the accent
 row, an item's colour, a table's colour, the floor background, and the palette

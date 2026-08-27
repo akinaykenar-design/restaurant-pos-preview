@@ -141,6 +141,33 @@ function RULES(label) {
     if (!STEPS.includes(fs)) out.push(`${label}  type ${(el.className || el.tagName).toString().split(' ')[0]} is ${fs}px, must be one of ${STEPS.join(' / ')} (or a named derivation)`);
   });
 
+  // THE SPACING RHYTHM — every gap and padding is a multiple of 4. The
+  // exceptions are things the OWNER tunes (the grid gap) or that follow the
+  // type (a name's side gutter is 2.1ch), and they are named here.
+  const SPACE_DERIVED = [
+    '.grid', '.acct-grid', '.item-card', '.item-name',   // --grid-gap and tile internals
+    '.floor-canvas', '.fp-canvas', '.floor-marker', '.tbl-cpill',
+    '.osk', '.covers-pad-key', '.qty-pad-key',
+    '.qty-pop', '.covers-pad-grid', '.qp-row', '.qp-actions', '.seat-grid',
+    '.modal-bg',                                   // clears the app bar / keyboard
+  ].join(', ');
+  document.querySelectorAll('*').forEach(el => {
+    if (skip(el)) return;
+    if (el.matches(SPACE_DERIVED) || el.closest(SPACE_DERIVED)) return;
+    if (el.parentElement === document.body) return;      // dev-only preview pills
+    const r = el.getBoundingClientRect(); if (r.width < 12 || r.height < 12) return;
+    const c = getComputedStyle(el);
+    const vals = [];
+    if (/flex|grid/.test(c.display) && c.gap && c.gap !== 'normal') vals.push(['gap', c.gap.split(' ')[0]]);
+    ['paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'].forEach(k => vals.push([k, c[k]]));
+    vals.forEach(([k, v]) => {
+      const n = parseFloat(v);
+      if (!n || Number.isNaN(n)) return;
+      if (Math.abs(n % 4) < 0.01) return;
+      out.push(`${label}  space ${(el.className || el.tagName).toString().split(' ')[0]} ${k} is ${v}, must be a multiple of 4`);
+    });
+  });
+
   // THE FINGER LAW — ink >= --tap, or nothing interactive within --tap.
   const tap = parseInt(root.getPropertyValue('--tap')) || 44;
   const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {

@@ -400,6 +400,25 @@ editor's qty steppers were 40px. It now walks pay, split, line edit, notes,
 covers pad and checkout as well — 30 views, not 18 — and it caught the 40px
 stepper the moment those were added. If you add a pane, add it to `DEEP`.
 
+## The spacing rhythm — multiples of 4 (owner, Aug '26)
+
+Every gap and every padding is a multiple of 4: **4, 8, 12, 16, 20, 24**.
+Nothing lines up across two panels by accident — it lines up because both
+panels are counting in the same units. 548 values were snapped; before it was
+9 different gaps (2, 3, 4, 5, 6, 8, 10, 12, 18) and 18 different paddings.
+
+**`button{padding:0}` is load-bearing.** A `<button>` with no padding rule
+inherits the browser's own `1px 6px` — not a number anyone chose, never on
+the rhythm, and invisible until you measure it. The docket's four action
+buttons had carried it all along. Zeroed once, globally; every button that
+wants padding still states it.
+
+**Derived, and named in the checker:** the grid gap is `--grid-gap` (the owner
+tunes it on the Design page), a tile's internals follow the tile, a name's
+side gutter is `2.1ch` so it follows the type, the number pads are computed
+from the menu grid in `syncPopupTileGrids()`, and `.modal-bg` clears the app
+bar and the keyboard. Everything else must be a multiple of 4.
+
 ## The type scale — five steps (owner, Aug '26)
 
     --fs-chip  10.5   badges, field labels, action words

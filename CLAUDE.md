@@ -364,6 +364,28 @@ sources.
 4. **Short.** Say what changed, the numbers that prove it, and stop.
 5. **Show it.** Rendered screenshots of the real app, never a description.
 
+## Control height — two chosen, everything else DERIVED (owner, Aug '26)
+
+    --h-control  44px   every control (same number as --tap)
+    --h-primary  64px   the docket's action row ONLY
+
+There is no "slightly smaller" button. 38, 41, 46, 50 and 52 were not
+decisions, they were accidents — a min-height nobody revisited, or a label
+wrapping to two lines ("2 min" was what made the idle-logoff buttons 52 while
+their neighbours were 44, which is why `.pay-opt` now sets `white-space:nowrap`
+and the row wraps by BUTTON instead).
+
+One place gets to be bigger and it is the docket's action row, because that is
+where a mistake costs money. It is `--h-primary` on every device — the phone
+used to say 60, and 4px is not worth a second number.
+
+**Derived, never chosen.** A few things legitimately land on any number
+because they follow something else: the docket quantity stretches to its line,
+a docket tile is half a menu tile, a nav button is square so it is the rail's
+width, a swatch is `--swatch`, a menu tile is the grid's job. Those are rules.
+`design/check-design.js` lists each derivation BY NAME, so a stray new height
+cannot pass itself off as one.
+
 ## The corner family — three, and only three (owner, Aug '26)
 
     --r-control  10px

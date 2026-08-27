@@ -116,6 +116,34 @@ function serve() {
           out.push(`${label}  corner ${(el.className || el.tagName).toString().split(' ')[0]} is ${r}, must be one of ${[...OK].join(' / ')}`);
         });
 
+        // RULE: control height — --h-control, or --h-primary for the docket's
+        // action row. Everything else must be DERIVED from something, and the
+        // derivations are named here so a new number cannot sneak in as one.
+        const H_OK = new Set([
+          parseInt(root.getPropertyValue('--h-control')) || 44,
+          parseInt(root.getPropertyValue('--h-primary')) || 64,
+        ]);
+        const DERIVED = [
+          '.tl-qty',              // stretches to its docket line
+          '.tkt-icon-btn',        // half a menu tile
+          '.admin-nav-group',     // square, so the rail's width
+          '.admin-nav-btn',
+          '.item-card', '.acct-tile', '.cat-btn', '.subcat-seg button', // the grid's job
+          '.menu-item-header', '.sel-head', '.order-row', '.ticket-line', // rows, not buttons
+          '.color-dot-btn', '.accent-swatch', '.swatch', '.color-swatch', // --swatch
+          '.floor-marker', '.shape-chip', '.seat-ghost', '.covers-pad-key',
+          '.qty-pad-key', '.pin-pad button', '.staff-tile', '.osk button',
+        ].join(', ');
+        document.querySelectorAll('button,[role=button]').forEach(el => {
+          if (skip(el)) return;
+          if (el.matches(DERIVED) || el.closest(DERIVED)) return;
+          const b = el.getBoundingClientRect(); if (b.width < 6 || b.height < 6) return;
+          const c = getComputedStyle(el);
+          if (c.visibility === 'hidden' || c.pointerEvents === 'none' || el.disabled) return;
+          const h = Math.round(b.height);
+          if (!H_OK.has(h)) out.push(`${label}  height ${(el.className || el.tagName).toString().split(' ')[0]} is ${h}px, must be ${[...H_OK].join(' or ')} (or a named derivation)`);
+        });
+
         // RULE: the finger law — ink >= --tap, or nothing interactive within --tap.
         const tap = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tap')) || 44;
         const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {

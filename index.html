@@ -4668,6 +4668,7 @@ const DEFAULT_DATA = {
   allergyPresets: DEFAULT_ALLERGY_PRESETS,
   vipPresets: DEFAULT_VIP_PRESETS,
   discountPresets: DEFAULT_DISCOUNT_PRESETS,
+  priceRules: [],
   voidReasons: DEFAULT_VOID_REASONS,
   registerCloses: [],
   shifts: [],
@@ -4927,6 +4928,24 @@ function loadAndMigrate() {
   }
   if (!data.voidReasons) {
     data.voidReasons = DEFAULT_VOID_REASONS;
+    writeData(data);
+  }
+  // Automatic rules own everything that puts itself on a bill. The old
+  // Sundays/Saturdays/Public-holidays switches were the same job with a
+  // narrower door, so they fold into rules on first read and the switches go.
+  if (!data.priceRules) {
+    data.priceRules = [];
+    const cfg = (data.settings || {}).autoSurcharge;
+    if (cfg && cfg.rate > 0) {
+      const mk = (name, field, value) => ({
+        id: 'pr' + Date.now() + Math.floor(Math.random() * 1000),
+        name, enabled: true, kind: 'surcharge', type: 'percent',
+        value: cfg.rate, field, op: 'is', value1: value, value2: '',
+      });
+      if (cfg.sunday) data.priceRules.push(mk('Sunday surcharge', 'weekday', 0));
+      if (cfg.saturday) data.priceRules.push(mk('Saturday surcharge', 'weekday', 6));
+      if (cfg.publicHoliday) data.priceRules.push(mk('Public holiday surcharge', 'holiday', 'yes'));
+    }
     writeData(data);
   }
   if (!data.registerCloses) {
@@ -5842,6 +5861,89 @@ app.delete('/api/discount-presets/:id', (req, res) => {
   if (!preset) return res.status(404).json({ error: 'Preset not found' });
   data.discountPresets = data.discountPresets.filter(p => p.id !== req.params.id);
   logAudit(data, staffFromReq(req), `Deleted ${preset.kind} preset: ${preset.name}`);
+  writeData(data);
+  res.json({ ok: true });
+});
+
+// ---------- Automatic rules ----------
+// A rule is ONE condition and ONE amount: when <field> <op> <value>, put this
+// discount/surcharge on the bill at payment. The field and operator lists are
+// fixed and served to the app, so the admin picks from dropdowns and there is
+// nothing to mistype — a rule can never be stored as a silent no-op.
+const RULE_FIELDS = {
+  covers: { label: 'Guests', kind: 'number', ops: ['atleast', 'atmost', 'is'] },
+  subtotal: { label: 'Bill total', kind: 'money', ops: ['atleast', 'atmost', 'is'] },
+  orderType: { label: 'Order type', kind: 'choice', ops: ['is', 'isnot'] },
+  weekday: { label: 'Day', kind: 'choice', ops: ['is', 'isnot'] },
+  holiday: { label: 'Public holiday', kind: 'choice', ops: ['is'] },
+  time: { label: 'Time of day', kind: 'time', ops: ['between'] },
+  table: { label: 'Table', kind: 'choice', ops: ['is', 'isnot'] },
+};
+function cleanRule(body, existing) {
+  const r = Object.assign({}, existing || {});
+  if (body.name !== undefined) r.name = String(body.name || '').trim().slice(0, 40);
+  if (body.enabled !== undefined) r.enabled = !!body.enabled;
+  if (body.kind !== undefined) r.kind = body.kind === 'discount' ? 'discount' : 'surcharge';
+  if (body.type !== undefined) r.type = body.type === 'fixed' ? 'fixed' : 'percent';
+  if (body.value !== undefined) r.value = parseFloat(body.value);
+  if (body.field !== undefined) r.field = String(body.field || '');
+  if (body.op !== undefined) r.op = String(body.op || '');
+  if (body.value1 !== undefined) r.value1 = body.value1;
+  if (body.value2 !== undefined) r.value2 = body.value2;
+  return r;
+}
+function ruleError(r) {
+  if (!r.name) return 'Name is required';
+  const f = RULE_FIELDS[r.field];
+  if (!f) return 'Pick what the rule looks at';
+  if (!f.ops.includes(r.op)) return 'That test does not work on ' + f.label.toLowerCase();
+  if (isNaN(parseFloat(r.value)) || parseFloat(r.value) <= 0) return 'Enter an amount greater than zero';
+  if (r.type === 'percent' && parseFloat(r.value) > 100) return 'A percentage cannot be over 100';
+  if (f.kind === 'number' || f.kind === 'money') {
+    if (r.value1 === '' || r.value1 === null || isNaN(parseFloat(r.value1))) return 'Enter a number to compare against';
+  } else if (f.kind === 'time') {
+    const ok = v => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || ''));
+    if (!ok(r.value1) || !ok(r.value2)) return 'Enter both times as HH:MM';
+  } else if (r.value1 === '' || r.value1 === null || r.value1 === undefined) {
+    return 'Pick a value for the rule to match';
+  }
+  return null;
+}
+app.get('/api/rule-fields', (req, res) => res.json(RULE_FIELDS));
+app.get('/api/price-rules', (req, res) => {
+  const data = readData();
+  res.json(data.priceRules || []);
+});
+app.post('/api/price-rules', (req, res) => {
+  const data = readData();
+  if (!data.priceRules) data.priceRules = [];
+  const rule = cleanRule(req.body, { enabled: true, kind: 'surcharge', type: 'percent', value2: '' });
+  const err = ruleError(rule);
+  if (err) return res.status(400).json({ error: err });
+  rule.id = 'pr' + Date.now();
+  data.priceRules.push(rule);
+  logAudit(data, staffFromReq(req), `Added automatic rule: ${rule.name}`);
+  writeData(data);
+  res.json(rule);
+});
+app.put('/api/price-rules/:id', (req, res) => {
+  const data = readData();
+  const rule = (data.priceRules || []).find(r => r.id === req.params.id);
+  if (!rule) return res.status(404).json({ error: 'Rule not found' });
+  const next = cleanRule(req.body, rule);
+  const err = ruleError(next);
+  if (err) return res.status(400).json({ error: err });
+  Object.assign(rule, next);
+  logAudit(data, staffFromReq(req), `Updated automatic rule: ${rule.name}`);
+  writeData(data);
+  res.json(rule);
+});
+app.delete('/api/price-rules/:id', (req, res) => {
+  const data = readData();
+  const rule = (data.priceRules || []).find(r => r.id === req.params.id);
+  if (!rule) return res.status(404).json({ error: 'Rule not found' });
+  data.priceRules = data.priceRules.filter(r => r.id !== req.params.id);
+  logAudit(data, staffFromReq(req), `Deleted automatic rule: ${rule.name}`);
   writeData(data);
   res.json({ ok: true });
 });
@@ -8609,7 +8711,7 @@ app.post('/api/import', (req, res) => {
 // (GET /api/staff strips them), so restoring staff would wipe every PIN.
 // 'floorPlans' is deliberately excluded — the table-layout editor saves live
 // (every place/move/delete persists immediately), so it must survive Discard.
-const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
+const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'sizePresets', 'noteCategories', 'discountPresets', 'priceRules', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
 app.post('/api/restore-config', (req, res) => {
   const data = readData();
   const snap = req.body || {};
@@ -10234,6 +10336,11 @@ let state = {
   customNoteDraft: null, // { categoryId, text, seats, wholeTable }
   noteCategories: [], // [{ id, name, color }]
   discountPresets: [],
+  priceRules: [],
+  ruleFields: {},
+  priceRuleModal: null,
+  selectedPriceRuleIds: [],
+  expandedPriceRuleIds: [],
   discountPresetModal: null, // { mode: 'add'|'edit', id, name, kind, type, value }
   voidReasons: [],
   voidModal: null, // { orderId, reason, note }
@@ -11904,6 +12011,7 @@ const MODAL_DELETE_ACTIONS = {
   'modal-delete-inventory-item': ['inventoryItemModal', (id) => deleteInventoryItem(id), 'Delete this inventory item?'],
   'modal-delete-happy-hour': ['happyHourModal', (id) => deleteHappyHourAction(id), 'Delete this promotion?'],
   'modal-delete-discount-preset': ['discountPresetModal', (id) => deleteDiscountPresetAction(id), 'Delete this preset?'],
+  'modal-delete-price-rule': ['priceRuleModal', (id) => deletePriceRuleAction(id), 'Delete this rule?'],
   'modal-delete-modifier-group': ['modifierGroupModal', (id) => deleteModifierGroupAction(id), 'Delete this modifier group? Items using it will lose it.'],
   'modal-delete-combo': ['comboModal', (id) => deleteComboAction(id), 'Delete this set menu?'],
   'modal-delete-menu-item': ['menuModal', (id) => deleteMenuItemAction(id), 'Delete this menu item?'],
@@ -13178,7 +13286,7 @@ async function loadInitial() {
     const [menu, categories, subcategories, salesCategories, modifierGroups, theme,
       settings, allergyPresets, savedColors, vipPresets, sizePresets, noteCategories,
       discountPresets, voidReasons, happyHours, printerStations, customers, combos,
-      floorPlans] = await Promise.all([
+      floorPlans, priceRules, ruleFields] = await Promise.all([
         api('/api/menu'), api('/api/categories'), api('/api/subcategories'),
         api('/api/sales-categories'), api('/api/modifier-groups'), api('/api/theme'),
         api('/api/settings'), api('/api/allergy-presets'),
@@ -13187,6 +13295,8 @@ async function loadInitial() {
         api('/api/discount-presets'), api('/api/void-reasons'), api('/api/happy-hours'),
         api('/api/printer-stations'), api('/api/customers'), api('/api/combos'),
         api('/api/floorplans'),
+        api('/api/price-rules').catch(() => []),
+        api('/api/rule-fields').catch(() => ({})),
       ]);
     state.menu = menu;
     state.categories = categories;
@@ -13201,6 +13311,8 @@ async function loadInitial() {
     state.sizePresets = sizePresets;
     state.noteCategories = normNoteCategories(noteCategories);
     state.discountPresets = discountPresets;
+    state.priceRules = priceRules || [];
+    state.ruleFields = ruleFields || {};
     state.voidReasons = voidReasons;
     state.happyHours = happyHours;
     state.printerStations = printerStations;
@@ -15201,7 +15313,7 @@ function saveDiscountModal() {
 }
 function removeDiscount() { state.discount = null; render(); }
 
-// §§ Auto surcharges (Sundays / AU public holidays)
+// §§ Automatic rules (self-applying discounts and surcharges)
 // Easter Sunday (Meeus/Jones/Butcher) — anchors Good Friday & Easter Monday.
 function easterSunday(year) {
   const a = year % 19, b = Math.floor(year / 100), c = year % 100;
@@ -15250,24 +15362,127 @@ function auPublicHolidays(year, st) {
   mondayise(new Date(year, 11, 26), 'Boxing Day');
   return set;
 }
-// Which surcharge applies today, if any (public holiday beats Sunday beats Sat).
-function autoSurchargeToday() {
-  const cfg = state.settings.autoSurcharge;
-  if (!cfg || !cfg.rate) return null;
-  const now = new Date(), day = now.getDay();
+// Is today a public holiday in the venue's state? Label, or null.
+function publicHolidayToday(now) {
+  const st = (state.settings.autoSurcharge && state.settings.autoSurcharge.state) || 'NSW';
   const key = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
-  if (cfg.publicHoliday) { const h = auPublicHolidays(now.getFullYear(), cfg.state || 'NSW'); if (h[key]) return { rate: cfg.rate, label: h[key] + ' surcharge' }; }
-  if (cfg.sunday && day === 0) return { rate: cfg.rate, label: 'Sunday surcharge' };
-  if (cfg.saturday && day === 6) return { rate: cfg.rate, label: 'Saturday surcharge' };
-  return null;
+  return auPublicHolidays(now.getFullYear(), st)[key] || null;
 }
-// At checkout, auto-apply the day's surcharge — but never stomp a manual
-// discount/surcharge the staff already put on. It shows as a normal surcharge
-// line the manager can remove.
+
+// ---- The rule catalogue -------------------------------------------------
+// What a rule can look at, and how it can be tested. The server holds the same
+// list and validates every save against it; this copy is what fills the
+// dropdowns, so nothing is ever typed by hand and no rule can quietly do
+// nothing. The operators come from the server (state.ruleFields).
+const RULE_FIELD_LABELS = {
+  covers: 'Guests', subtotal: 'Bill total', orderType: 'Order type',
+  weekday: 'Day', holiday: 'Public holiday', time: 'Time of day', table: 'Table',
+};
+const RULE_OP_LABELS = {
+  atleast: 'is at least', atmost: 'is at most', is: 'is', isnot: 'is not', between: 'is between',
+};
+const RULE_WEEKDAYS = [[1, 'Monday'], [2, 'Tuesday'], [3, 'Wednesday'], [4, 'Thursday'], [5, 'Friday'], [6, 'Saturday'], [0, 'Sunday']];
+const RULE_ORDER_TYPES = [['dine-in', 'Dine in'], ['takeaway', 'Takeaway'], ['delivery', 'Delivery']];
+function ruleFieldKind(field) {
+  if (field === 'covers') return 'number';
+  if (field === 'subtotal') return 'money';
+  if (field === 'time') return 'time';
+  return 'choice';
+}
+function ruleFieldOps(field) {
+  const served = (state.ruleFields || {})[field];
+  if (served && Array.isArray(served.ops)) return served.ops;
+  const k = ruleFieldKind(field);
+  if (k === 'number' || k === 'money') return ['atleast', 'atmost', 'is'];
+  if (k === 'time') return ['between'];
+  if (field === 'holiday') return ['is'];
+  return ['is', 'isnot'];
+}
+function ruleChoices(field) {
+  if (field === 'orderType') return RULE_ORDER_TYPES;
+  if (field === 'weekday') return RULE_WEEKDAYS;
+  if (field === 'holiday') return [['yes', 'Yes'], ['no', 'No']];
+  if (field === 'table') return allTables().map(t => [t.name, t.name]);
+  return [];
+}
+// The rule in as few words as the page allows — the same phrase in the list
+// and in the editor, so what you build is what you read back.
+function ruleWhenText(r) {
+  const neg = r.op === 'isnot';
+  const on = neg ? 'Not on' : 'On';
+  const choice = () => {
+    const c = ruleChoices(r.field).find(x => String(x[0]) === String(r.value1));
+    return c ? c[1] : (r.value1 === '' || r.value1 === undefined ? '—' : String(r.value1));
+  };
+  const n = r.value1 === '' || r.value1 === undefined ? '—' : r.value1;
+  switch (r.field) {
+    case 'covers': return r.op === 'atleast' ? `When guests ${n} or more` : r.op === 'atmost' ? `When guests ${n} or fewer` : `When guests is ${n}`;
+    case 'subtotal': {
+      const v = money(parseFloat(r.value1) || 0);
+      return r.op === 'atleast' ? `When bill ${v} or more` : r.op === 'atmost' ? `When bill ${v} or less` : `When bill is ${v}`;
+    }
+    case 'orderType': return `${on} ${choice().toLowerCase()} orders`;
+    case 'weekday': return `${on} ${choice()}s`;
+    case 'holiday': return String(r.value1) === 'yes' ? 'On public holidays' : 'On normal days';
+    case 'time': return `Between ${r.value1 || '--:--'} and ${r.value2 || '--:--'}`;
+    case 'table': return `${on} ${n}`;
+    default: return '—';
+  }
+}
+// The money, signed: on goes up, off comes down.
+function ruleAmountChip(r) {
+  const amt = r.type === 'percent' ? `${r.value}%` : money(r.value || 0);
+  return `${r.kind === 'discount' ? '−' : '+'}${amt}`;
+}
+function ruleAmountText(r) {
+  const amt = r.type === 'percent' ? `${r.value}%` : money(r.value || 0);
+  return `${r.kind === 'discount' ? 'take off' : 'add'} ${amt}`;
+}
+// Does this rule fit the bill on screen right now? Anything missing counts as
+// no — a rule can never throw and wedge the order screen.
+function ruleMatches(r, now) {
+  if (!r || r.enabled === false) return false;
+  const cmp = (actual, want, op) => {
+    const a = parseFloat(actual), w = parseFloat(want);
+    if (isNaN(a) || isNaN(w)) return false;
+    if (op === 'atleast') return a >= w;
+    if (op === 'atmost') return a <= w;
+    return a === w;
+  };
+  const same = (actual, want, op) => {
+    const hit = String(actual) === String(want);
+    return op === 'isnot' ? !hit : hit;
+  };
+  switch (r.field) {
+    case 'covers': return cmp(state.covers || 0, r.value1, r.op);
+    case 'subtotal': return cmp(cartSubtotal(), r.value1, r.op);
+    case 'orderType': return same(state.orderType, r.value1, r.op);
+    case 'weekday': return same(now.getDay(), r.value1, r.op);
+    case 'holiday': return same(publicHolidayToday(now) ? 'yes' : 'no', r.value1, 'is');
+    case 'table': return same(state.table || '', r.value1, r.op);
+    case 'time': {
+      const mins = now.getHours() * 60 + now.getMinutes();
+      const parse = v => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+      const from = parse(r.value1), to = parse(r.value2);
+      if (from === null || to === null) return false;
+      return from <= to ? (mins >= from && mins <= to) : (mins >= from || mins <= to);
+    }
+    default: return false;
+  }
+}
+// One rule per bill: the first one in the list that fits. Stacking would mean
+// surprises on the receipt, so it is deliberately not offered.
+function matchingPriceRule() {
+  const now = new Date();
+  return (state.priceRules || []).find(r => ruleMatches(r, now)) || null;
+}
+// At checkout, a matching rule puts itself on — but never over a discount or
+// surcharge the staff already put on by hand. It lands as a normal line a
+// manager can take straight back off.
 function maybeApplyAutoSurcharge() {
   if (state.discount) return;
-  const s = autoSurchargeToday();
-  if (s) state.discount = { type: 'percent', value: s.rate, reason: s.label, kind: 'surcharge', auto: true };
+  const r = matchingPriceRule();
+  if (r) state.discount = { type: r.type, value: r.value, reason: r.name, kind: r.kind, auto: true, ruleId: r.id };
 }
 function openCheckout() {
   if (state.cart.length === 0 && !state.openOrderId) return;
@@ -16130,6 +16345,7 @@ function render() {
     ${state.addTipModal ? renderAddTipModal() : ''}
     ${state.motdModal ? renderMotdModal() : ''}
     ${state.discountPresetModal ? renderDiscountPresetModal() : ''}
+    ${state.priceRuleModal ? renderPriceRuleModal() : ''}
     ${state.bulkEditModal ? renderBulkEditModal() : ''}
     ${state.bulkCategoryModal ? renderBulkCategoryModal() : ''}
     ${state.bulkColorModal ? renderBulkColorModal() : ''}
@@ -22240,8 +22456,8 @@ const SETTINGS_INDEX = [
   { page: 'settings-payments', label: 'Payments', terms: 'card terminal eftpos linkly commbank pair payment machine cash quick amounts tender' },
   { page: 'settings-doshii', label: 'App orders & pay at table', terms: 'doshii app orders qr delivery pay at table' },
   { page: 'settings-tips', label: 'Tips & quick percentages', terms: 'tips tip percent presets' },
-  { page: 'settings-discounts', label: 'Discount presets', terms: 'discount preset staff percent' },
-  { page: 'settings-surcharges', label: 'Surcharges & auto surcharges', terms: 'surcharge preset percent sunday saturday public holiday auto weekend' },
+  { page: 'settings-discounts', label: 'Discount presets', terms: 'discount preset staff percent rule automatic trigger' },
+  { page: 'settings-surcharges', label: 'Surcharges & automatic rules', terms: 'surcharge preset percent sunday saturday public holiday auto weekend rule trigger covers guests' },
   { page: 'settings-happyhour', label: 'Promotions & happy hour', terms: 'promotion happy hour discount times days' },
   { page: 'settings-giftcards', label: 'Gift cards & vouchers', terms: 'gift card voucher code redeem' },
   { page: 'settings-void', label: 'Void reasons', terms: 'void reasons cancel waste' },
@@ -22899,14 +23115,12 @@ function renderPresetTileList(kind, addLabel) {
   </div>`;
 }
 function renderDiscountsSettingsAdmin() {
-  return renderPresetTileList('discount', '+ Discount');
+  return renderPresetTileList('discount', '+ Discount') + renderPriceRuleList('discount');
 }
+// Surcharges live HERE now (owner ask): the preset tiles staff tap by hand,
+// then the rules that put a surcharge on by themselves.
 function renderSurchargesSettingsAdmin() {
-  // Surcharges live HERE now (owner ask): the preset tiles plus the auto
-  // surcharge rules that used to hide at the bottom of the Tax page.
-  const cfg = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
-  const chip = (key, label) => `<div class="pay-opt ${cfg[key] ? 'active' : ''}" data-act="toggle-auto-surcharge" data-key="${key}">${label}</div>`;
-  const today = autoSurchargeToday();
+  const cfg = state.settings.autoSurcharge || { state: 'NSW' };
   const states = [
     ['NSW', 'New South Wales'], ['VIC', 'Victoria'], ['QLD', 'Queensland'],
     ['SA', 'South Australia'], ['WA', 'Western Australia'], ['TAS', 'Tasmania'],
@@ -22914,30 +23128,103 @@ function renderSurchargesSettingsAdmin() {
   ];
   return `
   ${renderPresetTileList('surcharge', '+ Surcharge')}
+  ${renderPriceRuleList('surcharge')}
   <div class="settings-card" style="margin-top:14px;">
-    <div class="th" style="margin-bottom:4px;">Auto surcharges</div>
-    <div class="ts" style="margin-bottom:10px;">Adds itself at checkout on those days.</div>
-    <div class="pay-options" style="margin-bottom:14px;">
-      ${chip('sunday', 'Sundays')}
-      ${chip('saturday', 'Saturdays')}
-      ${chip('publicHoliday', 'Public holidays')}
-    </div>
-    <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;">
-      <div>
-        <label class="field-label">Rate %</label>
-        <input id="auto-surcharge-rate" type="number" min="0" max="40" step="0.5" value="${cfg.rate}" style="width:90px;padding:9px 12px;border-radius:8px;border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:var(--font-mono);" onblur="saveAutoSurcharge({ rate: Math.max(0, parseFloat(this.value) || 0) })">
-      </div>
-      <div>
-        <label class="field-label">State (for holidays)</label>
-        <select class="pp-select" style="width:210px;" onchange="saveAutoSurcharge({ state: this.value })">
-          ${states.map(([code, name]) => `<option value="${code}" ${cfg.state === code ? 'selected' : ''}>${code} — ${name}</option>`).join('')}
-        </select>
-      </div>
-    </div>
-    <div class="ts" style="margin-top:12px;">${today ? `Today: <b>${esc(today.label)} ${today.rate}%</b>` : 'Nothing applies today.'}</div>
+    <div class="th" style="margin-bottom:4px;">Public holidays</div>
+    <div class="ts" style="margin-bottom:10px;">Which state's holiday dates to use.</div>
+    <select class="pp-select" style="width:210px;" onchange="saveAutoSurcharge({ state: this.value })">
+      ${states.map(([code, name]) => `<option value="${code}" ${cfg.state === code ? 'selected' : ''}>${code} — ${name}</option>`).join('')}
+    </select>
   </div>`;
 }
 
+// ---- Automatic rules, the admin list ------------------------------------
+// Same tile list as the presets above it, so a rule reads like everything
+// else on the page: tick to select, tap to edit, On/Off on the right. Each
+// row spells the rule out in words — no hidden setting names, and no way to
+// end up with a rule that quietly does nothing.
+function renderPriceRuleList(kind) {
+  const list = (state.priceRules || []).filter(r => (r.kind === 'discount') === (kind === 'discount'));
+  const sel = state.selectedPriceRuleIds || [];
+  const selHere = sel.filter(id => list.some(r => r.id === id));
+  const now = new Date();
+  return `
+  <div class="settings-card wide" style="margin-top:14px;">
+    <div class="th" style="margin-bottom:4px;">Automatic rules</div>
+    <div class="ts" style="margin-bottom:10px;">Puts itself on the bill at payment.</div>
+    <div style="max-width:var(--admin-list-w,560px);">
+      <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" data-act="selall-price-rule" data-kind="${kind}" ${list.length > 0 && list.every(r => sel.includes(r.id)) ? 'checked' : ''}></label>${selHere.length > 0 ? `
+        <button class="icon-sq" data-act="delete-selected-price-rules">${ACT_TRASH_SVG}</button>
+        <button class="icon-sq" data-act="clear-price-rule-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-price-rule" data-kind="${kind}">+ Rule</button></div>
+      ${list.length === 0 ? `<div class="empty-hist">No rules yet.</div>` : ''}
+      ${list.map(r => `
+        <div class="menu-item-expandable price-rule-row${sel.includes(r.id) ? ' selected' : ''}" data-id="${r.id}" style="border:1px solid var(--steel-200);border-radius:12px;background:var(--surface);overflow:hidden;margin-bottom:8px;">
+          <div class="menu-item-header sel-head" data-act="edit-price-rule" data-id="${r.id}" data-sellist="price-rule" data-selkey="${r.id}" style="display:flex;align-items:center;gap:8px;padding:9px 12px;cursor:pointer;">
+            <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="price-rule" data-key="${r.id}" ${sel.includes(r.id) ? 'checked' : ''}>
+            <span style="display:flex;flex-direction:column;gap:2px;min-width:0;">
+              <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(r.name)}</span>
+              <span class="ts">${esc(ruleWhenText(r))}</span>
+            </span>
+            <span style="flex:1;"></span>
+            ${r.enabled !== false && ruleMatches(r, now) ? `<span class="status-chip paid" style="flex-shrink:0;">Fits now</span>` : ''}
+            <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);flex-shrink:0;">${ruleAmountChip(r)}</span>
+            <button class="status-chip ${r.enabled === false ? 'void' : 'paid'}" style="border:none;cursor:pointer;flex-shrink:0;" data-act="toggle-price-rule" data-id="${r.id}" onclick="event.stopPropagation();">${r.enabled === false ? 'Off' : 'On'}</button>
+          </div>
+        </div>`).join('')}
+    </div>
+  </div>`;
+}
+
+function renderPriceRuleModal() {
+  const m = state.priceRuleModal;
+  const kindWord = m.kind === 'discount' ? 'discount' : 'surcharge';
+  const fieldKind = ruleFieldKind(m.field);
+  const ops = ruleFieldOps(m.field);
+  const choices = ruleChoices(m.field);
+  return `
+  <div class="modal-bg" data-act="price-rule-modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>${m.mode === 'add' ? 'Add' : 'Edit'} rule</h2>
+      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      <label>Name</label>
+      <input id="price-rule-name-input" type="text" value="${esc(m.name)}" placeholder="${m.kind === 'discount' ? 'e.g. Early bird' : 'e.g. Large group'}">
+      <label>When</label>
+      <select class="pp-select" data-act="price-rule-field">
+        ${Object.keys(RULE_FIELD_LABELS).map(f => `<option value="${f}" ${m.field === f ? 'selected' : ''}>${RULE_FIELD_LABELS[f]}</option>`).join('')}
+      </select>
+      <select class="pp-select" style="margin-top:8px;" data-act="price-rule-op">
+        ${ops.map(o => `<option value="${o}" ${m.op === o ? 'selected' : ''}>${RULE_OP_LABELS[o] || o}</option>`).join('')}
+      </select>
+      ${fieldKind === 'time' ? `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <input id="price-rule-value1-input" type="time" value="${esc(m.value1 || '')}" style="flex:1;">
+        <span class="ts">and</span>
+        <input id="price-rule-value2-input" type="time" value="${esc(m.value2 || '')}" style="flex:1;">
+      </div>` : fieldKind === 'choice' ? `
+      <select class="pp-select" style="margin-top:8px;" data-act="price-rule-value1">
+        ${choices.length === 0 ? `<option value="">Nothing to pick yet</option>` : ''}
+        ${choices.map(([v, l]) => `<option value="${esc(String(v))}" ${String(m.value1) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>` : `
+      <input id="price-rule-value1-input" type="number" min="0" step="${fieldKind === 'money' ? '0.01' : '1'}" value="${esc(String(m.value1 === undefined ? '' : m.value1))}" placeholder="${fieldKind === 'money' ? '100.00' : '8'}" style="margin-top:8px;">`}
+      <label>Then</label>
+      <div class="pay-options">
+        <div class="pay-opt ${m.kind === 'surcharge' ? 'active' : ''}" data-act="price-rule-kind" data-val="surcharge">Add on</div>
+        <div class="pay-opt ${m.kind === 'discount' ? 'active' : ''}" data-act="price-rule-kind" data-val="discount">Take off</div>
+      </div>
+      <div class="pay-options" style="margin-top:8px;">
+        <div class="pay-opt ${m.type === 'percent' ? 'active' : ''}" data-act="price-rule-type" data-val="percent">% Percent</div>
+        <div class="pay-opt ${m.type === 'fixed' ? 'active' : ''}" data-act="price-rule-type" data-val="fixed">$ Fixed amount</div>
+      </div>
+      <input id="price-rule-amount-input" type="number" min="0" step="0.01" value="${esc(String(m.value))}" placeholder="${m.type === 'percent' ? '10' : '5.00'}" style="margin-top:8px;">
+      <div class="ts" style="margin-top:10px;">${esc(ruleWhenText(m))}, ${esc(ruleAmountText(m))}.</div>
+      <div class="modal-actions">
+        <button class="icon-action discard" data-act="close-price-rule-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        ${m.id ? `<button type="button" class="icon-action discard btn-modal-delete" data-act="modal-delete-price-rule">${ACT_TRASH_SVG}<span class="ia-label">Delete</span></button>` : ''}
+        <button class="icon-action send" data-act="save-price-rule-modal">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
+      </div>
+    </div>
+  </div>`;
+}
 
 // Tips collected over a period, split among staff by their weighted share.
 function tipPeriodStart(period) {
@@ -30116,6 +30403,75 @@ async function confirmAddTip() {
   }
 }
 
+// ---- Automatic rules, the actions ---------------------------------------
+function openAddPriceRule(kind) {
+  state.priceRuleModal = withDirtyCheck({
+    mode: 'add', id: null, name: '', enabled: true,
+    kind: kind === 'discount' ? 'discount' : 'surcharge',
+    type: 'percent', value: 10, field: 'covers', op: 'atleast', value1: '8', value2: '',
+  });
+  state.adminError = ''; render();
+}
+function openEditPriceRule(id) {
+  const r = (state.priceRules || []).find(x => x.id === id);
+  if (!r) return;
+  state.priceRuleModal = withDirtyCheck({
+    mode: 'edit', id: r.id, name: r.name, enabled: r.enabled !== false, kind: r.kind,
+    type: r.type, value: r.value, field: r.field, op: r.op,
+    value1: r.value1 === undefined ? '' : r.value1, value2: r.value2 || '',
+  });
+  state.adminError = ''; render();
+}
+function closePriceRuleModal() { if (!confirmDiscard(state.priceRuleModal)) return; state.priceRuleModal = null; state.adminError = ''; render(); }
+// The field decides which tests make sense, so changing it snaps the operator
+// and the value back to something valid — a half-changed rule can't be saved.
+function setPriceRuleField(field) {
+  const m = state.priceRuleModal;
+  m.field = field;
+  m.op = ruleFieldOps(field)[0];
+  const kind = ruleFieldKind(field);
+  if (kind === 'time') { m.value1 = '17:00'; m.value2 = '19:00'; }
+  else if (kind === 'choice') { const c = ruleChoices(field); m.value1 = c.length ? String(c[0][0]) : ''; m.value2 = ''; }
+  else { m.value1 = ''; m.value2 = ''; }
+  render();
+}
+async function savePriceRuleModal() {
+  const m = state.priceRuleModal;
+  const body = {
+    name: m.name, enabled: m.enabled !== false, kind: m.kind, type: m.type,
+    value: parseFloat(m.value), field: m.field, op: m.op, value1: m.value1, value2: m.value2,
+  };
+  try {
+    if (m.id) await api('/api/price-rules/' + m.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    else await api('/api/price-rules', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    state.priceRules = await api('/api/price-rules');
+    state.priceRuleModal = null; state.adminError = '';
+  } catch (e) { state.adminError = e.message || 'Could not save that rule.'; }
+  render();
+}
+async function togglePriceRule(id) {
+  const r = (state.priceRules || []).find(x => x.id === id);
+  if (!r) return;
+  try {
+    await api('/api/price-rules/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: r.enabled === false }) });
+    state.priceRules = await api('/api/price-rules');
+  } catch (e) { state.toast = 'Could not change that rule.'; }
+  render();
+}
+async function deletePriceRuleAction(id) {
+  try { await api('/api/price-rules/' + id, { method: 'DELETE' }); state.priceRules = await api('/api/price-rules'); } catch (e) { state.toast = 'Could not delete that rule.'; }
+  state.priceRuleModal = null; state.selectedPriceRuleIds = (state.selectedPriceRuleIds || []).filter(x => x !== id);
+  render();
+}
+async function deleteSelectedPriceRules() {
+  const ids = (state.selectedPriceRuleIds || []).slice();
+  if (ids.length === 0) return;
+  if (!confirm(`Delete ${ids.length} rule${ids.length > 1 ? 's' : ''}?`)) return;
+  for (const id of ids) { try { await api('/api/price-rules/' + id, { method: 'DELETE' }); } catch (e) { /* keep going */ } }
+  state.priceRules = await api('/api/price-rules');
+  state.selectedPriceRuleIds = [];
+  render();
+}
 function openAddDiscountPreset(kind) { state.discountPresetModal = withDirtyCheck({ mode: 'add', id: null, name: '', kind: kind === 'surcharge' ? 'surcharge' : 'discount', type: 'percent', value: 10, minCovers: '' }); state.adminError = ''; render(); }
 // Inline tile edits (name/value/type/colour) — save one field, keep the list fresh.
 async function updateDiscountPresetField(id, patch) {
@@ -31686,6 +32042,13 @@ async function deleteComboAction(id) {
 // Backups: hidden file input for "Import data file" (delegated once — the
 // input is re-created by every render).
 document.addEventListener('change', (e) => {
+  // Automatic rules: the three dropdowns in the rule editor.
+  if (e.target && e.target.dataset && state.priceRuleModal) {
+    const a = e.target.dataset.act;
+    if (a === 'price-rule-field') { setPriceRuleField(e.target.value); return; }
+    if (a === 'price-rule-op') { state.priceRuleModal.op = e.target.value; render(); return; }
+    if (a === 'price-rule-value1') { state.priceRuleModal.value1 = e.target.value; render(); return; }
+  }
   if (e.target && e.target.id === 'import-data-input' && e.target.files && e.target.files[0]) {
     importDataFile(e.target.files[0]);
     e.target.value = '';
@@ -32299,6 +32662,7 @@ const SEL_LISTS = {
   'void-reason': { arr: 'selectedVoidReasonIdxs', numeric: true },
   'tip-preset': { arr: 'selectedTipPresetIdxs', numeric: true },
   'discount-preset': { arr: 'selectedDiscountPresetIds' },
+  'price-rule': { arr: 'selectedPriceRuleIds' },
   'happy-hour': { arr: 'selectedHappyHourIds' },
   customer: { arr: 'selectedCustomerIds' },
   'inventory-item': { arr: 'selectedInventoryItemIds' },
@@ -32607,6 +32971,14 @@ function bindEvents() {
   }
   const discountPresetNameInput = document.getElementById('discount-preset-name-input');
   if (discountPresetNameInput) discountPresetNameInput.addEventListener('input', (e) => { state.discountPresetModal.name = e.target.value; });
+  const priceRuleNameInput = document.getElementById('price-rule-name-input');
+  if (priceRuleNameInput) priceRuleNameInput.addEventListener('input', (e) => { state.priceRuleModal.name = e.target.value; });
+  const priceRuleAmountInput = document.getElementById('price-rule-amount-input');
+  if (priceRuleAmountInput) priceRuleAmountInput.addEventListener('input', (e) => { state.priceRuleModal.value = e.target.value; });
+  const priceRuleValue1Input = document.getElementById('price-rule-value1-input');
+  if (priceRuleValue1Input) priceRuleValue1Input.addEventListener('input', (e) => { state.priceRuleModal.value1 = e.target.value; });
+  const priceRuleValue2Input = document.getElementById('price-rule-value2-input');
+  if (priceRuleValue2Input) priceRuleValue2Input.addEventListener('input', (e) => { state.priceRuleModal.value2 = e.target.value; });
   const discountPresetValueInput = document.getElementById('discount-preset-value-input');
   if (discountPresetValueInput) discountPresetValueInput.addEventListener('input', (e) => { state.discountPresetModal.value = e.target.value; });
   const discountPresetMinCoversInput = document.getElementById('discount-preset-mincovers-input');
@@ -34099,11 +34471,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'close-motd-modal') { state.motdModal = null; render(); }
       else if (act === 'save-motd') { saveVenueSettings({ messageOfTheDay: (document.getElementById('motd-input') || {}).value || '' }); state.motdModal = null; state.toast = 'Message of the day saved'; armToastTimer(2500); }
-      else if (act === 'toggle-auto-surcharge') {
-        const cur = state.settings.autoSurcharge || { sunday: false, saturday: false, publicHoliday: false, rate: 10, state: 'NSW' };
-        const k = el.dataset.key;
-        saveAutoSurcharge({ [k]: !cur[k] });
-      }
       else if (act === 'picker-mode') { state.transferMode = el.dataset.mode === 'transfer'; state.transferFrom = null; render(); }
       else if (act === 'floor-status-view') {
         state.floorStatusView = el.dataset.val;
@@ -34702,6 +35069,10 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'discount-preset-inline-type') { updateDiscountPresetField(el.dataset.id, { type: el.dataset.val }); }
+      else if (act === 'selall-price-rule') {
+        const wantDiscount = el.dataset.kind === 'discount';
+        toggleSelAllList('price-rule', (state.priceRules || []).filter(r => (r.kind === 'discount') === wantDiscount).map(r => r.id));
+      }
       else if (act === 'selall-discount-preset') {
         const wantSurcharge = el.dataset.kind === 'surcharge';
         toggleSelAllList('discount-preset', state.discountPresets.filter(p => (p.kind === 'surcharge') === wantSurcharge).map(p => p.id));
@@ -34713,6 +35084,16 @@ function handleActClick(el, e) {
       else if (act === 'delete-discount-preset') { deleteDiscountPresetAction(el.dataset.id); }
       else if (act === 'close-discount-preset-modal') { closeDiscountPresetModal(); }
       else if (act === 'save-discount-preset-modal') { saveDiscountPresetModal(); }
+      else if (act === 'add-price-rule') { openAddPriceRule(el.dataset.kind); }
+      else if (act === 'edit-price-rule') { openEditPriceRule(el.dataset.id); }
+      else if (act === 'toggle-price-rule') { togglePriceRule(el.dataset.id); }
+      else if (act === 'close-price-rule-modal') { closePriceRuleModal(); }
+      else if (act === 'save-price-rule-modal') { savePriceRuleModal(); }
+      else if (act === 'price-rule-kind') { state.priceRuleModal.kind = el.dataset.val; render(); }
+      else if (act === 'price-rule-type') { state.priceRuleModal.type = el.dataset.val; render(); }
+      else if (act === 'delete-selected-price-rules') { deleteSelectedPriceRules(); }
+      else if (act === 'clear-price-rule-selection') { state.selectedPriceRuleIds = []; render(); }
+      else if (act === 'price-rule-modal-bg') { /* a tap on the dark does nothing */ }
       else if (act === 'discount-preset-kind') { state.discountPresetModal.kind = el.dataset.val; render(); }
       else if (act === 'discount-preset-type') { state.discountPresetModal.type = el.dataset.val; render(); }
       else if (act === 'set-show-staff-ticket') { saveTicketSetting({ showStaffOnTicket: el.dataset.val === 'true' }); }

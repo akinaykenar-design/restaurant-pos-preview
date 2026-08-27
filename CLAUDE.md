@@ -370,6 +370,14 @@ same word. No word names two things (that is why the docket's button row is
   not selected is the plain surface, selected is the accent TINT with accent
   text, on every device. The phone was painting a cream chip and a SOLID
   accent chip: a second visual language for the same control.
+  A nav laid out as a STRIP is a row of TABS: each one fills the strip's full
+  height, square edges, nothing floating in the middle of it (owner, Aug '26:
+  "I want the square edge ... I just want to remove the top and bottom
+  space"). `--nav-strip-h` is the old chip height plus the padding that used
+  to sit above and below it, so the strip keeps the height it had, nothing on
+  screen moves, and that padding becomes tappable. The COLUMN layout already
+  worked this way; the strip was the odd one out. This is the ONE place a
+  square edge is right: a tab is cut FROM the strip, it does not sit on it.
 - **Menu tile** — one item on the order grid. **Subsection tile** likewise.
 - **Docket** — the order panel. **Docket text**, **Docket tiles**.
 - **Docket tiles** — the button row across the docket's head: Table, Covers,

@@ -674,3 +674,22 @@ pane with `overflow:hidden` and the controls below the fold could not be
 reached at all (owner, Aug '26: "I cant scroll the options any more").
 A pane that scrolls needs EVERY ancestor between it and the fixed-height
 one to pass the height down. Check the whole chain, not the scroller.
+
+## The Design page: ONE control, and the preview is a card
+
+- **Every value is a stepper** — minus, the value, plus. Tiles across, tiles
+  down, text size (`− M +`) and docket width (`− 360px +`). No sliders: a drag
+  on a phone steals the scroll. No rows of chips: the owner called them messy
+  (Aug '26, after seeing 12 alternatives). `stepper()` in `renderScreenAdmin`
+  builds all of them.
+- **The preview is a card like the rest** — same `--r-surface` corner, same
+  1px border, same width, page showing all round it. It used to run edge to
+  edge with square corners and read as chrome, not as one of the things on
+  the page.
+- **Tablet / Mobile are equal width.** "Mobile" is the longer word and was
+  making its button 5px wider. `min-width:96px` on both.
+- **The controls pane snaps to card tops.** Scrolling left a ~16px tail of the
+  card above stuck under the preview — an empty rounded strip. A fade needs
+  ~100px to hide a 16px stub and washes out card titles; snapping costs
+  nothing visual. `proximity`, never `mandatory` — the two biggest cards are
+  taller than the pane and mandatory strands their bottoms.

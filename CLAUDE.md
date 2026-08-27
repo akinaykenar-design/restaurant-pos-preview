@@ -644,3 +644,33 @@ refreshed only on load, on send, and when a table is opened — so editing
 the course list in admin does not refresh it. Anything that asks "how many
 courses are there?" must take the **max** of the two, never the cache alone.
 That is why adding a 6th course never showed up in the docket.
+
+## The docket has no lines and no total
+
+Two rules, both owner-set (Aug '26), both easy to undo by accident:
+
+- **No divider rules.** `.ticket-head` and `.course-tabs` used to carry a
+  `border-bottom`. They do not. The gap between blocks does the dividing.
+- **No running total.** The docket lists what was ordered. What it adds up to
+  belongs to Pay, and only Pay. `.ticket-totals` is gone from the markup and
+  from the stylesheet — do not put a Total, a Subtotal or a count back in the
+  docket, however useful it looks.
+
+## A number pad opens on the number it is changing
+
+The price pad used to open blank on `$0.00`, so you could not see what you
+were about to change. It now opens on the current value, and confirming
+without typing is a no-op instead of a reset. The price it edits is the EACH
+price, so when the line has more than one the header spells it out —
+"Quail × 2 — each". Any new pad follows this: show the value, then let them
+type over it.
+
+## Height has to be passed DOWN, every step
+
+`.admin-content` → `#admin-router` → `.design-split` → `.screen-ctl-scroll`.
+Three of those four were flex columns with `min-height:0`; `.design-split`
+was left a plain block, so it grew to its content (2354px) inside an 814px
+pane with `overflow:hidden` and the controls below the fold could not be
+reached at all (owner, Aug '26: "I cant scroll the options any more").
+A pane that scrolls needs EVERY ancestor between it and the fixed-height
+one to pass the height down. Check the whole chain, not the scroller.

@@ -693,3 +693,40 @@ one to pass the height down. Check the whole chain, not the scroller.
   ~100px to hide a 16px stub and washes out card titles; snapping costs
   nothing visual. `proximity`, never `mandatory` — the two biggest cards are
   taller than the pane and mandatory strands their bottoms.
+
+## The line editor: one screen, two states
+
+A SENT line and an UNSENT line are the SAME screen (owner, Aug '26: "match the
+item sent vs not sent"). Same rows, same order, same controls, built by
+`renderLineEditMiddle` and `renderEditSentMiddle` — keep them in step.
+`lineEditHead()` draws the head for both: dish name, what the line comes to,
+and one line saying NOT SENT YET or SENT TO THE KITCHEN · ROUND n. Nothing on
+the old unsent editor said which dish you were editing.
+
+Only two things differ, and both are stated on screen, not implied:
+- **What the kitchen already has is dim and dead** — size, modifiers, build,
+  under `.le-locked`. Changing them after the ticket is a remake, not an edit.
+- **Quantity means something else.** `＋` sends another serving, `−` asks why
+  and voids one. The caption under the row says so.
+
+**Seat and course stay live after sending.** They are the two that still matter
+once the food is away — the right seat before a split, a later course. The
+server grew a `move` action for it (`/api/orders/:id/modify-item`), which
+touches `items` and `rounds` and never tells the kitchen, because the dish
+has not changed. `doMoveSent` follows the line's new signature afterwards or
+the next tap edits a line that no longer exists — and it moves
+`state.activeCourse` with it, or the docket is still showing the course you
+left and the line looks deleted.
+
+## The gradient means ONE thing
+
+`linear-gradient(120deg, var(--green-sel), var(--teal))` means "this is the
+dish you picked off the menu". Nothing else. Seat, course, size and modifiers
+are attributes OF a dish, so inside `.line-edit-pane` they use the ACCENT RING
+instead — dim fill, accent edge, text left alone, the same style the item
+options pop already used:
+
+    border-color:var(--orange); background:var(--orange-dim);
+    color:var(--text-primary); box-shadow:0 0 0 2px var(--orange);
+
+Any new selectable control that is not a menu item gets the ring.

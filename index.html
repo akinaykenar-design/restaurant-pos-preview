@@ -766,6 +766,19 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 /* Picking a variant/modifier/seat/preset POPS in the accent — same selected
    language as payment methods, course tabs and the category rail. Never grey. */
 .allergy-item-card.selected{border-color:transparent;background:linear-gradient(120deg, var(--green-sel), var(--teal)) !important;color:#fff !important;box-shadow:none;}
+/* THE LINE EDITOR uses the ACCENT RING, never the gradient. The gradient means
+   one thing only - "this is the dish you picked off the menu". Seat, course,
+   size and modifiers are attributes OF that dish, so they get the ring: dim
+   fill, accent edge, text left alone (owner, Aug '26). Same style the item
+   options pop already uses. */
+.line-edit-pane .allergy-item-card.selected{
+  border-color:var(--orange) !important; background:var(--orange-dim) !important;
+  color:var(--text-primary) !important; box-shadow:0 0 0 2px var(--orange) !important; }
+.line-edit-pane .pay-opt.active{
+  border-color:var(--orange); background:var(--orange-dim); color:var(--text-primary);
+  box-shadow:0 0 0 2px var(--orange); }
+/* Sent: what the kitchen already has is shown but not changeable. */
+.line-edit-pane .le-locked{ opacity:.42; pointer-events:none; }
 /* Default docket components in the line editor: shown "on" by default; tapping
    one crosses it out (red "No X") — the customer removed it. */
 .build-comp.removed{border-color:var(--red-300,#e7a9a3);background:var(--red-50,#fdf1ef);filter:none;}
@@ -9108,7 +9121,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { match, action, newPrice, staffName, reason } = req.body || {};
+  const { match, action, newPrice, newSeat, newCourse, staffName, reason } = req.body || {};
   if (!match || !match.name) return res.status(400).json({ error: 'Missing item to modify' });
   const norm = v => (v === null || v === undefined || v === '') ? null : v;
   const matches = (i) =>
@@ -9136,6 +9149,22 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
       data.houseLog.push({ at: Date.now(), staff, reason, item: match.name, qty: qtyRemoved, value: Math.round(value * 100) / 100, ticket: order.id });
       if (data.houseLog.length > 5000) data.houseLog.splice(0, data.houseLog.length - 5000);
     }
+  } else if (action === 'move') {
+    // Seat and course are the two things that STILL matter after the food has
+    // gone: moving a dish to the right seat before splitting a bill, or pushing
+    // it to a later course. Nothing about the dish itself changes, so the
+    // kitchen does not need to hear about it (owner, Aug '26).
+    const seat = (newSeat === undefined) ? undefined : (newSeat === 'all' || newSeat === null ? null : parseInt(newSeat, 10));
+    const course = (newCourse === undefined) ? undefined : parseInt(newCourse, 10);
+    let n = 0;
+    const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined) i.course = course; };
+    (order.items || []).forEach(i => { if (matches(i)) { apply(i); n++; } });
+    (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (matches(i)) apply(i); }));
+    if (n === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
+    const bits = [];
+    if (seat !== undefined) bits.push('seat ' + (seat === null ? 'All' : seat));
+    if (course !== undefined) bits.push('course ' + course);
+    logAudit(data, staff, `Moved ${match.name} to ${bits.join(', ')} on Ticket #${order.id}`);
   } else if (action === 'reprice') {
     const p = parseFloat(newPrice);
     if (isNaN(p) || p < 0) return res.status(400).json({ error: 'Enter a valid price' });
@@ -17522,6 +17551,32 @@ async function doRepriceSent(match, newPrice) {
     armToastTimer(2000);
   } catch (e) { state.toast = 'Could not update price'; render(); }
 }
+// Seat and course stay editable after sending - see the server's 'move'.
+// The editor keeps its own pane open so the owner can change both in one visit.
+async function doMoveSent(match, patch) {
+  const o = activeOpenOrder();
+  if (!match || !o) return;
+  try {
+    await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ match, action: 'move', newSeat: patch.seat, newCourse: patch.course,
+                             staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+    await refreshOrders();
+    // The signature the editor is holding has just changed - follow it, or the
+    // next tap edits a line that no longer exists.
+    const next = { ...match };
+    if (patch.seat !== undefined) next.seat = (patch.seat === 'all' ? null : patch.seat);
+    if (patch.course !== undefined) {
+      next.course = patch.course;
+      state.activeCourse = patch.course;
+      if (patch.course > state.courseCount) state.courseCount = patch.course;
+    }
+    state.cart.forEach(c => { if (sentItemMatches(c, match)) {
+      if (patch.seat !== undefined) c.seat = patch.seat;
+      if (patch.course !== undefined) c.course = patch.course; } });
+    state.editSent = next;
+    render();
+  } catch (e) { state.toast = 'Could not move that item'; render(); }
+}
 function repriceSentItem() {
   const inp = document.getElementById('sent-price-input');
   const p = inp ? parseFloat(inp.value) : NaN;
@@ -17662,32 +17717,89 @@ function removeSentLine(el) {
   const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
   doRemoveSent({ name: d.name, seat, note: d.note || '', price: parseFloat(d.price), course: parseInt(d.course) || 1 });
 }
+// A SENT line and an UNSENT line are the SAME screen (owner, Aug '26: "match
+// the item sent vs not sent"). Same rows, same order, same controls. Only two
+// things differ, and both are stated on the screen rather than implied:
+//   - the state line under the name says which it is;
+//   - what the kitchen already has (size, modifiers, build) is shown but dim
+//     and dead, because changing it after the ticket is a remake, not an edit.
+// Seat and course stay live: they are the two that still matter once the food
+// is away - the right seat before a split, a later course.
 function renderEditSentMiddle() {
   const agg = findSentAggregate();
   if (!agg) { state.editSent = null; return ''; }
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
+  const item = state.menu.find(x => x.name === agg.name);
+  const variants = item ? (item.variants || []) : [];
+  const groups = item ? (item.modifierGroupIds || []).map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean) : [];
+  const seatEnabled = state.settings.seatNumbersEnabled && state.covers > 0;
+  const curSeat = agg.seat == null ? 'all' : agg.seat;
+  const qtyBtn = 'width:var(--h-control);height:var(--h-control);border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);font-size:var(--fs-xl);font-weight:700;cursor:pointer;color:var(--text-primary);display:flex;align-items:center;justify-content:center;';
+  const round = (() => { const o = activeOpenOrder(); if (!o || !o.rounds) return null;
+    for (let i = o.rounds.length - 1; i >= 0; i--) if ((o.rounds[i].items || []).some(x => sentItemMatches(x, state.editSent))) return i + 1;
+    return null; })();
   return `
   <div class="middle-view">
-    <div class="pay-pane" style="padding:8px 20px 24px;">
-      <div class="sub">Sent · ${agg.qty} × ${money(agg.price)}${agg.seat ? ' · ' + esc(seatText(agg.seat)) : ''}${agg.note ? ' · ' + esc(agg.note) : ''}</div>
-      ${(() => { const it = state.menu.find(x => x.name === agg.name); const only = matchedAllergenBases(it, agg.seat != null ? agg.seat : 'all'); return only.length ? allergenChipRow(it, only) : ''; })()}
-      <button class="btn-confirm" style="width:100%;margin-top:14px;" data-act="add-serving">＋ Add another serving</button>
-      ${isManager ? `
-        <div style="margin-top:20px;border-top:1px solid var(--steel-200);padding-top:16px;display:flex;flex-direction:column;gap:12px;">
-          <div>
-            <label>Price each</label>
-            <div style="display:flex;gap:8px;">
-              <input id="sent-price-input" type="number" min="0" step="0.01" value="${agg.price}" style="flex:1;">
-              <button class="btn-secondary" style="width:auto;padding:8px 16px;" data-act="reprice-sent">Update</button>
-            </div>
-          </div>
-          <button class="btn-secondary" style="width:auto;border-color:var(--red);color:var(--red);" data-act="remove-sent">${SYS_TRASH_SVG} Remove from order</button>
+    <div class="pay-pane line-edit-pane" style="padding:8px 20px 24px;">
+      ${lineEditHead(agg.name, agg.price * agg.qty, true, round)}
+      ${(() => { const only = matchedAllergenBases(item, agg.seat != null ? agg.seat : 'all'); return only.length ? allergenChipRow(item, only) : ''; })()}
+      <label>Quantity</label>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
+        <button style="${qtyBtn}" data-act="void-one-sent">−</button>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:var(--fs-xl);font-weight:700;min-width:30px;text-align:center;">${agg.qty}</span>
+        <button style="${qtyBtn}" data-act="add-serving">＋</button>
+        <span class="tl-price" style="margin-left:auto;font-size:var(--fs-lg);">${money(agg.price * agg.qty)}</span>
+      </div>
+      <div class="ts" style="margin-bottom:16px;">＋ sends another serving · − asks why, then voids</div>
+      ${variants.length ? `
+        <label>Size <span style="color:var(--charcoal-soft);font-weight:600;text-transform:none;">· locked — the kitchen has it</span></label>
+        <div class="grid le-locked" style="margin-bottom:16px;">
+          ${variants.map(v => `<div class="item-card allergy-item-card ${agg.variantId === v.id ? 'selected' : ''}"><div class="item-name">${esc(v.label)}</div><div class="item-price">${money(v.price)}</div></div>`).join('')}
         </div>` : ''}
+      ${groups.map(g => {
+        const sel = modSel(agg.modSelections, g.id);
+        return `
+        <label>${esc(g.name)} <span style="color:var(--charcoal-soft);font-weight:600;text-transform:none;">· locked</span></label>
+        <div class="grid le-locked" style="margin-bottom:16px;">
+          ${g.options.map(o => `<div class="item-card allergy-item-card ${sel.includes(o.id) ? 'selected' : ''}"><div class="item-name">${esc(o.label)}</div></div>`).join('')}
+        </div>`; }).join('')}
+      ${seatEnabled ? `
+        <label>Seat</label>
+        <div class="grid" style="margin:0 0 16px;">
+          <button class="item-card allergy-item-card ${curSeat === 'all' ? 'selected' : ''}" data-act="edit-sent-seat" data-seat="all"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'All')}</div></button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${curSeat === n ? 'selected' : ''}" data-act="edit-sent-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('')}
+        </div>` : ''}
+      <label>Course</label>
+      <div class="pay-options" style="margin-bottom:16px;flex-wrap:wrap;">
+        ${(state.settings.courses || []).map((c, i) => c.enabled === false && agg.course !== i + 1 ? '' :
+          `<div class="pay-opt sm ${agg.course === i + 1 ? 'active' : ''}" data-act="edit-sent-course" data-val="${i + 1}">${esc(c.name)}</div>`).join('')}
+      </div>
+      ${isManager ? `
+        <label>Price each</label>
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+          <input id="sent-price-input" type="number" min="0" step="0.01" value="${agg.price}" style="flex:1;">
+          <button class="btn-secondary" style="width:auto;padding:8px 16px;" data-act="reprice-sent">Update</button>
+        </div>` : ''}
+      <label>Note</label>
+      <input id="sent-note-input" type="text" value="${esc(agg.note || '')}" data-act="noop">
       <div class="pane-actions">
+        ${isManager ? `<button class="icon-action discard bin-left" data-act="remove-sent">${ACT_CROSS_SVG}<span class="ia-label">Remove</span></button>` : ''}
         <button class="icon-action send" data-act="close-edit-sent">${ACT_TICK_SVG}<span class="ia-label">Done</span></button>
       </div>
     </div>
   </div>`;
+}
+// ONE head for both states - the name of the dish, what the line comes to, and
+// a single line saying where it stands. Nothing on the old unsent editor said
+// WHICH dish you were editing (owner, Aug '26).
+function lineEditHead(name, total, sent, round) {
+  return `
+      <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
+        <div class="th" style="font-size:var(--fs-xl);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div>
+        <div style="font-family:var(--font-mono);font-weight:800;font-size:var(--fs-lg);">${money(total)}</div>
+      </div>
+      <div class="sub" style="margin:2px 0 16px;font-weight:700;color:${sent ? 'var(--orange)' : 'var(--charcoal-soft)'};">
+        ${sent ? 'SENT TO THE KITCHEN' + (round ? ' · ROUND ' + round : '') : 'NOT SENT YET'}</div>`;
 }
 
 // Crisp, thick-stroke action icons for the ticket action row (send/discard/
@@ -27665,7 +27777,8 @@ function renderLineEditMiddle() {
   const qtyBtn = 'width:var(--h-control);height:var(--h-control);border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);font-size:var(--fs-xl);font-weight:700;cursor:pointer;color:var(--text-primary);display:flex;align-items:center;justify-content:center;';
   return `
   <div class="middle-view">
-    <div class="pay-pane" style="padding:8px 20px 24px;">
+    <div class="pay-pane line-edit-pane" style="padding:8px 20px 24px;">
+      ${lineEditHead(line.name, line.price * line.qty, false, null)}
       ${(() => { if (!item) return ''; const only = matchedAllergenBases(item, line.seat != null ? line.seat : 'all'); return only.length ? allergenChipRow(item, only) : ''; })()}
       <label>Quantity</label>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:${line.qty > 1 ? '10px' : '16px'};">
@@ -27695,7 +27808,8 @@ function renderLineEditMiddle() {
           ${recipeBuild.map(c => { const off = line.removed.includes(c.id); return `<button class="item-card allergy-item-card build-comp ${off ? 'removed' : ''}" data-act="edit-line-remove-comp" data-inv="${esc(c.id)}"><div class="item-name">${off ? 'No ' : ''}${esc(c.label)}</div></button>`; }).join('')}
         </div>` : ''}
       ${seatEnabled ? `
-        <div class="grid" style="margin:6px 0 16px;">
+        <label>Seat</label>
+        <div class="grid" style="margin:0 0 16px;">
           <button class="item-card allergy-item-card ${line.seat === 'all' || !line.seat ? 'selected' : ''}" data-act="edit-line-seat" data-seat="all"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'All')}</div>${seatAvoidTag(item, 'all')}</button>
           ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${line.seat === n ? 'selected' : ''}" data-act="edit-line-seat" data-seat="${n}"><div class="item-name">${n}</div>${seatAvoidTag(item, n)}</button>`).join('')}
         </div>` : ''}
@@ -27708,9 +27822,16 @@ function renderLineEditMiddle() {
           return `<div class="pay-opt sm ${line.course === i + 1 ? 'active' : ''}" data-act="edit-line-course" data-val="${i + 1}"${ok ? '' : ' style="opacity:.35;"'}>${esc(c.name)}</div>`;
         })()).join('')}
       </div>
+      ${state.currentStaff && state.currentStaff.role === 'manager' ? `
+        <label>Price each</label>
+        <div style="display:flex;gap:8px;margin-bottom:16px;">
+          <input id="edit-line-price-input" type="number" min="0" step="0.01" value="${line.price}" style="flex:1;">
+          <button class="btn-secondary" style="width:auto;padding:8px 16px;" data-act="edit-line-price">Update</button>
+        </div>` : ''}
       <label>Note</label>
       <input id="edit-line-note-input" type="text" value="${esc(line.note || '')}">
       <div class="pane-actions">
+        <button class="icon-action discard bin-left" data-act="edit-line-remove">${ACT_CROSS_SVG}<span class="ia-label">Remove</span></button>
         <button class="icon-action send" data-act="close-line-edit">${ACT_TICK_SVG}<span class="ia-label">Done</span></button>
       </div>
     </div>
@@ -33892,6 +34013,24 @@ function handleActClick(el, e) {
       else if (act === 'serve-again') { serveAnotherFromEl(el); }
       else if (act === 'add-serving') { addAnotherServing(); }
       else if (act === 'reprice-sent') { repriceSentItem(); }
+      else if (act === 'edit-sent-seat') {
+        const v = el.dataset.seat;
+        doMoveSent(state.editSent, { seat: v === 'all' ? 'all' : parseInt(v, 10) });
+      }
+      else if (act === 'edit-sent-course') { doMoveSent(state.editSent, { course: parseInt(el.dataset.val, 10) }); }
+      else if (act === 'void-one-sent') { doRemoveSent(state.editSent); }
+      else if (act === 'edit-line-price') {
+        const inp = document.getElementById('edit-line-price-input');
+        const v = inp ? parseFloat(inp.value) : NaN;
+        if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; }
+        const l = state.editLine ? state.cart[state.editLine.idx] : null;
+        if (l) { l.price = v; state.toast = 'Price updated'; render(); armToastTimer(2000); }
+      }
+      else if (act === 'edit-line-remove') {
+        const i = state.editLine ? state.editLine.idx : -1;
+        if (i >= 0) state.cart.splice(i, 1);
+        state.editLine = null; render();
+      }
       else if (act === 'remove-sent') { removeSentItem(); }
       else if (act === 'void-reason-pick') {
         const m = state.voidItemPrompt; if (!m) return;
@@ -34409,7 +34548,9 @@ function handleActClick(el, e) {
             state.toast = `${courseInfo(n).name} doesn't take ${it && it.category ? it.category : 'this section'}`;
             render(); armToastTimer(2400); return;
           }
-          l.course = n; if (l.course > state.courseCount) state.courseCount = l.course; render();
+          l.course = n; if (l.course > state.courseCount) state.courseCount = l.course;
+          state.activeCourse = n; // the docket follows the line, or it looks deleted
+          render();
         }
       }
       else if (act === 'fire-course') { stageCourse(parseInt(el.dataset.val)); }

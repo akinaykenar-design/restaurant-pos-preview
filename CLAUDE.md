@@ -367,7 +367,14 @@ sources.
 ## Control height — two chosen, everything else DERIVED (owner, Aug '26)
 
     --h-control  44px   every control (same number as --tap)
-    --h-primary  64px   the docket's action row ONLY
+    --h-primary  64px   the .icon-action family — every commit-or-cancel
+
+`--h-primary` is NOT "the docket only" (an earlier draft of this section said
+that and it was wrong). It is the `.icon-action` family, and every member is
+already 64: the docket's Bill/Pay/Discard/Send, the floor picker's Close, the
+checkout's Cancel/Confirm, the line editor's Done, the notes pane's
+Close/Save. Only the WIDTH changes with how many share the row — 69 for four
+across a docket, 76 for a square, 148 for two across a checkout.
 
 There is no "slightly smaller" button. 38, 41, 46, 50 and 52 were not
 decisions, they were accidents — a min-height nobody revisited, or a label
@@ -385,6 +392,13 @@ a docket tile is half a menu tile, a nav button is square so it is the rail's
 width, a swatch is `--swatch`, a menu tile is the grid's job. Those are rules.
 `design/check-design.js` lists each derivation BY NAME, so a stray new height
 cannot pass itself off as one.
+
+**Check the states you have to OPEN.** The first checker only walked screens
+reachable from the nav, passed clean, and meanwhile the button that takes the
+money in a split (`Take it`) was 41px, the split's -/+ were 30px and the line
+editor's qty steppers were 40px. It now walks pay, split, line edit, notes,
+covers pad and checkout as well — 30 views, not 18 — and it caught the 40px
+stepper the moment those were added. If you add a pane, add it to `DEEP`.
 
 ## The corner family — three, and only three (owner, Aug '26)
 

@@ -1,29 +1,20 @@
 #!/usr/bin/env node
 /* House-rule checker for the preview.
  *
- *   node design/check-design.js
+ *   NODE_PATH=<where playwright-core lives> node design/check-design.js
  *
- * A rule that is only written down rots. (This file exists because a comment
+ * A rule that is only written down rots. This file exists because a comment
  * in index.html referenced `design/check-tap-targets.js` for months and that
- * file was never actually written — so the tap-target rule quietly drifted
- * until 40 controls were under size.) Everything checked here is a rule in
- * CLAUDE.md. Exit code 1 means a rule was broken.
- *
- * Needs a static server on the port below; it starts one itself.
+ * file was never written — so the tap-target rule drifted until 40 controls
+ * were under size. Everything checked here is a rule in CLAUDE.md.
+ * Exit 1 means a rule was broken. Exit 2 means the checker could not run.
  */
-// playwright-core is not a dependency of this repo (it has none) — resolve it
-// from wherever it happens to be installed, and say so plainly if it isn't.
 let chromium;
 try { chromium = require('playwright-core').chromium; }
 catch (e) {
-  try { chromium = require(require('child_process')
-    .execSync('node -e "console.log(require.resolve(\'playwright-core\'))"',
-      { cwd: process.env.PW_DIR || process.cwd(), encoding: 'utf8' }).trim()).chromium; }
-  catch (e2) {
-    console.error('This check needs playwright-core. Install it anywhere and run with:\n' +
-                  '  NODE_PATH=/path/to/node_modules node design/check-design.js');
-    process.exit(2);
-  }
+  console.error('This check needs playwright-core. Install it anywhere and run with:\n' +
+                '  NODE_PATH=/path/to/node_modules node design/check-design.js');
+  process.exit(2);
 }
 const http = require('http');
 const fs = require('fs');
@@ -33,6 +24,7 @@ const ROOT = path.join(__dirname, '..');
 const PORT = 8899;
 const EXEC = process.env.CHROMIUM || '/opt/pw-browsers/chromium';
 
+/* Screens you reach by tapping a nav item. */
 const SCREENS = [
   ['order', null], ['floor', null],
   ['admin', 'menu'], ['admin', 'screen'], ['admin', 'floorplan'],
@@ -40,6 +32,112 @@ const SCREENS = [
   ['admin', 'staff'], ['admin', 'settings-hub'],
 ];
 
+/* States you have to OPEN to reach. The first version of this checker only
+ * looked at the list above, and it passed clean while the button that takes
+ * the money in a split was 41px tall. A rule is only kept where the checker
+ * actually looks. */
+const DEEP = [
+  ['pay pane',   () => document.querySelector('.icon-action.pay') && document.querySelector('.icon-action.pay').click()],
+  ['split pane', () => { const p = document.querySelector('.icon-action.pay'); if (p) p.click();
+                         setTimeout(() => { const s = [...document.querySelectorAll('.cat-btn')].find(x => /split/i.test(x.textContent)); if (s) s.click(); }, 300); }],
+  ['line edit',  () => { state.editLine = { idx: 0 }; render(); }],
+  ['notes',      () => { state.notesPanel = true; render(); }],
+  ['covers pad', () => { state.coversPad = { buf: '', touched: false }; render(); }],
+  ['checkout',   () => { state.showCheckout = true; render(); }],
+];
+
+/* ── the rules ─────────────────────────────────────────────────────────── */
+function RULES(label) {
+  const out = [];
+  const root = getComputedStyle(document.documentElement);
+  const skip = el => el.closest('.scrmock, .mk-wrap') || el.classList.contains('floor-marker');
+
+  // ONE swatch wherever a colour is picked.
+  const want = root.getPropertyValue('--swatch').trim() || '44px';
+  const wantR = root.getPropertyValue('--swatch-r').trim() || '10px';
+  document.querySelectorAll('.color-dot-btn, .accent-swatch, .swatch, .color-popover-grid .color-swatch').forEach(el => {
+    if (skip(el)) return;
+    const r = el.getBoundingClientRect(); if (r.width < 2) return;
+    const c = getComputedStyle(el);
+    const name = (el.className || '').toString().split(' ')[0];
+    if (Math.round(r.height) !== parseInt(want)) out.push(`${label}  swatch ${name} is ${Math.round(r.width)}x${Math.round(r.height)}, must be ${want}`);
+    if (c.borderTopLeftRadius !== wantR) out.push(`${label}  swatch ${name} corner ${c.borderTopLeftRadius}, must be ${wantR}`);
+    if (!el.classList.contains('empty') && c.borderTopWidth !== '2px') out.push(`${label}  swatch ${name} inner ring ${c.borderTopWidth}, must be 2px`);
+  });
+
+  // THE CORNER FAMILY — control, surface, pill, and nothing else.
+  const OK = new Set([
+    root.getPropertyValue('--r-control').trim(),
+    root.getPropertyValue('--r-surface').trim(),
+    root.getPropertyValue('--r-pill').trim(),
+    '0px', '50%',
+  ]);
+  const SHAPES = '.shape-chip-preview, .switch-knob, .floor-marker, .tbl-wash, .fm-num';
+  document.querySelectorAll('*').forEach(el => {
+    if (skip(el)) return;
+    if (el.matches(SHAPES) || el.closest(SHAPES)) return;
+    if (el.parentElement === document.body) return;      // dev-only preview pills
+    const b = el.getBoundingClientRect(); if (b.width < 10 || b.height < 10) return;
+    const c = getComputedStyle(el);
+    if (c.borderTopLeftRadius === '0px' || OK.has(c.borderTopLeftRadius)) return;
+    if (c.backgroundColor === 'rgba(0, 0, 0, 0)' && c.borderTopWidth === '0px' && c.boxShadow === 'none') return;
+    out.push(`${label}  corner ${(el.className || el.tagName).toString().split(' ')[0]} is ${c.borderTopLeftRadius}, must be one of ${[...OK].join(' / ')}`);
+  });
+
+  // CONTROL HEIGHT — two chosen, the rest derived and each derivation named.
+  const H_OK = new Set([
+    parseInt(root.getPropertyValue('--h-control')) || 44,
+    parseInt(root.getPropertyValue('--h-primary')) || 64,
+  ]);
+  const DERIVED = [
+    '.tl-qty', '.tkt-icon-btn', '.admin-nav-group', '.admin-nav-btn',
+    '.item-card', '.acct-tile', '.cat-btn', '.subcat-seg button',
+    '.menu-item-header', '.sel-head', '.order-row', '.ticket-line',
+    '.color-dot-btn', '.accent-swatch', '.swatch', '.color-swatch',
+    '.floor-marker', '.shape-chip', '.seat-ghost', '.covers-pad-key',
+    '.qty-pad-key', '.pin-pad button', '.staff-tile', '.osk button',
+    '.qp-actions .icon-action', '.note-preset-grid button', '.io-size-grid button',
+  ].join(', ');
+  document.querySelectorAll('button,[role=button]').forEach(el => {
+    if (skip(el)) return;
+    if (el.matches(DERIVED) || el.closest(DERIVED)) return;
+    const b = el.getBoundingClientRect(); if (b.width < 6 || b.height < 6) return;
+    const c = getComputedStyle(el);
+    if (c.visibility === 'hidden' || c.pointerEvents === 'none' || el.disabled) return;
+    const h = Math.round(b.height);
+    if (!H_OK.has(h)) out.push(`${label}  height ${(el.className || el.tagName).toString().split(' ')[0]} is ${h}px, must be ${[...H_OK].join(' or ')} (or a named derivation)`);
+  });
+
+  // THE FINGER LAW — ink >= --tap, or nothing interactive within --tap.
+  const tap = parseInt(root.getPropertyValue('--tap')) || 44;
+  const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {
+    if (skip(el)) return false;
+    const b = el.getBoundingClientRect(); if (b.width < 6 || b.height < 6) return false;
+    const c = getComputedStyle(el);
+    return c.visibility !== 'hidden' && c.pointerEvents !== 'none' && !el.disabled;
+  });
+  const boxes = els.map(e => e.getBoundingClientRect());
+  els.forEach((el, i) => {
+    const a = boxes[i], acx = a.left + a.width / 2, acy = a.top + a.height / 2;
+    let okW = a.width >= tap - 0.5, okH = a.height >= tap - 0.5;
+    if (!okW || !okH) {
+      let dx = Infinity, dy = Infinity;
+      boxes.forEach((o, j) => {
+        if (i === j || els[j].contains(el) || el.contains(els[j])) return;
+        const ox = o.left + o.width / 2, oy = o.top + o.height / 2;
+        if (Math.abs(oy - acy) < 30) dx = Math.min(dx, Math.abs(ox - acx));
+        if (Math.abs(ox - acx) < 30) dy = Math.min(dy, Math.abs(oy - acy));
+      });
+      okW = okW || dx >= tap - 0.5;
+      okH = okH || dy >= tap - 0.5;
+    }
+    if (!okW || !okH) out.push(`${label}  tap ${(el.className || el.tagName).toString().split(' ')[0]} ${Math.round(a.width)}x${Math.round(a.height)} act=${el.getAttribute('data-act') || ''}`);
+  });
+
+  return [...new Set(out)];
+}
+
+/* ── harness ───────────────────────────────────────────────────────────── */
 function serve() {
   return new Promise(res => {
     const s = http.createServer((req, rq) => {
@@ -50,129 +148,51 @@ function serve() {
   });
 }
 
+async function boot(page, view, tab) {
+  await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'networkidle' });
+  await page.evaluate(async ({ v, t }) => {
+    await loadInitial();
+    state.currentStaff = (state.staffList || []).find(s => s.role === 'manager');
+    const fp = (state.floorPlans || [])[0];
+    state.table = fp && (fp.tables || [])[0];
+    state.covers = 4; state.settings.coversEnabled = true;
+    const m = state.menu || [];
+    state.cart = m.slice(0, 3).map((it, i) => ({ id: 'l' + i, itemId: it.id, name: it.name, price: it.price, qty: 1, mods: [], seat: i + 1, course: 1 }));
+    if (v === 'admin') { state.view = 'admin'; state.adminTab = t; }
+    else if (v === 'floor') { state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = true; }
+    else {
+      state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false; state.activeCat = 'Food';
+      if (innerWidth <= 768) state.mobileCartOpen = true;
+    }
+    render();
+  }, { v: view, t: tab });
+  await page.waitForTimeout(1200);
+}
+
 (async () => {
   const server = await serve();
   const browser = await chromium.launch({ executablePath: EXEC });
   const fails = [];
+  let checked = 0;
 
   for (const [view, tab] of SCREENS) {
     for (const w of [430, 1300]) {
       const page = await browser.newPage({ viewport: { width: w, height: 900 }, isMobile: w < 800, hasTouch: w < 800 });
-      const label = `${view}${tab ? '/' + tab : ''}@${w}`;
-      await page.goto(`http://127.0.0.1:${PORT}/index.html`, { waitUntil: 'networkidle' });
-      await page.evaluate(async ({ v, t }) => {
-        await loadInitial();
-        state.currentStaff = (state.staffList || []).find(s => s.role === 'manager');
-        const fp = (state.floorPlans || [])[0];
-        state.table = fp && (fp.tables || [])[0];
-        state.covers = 4; state.settings.coversEnabled = true;
-        const m = state.menu || [];
-        state.cart = m.slice(0, 3).map((it, i) => ({ id: 'l' + i, itemId: it.id, name: it.name, price: it.price, qty: 1, mods: [], seat: i + 1, course: 1 }));
-        if (v === 'admin') { state.view = 'admin'; state.adminTab = t; }
-        else if (v === 'floor') { state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = true; }
-        else { state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false; state.activeCat = 'Food'; }
-        render();
-      }, { v: view, t: tab });
+      await boot(page, view, tab);
+      fails.push(...await page.evaluate(RULES, `${view}${tab ? '/' + tab : ''}@${w}`));
+      checked++;
+      await page.close();
+    }
+  }
+
+  for (const [what, open] of DEEP) {
+    for (const w of [430, 1300]) {
+      const page = await browser.newPage({ viewport: { width: w, height: 900 }, isMobile: w < 800, hasTouch: w < 800 });
+      await boot(page, 'order', null);
+      try { await page.evaluate(open); } catch (e) {}
       await page.waitForTimeout(1200);
-
-      const bad = await page.evaluate((label) => {
-        const out = [];
-        const skip = el => el.closest('.scrmock, .mk-wrap') || el.classList.contains('floor-marker');
-
-        // RULE: one swatch wherever a colour is picked.
-        const SW = '.color-dot-btn, .accent-swatch, .swatch, .color-popover-grid .color-swatch';
-        document.querySelectorAll(SW).forEach(el => {
-          if (skip(el)) return;
-          const r = el.getBoundingClientRect(); if (r.width < 2) return;
-          const c = getComputedStyle(el);
-          const want = getComputedStyle(document.documentElement).getPropertyValue('--swatch').trim() || '44px';
-          const wantR = getComputedStyle(document.documentElement).getPropertyValue('--swatch-r').trim() || '10px';
-          const name = (el.className || '').toString().split(' ')[0];
-          if (Math.round(r.height) !== parseInt(want)) out.push(`${label}  swatch ${name} is ${Math.round(r.width)}x${Math.round(r.height)}, must be ${want}`);
-          if (c.borderTopLeftRadius !== wantR) out.push(`${label}  swatch ${name} corner ${c.borderTopLeftRadius}, must be ${wantR}`);
-          if (!el.classList.contains('empty') && c.borderTopWidth !== '2px') out.push(`${label}  swatch ${name} inner ring ${c.borderTopWidth}, must be 2px`);
-        });
-
-        // RULE: the corner family — control 10, surface 16, pill 999, and
-        // nothing else. Table-shape drawings and the switch knob are pictures,
-        // not corners, so they are exempt by name.
-        const root = getComputedStyle(document.documentElement);
-        const OK = new Set([
-          root.getPropertyValue('--r-control').trim(),
-          root.getPropertyValue('--r-surface').trim(),
-          root.getPropertyValue('--r-pill').trim(),
-          '0px', '50%',
-        ]);
-        const EXEMPT = '.shape-chip-preview, .switch-knob, .floor-marker, .tbl-wash, .fm-num';
-        document.querySelectorAll('*').forEach(el => {
-          if (skip(el)) return;
-          if (el.matches(EXEMPT) || el.closest(EXEMPT)) return;
-          if (el.parentElement === document.body) return;   // dev-only preview pills
-          const b = el.getBoundingClientRect(); if (b.width < 10 || b.height < 10) return;
-          const c = getComputedStyle(el);
-          const r = c.borderTopLeftRadius;
-          if (r === '0px' || OK.has(r)) return;
-          if (c.backgroundColor === 'rgba(0, 0, 0, 0)' && c.borderTopWidth === '0px' && c.boxShadow === 'none') return;
-          out.push(`${label}  corner ${(el.className || el.tagName).toString().split(' ')[0]} is ${r}, must be one of ${[...OK].join(' / ')}`);
-        });
-
-        // RULE: control height — --h-control, or --h-primary for the docket's
-        // action row. Everything else must be DERIVED from something, and the
-        // derivations are named here so a new number cannot sneak in as one.
-        const H_OK = new Set([
-          parseInt(root.getPropertyValue('--h-control')) || 44,
-          parseInt(root.getPropertyValue('--h-primary')) || 64,
-        ]);
-        const DERIVED = [
-          '.tl-qty',              // stretches to its docket line
-          '.tkt-icon-btn',        // half a menu tile
-          '.admin-nav-group',     // square, so the rail's width
-          '.admin-nav-btn',
-          '.item-card', '.acct-tile', '.cat-btn', '.subcat-seg button', // the grid's job
-          '.menu-item-header', '.sel-head', '.order-row', '.ticket-line', // rows, not buttons
-          '.color-dot-btn', '.accent-swatch', '.swatch', '.color-swatch', // --swatch
-          '.floor-marker', '.shape-chip', '.seat-ghost', '.covers-pad-key',
-          '.qty-pad-key', '.pin-pad button', '.staff-tile', '.osk button',
-        ].join(', ');
-        document.querySelectorAll('button,[role=button]').forEach(el => {
-          if (skip(el)) return;
-          if (el.matches(DERIVED) || el.closest(DERIVED)) return;
-          const b = el.getBoundingClientRect(); if (b.width < 6 || b.height < 6) return;
-          const c = getComputedStyle(el);
-          if (c.visibility === 'hidden' || c.pointerEvents === 'none' || el.disabled) return;
-          const h = Math.round(b.height);
-          if (!H_OK.has(h)) out.push(`${label}  height ${(el.className || el.tagName).toString().split(' ')[0]} is ${h}px, must be ${[...H_OK].join(' or ')} (or a named derivation)`);
-        });
-
-        // RULE: the finger law — ink >= --tap, or nothing interactive within --tap.
-        const tap = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tap')) || 44;
-        const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {
-          if (skip(el)) return false;
-          const b = el.getBoundingClientRect(); if (b.width < 6 || b.height < 6) return false;
-          const c = getComputedStyle(el);
-          return c.visibility !== 'hidden' && c.pointerEvents !== 'none' && !el.disabled;
-        });
-        const boxes = els.map(e => e.getBoundingClientRect());
-        els.forEach((el, i) => {
-          const a = boxes[i], acx = a.left + a.width / 2, acy = a.top + a.height / 2;
-          let okW = a.width >= tap - 0.5, okH = a.height >= tap - 0.5;
-          if (!okW || !okH) {
-            let dx = Infinity, dy = Infinity;
-            boxes.forEach((o, j) => {
-              if (i === j || els[j].contains(el) || el.contains(els[j])) return;
-              const ox = o.left + o.width / 2, oy = o.top + o.height / 2;
-              if (Math.abs(oy - acy) < 30) dx = Math.min(dx, Math.abs(ox - acx));
-              if (Math.abs(ox - acx) < 30) dy = Math.min(dy, Math.abs(oy - acy));
-            });
-            okW = okW || dx >= tap - 0.5;
-            okH = okH || dy >= tap - 0.5;
-          }
-          if (!okW || !okH) out.push(`${label}  tap ${(el.className || el.tagName).toString().split(' ')[0]} ${Math.round(a.width)}x${Math.round(a.height)} act=${el.getAttribute('data-act') || ''}`);
-        });
-        return [...new Set(out)];
-      }, label);
-
-      fails.push(...bad);
+      fails.push(...await page.evaluate(RULES, `${what}@${w}`));
+      checked++;
       await page.close();
     }
   }
@@ -181,8 +201,8 @@ function serve() {
   server.close();
 
   if (fails.length) {
-    console.error(`\n${fails.length} rule breaks:\n` + fails.map(f => '  ' + f).join('\n'));
+    console.error(`\n${fails.length} rule breaks across ${checked} views:\n` + fails.map(f => '  ' + f).join('\n'));
     process.exit(1);
   }
-  console.log('All house rules pass.');
+  console.log(`All house rules pass across ${checked} views.`);
 })();

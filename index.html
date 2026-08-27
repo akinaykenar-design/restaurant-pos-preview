@@ -902,6 +902,15 @@ body[data-theme="dark"] .acct-tile .acct-pin svg{fill:#8A847A !important;}
 .seat-chip{background:var(--steel-100);border:1px solid var(--chit-line);border-radius:var(--r-control);padding:4px 8px;font-size:var(--fs-chip);font-weight:700;cursor:pointer;font-family:var(--font-mono);margin-top:3px;display:inline-block;}
 .ticket-custom-header{font-weight:800;font-size:var(--fs-md);color:var(--charcoal-soft);text-transform:uppercase;letter-spacing:0.5px;text-align:center;}
 .ticket-sub-meta{font-size:var(--fs-chip);color:var(--charcoal-soft);margin-top:3px;font-family:var(--font-mono);}
+.send-failed-band{display:flex;align-items:center;gap:8px;margin:0 8px 8px;padding:8px;border-radius:var(--r-control);
+  /* Mixed against --surface, not a fixed pale pink, so it stays legible in
+     dark mode. --red-50 read as near-white there and the second line
+     disappeared into it. */
+  background:color-mix(in srgb, var(--red) 14%, var(--surface));border:1px solid var(--red);}
+.send-failed-band .sfb-txt{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px;}
+.send-failed-band b{color:var(--red);font-size:var(--fs-md);}
+.send-failed-band .ts{color:var(--text-primary);}
+.send-failed-band .btn-secondary{flex:none;border-color:var(--red);color:var(--red);background:var(--surface);}
 .ticket-footer-msg{padding:8px;text-align:center;font-size:var(--fs-chip);color:var(--charcoal-soft);border-top:1px solid var(--chit-line);font-style:italic;}
 .tl-price{font-family:var(--font-mono);font-size:calc(12.5px*var(--tkt-fs,1));font-weight:600;}
 .tl-price-btn{flex:none;font-family:var(--font-mono);font-size:var(--fs-md);font-weight:600;color:var(--orange);background:transparent;border:1px solid transparent;border-radius:var(--r-control);padding:4px 8px;cursor:pointer;}
@@ -2335,7 +2344,9 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
    actually exists. */
 .status-chip[data-act], .pay-opt.sm, .btn-add, .btn-secondary, .btn-secondary.sm,
 .seg > button, .tl-price-btn{ min-height:var(--tap); }
-.status-chip[data-act]{ display:inline-flex; align-items:center; }
+/* Both ways. Height alone left a tappable chip 33px WIDE - legal to the eye,
+   a miss to a thumb (check-tap-targets, Aug '26). */
+.status-chip[data-act]{ display:inline-flex; align-items:center; justify-content:center; min-width:var(--tap); }
 .sort-btn, .icon-sq, .icon-dot-btn, .delete-icon-btn, .seg-icon, .shape-chip,
 .tl-remove, .sar-cb{ min-width:var(--tap); min-height:var(--tap); }
 /* The switch is alone in its row, so there is no row to enlarge — the switch
@@ -2343,9 +2354,8 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
 .switch{ width:76px; height:var(--tap); border-radius:var(--r-pill); }
 .switch-knob{ top:5px; left:5px; width:34px; height:34px; }
 .switch.on .switch-knob{ left:37px; }
-.sar-cb::before{ inset:-4px; }
-.switch::before{ inset:-9px -2px; } /* 26 + 18 = 44 exactly; -8 left it 2px short */
-.status-chip[data-act]::before{ inset:-9px -2px; }
+/* No ::before halos here: these controls are 44x44 for real now, so an
+   invisible overlay would only add a second, offset hit area. */
 
 /* §§ On-screen keyboard
    The app's own compact keyboard for text fields on touch screens —
@@ -8971,6 +8981,13 @@ app.post('/api/orders', (req, res) => {
 
   // A notes-only send is allowed on an open dine-in tab (or with a quick
   // note): the docket carries the table's notes/allergies, no items yet.
+  // SEND-ONCE, same as a round: a retry after a dropped reply must reopen the
+  // ticket that already exists, never a second one for the same table.
+  const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
+  if (sendKey) {
+    const already = (data.orders || []).find(o => o.sendKey === sendKey);
+    if (already) return res.json(already);
+  }
   const noteOnly = !rawItems || rawItems.length === 0;
   if (noteOnly && !(open && (String(req.body.quickNote || '').trim() || (orderType || 'dine-in') === 'dine-in' && table))) {
     return res.status(400).json({ error: 'Order has no items' });
@@ -8988,6 +9005,7 @@ app.post('/api/orders', (req, res) => {
   if (open) {
     const order = {
       id: data.ticketCounter,
+      sendKey,
       createdAt: Date.now(),
       orderType: orderType || 'dine-in',
       table: orderType === 'dine-in' ? table : null,
@@ -9082,6 +9100,14 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { items: rawItems, staffName } = req.body;
+  // SEND-ONCE. A round carries a key the till minted before it left. If the
+  // wifi dropped after we wrote the round but before the reply got home, the
+  // till retries with the SAME key - so return the order we already have
+  // instead of ringing the food twice (owner, Aug '26: a dropped round).
+  const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
+  if (sendKey && (order.rounds || []).some(r => r.sendKey === sendKey)) {
+    return res.json(order);
+  }
   // A notes-only round rides out with the table's notes or the quick note.
   if ((!rawItems || rawItems.length === 0) &&
       !(String(req.body.quickNote || '').trim() || (order.orderType === 'dine-in' && order.table))) {
@@ -9093,7 +9119,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   const quickNoteStation = (data.printerStations || []).some(s => s.id === req.body.quickNoteStation) ? req.body.quickNoteStation : null;
   // Who rang the round rides with it — the order-history pop shows who sent
   // what, when (order.staffName only names whoever OPENED the table).
-  const round = { id: roundNumber, sentAt: Date.now(), color: roundColorFor(data, roundNumber), items, quickNote, quickNoteStation, staffName: staffName || order.staffName || null };
+  const round = { id: roundNumber, sendKey, sentAt: Date.now(), color: roundColorFor(data, roundNumber), items, quickNote, quickNoteStation, staffName: staffName || order.staffName || null };
   order.rounds = [...(order.rounds || []), round];
   order.items = order.items.concat(items);
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
@@ -16036,7 +16062,12 @@ async function sendToKitchen() {
     if (mis.length) { state.stockWarnModal = mis; render(); return; }
   }
   state._stockWarnAck = false;
+  // ONE key per attempt at THIS cart. A retry reuses it, so if the round
+  // actually landed and only the reply was lost, the server hands back the
+  // same ticket instead of ringing the food twice.
+  if (!state.sendKey) state.sendKey = 'snd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
   state.sending = true;
+  state.sendFailed = null;
   render();
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
   const sentItemCount = state.cart.length;
@@ -16049,10 +16080,11 @@ async function sendToKitchen() {
       order = await api(`/api/orders/${state.openOrderId}/rounds`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: state.cart, staffName, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null }),
+        body: JSON.stringify({ items: state.cart, staffName, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null }),
       });
     } else {
       const payload = {
+        sendKey: state.sendKey,
         orderType: state.orderType,
         table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null,
         customerName: state.customerName,
@@ -16078,6 +16110,7 @@ async function sendToKitchen() {
     const sentCourses = [...new Set(state.cart.map(c => c.course || 1))];
     if (sentCourses.length && !sentCourses.includes(state.activeCourse)) state.activeCourse = sentCourses[0];
     state.cart = [];
+    state.sendKey = null; state.sendFailed = null;
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
     state.courseCount = state.settings.courses.length || 1;
     // The staged call-away goes out WITH the round it was staged behind.
@@ -16110,13 +16143,27 @@ async function sendToKitchen() {
     armToastTimer(3200);
   } catch (e) {
     state._logoffOnce = false;
-    state.toast = 'Could not send items — check the server.';
+    // NOT a toast. A toast is gone in three seconds and then an unsent round
+    // looks exactly like one nobody has sent yet - which is how a table waits
+    // forty minutes for food the kitchen never heard about (owner, Aug '26).
+    // This sticks on the docket until it goes or the waiter clears it.
+    state.sendFailed = { at: Date.now(), items: state.cart.length };
+    state.toast = null;
     render();
   } finally {
     state.sending = false;
     render();
   }
 }
+
+// The wifi comes back on its own, so the round should go on its own. The
+// waiter is carrying plates - they will not be watching the till for the
+// moment the bars come back (owner, Aug '26).
+window.addEventListener('online', () => {
+  if (state.sendFailed && !state.sending && state.cart.length) sendToKitchen();
+  else render();  // the band's wording changes with the connection
+});
+window.addEventListener('offline', () => { if (state.sendFailed) render(); });
 
 // Is an integrated card terminal set up?
 function terminalActive() {
@@ -18271,6 +18318,16 @@ function renderTicketPanel() {
     })()}
     <!-- NO running total here. The docket lists what was ordered; what it
          adds up to belongs to Pay, and only Pay (owner, Aug '26). -->
+    ${state.sendFailed ? `
+    <!-- The round did NOT go. This stays until it does - a toast would be gone
+         in three seconds and then this docket looks like any other unsent one. -->
+    <div class="send-failed-band">
+      <div class="sfb-txt">
+        <b>Not sent${navigator.onLine ? '' : ' — no connection'}</b>
+        <span class="ts">${state.sendFailed.items} item${state.sendFailed.items === 1 ? '' : 's'} still waiting. ${navigator.onLine ? 'Tap to try again.' : 'It goes on its own when the wifi is back.'}</span>
+      </div>
+      <button class="btn-secondary sm" data-act="retry-send">${state.sending ? 'Sending' : 'Retry'}</button>
+    </div>` : ''}
     <div class="ticket-actions">
       ${state.showCheckout ? `
       <!-- Paying: the two actions sit under the bill they settle, and the
@@ -34104,6 +34161,7 @@ function handleActClick(el, e) {
         state._moFlick = Date.now();
         markBillPrinted(el.dataset.order);
       }
+      else if (act === 'retry-send') { sendToKitchen(); }
       else if (act === 'send-to-kitchen') {
         if (_sendHoldFired) { _sendHoldFired = false; return; }
         state._logoffOnce = false; // plain tap never inherits an old hold's intent

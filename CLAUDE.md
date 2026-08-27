@@ -1,10 +1,37 @@
 # Restaurant POS — working rules
 
-The whole product is `index.html` on the `gh-pages` branch (single-file PWA,
-embedded mock server, state in localStorage). The owner tests on a phone and a
-PC via GitHub Pages using the in-app "Get latest" button. Always `git pull
-origin gh-pages` before starting work; commit straight to `gh-pages` with a
-`Preview: ...` message.
+## Which repo is the real one
+
+**`restaurant-pos-preview`, branch `gh-pages`, is the LIVE PRODUCT.** The name
+lies and the owner has decided to leave it that way (Aug '26) — do not suggest
+renaming it again. Everything is one `index.html` (single-file PWA, embedded
+mock server, state in localStorage), and that file is the whole till.
+
+`restaurant-pos` — the repo without "preview" — is DEAD. Last touched 17 July
+'26, nothing since. It is the old server-based build (`server.js` +
+`public/app.js`, ~12,700 lines) and contains none of this work. It needs Node
+running to start, which is exactly why the single-file version was made and
+why it quietly became the product. Never work there, and never copy anything
+back into it.
+
+`main` on the live repo is an empty "Initial commit" with a README, from the
+day the repo was created. It has no `index.html`. Nothing is missing from it.
+`phone-data` carries the owner's synced data.
+
+## Two sessions push to this branch
+
+Another Claude session works on `gh-pages` at the same time. On 26 Aug one of
+its pushes came from a stale copy of `index.html` and wiped the entire design
+system — 258 token lines gone in a commit whose message was about surcharges.
+It was recovered by reverting the non-surcharge hunks, but only because
+someone went looking.
+
+So: **`git pull origin gh-pages` before starting work AND again before every
+push**, and after any push that reports a rebase, check that your own change
+is still in the file before saying it is done.
+
+The owner tests on a phone and a PC via GitHub Pages using the in-app "Get
+latest" button. Commit straight to `gh-pages` with a `Preview: ...` message.
 
 ## The first law: buttons never move
 

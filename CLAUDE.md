@@ -622,3 +622,24 @@ no direction arrows, no up/down trend arrows, no arrow-circles. Express
 (Two owner-approved exceptions: the table-transfer swap glyph, and the
 sort menu's "$ ↑" / "$ ↓" price labels — the owner asked for the $arrow
 form back, Aug '26.)
+
+## Rows in the docket SHARE their width
+
+The pinned tiles, the course tabs and the action row all sit in the same
+narrow panel. Every one of them divides the panel's width evenly — no row
+hugs the left and leaves a hole on the right.
+
+- Pinned tiles: `flex:1 1 0` with `min-width:44px` and **no max-width**.
+  A cap looks tidy in the CSS and leaves 200px of dead space when the
+  owner turns shortcuts off (owner, Aug '26).
+- Course tabs: `grid-template-columns:repeat(auto-fill,minmax(84px,1fr))`.
+  `auto-fill`, not `auto-fit` — with `auto-fit` a lone tab on the last row
+  stretches to the full width and dwarfs the others.
+
+## `state.courseCount` is a CACHE, not the truth
+
+`state.settings.courses` is the truth. `state.courseCount` is a copy,
+refreshed only on load, on send, and when a table is opened — so editing
+the course list in admin does not refresh it. Anything that asks "how many
+courses are there?" must take the **max** of the two, never the cache alone.
+That is why adding a 6th course never showed up in the docket.

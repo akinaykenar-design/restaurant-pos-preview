@@ -93,6 +93,29 @@ function serve() {
           if (!el.classList.contains('empty') && c.borderTopWidth !== '2px') out.push(`${label}  swatch ${name} inner ring ${c.borderTopWidth}, must be 2px`);
         });
 
+        // RULE: the corner family — control 10, surface 16, pill 999, and
+        // nothing else. Table-shape drawings and the switch knob are pictures,
+        // not corners, so they are exempt by name.
+        const root = getComputedStyle(document.documentElement);
+        const OK = new Set([
+          root.getPropertyValue('--r-control').trim(),
+          root.getPropertyValue('--r-surface').trim(),
+          root.getPropertyValue('--r-pill').trim(),
+          '0px', '50%',
+        ]);
+        const EXEMPT = '.shape-chip-preview, .switch-knob, .floor-marker, .tbl-wash, .fm-num';
+        document.querySelectorAll('*').forEach(el => {
+          if (skip(el)) return;
+          if (el.matches(EXEMPT) || el.closest(EXEMPT)) return;
+          if (el.parentElement === document.body) return;   // dev-only preview pills
+          const b = el.getBoundingClientRect(); if (b.width < 10 || b.height < 10) return;
+          const c = getComputedStyle(el);
+          const r = c.borderTopLeftRadius;
+          if (r === '0px' || OK.has(r)) return;
+          if (c.backgroundColor === 'rgba(0, 0, 0, 0)' && c.borderTopWidth === '0px' && c.boxShadow === 'none') return;
+          out.push(`${label}  corner ${(el.className || el.tagName).toString().split(' ')[0]} is ${r}, must be one of ${[...OK].join(' / ')}`);
+        });
+
         // RULE: the finger law — ink >= --tap, or nothing interactive within --tap.
         const tap = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--tap')) || 44;
         const els = [...document.querySelectorAll('button,[role=button]')].filter(el => {

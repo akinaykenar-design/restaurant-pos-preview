@@ -364,6 +364,39 @@ sources.
 4. **Short.** Say what changed, the numbers that prove it, and stop.
 5. **Show it.** Rendered screenshots of the real app, never a description.
 
+## The corner family — three, and only three (owner, Aug '26)
+
+    --r-control  10px
+    --r-surface  16px
+    --r-pill    999px
+
+- **control** — anything you PRESS: button, chip, key, tile, list row, swatch,
+  input. A row is pressed too, so a row is a control.
+- **surface** — anything that FLOATS and CONTAINS controls: popover, modal,
+  number pad, settings card. It is rounder than its contents on purpose; a
+  container with the same corner as the things inside it looks pinched.
+- **pill** — a true capsule and nothing else: the switch, a status chip, a
+  count, a badge, a toast.
+
+Eleven different corners were on screen at once before this (6, 7, 8, 10, 12,
+13, 14, 20, 22, 99 and a circle) and 213 radii were hard-coded. All swept into
+the tokens. **Nothing decides its own corner.** `design/check-design.js` fails
+on any corner that is not one of the three.
+
+Exempt, by name, because they are pictures rather than corners: the floor
+editor's table-shape drawings (`.shape-chip-preview`), the switch knob, and
+floor markers.
+
+## The docket is the quietest panel (owner, Aug '26: "both bare for now")
+
+An action gets a shape, a value does not — and on a docket line neither gets an
+outline. The price is a value you can edit; the accent colour already says tap
+me. The ✕ is a glyph whose whole meaning IS its shape, so a box around it is a
+second shape saying the same thing. Its box was also the only outline on a
+line, so it repeated down the right edge as a ladder of empty rectangles and
+made DELETE the loudest thing on the panel you read a hundred times a shift.
+Both are still full `--tap` targets; only the box is gone.
+
 ## The finger law — and how rules are actually kept (owner, Aug '26)
 
 Nothing you tap is smaller than `--tap` (44px) on either axis. 44 is Apple's

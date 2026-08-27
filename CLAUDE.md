@@ -351,6 +351,19 @@ recorded seat allergies always fire regardless of the picks. The item
 side never renames when a category does — generic container, picked
 sources.
 
+## Working rules (owner, Aug '26: "lets stop any bs in the future")
+
+1. **Pull before every change and before every push.** Another session pushes
+   to this branch. A rejected push means work was done on a stale file.
+2. **Find the element before answering.** Measure it, name it from the
+   vocabulary below, and say which one you changed. Do not guess which thing
+   the owner means and build on the guess.
+3. **One answer, not a menu.** Give the recommendation and build it. Options
+   only when the choice genuinely changes the product and the owner has to
+   live with it.
+4. **Short.** Say what changed, the numbers that prove it, and stop.
+5. **Show it.** Rendered screenshots of the real app, never a description.
+
 ## The vocabulary — every element has ONE proper name
 
 Owner rule, Aug '26: "I want every element to be named proper." A name is

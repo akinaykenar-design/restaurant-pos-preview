@@ -2094,7 +2094,12 @@ button:not(:disabled):active,
    press; the screen changing IS the acknowledgement. Buttons keep their sink,
    because a button often stays on screen after you press it. */
 .acct-tile.pressed{ filter:brightness(0.9) saturate(1.06); box-shadow:inset 0 3px 10px rgba(0,0,0,.32), inset 0 0 0 1px rgba(0,0,0,.14); }
-.item-card.pressed{ filter:none; box-shadow:none; }
+/* A menu tile gets NO press look - the screen changing is the acknowledgement.
+   That means no darken AND no change at all: this used to also strip the
+   tile's resting shadow, so a tap flattened it before the cart state landed.
+   Filmed it: rest -> flat (122ms) -> dark (222ms) -> rest (306ms), every one
+   of those after the finger had lifted (owner, Aug '26: "like a seizure"). */
+.item-card.pressed{ filter:none; }
 /* HELD-OPEN: whatever launched a popup keeps the finger-hold look until the
    selection is made. Same darken as .pressed + a ring — overlays only, the
    layout never moves. (.prompting = the item tile whose options/seat popup
@@ -2112,7 +2117,7 @@ button:not(:disabled):active,
    only, zero motion. */
 /* Gradient (selected) tiles press as ONE uniform dim — any inset ring reads
    as a ghost border against the bright green (owner, Aug '26). */
-.item-card.in-cart.pressed:not(.out), .item-card.in-cart.qp-held{ filter:brightness(0.62) saturate(1.12); box-shadow:none; }
+.item-card.in-cart.qp-held{ filter:brightness(0.62) saturate(1.12); box-shadow:none; }
 
 /* No hover lift — it's a touch till (Surface trackpads count as a fine pointer,
    so a media query wouldn't catch them). Hover changes nothing animated. */
@@ -2461,6 +2466,10 @@ body[data-tiles-bottom] .menu-scroll{ display:flex; flex-direction:column-revers
    colour deepens and the tile dips — reads the same on white combos and on
    the coloured food tiles. */
 .item-card:not(.out):active{ filter:brightness(0.9) saturate(1.06); box-shadow:inset 0 3px 10px rgba(0,0,0,.32), inset 0 0 0 1px rgba(0,0,0,.14); }
+/* Deep green presses straight to its hold shade, so a hold darkens ONCE.
+   It used to press to 0.9 and then jump to 0.62 when the pad armed - "dark
+   then darker", and only on a mouse, because touch never gets :active. */
+.item-card.in-cart:not(.out):active{ filter:brightness(0.62) saturate(1.12); box-shadow:none; }
 
 /* This is a touchscreen POS: the order screen has NO hover graphics at all —
    its old hover rules are deleted outright and :active does the feedback.
@@ -16608,6 +16617,11 @@ function render() {
   if (_pressState && _pressState.sel) {
     const held = document.querySelector(_pressState.sel);
     if (held) { held.classList.add('pressed'); _pressState.el = held; }
+  } else if (!state.qtyPopItemId && !state.itemOptions) {
+    // No finger down and no pad open, so nothing may still look held. A press
+    // whose pointerup got swallowed by the popup it opened used to leave the
+    // tile indented for good (owner, Aug '26).
+    document.querySelectorAll('.pressed, .qp-held').forEach(el => el.classList.remove('pressed', 'qp-held'));
   }
   // The keyboard survives the full re-render. The rebuilt page loses the
   // .osk-lit lift — the tiles fell behind the keyboard's dim and went dead
@@ -28894,6 +28908,16 @@ document.addEventListener('touchcancel', () => {
 // qtyPadBuffer path the 123 pad uses, so items with options inherit the
 // quantity too (the options pane opens showing "Add ×N").
 let _qtyPopEl = null, _qtyHoldFired = false, _qtyPopApplyCount = null, _qtyPopCard = null, _qtyPopSwallow = null, _qtyPopScrim = null;
+// Nothing may keep a held look once nothing is open. .pressed is painted on
+// the DOM by pointerdown and normally cleared by pointerup - but a press that
+// opened a pad can have its pointerup swallowed by the pad, and the tile then
+// sits there indented with no way back (owner, Aug '26: "cancel and it remains
+// indented"). Every close sweeps, so a stale mark cannot outlive its popup.
+function clearStuckPress() {
+  document.querySelectorAll('.pressed').forEach(el => el.classList.remove('pressed'));
+  document.querySelectorAll('.qp-held').forEach(el => el.classList.remove('qp-held'));
+  _pressState = null;
+}
 function closeQtyPop() {
   if (_qtyPopCard) { _qtyPopCard.classList.remove('qp-held'); _qtyPopCard = null; }
   if (_qtyPopEl) { _qtyPopEl.remove(); _qtyPopEl = null; _qtyPopApplyCount = null; }
@@ -28906,6 +28930,7 @@ function closeQtyPop() {
     if (live) live.classList.remove('qp-held');
     state.qtyPopItemId = null;
   }
+  clearStuckPress();
 }
 // Trim an item's unsent quantity down to hit a pad-typed total.
 function removeQtyFromCart(menuItemId, amount) {

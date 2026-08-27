@@ -511,6 +511,19 @@ a wish.** When you add a rule to this document, add it to that script too.
 
 ## ONE swatch, wherever a colour is picked (owner, Aug '26)
 
+**One way to pick it, too** (owner, Aug '26: "we should just have the std
+colour choices pop up for colour items"). Every colour in the app — an item's,
+a section's, a table's, the floor background, and now the ACCENT — is one
+swatch that opens the same popover. The accent used to be eight swatches laid
+out in the settings card, which was a second way to do the same job.
+
+The popover's PALETTE still changes with the kind, because the job changes:
+`PRESET_COLORS` for general use, `TABLE_MATERIAL_COLORS` for tables (woods,
+cloths, stone), `ACCENT_COLORS` for the accent — an accent has to read as
+"chosen" against every surface and must not collide with the reserved
+table-status colours. Same box, same swatch, different contents. The accent
+offers no Clear, because the app always has an accent.
+
 Picking a colour is the same job in all five places it happens — the accent
 row, an item's colour, a table's colour, the floor background, and the palette
 inside the colour popover — so it is the same control:

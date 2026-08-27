@@ -364,6 +364,30 @@ sources.
 4. **Short.** Say what changed, the numbers that prove it, and stop.
 5. **Show it.** Rendered screenshots of the real app, never a description.
 
+## ONE swatch, wherever a colour is picked (owner, Aug '26)
+
+Picking a colour is the same job in all five places it happens — the accent
+row, an item's colour, a table's colour, the floor background, and the palette
+inside the colour popover — so it is the same control:
+
+**44 x 44, corner `--swatch-r` (10), 8px apart, and TWO RINGS.**
+
+The rings are the part worth keeping (they were already right in the Items
+list): `border:2px solid var(--surface)` sits INSIDE the 44 box so the colour
+never touches its own outline, and `box-shadow:0 0 0 1px var(--steel-300)`
+draws the visible hairline just outside it, costing no layout. That inner ring
+is why a pale swatch still reads on a white row instead of dissolving into it.
+Chosen = the hairline thickens to `0 0 0 3px var(--text-primary)`; nothing
+moves.
+
+The 44 is the box AND the tap target, so a swatch needs no halo.
+
+The rule itself is older than this pass — `colorDotButton()` already said
+"colour swatches are one size everywhere". The number was 22px, which is
+half a finger, and three places had quietly overridden it. Same rule, honest
+number, and the geometry lives in CSS (`--swatch`) instead of being written
+onto every button's style attribute.
+
 ## The vocabulary — every element has ONE proper name
 
 Owner rule, Aug '26: "I want every element to be named proper." A name is

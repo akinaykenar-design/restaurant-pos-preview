@@ -10425,6 +10425,7 @@ let state = {
   mobileCartOpen: false, // on phones the ticket panel is an off-canvas drawer
   idleWarn: false, // idle auto-logoff countdown showing
   menu: [],
+  menuAdminShown: 100,   // how much of the Items list is drawn — grows as you reach the end of it
   activeCat: null,
   activeSubcat: null, // null = "All", '__none__' = items without a subcategory, or a subcategory id
   search: '',
@@ -24576,6 +24577,7 @@ function maFilterDd(id, label, options, current) {
   </select>`;
 }
 function maFilterPick(dd, v) {
+  state.menuAdminShown = MENU_ADMIN_PAGE;   // any filter change starts at the top of the list
   if (dd === 'cat') { state.menuAdminCategoryFilter = v; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; }
   else if (dd === 'sub') { state.menuAdminSubcategoryFilter = v; state.menuAdminSubsubFilter = ''; }
   else if (dd === 'subsub') { state.menuAdminSubsubFilter = v; }
@@ -24704,13 +24706,29 @@ function foldHeadHtml(key, label, count) {
     <span class="gf-name">${esc(label)}</span><span class="gf-count">${count}</span></button>`;
 }
 // §§ Menu admin: items, sizes, modifiers
+// A WINDOW, NOT THE WHOLE BOOK (owner, Aug '26: "lag opening the items section
+// in menu admin", "shit tonne of lag when drag and drop"). 712 items came to a
+// megabyte of HTML and 5,800 nodes: 300ms to open, and 300ms AGAIN on every
+// redraw - every keystroke, every poll, every frame of a drag. The list now
+// draws a screenful at a time and grows as you scroll to the end of it, so a
+// redraw costs what is on screen, not what is in the menu.
+const MENU_ADMIN_PAGE = 100;
 function renderMenuAdminRows() {
   const items = visibleMenuItemsForAdmin();
   if (items.length === 0) return `<div class="empty-hist">No items match.</div>`;
+  const shown = Math.min(items.length, state.menuAdminShown || MENU_ADMIN_PAGE);
   // FLAT list, always: the section dropdown IS the grouping — a second layer
   // of section fold-rows on top of it just hid the items (owner, Aug '26:
   // "we already have a dropdown; all sections selected shows all items").
-  return items.map(menuItemRowHtml).join('');
+  const page = items.slice(0, shown);
+  // An open or ticked row further down stays drawn wherever it is — collapsing
+  // the list must never make the thing you were editing vanish.
+  const extra = items.slice(shown).filter(m => state.expandedMenuItemIds.includes(m.id) || state.selectedMenuItemIds.includes(m.id));
+  const rows = page.concat(extra).map(menuItemRowHtml).join('');
+  const left = items.length - shown;
+  return rows + (left > 0
+    ? `<button type="button" class="btn-secondary" id="menu-admin-more" data-act="menu-admin-more" style="align-self:center;margin:4px 0 12px;">Show ${Math.min(left, MENU_ADMIN_PAGE)} more · ${left} left</button>`
+    : '');
 }
 
 // One Items-admin row (collapsed, or expanded with its inline edit panel).
@@ -33047,9 +33065,18 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
     const t = Math.max(Math.min(tOut, tRet), Math.min(Math.max(tOut, tRet), target));
     if (opts.onDragMove) opts.onDragMove(fromIdx, dx, dy, itemsList);
     if (t === target) return;
+    const prev = target;
     target = t;
-    // Slide the intervening neighbours to open the gap at `target`.
-    for (let i = 0; i < slots.length; i++) {
+    // Slide the intervening neighbours to open the gap at `target` — but only
+    // the ones whose position actually CHANGED (owner, Aug '26: "shit tonne of
+    // lag when drag and drop in items when full item list is loaded"). This
+    // used to rewrite the transform of every row in the list each time the
+    // dragged row crossed a neighbour: with 712 items that is 712 style writes
+    // and 712 transitions for one row moving one place. Everything outside the
+    // band between the old gap and the new one is already where it belongs.
+    const lo = prev < 0 ? 0 : Math.max(0, Math.min(prev, target, fromIdx));
+    const hi = prev < 0 ? slots.length - 1 : Math.min(slots.length - 1, Math.max(prev, target, fromIdx));
+    for (let i = lo; i <= hi; i++) {
       if (i === fromIdx) continue;
       let d = 0;
       if (target > fromIdx && i > fromIdx && i <= target) d = -lift;
@@ -33635,6 +33662,7 @@ function bindEvents() {
   if (menuAdminSearchInput) {
     menuAdminSearchInput.addEventListener('input', (e) => {
       state.menuAdminSearch = e.target.value;
+      state.menuAdminShown = MENU_ADMIN_PAGE;   // a new search starts at the top
       // Refresh only the rows, not the input — keeps the mobile keyboard up.
       // Debounced so fast typing costs one rebuild, not one per key.
       clearTimeout(window._menuAdminSearchTimer);
@@ -34725,7 +34753,7 @@ function handleActClick(el, e) {
       else if (act === 'search-open-menu-item') {
         state.adminTab = 'menu'; state.adminSearch = '';
         // Clear the list filters so the item's row is actually on the page.
-        state.menuAdminCategoryFilter = ''; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; state.menuAdminSearch = '';
+        state.menuAdminCategoryFilter = ''; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; state.menuAdminSearch = ''; state.menuAdminShown = MENU_ADMIN_PAGE;
         openEditMenuItem(el.dataset.id);
         jumpToAdminRow(el.dataset.id);
       }
@@ -34764,6 +34792,10 @@ function handleActClick(el, e) {
       else if (act === 'close-bulk-staff') { state.bulkStaffModal = null; render(); }
       else if (act === 'bulk-staff-role') { state.bulkStaffModal.role = el.dataset.val; render(); }
       else if (act === 'save-bulk-staff') { saveBulkStaff(); }
+      else if (act === 'menu-admin-more') {
+        state.menuAdminShown = (state.menuAdminShown || 100) + 100;
+        render();
+      }
       else if (act === 'add-menu-item') { quickAddMenuItem(); }
       else if (act === 'duplicate-menu-item') { duplicateMenuItem(el.dataset.id); }
       else if (act === 'toggle-menu-item-active') { toggleMenuItemActive(el.dataset.id); }
@@ -35500,7 +35532,8 @@ function handleActClick(el, e) {
       else if (act === 'ma-dd') { state.maDdOpen = state.maDdOpen === el.dataset.dd ? null : el.dataset.dd; state.sortMenuOpen = null; render(); }
       else if (act === 'ma-dd-pick') {
         const dd = el.dataset.dd, v = el.dataset.val;
-        if (dd === 'cat') { state.menuAdminCategoryFilter = v; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; }
+        state.menuAdminShown = MENU_ADMIN_PAGE;   // any filter change starts at the top of the list
+  if (dd === 'cat') { state.menuAdminCategoryFilter = v; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; }
         else if (dd === 'sub') { state.menuAdminSubcategoryFilter = v; state.menuAdminSubsubFilter = ''; }
         else if (dd === 'subsub') { state.menuAdminSubsubFilter = v; }
         state.maDdOpen = null; render();

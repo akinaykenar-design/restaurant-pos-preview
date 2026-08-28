@@ -16833,6 +16833,7 @@ function render() {
   document.body.toggleAttribute('data-tiles-bottom', !!(state.settings.tilesBottomUp && state.view === 'order'));
   // In Link mode a finger on a table must DRAG the table, never scroll the page.
   // A finger still holding a button keeps its sunk look on the rebuilt node.
+  tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
   if (_pressState && _pressState.sel) {
     const held = document.querySelector(_pressState.sel);
     if (held) { held.classList.add('pressed'); _pressState.el = held; }
@@ -29687,6 +29688,36 @@ document.addEventListener('wheel', (e) => {
 let _tpPinch = null, _tpPinchGuard = 0;
 // §§ The floor: zoom, panning, typing a table number
 function tpZoom() { return parseFloat(document.documentElement.style.getPropertyValue('--tp-zoom')) || 1; }
+
+// THE PINCH PAINTS ONCE PER FRAME, ON THE MAP ONLY (owner, Aug '26:
+// "pinching/zoom is laggy as fuck"). Two things made it crawl:
+//   - the zoom was written to --tp-zoom on the ROOT, which asks the browser to
+//     re-check every element on the page against every rule. Measured 2.6ms a
+//     go against 0.2ms for writing the map's own transform - and a tablet is
+//     several times slower again.
+//   - it ran on EVERY touchmove. Fingers report far faster than the screen
+//     draws, so most of that work was thrown away before anything appeared.
+// Now: the finger positions are recorded, and one frame later the map's own
+// transform and margins are set, once. The shared --tp-zoom is written when
+// the fingers lift, so everything else still reads the same number.
+let _tpFrame = 0, _tpWant = null;
+function tpApply() {
+  _tpFrame = 0;
+  const w = _tpWant; if (!w || !_tpPinch) return;
+  const { wrap, canvas, baseW, baseH } = _tpPinch;
+  if (!canvas || !canvas.isConnected) return;
+  const z = w.z, old = _tpPinch.shown || 1;
+  canvas.style.transform = 'scale(' + z + ')';
+  canvas.style.marginRight = (baseW * (z - 1)) + 'px';
+  canvas.style.marginBottom = (baseH * (z - 1)) + 'px';
+  // Keep the point between the fingers under the fingers.
+  const ox = wrap.scrollLeft + w.midX, oy = wrap.scrollTop + w.midY;
+  wrap.scrollLeft = ox * (z / old) - w.midX;
+  wrap.scrollTop = oy * (z / old) - w.midY;
+  _tpPinch.shown = z;
+}
+// A poll can rebuild the map mid-pinch; the rebuilt node has no inline zoom.
+function tpRepaintAfterRender() { if (_tpPinch && _tpWant) { _tpPinch.canvas = document.querySelector('.floor-canvas'); _tpPinch.shown = 1; tpApply(); } }
 document.addEventListener('touchstart', (e) => {
   if (e.touches.length !== 2) { _tpPinch = null; return; }
   const wrap = e.target.closest && e.target.closest('.tp-canvas-wrap');
@@ -29695,12 +29726,17 @@ document.addEventListener('touchstart', (e) => {
   // Pinching IN goes past 1× down to "the whole room on screen" (owner,
   // Aug '26): the floor below fit-width would just squash, so the fit IS
   // the floor of the zoom. On the till the map already fits — min stays 1.
+  // offsetWidth/Height are the UNZOOMED size — the zoom is a transform, which
+  // never changes layout, so it must not be divided out again.
   const canvas = wrap.querySelector('.floor-canvas');
-  // offsetWidth is the UNZOOMED width now — the zoom is a transform, which
-    // never changes layout, so it must not be divided out again.
-    const baseW = canvas ? canvas.offsetWidth : wrap.clientWidth;
-  _tpPinch = { wrap, dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom: tpZoom(),
+  const baseW = canvas ? canvas.offsetWidth : wrap.clientWidth;
+  const baseH = canvas ? canvas.offsetHeight : wrap.clientHeight;
+  const r = wrap.getBoundingClientRect();   // read ONCE, not every move
+  const zoom = tpZoom();
+  _tpPinch = { wrap, canvas, baseW, baseH, rect: r, shown: zoom,
+    dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom,
     minZ: Math.min(1, wrap.clientWidth / baseW) };
+  _tpWant = null;
   _tpPinchGuard = Date.now() + 600;
 }, { passive: true });
 document.addEventListener('touchmove', (e) => {
@@ -29709,17 +29745,19 @@ document.addEventListener('touchmove', (e) => {
   const [a, b] = e.touches;
   const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
   const z = Math.min(3, Math.max(_tpPinch.minZ, _tpPinch.zoom * d / _tpPinch.dist));
-  const old = tpZoom();
-  if (Math.abs(z - old) < 0.01) return;
-  const w = _tpPinch.wrap, r = w.getBoundingClientRect();
-  const midX = (a.clientX + b.clientX) / 2 - r.left, midY = (a.clientY + b.clientY) / 2 - r.top;
-  const ox = w.scrollLeft + midX, oy = w.scrollTop + midY;
-  document.documentElement.style.setProperty('--tp-zoom', z);
-  w.scrollLeft = ox * (z / old) - midX;
-  w.scrollTop = oy * (z / old) - midY;
+  const r = _tpPinch.rect;
+  _tpWant = { z, midX: (a.clientX + b.clientX) / 2 - r.left, midY: (a.clientY + b.clientY) / 2 - r.top };
+  if (!_tpFrame) _tpFrame = requestAnimationFrame(tpApply);
   _tpPinchGuard = Date.now() + 600;
 }, { passive: false });
-document.addEventListener('touchend', () => { if (_tpPinch) { _tpPinch = null; _tpPinchGuard = Date.now() + 400; } }, { passive: true });
+document.addEventListener('touchend', () => {
+  if (!_tpPinch) return;
+  // The fingers are off: publish the zoom everywhere (the CSS margins and any
+  // later render read this), then let go of the gesture.
+  if (_tpWant) document.documentElement.style.setProperty('--tp-zoom', _tpPinch.shown || _tpWant.z);
+  if (_tpFrame) { cancelAnimationFrame(_tpFrame); _tpFrame = 0; }
+  _tpPinch = null; _tpWant = null; _tpPinchGuard = Date.now() + 400;
+}, { passive: true });
 document.addEventListener('click', (e) => {
   if (Date.now() < _tpPinchGuard && e.target.closest && e.target.closest('.tp-canvas-wrap')) { e.preventDefault(); e.stopPropagation(); }
 }, true);

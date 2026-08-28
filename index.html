@@ -2678,7 +2678,11 @@ body[data-fs-picker] .tp-actions{ flex:none; }
    the wrap and stays stationary filling its box (owner's design); only the
    table arrangement inside scales, centring when smaller ("safe" keeps the
    start edge reachable when it overflows instead). */
-.tp-canvas-wrap{ overflow:auto; -webkit-overflow-scrolling:touch; touch-action:pan-x pan-y;
+/* No -webkit-overflow-scrolling:touch. It is a no-op on any iPad since iOS 13,
+   and on the ones where it still does something it stops a TRANSFORMED child
+   scrolling at all — which is exactly what the map is now (owner, Aug '26:
+   "I can't move side to side while zoomed in"). */
+.tp-canvas-wrap{ overflow:auto; touch-action:pan-x pan-y;
   border-radius:var(--r-control); display:flex; align-items:safe center; justify-content:safe center; }
 .tp-canvas-wrap .floor-canvas{ flex:none; }
 /* A ZOOM, NOT A BIGGER BOX (owner, Aug '26: "it doesn't zoom, it just makes
@@ -2694,7 +2698,7 @@ body[data-fs-picker] .tp-actions{ flex:none; }
   transform:scale(var(--tp-zoom,1)); transform-origin:0 0;
   margin-right:calc(var(--fc-base, 100%) * (var(--tp-zoom,1) - 1));
   margin-bottom:calc(var(--fc-base, 100%) * (var(--tp-zoom,1) - 1) * var(--fc-ar, 1));
-  will-change:transform; }
+  }   /* will-change is set only WHILE pinching — a permanent one keeps the whole floor in its own GPU layer for nothing */
 @media (max-width:768px){
   .tp-canvas-wrap{ height:calc(100dvh - 125px); }
   /* Phones: the map is taller than the screen by design, so Close floats
@@ -3003,12 +3007,18 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    having a table were two different pictures of the same thing — and that
    gradient means "the dish you picked off the menu", nothing else. A table
    being picked now wears the ring it is about to keep. */
-.simple-table-btn.picking{ border-color:var(--orange); background:var(--orange-dim); color:var(--orange); }
-.floor-marker.picking:not(.mk-stool)::after{
+/* THE RING LANDS WITH THE FINGER (owner, Aug '26: "selecting animation blue
+   border is also laggy"). It used to wait for the CLICK - measured 116ms after
+   the touch, and only then did the beat before the order screen start. .pressed
+   is painted on pointerdown (the same handler the tiles use), so the ring a
+   table is about to keep shows in the frame the finger lands, and .picking
+   simply keeps it there for the beat. */
+.simple-table-btn.picking, .simple-table-btn.pressed{ border-color:var(--orange); background:var(--orange-dim); color:var(--orange); }
+.floor-marker.picking:not(.mk-stool)::after, .floor-marker.pressed:not(.mk-stool)::after{
   content:''; position:absolute; z-index:4; pointer-events:none;
   inset:-1px; border-radius:inherit;
   box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange); }
-.floor-marker.mk-stool.picking::before{ box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange); }
+.floor-marker.mk-stool.picking::before, .floor-marker.mk-stool.pressed::before{ box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange); }
 
 /* Table number: big and plain — inherits the chip's own text colour. */
 .stb-num{font-family:var(--font-mono);font-size:var(--stb-fs,34px);font-weight:800;line-height:1;}
@@ -29706,6 +29716,7 @@ function tpApply() {
   const w = _tpWant; if (!w || !_tpPinch) return;
   const { wrap, canvas, baseW, baseH } = _tpPinch;
   if (!canvas || !canvas.isConnected) return;
+  if (canvas.style.willChange !== 'transform') canvas.style.willChange = 'transform';
   const z = w.z, old = _tpPinch.shown || 1;
   canvas.style.transform = 'scale(' + z + ')';
   canvas.style.marginRight = (baseW * (z - 1)) + 'px';
@@ -29756,6 +29767,7 @@ document.addEventListener('touchend', () => {
   // later render read this), then let go of the gesture.
   if (_tpWant) document.documentElement.style.setProperty('--tp-zoom', _tpPinch.shown || _tpWant.z);
   if (_tpFrame) { cancelAnimationFrame(_tpFrame); _tpFrame = 0; }
+  if (_tpPinch.canvas) _tpPinch.canvas.style.willChange = '';   // give the layer back
   _tpPinch = null; _tpWant = null; _tpPinchGuard = Date.now() + 400;
 }, { passive: true });
 document.addEventListener('click', (e) => {
@@ -35126,7 +35138,11 @@ function handleActClick(el, e) {
           state.pickFlashId = el.dataset.id;
           el.classList.add('picking');
           const id = el.dataset.id;
-          setTimeout(() => { window._pickFlash = false; pickTable(id); }, 160);
+          // The ring is already on the table (it landed with the finger), so
+          // the beat only has to be long enough to SEE - not long enough to
+          // wait for. 160ms on top of the 116ms the ring itself used to take
+          // was a quarter of a second of nothing happening.
+          setTimeout(() => { window._pickFlash = false; pickTable(id); }, 90);
         }
       }
       // §§ router: the floor and table numbers

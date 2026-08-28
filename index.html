@@ -4050,6 +4050,24 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
   .fp-wrap.fp-split{ display:flex; flex-direction:column; }
   .fp-split .fp-rail-side{ max-height:none; overflow:visible; flex-direction:row; flex-wrap:wrap; align-items:center; }
 }
+
+/* §§ Knocking money off one line
+   The common discounts are one tap on the price pad, and the reason sits with
+   them rather than on a screen of its own (owner, Aug '26). */
+.pp-off-row{ display:flex; gap:6px; margin:8px 0 0; }
+.pp-off{ flex:1; min-width:0; height:var(--h-control); border:1px solid var(--steel-300);
+  border-radius:var(--btn-radius); background:var(--surface); color:var(--text-primary);
+  font-weight:800; font-size:var(--fs-md); cursor:pointer; }
+.pp-off.on{ background:var(--orange-dim); border-color:var(--orange); color:var(--orange); }
+.pp-was{ margin-top:8px; text-align:center; font-weight:700; font-size:var(--fs-md); color:var(--orange); }
+.pp-why-row{ display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.pp-why{ flex:1 1 auto; min-height:var(--tap); padding:0 10px; border:1px solid var(--steel-300);
+  border-radius:var(--btn-radius); background:var(--surface); color:var(--text-secondary);
+  font-weight:700; font-size:var(--fs-chip); cursor:pointer; white-space:nowrap; }
+.pp-why.on{ background:var(--orange-dim); border-color:var(--orange); color:var(--orange); }
+/* The old price stays visible on the line it came off, struck through. */
+.tl-was{ text-decoration:line-through; color:var(--charcoal-soft); font-family:var(--font-mono);
+  font-size:var(--fs-chip); margin-right:6px; }
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -9501,11 +9519,29 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   } else if (action === 'reprice') {
     const p = parseFloat(newPrice);
     if (isNaN(p) || p < 0) return res.status(400).json({ error: 'Enter a valid price' });
-    let n = 0;
-    (order.items || []).forEach(i => { if (matches(i)) { i.price = p; n++; } });
-    (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (matches(i)) i.price = p; }));
+    // A LINE DISCOUNT REMEMBERS WHAT IT WAS AND WHY (owner, Aug '26). Knocking
+    // money off one dish used to just overwrite the price: the bill was right
+    // but nothing said the dish had been $19, or that it went because the
+    // kitchen sent the wrong one. The charged price is still the price - every
+    // total, receipt and report is untouched - and the line now carries what it
+    // was before and the reason beside it.
+    const why = String(req.body.reason || '').trim().slice(0, 40);
+    let n = 0, was = null;
+    const mark = (i) => {
+      // The FIRST price is the original: discounting twice must not quietly
+      // make the discounted price the thing it was "reduced from".
+      if (i.origPrice === undefined && p < i.price) i.origPrice = i.price;
+      i.price = p;
+      if (i.origPrice !== undefined && p >= i.origPrice) { delete i.origPrice; delete i.discountReason; }
+      else if (why) i.discountReason = why;
+    };
+    (order.items || []).forEach(i => { if (matches(i)) { if (was === null) was = i.price; mark(i); n++; } });
+    (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (matches(i)) mark(i); }));
     if (n === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
-    logAudit(data, staff, `Repriced ${match.name} to $${p.toFixed(2)} on Ticket #${order.id}`);
+    const off = was !== null && p < was;
+    logAudit(data, staff, off
+      ? `Discounted ${match.name} from $${was.toFixed(2)} to $${p.toFixed(2)}${why ? ' — ' + why : ''} on Ticket #${order.id}`
+      : `Repriced ${match.name} to $${p.toFixed(2)} on Ticket #${order.id}`);
   } else {
     return res.status(400).json({ error: 'Unknown action' });
   }
@@ -17938,12 +17974,12 @@ function serveAnotherFromEl(el) {
   const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
   doAddServing({ name: d.name, seat, note: d.note || '', price: parseFloat(d.price), course: parseInt(d.course) || 1 });
 }
-async function doRepriceSent(match, newPrice) {
+async function doRepriceSent(match, newPrice, reason) {
   const o = activeOpenOrder();
   if (!match || !o) return;
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'reprice', newPrice, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'reprice', newPrice, reason: reason || '', staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     // Keep any pending (unsent) additions of this item merged with the sent line.
     state.cart.forEach(c => { if (sentItemMatches(c, match)) c.price = newPrice; });
@@ -18006,33 +18042,79 @@ function openPriceEntry(el) {
   state.notesPanel = null; state.showCheckout = false; state.comboBuilder = null; state.showTablePicker = false;
   render();
 }
+// A percentage off works on the price the line STARTED at, so tapping 25%
+// then 50% is half off the original, not half off the quarter off.
+function tapPriceOff(pct) {
+  const pe = state.priceEntry; if (!pe) return;
+  if (pe.pct === pct) { pe.pct = null; pe.buffer = ''; render(); return; }
+  pe.pct = pct;
+  pe.buffer = (Math.round((pe.original || 0) * (100 - pct)) / 100).toFixed(2);
+  render();
+}
+function tapPriceWhy(why) {
+  const pe = state.priceEntry; if (!pe) return;
+  pe.reason = pe.reason === why ? '' : why;
+  render();
+}
 function tapPriceKey(key) {
   const pe = state.priceEntry; if (!pe) return;
   const b = pe.buffer || '';
+  pe.pct = null;
   if (key === 'back') pe.buffer = b.slice(0, -1);
   else if (key === '.') { if (!b.includes('.')) pe.buffer = (b || '0') + '.'; }
   else { if (b.includes('.') && b.split('.')[1].length >= 2) return; pe.buffer = (b === '0' ? '' : b) + key; }
   render();
+}
+// The venue's own void/comp wording where they have set it, so a line
+// discount reads the same as a void does in the house log.
+function lineDiscountReasons() {
+  const venue = (state.voidReasons || []).filter(Boolean);
+  return (venue.length ? venue : ['Comp', 'Wrong order', 'Staff meal', 'Goodwill']).slice(0, 4);
 }
 // §§ Typing a price
 function confirmPriceEntry() {
   const pe = state.priceEntry; if (!pe) return;
   const val = pe.buffer === '' ? pe.original : parseFloat(pe.buffer);
   if (isNaN(val) || val < 0) { state.priceEntry = null; render(); return; }
-  if (pe.scope === 'cart') { if (state.cart[pe.idx]) state.cart[pe.idx].price = val; state.priceEntry = null; render(); }
-  else { const m = pe.match; state.priceEntry = null; doRepriceSent(m, val); }
+  const why = pe.reason || '';
+  if (pe.scope === 'cart') {
+    const line = state.cart[pe.idx];
+    if (line) {
+      if (line.origPrice === undefined && val < line.price) line.origPrice = line.price;
+      line.price = val;
+      if (line.origPrice !== undefined && val >= line.origPrice) { delete line.origPrice; delete line.discountReason; }
+      else if (why) line.discountReason = why;
+    }
+    state.priceEntry = null; render();
+  }
+  else { const m = pe.match; state.priceEntry = null; doRepriceSent(m, val, why); }
 }
 // Price is a POP like Covers/Quantity — the docket stays visible behind it.
 function renderPricePop() {
   const pe = state.priceEntry;
   const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'];
   const typing = pe.buffer !== '';
+  const now = typing ? (parseFloat(pe.buffer) || 0) : (pe.original || 0);
+  const off = pe.original > 0 && now < pe.original;
   return `
       <div class="qty-pop covers-pop price-pop">
         ${pe.name ? `<div class="sp-item">${esc(pe.name)}${pe.qty > 1 ? ` &times; ${pe.qty} &mdash; each` : ''}</div>` : ''}
         <div class="pad-disp-row">
           <div class="covers-pad-display qp-display">$${typing ? esc(pe.buffer) : (pe.original || 0).toFixed(2)}</div>
         </div>
+        ${/* KNOCKING MONEY OFF ONE DISH (owner, Aug '26, from the OrderMate
+              screens). The common ones are a tap - half off, a comp - and the
+              pad is still there for anything else. The old price and the reason
+              ride with the line from here. */ ''}
+        <div class="pp-off-row">
+          ${[10, 25, 50].map(n => `<button class="pp-off${pe.pct === n ? ' on' : ''}" data-act="price-off" data-pct="${n}">−${n}%</button>`).join('')}
+          <button class="pp-off${pe.pct === 100 ? ' on' : ''}" data-act="price-off" data-pct="100">Free</button>
+        </div>
+        ${off ? `
+        <div class="pp-was">was ${money(pe.original)} · ${money(pe.original - now)} off${pe.qty > 1 ? ' each' : ''}</div>
+        <div class="pp-why-row">
+          ${lineDiscountReasons().map(r => `<button class="pp-why${pe.reason === r ? ' on' : ''}" data-act="price-why" data-why="${esc(r)}">${esc(r)}</button>`).join('')}
+        </div>` : ''}
         <div class="covers-pad-grid qp-grid">
           ${keys.map(k => `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="price-pad-key" data-key="${k}">${k === 'back' ? PAD_BSP_SVG : k}</button>`).join('')}
         </div>
@@ -18599,16 +18681,22 @@ function renderTicketPanel() {
           const showSeat = state.settings.seatNumbersEnabled && e.seat && e.seat !== 'all';
           const removedNames = lineBuild(e).removed.map(c => c.label);
           const noText = removedNames.map(n => 'No ' + n).join(' · ');
-          const subBits = [showSeat ? esc(seatText(e.seat)) : '', e.note ? esc(e.note) : ''].filter(Boolean).join(' · ');
+          const subBits = [showSeat ? esc(seatText(e.seat)) : '', e.note ? esc(e.note) : '',
+            e.origPrice && e.origPrice > e.price ? esc(e.discountReason || 'Discounted') : ''].filter(Boolean).join(' · ');
           const sub = (subBits || noText) ? `<div class="tl-sub">${subBits}${subBits && noText ? ' · ' : ''}${noText ? `<span class="tl-no">${esc(noText)}</span>` : ''}</div>` : '';
           const qtyBtn = isSent
             ? `<button class="tl-qty" data-act="serve-again" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-price="${e.price}" data-course="${e.course}" onclick="event.stopPropagation();">${total}</button>`
             : `<button class="tl-qty" data-act="qty-inc" data-idx="${e.cartIdx}" onclick="event.stopPropagation();">${total}</button>`;
+          // A discounted line SAYS SO: the old price sits beside the new one,
+          // struck through, and the reason rides with it. Otherwise a comped
+          // dish just looks like a dish that costs less than the menu says.
+          const wasHtml = e.origPrice && e.origPrice > e.price
+            ? `<span class="tl-was">${money(e.origPrice * total)}</span>` : '';
           const priceHtml = (isManager
             ? (isSent
-                ? `<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="sent" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-oldprice="${e.price}" data-qty="${total}" data-course="${e.course}" onclick="event.stopPropagation();">${money(e.price * total)}</button>`
-                : `<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="cart" data-idx="${e.cartIdx}" data-name="${esc(e.name)}" data-oldprice="${e.price}" data-qty="${total}" onclick="event.stopPropagation();">${money(e.price * total)}</button>`)
-            : `<div class="tl-price">${money(e.price * total)}</div>`);
+                ? `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="sent" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-oldprice="${e.price}" data-qty="${total}" data-course="${e.course}" onclick="event.stopPropagation();">${money(e.price * total)}</button>`
+                : `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="cart" data-idx="${e.cartIdx}" data-name="${esc(e.name)}" data-oldprice="${e.price}" data-qty="${total}" onclick="event.stopPropagation();">${money(e.price * total)}</button>`)
+            : `${wasHtml}<div class="tl-price">${money(e.price * total)}</div>`);
           // Remove control is a cross (✕), not a bin. An UNSENT line — an item
           // "just put through" that hasn't gone to the kitchen — carries the ✕
           // for EVERYONE: any waiter can pull back what they haven't sent yet.
@@ -18638,12 +18726,12 @@ function renderTicketPanel() {
           const info = courseInfo(n);
           const fired = state.firedCourses[n];
           const merged = new Map();
-          Object.values(sentByCourse[n] || {}).forEach(s => { merged.set(keyOf(s), { name: s.name, seat: s.seat, note: s.note, price: s.price, course: n, menuItemId: s.menuItemId, modSelections: s.modSelections || {}, removed: s.removed || [], sentQty: s.qty, newQty: 0, cartIdx: null }); });
+          Object.values(sentByCourse[n] || {}).forEach(s => { merged.set(keyOf(s), { name: s.name, seat: s.seat, note: s.note, price: s.price, course: n, menuItemId: s.menuItemId, modSelections: s.modSelections || {}, removed: s.removed || [], origPrice: s.origPrice, discountReason: s.discountReason, sentQty: s.qty, newQty: 0, cartIdx: null }); });
           const freshKeys = [];
           (cartByCourse[n] || []).forEach(c => {
             const k = keyOf(c);
             if (merged.has(k)) { const en = merged.get(k); en.newQty += c.qty; en.cartIdx = c.idx; }
-            else { merged.set(k, { name: c.name, seat: c.seat, note: c.note, price: c.price, course: n, menuItemId: c.menuItemId, modSelections: c.modSelections || {}, removed: c.removed || [], sentQty: 0, newQty: c.qty, cartIdx: c.idx }); freshKeys.push(k); }
+            else { merged.set(k, { name: c.name, seat: c.seat, note: c.note, price: c.price, course: n, menuItemId: c.menuItemId, modSelections: c.modSelections || {}, removed: c.removed || [], origPrice: c.origPrice, discountReason: c.discountReason, sentQty: 0, newQty: c.qty, cartIdx: c.idx }); freshKeys.push(k); }
           });
           const orderedKeys = [...[...merged.keys()].filter(k => merged.get(k).sentQty > 0), ...freshKeys];
           // Single-course view: the active course tab already names it, so the
@@ -34720,6 +34808,8 @@ function handleActClick(el, e) {
       else if (act === 'close-edit-sent') { state.editSent = null; render(); }
       else if (act === 'edit-docket-price') { openPriceEntry(el); }
       else if (act === 'price-pad-key') { tapPriceKey(el.dataset.key); }
+      else if (act === 'price-off') { tapPriceOff(parseInt(el.dataset.pct, 10)); }
+      else if (act === 'price-why') { tapPriceWhy(el.dataset.why || ''); }
       else if (act === 'confirm-price-entry') { confirmPriceEntry(); }
       else if (act === 'close-price-entry') { state.priceEntry = null; render(); }
       else if (act === 'edit-line-qty') { editLineQty(parseInt(el.dataset.dir)); }

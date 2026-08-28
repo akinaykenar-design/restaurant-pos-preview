@@ -2661,7 +2661,10 @@ body[data-fs-picker] .tp-actions{ flex:none; }
 .floor-marker:not(.mk-stool)::before{content:'';position:absolute;inset:-5px;border-radius:inherit;}
 .floor-marker.mk-stool::after{content:'';position:absolute;inset:-5px;border-radius:inherit;}
 .floor-marker.mk-stool::before{content:'';position:absolute;inset:0;border-radius:inherit;background:var(--mk-bg);border:var(--mk-border);clip-path:inset(0 0 33% 0);z-index:0;}
-.floor-marker.mk-stool > *{position:relative;z-index:1;}
+.floor-marker.mk-stool > *:not(.tbl-badges){position:relative;z-index:1;}
+/* ...but NOT the badge anchor: it has to stay absolute or it loses the box it
+   is anchored to, and the pill ends up measured against nothing. */
+.floor-marker.mk-stool > .tbl-badges{position:absolute;z-index:2;}
 /* Selected stool: the ring rides the clipped skin, so it follows the
    flat-bottom stool shape instead of circling the invisible box. */
 .floor-marker.mk-stool.mk-sel::before{box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange);}
@@ -2888,7 +2891,16 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    long since the call. Flips solid violet past the course-wait cap — the
    sitting itself is told by the chip body's burn, digitless. */
 /* Detached: the pill floats just off the table's bottom-right corner. */
-.tbl-cpill{ position:absolute; bottom:-16px; right:-12px; top:auto; left:auto; z-index:4; display:inline-flex; align-items:center; gap:4px; white-space:nowrap;
+/* The badge anchor fills the marker and is turned back by the table's own
+   angle about its centre, so everything inside reads horizontally however the
+   table is set. It is not a box you can see - only a frame of reference. */
+.tbl-badges{ position:absolute; inset:0; z-index:5; pointer-events:none; transform-origin:50% 50%; display:block; }
+/* A table that is showing a pill stands above its neighbours, or the pill -
+   which hangs outside the table's own box - was painted over by whichever
+   table came next (owner, Aug '26: "sometimes pills are not above the table"). */
+.floor-marker.has-pill, .simple-table-btn.has-pill{ z-index:6; }
+.tbl-cpill{ position:absolute; left:50%; top:calc(100% + var(--pill-out, 0%)); bottom:auto; right:auto;
+  transform:translate(-50%, 2px); z-index:4; display:inline-flex; align-items:center; gap:4px; white-space:nowrap;
   background:rgba(20,22,24,.62); color:#fff; border-radius:var(--r-pill); padding:4px 8px 4px 8px; pointer-events:none; box-shadow:0 1px 5px rgba(0,0,0,.3); }
 .tbl-cpill i{ width:12px; height:12px; border-radius:50%; display:block; border:1.5px solid rgba(255,255,255,.85); box-sizing:border-box; }
 .tbl-cpill b{ font-size:var(--fs-md); font-weight:800; color:inherit; line-height:1; font-family:var(--font-mono); }
@@ -13224,14 +13236,14 @@ function oskKey(k) {
   if (k === '!#1') { _oskMode = 'sym'; oskPaint(); return; }
   if (k === 'ABC') { _oskMode = 'lower'; oskPaint(); return; }
   if (k === '⌄') {
-    // ONE quiet exit (owner, Aug '26: "just a down arrow"). On a SEARCH
-    // field the down key presses the magnifier's own close (owner: "should
-    // deselect search not just hide") — search shuts, filter clears. On any
-    // other field the keyboard drops and whatever was typed stays.
+    // ONE quiet exit (owner, Aug '26: "just a down arrow"). The keyboard drops
+    // and whatever was typed STAYS - on a search field too (owner, Aug '26,
+    // later: "when exiting the keyboard it should still allow you to see search
+    // results and scroll them"). It used to wipe the search on the way down, so
+    // putting the keyboard away to look at what you had found threw the results
+    // away with it. Closing the search is still the magnifier's own job.
     _oskGhostGuard = Date.now() + 450;
     const el = _oskTarget;
-    if (el && el.id === 'search-input') { state.searchOpen = false; state.search = ''; oskHide(); render(); return; }
-    if (el && el.id === 'admin-search-input') { state.adminSearchOpen = false; state.adminSearch = ''; oskHide(); render(); return; }
     if (el && document.contains(el)) { el.dispatchEvent(new Event('change', { bubbles: true })); el.blur(); }
     oskHide(); return;
   }
@@ -18376,7 +18388,12 @@ function renderTicketPanel() {
   <div class="ticket-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}">
     <div class="ticket-head">
       <button class="ticket-close-mobile" data-act="toggle-mobile-cart">✕</button>
-      ${state.settings.ticketHeader ? `<div class="ticket-custom-header">${esc(state.settings.ticketHeader)}</div>` : ''}
+      ${/* THE VENUE'S NAME BELONGS ON THE PRINT, NOT THE TILL (owner, Aug '26:
+            "there is 'watermans' on top of docket panel and there is no setting
+            that removes it"). It is the RECEIPT header, edited in the receipt
+            designer - it was being echoed onto the live docket as well, where
+            nothing in Design could switch it off because the switch lives on
+            the receipt. The bill and receipt previews below still carry it. */ ''}
       ${state.orderType !== 'dine-in' ? `
         <div class="ticket-title">${state.orderType === 'takeaway' ? 'Takeaway' : 'Delivery'}</div>
         <input id="customer-name" class="ticket-name-input" type="text" placeholder="Guest name" value="${esc(state.customerName)}">` : ''}
@@ -26925,7 +26942,35 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // floor map during service).
   if (opts.hideStatus) return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}`;
   const cs = opts.noPill ? null : tableCourseStatus(t.label);
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${floorPillHtml(t, cs)}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, floorPillHtml(t, cs))}`;
+}
+
+// EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
+// "pills on tables should be horizontal on all tables regardless of if they are
+// rotated"). A badge is a child of the marker, and the marker is what carries
+// the table's rotation - so an angled table hung its pill at the same angle and
+// you had to tilt your head to read the minutes.
+// The badges now live in an anchor that fills the marker and is turned back by
+// the same angle about the table's centre: upright on screen, still pinned to
+// its own table. The pill also sits UNDER the table's centre line rather than
+// off a corner, pushed out far enough to clear the shape at whatever angle it
+// is turned to ("sometimes pills are not above the table").
+function uprightBadges(t, inner) {
+  if (!inner) return '';
+  const rot = ((t.rotation || 0) % 360 + 360) % 360;
+  // A turned rectangle reaches further down the screen than its own box does.
+  // How much further, exactly: a w x h box turned by r stands (w|sin| + h|cos|)
+  // tall, so it pokes out below its box by half the difference. Said as a
+  // percentage of the box's own height - which is what `top` percentages are
+  // measured against - that is ((w/h)|sin| + |cos| - 1) / 2.
+  // Widths are a share of the canvas's WIDTH and heights a share of its HEIGHT,
+  // so the ratio has to come back through the canvas's own proportions first.
+  const rad = rot * Math.PI / 180;
+  const hOverW = 900 / STD_FLOOR_H;
+  const wh = (t.height ? (t.width || 0) / t.height : 1) * hOverW;
+  const grow = (wh * Math.abs(Math.sin(rad)) + Math.abs(Math.cos(rad)) - 1) / 2;
+  const out = Math.max(0, Math.round(grow * 100));
+  return `<span class="tbl-badges" style="${rot ? `transform:rotate(${-rot}deg);` : ''}--pill-out:${out}%;">${inner}</span>`;
 }
 
 // A dine-in table's live status, for the floor-map colour theme.
@@ -27284,7 +27329,7 @@ function renderTablePickerMiddle() {
             const body = _bg ? `background:${_bg};${_txt ? `color:${_txt};` : ''}` : '';
             const billEdge = fx.ring || '';
             return `
-            <div class="simple-table-btn${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${fx.glow}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
+            <div class="simple-table-btn${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${fx.glow}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
               ${fx.wash}
               ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
               ${mvSrcBadge(t)}
@@ -27313,7 +27358,7 @@ function renderTablePickerMiddle() {
           const fx = tableStatusFx(t, cs, lock);
           const billEdge = fx.ring || '';
           return `
-          <div class="floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
+          <div class="floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
             ${fx.wash}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
             ${mvSrcBadge(t)}

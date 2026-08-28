@@ -4006,6 +4006,20 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 .mi-gap{ flex:1; }
 .mi-price{ font-family:var(--font-mono); font-size:var(--fs-md); font-weight:700; flex-shrink:0; }
 .mi-onoff{ border:none; cursor:pointer; flex-shrink:0; }
+
+/* §§ The preview shows the till's own panels
+   The preview renders the REAL rail, hub and docket now, so its job here is
+   only to hold them: give each wrapper the panel's place in the row and let
+   the till's own CSS do the rest. Nothing inside answers a finger - the
+   wrapper takes the tap and jumps to that panel's settings. */
+/* Said by POSITION, not by name: whatever the till puts inside a preview panel
+   is the panel's only child, so the preview never has to know what it is
+   called - and the old rail/hub/docket names stay where they belong. */
+.mk-catrail > *:not(.mk-railgrip){ height:100%; }
+.mk-menu > *{ height:100%; }
+.mk-ticket > *:not(.mk-grip){ position:static; width:100%; height:100%; max-width:none; box-shadow:none; }
+.mk-panel > *, .mk-panel > * *{ pointer-events:none; }
+.mk-panel .mk-grip, .mk-panel .mk-railgrip{ pointer-events:auto; }
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -16897,6 +16911,7 @@ function render() {
   // In Link mode a finger on a table must DRAG the table, never scroll the page.
   // A finger still holding a button keeps its sunk look on the rebuilt node.
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
+  if (state.view === 'admin' && state.adminTab === 'design') attachPreviewHooks();
   if (_pressState && _pressState.sel) {
     const held = document.querySelector(_pressState.sel);
     if (held) { held.classList.add('pressed'); _pressState.el = held; }
@@ -17734,13 +17749,10 @@ function renderMenuScrollBody() {
         }).join('')}`;
 }
 
-function renderOrderView() {
-  // The dedicated set-menus tab is gone: a set menu sells only inside the
-  // section its editor assigns it to. Clear any stale tab selection.
-  if (state.activeCat === '__combos__') state.activeCat = (state.categories.find(c => !c.disabled) || {}).name || null;
-
-  const searching = state.searchOpen || state.search;
-  const catrailHtml = `
+// THE RAIL, on its own, so the Design preview can draw the REAL one instead
+// of a replica of it (owner, Aug '26: "mirror it in real time").
+function renderCatRail() {
+  return `
     <div class="catrail">
       ${state.categories.filter(catObj => !catObj.disabled).map(catObj => {
         const hasIcon = catObj.iconEnabled !== false;
@@ -17757,11 +17769,16 @@ function renderOrderView() {
         </button>`;
       }).join('')}
     </div>`;
+}
 
-  // Paying keeps the SAME furniture: the rail stays a rail and swaps what it
-  // offers, the docket stays where it is. Staff never lose their bearings, and
-  // the buttons are the app's own `.cat-btn`, so they carry its size and corner
-  // without a number being written here (owner-asked, Aug '26).
+function renderOrderView() {
+  // The dedicated set-menus tab is gone: a set menu sells only inside the
+  // section its editor assigns it to. Clear any stale tab selection.
+  if (state.activeCat === '__combos__') state.activeCat = (state.categories.find(c => !c.disabled) || {}).name || null;
+
+  const searching = state.searchOpen || state.search;
+  const catrailHtml = renderCatRail();
+
   const payRailHtml = () => {
     // Emoji, like the category rail beside it — the two rails must read as the
     // same rail (owner, Aug '26). Split sits with them because splitting is
@@ -25624,6 +25641,89 @@ let _mkZoom = 1;
 // Design › Screen: live scaled mockup of the order screen. Tiles and docket
 // read the same CSS vars as the real screen, so every control (and the drag
 // grip on the docket edge) previews exactly what the till will show.
+// A LIVE MIRROR, NOT A REPLICA (owner, Aug '26: "still not the same", "mirror
+// it in real time"). The preview used to be a hand-built copy of the order
+// screen, so every change to the till had to be copied into it by hand and it
+// drifted every time somebody forgot: a running total that had been removed,
+// a heading the till never had, a grid that did not stretch, a docket line
+// made of free text. It now renders the SAME markup the till renders - the
+// real rail, the real hub, the real docket - off a sample order.
+//
+// Two things make that safe to put inside the admin page:
+//   - every id is dropped, so nothing collides with the admin form fields;
+//   - every data-act, onclick and oninput is defused, so a tap on the preview
+//     can never ring an item up or clear a docket. The mock-jump wrappers
+//     around each panel are what taps land on.
+// The editor's hooks live on the MOCK's own markup. Now that the panels are
+// the till's real markup, the hooks are pinned onto the real elements after
+// the render - one table, so a new control is one line here rather than a
+// second copy of the order screen to keep in step.
+const PREVIEW_HOOKS = [
+  ['.mk-catrail .cat-btn', 'railSize', 'Menu nav', 'ctl-rail'],
+  ['.mk-menu .subcat-tile', 'subcatSize', 'Subsection tile', 'ctl-subcat'],
+  ['.mk-menu .subcat-seg', 'subcatSize', 'Subsection bar', 'ctl-subcat'],
+  ['.mk-menu .item-card:not(.subcat-tile)', 'itemSize', 'Menu tile', 'ctl-tiles'],
+  ['.mk-menu .item-card:not(.subcat-tile) .item-name', 'tileFont', 'Tile text', 'ctl-tiles'],
+  ['.mk-menu .item-tile-icon', 'toggle:itemIcons', 'Item icon', 'ctl-tiles'],
+  ['.mk-ticket .ticket-head-row .tkt-icon-btn', 'shortcut', 'Docket tiles', 'ctl-docket'],
+  ['.mk-ticket .ticket-line', 'tktFontSize', 'Docket text', 'ctl-docket'],
+  ['.mk-ticket .course-tab', 'courses', 'Courses', 'ctl-courses'],
+];
+function attachPreviewHooks() {
+  const wrap = document.querySelector('.mk-wrap');
+  if (!wrap) return;
+  PREVIEW_HOOKS.forEach(([sel, mkel, name, target]) => {
+    wrap.querySelectorAll(sel).forEach(el => {
+      if (!el.dataset.mkel) { el.dataset.mkel = mkel; el.dataset.mkname = name; }
+      if (target && !el.dataset.target) { el.dataset.act = 'mock-jump'; el.dataset.target = target; }
+      el.style.pointerEvents = 'auto';
+    });
+  });
+}
+
+function previewSanitise(html) {
+  return String(html)
+    .replace(/\sid="[^"]*"/g, '')
+    .replace(/\sdata-act="/g, ' data-preview-act="')
+    .replace(/\son(?:click|input|blur|change|focus)="[^"]*"/g, '');
+}
+// Build the three real panels off a sample order, then put the till's own
+// state back exactly as it was.
+function livePreviewPanels() {
+  const keep = {};
+  const FIELDS = ['view', 'showTablePicker', 'table', 'covers', 'cart', 'activeCat', 'activeSubcat',
+    'search', 'searchOpen', 'showCheckout', 'editLine', 'editSent', 'activeCourse', 'activeSeat',
+    'openOrderId', 'mobileCartOpen', 'itemOptions', 'notesPanel', 'callAway', 'quickNotePad', 'coversPad',
+    'billSplit', 'moveItems', 'orderType', 'firedCourses', 'qtyPadBuffer'];
+  FIELDS.forEach(f => { keep[f] = state[f]; });
+  try {
+    const t = (allTables() || [])[0];
+    state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false;
+    state.showCheckout = false; state.editLine = null; state.editSent = null; state.itemOptions = null;
+    state.notesPanel = false; state.callAway = false; state.quickNotePad = false; state.coversPad = null;
+    state.billSplit = null; state.moveItems = null; state.mobileCartOpen = false;
+    state.search = ''; state.searchOpen = false; state.qtyPadBuffer = ''; state.firedCourses = {};
+    state.table = t ? t.id : null; state.covers = 2; state.activeSeat = 1; state.openOrderId = null;
+    const cat = (state.categories || []).find(c => !c.disabled);
+    state.activeCat = cat ? cat.name : null; state.activeSubcat = null;
+    state.activeCourse = firstEnabledCourseNumber();
+    // A few lines on the docket so it shows what a working docket looks like.
+    const pick = (state.menu || []).filter(m => !m.disabled).slice(0, 4);
+    state.cart = pick.map((m, i) => ({ menuItemId: m.id, name: m.name, price: m.price || 0,
+      qty: i === 1 ? 2 : 1, seat: (i % 2) + 1, course: state.activeCourse, note: '',
+      modSelections: {}, removed: [] }));
+    return {
+      rail: previewSanitise(renderCatRail()),
+      hub: previewSanitise(renderHubMiddle()),
+      docket: previewSanitise(renderTicketPanel()),
+    };
+  } catch (e) {
+    return null;
+  } finally {
+    FIELDS.forEach(f => { state[f] = keep[f]; });
+  }
+}
+
 function renderScreenMockup() {
   const cats = (state.categories || []).slice(0, 6);
   // Prefer a category that has subsections so the mockup shows the subcat bar
@@ -25702,43 +25802,21 @@ function renderScreenMockup() {
   // The panels ARE the layout editor: drag one sideways to rearrange the
   // screen, drag the category rail up to dock it on top. Tap still jumps to
   // the panel's settings card.
+  // THE PANELS ARE THE TILL'S OWN PANELS (owner, Aug '26: "mirror it in real
+  // time"). Each one is the real markup, defused, inside the wrapper that
+  // carries the editor's hooks - tap to jump to its settings, drag to reorder,
+  // the grips to resize. The look can no longer drift from the till because it
+  // is not a copy of the till.
+  const live = livePreviewPanels();
   const panels = {
-    catrail: `<div class="mk-catrail mk-panel" data-panel="catrail" data-act="mock-jump" data-target="ctl-rail" data-mkel="railSize" data-mkname="Menu nav">${cats.map(mkCat).join('')}<span class="mk-railgrip" data-scale="${MK_SCALE}"></span></div>`,
-    menu: `<div class="mk-menu mk-panel" data-panel="menu" data-act="mock-jump" data-target="ctl-rail">${subSeg}<div class="grid">${mkSubTiles}${items.map(mkCard).join('')}</div></div>`,
+    catrail: `<div class="mk-catrail mk-panel" data-panel="catrail" data-act="mock-jump" data-target="ctl-rail" data-mkel="railSize" data-mkname="Menu nav">${live ? live.rail : ''}<span class="mk-railgrip" data-scale="${MK_SCALE}"></span></div>`,
+    menu: `<div class="mk-menu mk-panel" data-panel="menu" data-act="mock-jump" data-target="ctl-rail">${live ? live.hub : ''}</div>`,
     ticket: `<div class="mk-ticket mk-panel" data-panel="ticket" data-act="mock-jump" data-target="ctl-docket" data-mkel="tktWidth" data-mkname="Docket" style="${ticketFirst ? 'border-right:1px solid var(--steel-200);border-left:none;' : ''}">
       <span class="mk-grip" data-side="${gripSide}" data-scale="${MK_SCALE}" style="${gripSide === 'right' ? 'right:-6px;' : 'left:-6px;'}"></span>
-      ${/* NO "Table 12 / Dine-in" HEADING (owner, Aug '26: "docket not the
-            same"). The till has no such block - the table number rides IN the
-            table button, and the covers count in the covers button, exactly as
-            below. The preview shows the till, never a tidier version of it. */ ''}
-      ${(() => {
-        const sc = state.settings.docketShortcuts || {};
-        const ic = [];
-        if (sc.table !== false) ic.push(['table', 'Table', DKT_TABLE_SVG, '12']);
-        if (state.settings.coversEnabled) ic.push(['covers', 'Covers', DKT_USER_SVG, '2']);
-        if (sc.notes !== false) ic.push(['notes', 'Notes', DKT_POSTIT_SVG, '']);
-        if (sc.quickNote !== false) ic.push(['quickNote', 'Quick note', DKT_BOLT_SVG, '']);
-        if (sc.callAway !== false) ic.push(['callAway', 'Call away', DKT_FLAME_SVG, '']);
-        return ic.length ? `<div class="mk-tkt-icons" data-mkname="Docket tiles">${ic.map(([k, n, svg, num]) => `<span class="mk-ti${num ? ' glyph-btn' : ''}" data-mkel="shortcut:${k}" data-mkname="${n}">${svg}${num ? `<span class="gnum">${num}</span>` : ''}</span>`).join('')}</div>` : '';
-      })()}
-      ${mkCourses.length > 1 ? `<div class="course-tabs" data-act="mock-jump" data-target="ctl-courses" data-mkname="Courses" style="cursor:pointer;">${mkCourses.map((c, i) => `<button class="course-tab ${i === 0 ? 'active' : ''}" style="pointer-events:none;">${esc(c.name)}</button>`).join('')}</div>` : ''}
-      <div class="mk-tkt-lines">${lines.map(l => `
-        <div class="mk-line" data-mkel="tktFontSize" data-mkname="Docket text"><span class="mk-line-qty">${l.qty}</span><span class="mk-line-body"><span class="tl-name">${esc(l.name)}</span>${
-          /* Seat numbers off ⇒ no seat text on the till's docket, so none here. */
-          state.settings.seatNumbersEnabled ? `<span class="tl-sub">${esc(state.settings.seatPrefix || 'Seat')} ${l.seat}</span>` : ''
-        }</span><span class="tl-price">${money(l.price * l.qty)}</span><span class="mk-line-x">${ACT_CROSS_SVG}</span></div>`).join('')}
-      </div>
-      ${/* NO running total. It came off the till's docket at the owner's ask
-            ("remove subtotal, it's seen in the pay section") and the preview
-            kept showing one, which is half of why the docket did not match. */ ''}
-      <div class="mk-tkt-actions">
-        <span class="mk-ta bill">${ACT_BILL_SVG}<span class="ia-label">Bill</span></span>
-        <span class="mk-ta pay">${ACT_PAY_SVG}<span class="ia-label">Pay</span></span>
-        <span class="mk-ta discard">${ACT_CROSS_SVG}<span class="ia-label">Discard</span></span>
-        <span class="mk-ta send">${ACT_TICK_SVG}<span class="ia-label">Send</span></span>
-      </div>
+      ${live ? live.docket : ''}
     </div>`
   };
+
   // App bar (Order/Kitchen/Admin): dockable top / bottom / left / right —
   // drag the strip itself in the mockup. Phone allows top / bottom only.
   const abPos = appBarPosFor(dev); // SAME resolver as the till - phone defaults BOTTOM

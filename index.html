@@ -4044,7 +4044,10 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
    options with course buttons — size, spacing etc"). Same grid, same gap,
    same chip, same solid accent on the chosen one — the class IS .course-tab,
    so it can never drift from them again. */
-.split-ways{padding:8px 12px;}
+/* FIVE WAYS, ONE ROW. The docket's course tabs auto-fill at 84px, which fits
+   four — so the fifth way dropped to a second row and cost 48px of docket for
+   nothing. Five equal columns; the labels were cut to suit. */
+.split-ways{padding:8px 12px;grid-template-columns:repeat(5,minmax(0,1fr));}
 .split-count{display:flex;align-items:center;gap:8px;padding:0 12px 12px;}
 .split-count button{width:var(--h-control);height:var(--h-control);flex:none;border-radius:var(--btn-radius);
   border:1px solid var(--chit-line);background:var(--surface);color:var(--text-primary);font-weight:800;font-size:var(--fs-lg);cursor:pointer;line-height:1;}
@@ -4082,7 +4085,25 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 /* The three actions keep the docket's four-button size and its slots, so the
    row never reshapes when the split opens (owner, Aug '26). */
 .action-icons.split-acts .icon-action{flex:0 1 calc((100% - 30px) / 4);}
-.split-amount-input{min-width:0;}
+/* A SHARE IS A ROW, NOT A NUMBER BOX (owner, Aug '26). Name left, money
+   right, its bin on the end — the docket line's own shape — and both halves
+   open the pad. One inset, one gap, like every other list. */
+.split-amounts{display:flex;flex-direction:column;gap:var(--list-gap);padding:var(--hub-edge);}
+.split-amt-row{display:flex;align-items:center;gap:var(--list-gap);}
+.split-amt-name,.split-amt-val{height:var(--sq-ctl,40px);display:flex;align-items:center;
+  border:1px solid var(--chit-line);background:var(--surface);color:var(--text-primary);
+  border-radius:var(--btn-radius);font-family:inherit;font-weight:700;font-size:var(--fs-md);}
+.split-amt-name{flex:1;min-width:0;padding:0 12px;justify-content:flex-start;cursor:pointer;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.split-amt-val{flex:0 0 auto;min-width:92px;padding:0 12px;justify-content:flex-end;cursor:pointer;
+  font-variant-numeric:tabular-nums;}
+.split-amt-val.empty{color:var(--charcoal-soft);}
+/* What is left over is a READING, not a control — no border, no tap. */
+.split-amt-row.rest .split-amt-name,.split-amt-row.rest .split-amt-val{
+  border-color:transparent;background:transparent;color:var(--text-secondary);font-weight:800;cursor:default;}
+.split-amt-add{height:var(--sq-ctl,40px);border:1px dashed var(--steel-300);border-radius:var(--btn-radius);
+  background:transparent;color:var(--text-primary);font-family:inherit;font-weight:700;
+  font-size:var(--fs-md);cursor:pointer;}
 /* Card screen: the two answers to "the number isn't the bill". */
 .card-ask{margin:0 0 12px;padding:12px 12px;border-radius:var(--radius);background:var(--green-dim);border:1px solid var(--green);}
 .card-ask b{color:var(--green);font-size:var(--fs-md);}
@@ -10781,6 +10802,7 @@ let state = {
   editLine: null, // { idx } when editing a cart line in the middle pane
   editSent: null, // { name, seat, note, price, course } identity of a sent item being edited
   priceEntry: null, // { scope, idx/match, name, buffer } touch-keypad price editor for a docket line
+  splitAmtPad: null, // { idx, buffer } money pad for one share of a by-amount split
   nextTicket: 1,
   orders: [],
   auditLog: [],
@@ -14284,7 +14306,7 @@ function logOut() {
   // NOTHING OF THE LAST SHIFT STAYS ON SCREEN. The cart and the table were
   // cleared but the open panes were not, so a log-off in the middle of a
   // split left the split sitting there for whoever signed in next.
-  state.showCheckout = false; state.billSplit = null; state.paySeat = null;
+  state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null;
   state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0;
   state.editLine = null; state.editSent = null; state.itemOptions = null;
   state.notesPanel = null; state.noteSeatPop = null; state.allergySeatPop = null;
@@ -14608,6 +14630,7 @@ function closeBillSplit() {
   // Nothing is settled in here, so walking away costs nothing — the plan is
   // saved on the order and holding Bill brings it straight back.
   state.billSplit = null;
+  state.splitAmtPad = null; // nothing outlives its screen
   render();
 }
 // Every part already PAID on this table, straight from the order.
@@ -14698,15 +14721,28 @@ function renderSplitPanel() {
         <button data-act="split-n-inc">+</button>
         <em>bill${n === 1 ? '' : 's'}</em>
       </div>` : ''}
-    ${sp.way === 'amount' ? `
-      <div class="split-count split-amounts">
-        ${(sp.amounts || []).map((a, i) => `
-          <div class="split-row">
-            <input class="split-amount-input" data-idx="${i}" type="number" min="0" step="0.01" placeholder="0.00" value="${esc(String(a))}" style="flex:1;">
-            ${deleteIconButton('split-amount-remove', i, 'Remove')}
+    ${sp.way === 'amount' ? (() => {
+      // A SHARE IS A ROW, AND YOU TYPE IT ON A PAD (owner, Aug '26: "make this
+      // nicer, popup for amount?"). It was a bare number box with a bin beside
+      // it — and the box was never wired to anything, so every figure typed
+      // into it was thrown away and every part stayed at zero.
+      const typed = (sp.amounts || []);
+      const rest = Math.max(0, Math.round((amountOwing() - typed.reduce((t, v) => t + (parseFloat(v) || 0), 0)) * 100) / 100);
+      return `
+      <div class="split-amounts">
+        ${typed.map((a, i) => `
+          <div class="split-amt-row">
+            <button type="button" class="split-amt-name" data-act="split-amt-open" data-idx="${i}">Part ${i + 1}</button>
+            <button type="button" class="split-amt-val${parseFloat(a) > 0 ? '' : ' empty'}" data-act="split-amt-open" data-idx="${i}">${money(parseFloat(a) || 0)}</button>
+            <button type="button" class="icon-sq" data-act="split-amount-remove" data-idx="${i}" aria-label="Remove part ${i + 1}">${ACT_TRASH_SVG}</button>
           </div>`).join('')}
-        <button class="btn-secondary" style="width:100%;" data-act="split-amount-add">+ Another amount</button>
-      </div>` : ''}
+        <div class="split-amt-row rest">
+          <span class="split-amt-name">The rest</span>
+          <span class="split-amt-val">${money(rest)}</span>
+        </div>
+        <button type="button" class="split-amt-add" data-act="split-amount-add">+ Another part</button>
+      </div>`;
+    })() : ''}
     <div class="split-pager">
       <button class="sp-arrow" data-act="split-prev" ${at <= 0 ? 'disabled' : ''} aria-label="Previous part">${SYS_CHEV_L_SVG}</button>
       <div class="sp-now">
@@ -14753,12 +14789,15 @@ function renderSplitPanel() {
 // there, so there is no second way to take money in here. Four ways to divide,
 // all landing on the same shape: a list of parts with a label and an exact
 // amount that add up to the cent.
+// "By" was in four of the five and said nothing — the row above them already
+// says "Split the bill". Dropping it puts all five on ONE row instead of two
+// (owner, Aug '26: "more efficient way to communicate these?").
 const SPLIT_WAYS = [
   { key: 'evenly', label: 'Evenly' },
-  { key: 'seat', label: 'By seat' },
-  { key: 'item', label: 'By item' },
-  { key: 'amount', label: 'By amount' },
-  { key: 'category', label: 'By category' },
+  { key: 'seat', label: 'Seat' },
+  { key: 'item', label: 'Item' },
+  { key: 'amount', label: 'Amount' },
+  { key: 'category', label: 'Type' },
 ];
 // One line's place in the picking. The seat, note and course are in the key
 // because two lines of the same dish can sit on different bills.
@@ -16238,7 +16277,7 @@ function openCheckout() {
   state.attachedCustomerId = (openOrder && openOrder.customerId) || null;
   render();
 }
-function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
+function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
 
 // How many of this dish the ingredients can still make — worked out by the
 // server off the recipe, null when the dish has no recipe.
@@ -17133,6 +17172,7 @@ function render() {
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
+    ${state.splitAmtPad ? renderSplitAmtPop() : ''}
     ${state.callAway ? renderCallAwayPop() : ''}
     ${state.quickNotePad ? renderQuickNoteMiddle() : ''}
     ${state.notesPanel ? renderNotesMiddle() : ''}
@@ -18321,6 +18361,65 @@ function confirmPriceEntry() {
     state.priceEntry = null; render();
   }
   else { const m = pe.match; state.priceEntry = null; doRepriceSent(m, val, why); }
+}
+// ONE SHARE OF A BY-AMOUNT SPLIT, TYPED ON A PAD. Same pad furniture as
+// Covers and Price — a scrim that does nothing, digits, and a way out at the
+// foot. "Rest" fills in whatever the other parts have left, which is the way
+// a share is usually decided ("she's paying fifty, I'll take the rest").
+function openSplitAmtPad(idx) {
+  if (!state.billSplit) return;
+  state.splitAmtPad = { idx, buffer: '' };
+  render();
+}
+function splitAmtRest(exceptIdx) {
+  const typed = (state.billSplit && state.billSplit.amounts) || [];
+  const used = typed.reduce((t, v, i) => t + (i === exceptIdx ? 0 : (parseFloat(v) || 0)), 0);
+  return Math.max(0, Math.round((amountOwing() - used) * 100) / 100);
+}
+function splitAmtKey(k) {
+  const sa = state.splitAmtPad; if (!sa) return;
+  if (k === 'back') sa.buffer = sa.buffer.slice(0, -1);
+  else if (k === '.') { if (!sa.buffer.includes('.')) sa.buffer = (sa.buffer || '0') + '.'; }
+  else if (/^\d$/.test(k)) {
+    const dot = sa.buffer.indexOf('.');
+    if (dot >= 0 && sa.buffer.length - dot > 2) return; // cents only go two deep
+    sa.buffer = (sa.buffer + k).replace(/^0(\d)/, '$1').slice(0, 9);
+  }
+  render();
+}
+function confirmSplitAmt() {
+  const sa = state.splitAmtPad; if (!sa || !state.billSplit) return;
+  const amounts = (state.billSplit.amounts || []).slice();
+  const v = parseFloat(sa.buffer);
+  amounts[sa.idx] = sa.buffer === '' ? '' : String(Math.max(0, Math.round((isNaN(v) ? 0 : v) * 100) / 100));
+  state.billSplit.amounts = amounts;
+  state.splitAmtPad = null;
+  render(); saveSplitPlan();
+}
+function renderSplitAmtPop() {
+  const sa = state.splitAmtPad;
+  const cur = ((state.billSplit && state.billSplit.amounts) || [])[sa.idx];
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'];
+  const typing = sa.buffer !== '';
+  const shown = typing ? sa.buffer : (parseFloat(cur) || 0).toFixed(2);
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop price-pop">
+        <div class="covers-hd">Part ${sa.idx + 1}</div>
+        <div class="pad-disp-row">
+          <div class="covers-pad-display qp-display ${typing ? '' : 'placeholder'}">$${esc(String(shown))}</div>
+        </div>
+        <div class="pp-off-row">
+          <button class="pp-off" data-act="split-amt-rest">Rest ${money(splitAmtRest(sa.idx))}</button>
+        </div>
+        <div class="covers-pad-grid qp-grid">
+          ${keys.map(k => `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-act="split-amt-key" data-key="${k}">${k === 'back' ? PAD_BSP_SVG : k}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action discard" data-act="close-split-amt" aria-label="Cancel">${ACT_CROSS_SVG}</button>
+          <button class="icon-action send" data-act="confirm-split-amt" aria-label="Done">${ACT_TICK_SVG}</button>
+        </div>
+      </div>`;
 }
 // Price is a POP like Covers/Quantity — the docket stays visible behind it.
 function renderPricePop() {
@@ -26080,14 +26179,14 @@ function livePreviewPanels() {
   const FIELDS = ['view', 'showTablePicker', 'table', 'covers', 'cart', 'activeCat', 'activeSubcat',
     'search', 'searchOpen', 'showCheckout', 'editLine', 'editSent', 'activeCourse', 'activeSeat',
     'openOrderId', 'mobileCartOpen', 'itemOptions', 'notesPanel', 'callAway', 'quickNotePad', 'coversPad',
-    'billSplit', 'moveItems', 'orderType', 'firedCourses', 'qtyPadBuffer'];
+    'billSplit', 'splitAmtPad', 'moveItems', 'orderType', 'firedCourses', 'qtyPadBuffer'];
   FIELDS.forEach(f => { keep[f] = state[f]; });
   try {
     const t = (allTables() || [])[0];
     state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false;
     state.showCheckout = false; state.editLine = null; state.editSent = null; state.itemOptions = null;
     state.notesPanel = false; state.callAway = false; state.quickNotePad = false; state.coversPad = null;
-    state.billSplit = null; state.moveItems = null; state.mobileCartOpen = false;
+    state.billSplit = null; state.splitAmtPad = null; state.moveItems = null; state.mobileCartOpen = false;
     state.search = ''; state.searchOpen = false; state.qtyPadBuffer = ''; state.firedCourses = {};
     state.table = t ? t.id : null; state.covers = 2; state.activeSeat = 1; state.openOrderId = null;
     const cat = (state.categories || []).find(c => !c.disabled);
@@ -35217,12 +35316,21 @@ function handleActClick(el, e) {
       }
       else if (act === 'split-n-inc') { state.billSplit.n = Math.min(20, (state.billSplit.n || 2) + 1); render(); saveSplitPlan(); }
       else if (act === 'split-n-dec') { state.billSplit.n = Math.max(2, (state.billSplit.n || 2) - 1); render(); saveSplitPlan(); }
-      else if (act === 'split-amount-add') { state.billSplit.amounts = [...(state.billSplit.amounts || []), '']; render(); saveSplitPlan(); }
+      else if (act === 'split-amount-add') {
+        state.billSplit.amounts = [...(state.billSplit.amounts || []), ''];
+        openSplitAmtPad(state.billSplit.amounts.length - 1); // a new part opens its pad
+        saveSplitPlan();
+      }
       else if (act === 'split-amount-remove') {
         const i = parseInt(el.dataset.idx, 10);
         state.billSplit.amounts = (state.billSplit.amounts || []).filter((_, n) => n !== i);
         render(); saveSplitPlan();
       }
+      else if (act === 'split-amt-open') { openSplitAmtPad(parseInt(el.dataset.idx, 10)); }
+      else if (act === 'split-amt-key') { splitAmtKey(el.dataset.key); }
+      else if (act === 'split-amt-rest') { state.splitAmtPad.buffer = splitAmtRest(state.splitAmtPad.idx).toFixed(2); render(); }
+      else if (act === 'close-split-amt') { state.splitAmtPad = null; render(); }
+      else if (act === 'confirm-split-amt') { confirmSplitAmt(); }
       else if (act === 'split-prev') { state.billSplit.at = Math.max(0, (state.billSplit.at || 0) - 1); render(); }
       else if (act === 'split-next') { state.billSplit.at = Math.min(billSplitParts().length - 1, (state.billSplit.at || 0) + 1); render(); }
       else if (act === 'split-then-pay') { closeBillSplit(); openCheckout(); }

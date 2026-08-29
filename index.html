@@ -6268,6 +6268,31 @@ app.put('/api/vip-presets', (req, res) => {
   res.json(data.vipPresets);
 });
 
+// ---------- Quick note presets ----------
+// A quick note is a ONE-SHOT message to a station — it rides the next docket
+// and clears itself. These are the standing ones ("86 the lamb", "birthday
+// cake now") so nobody types them again, and each may name its own station
+// (owner, Aug '26).
+function normQuickNotePreset(p, stations) {
+  const o = normPresetObj(p, 80);
+  if (!o) return null;
+  if (p && typeof p === 'object' && p.station && (stations || []).some(s => s.id === p.station)) o.station = p.station;
+  return o;
+}
+app.get('/api/quicknote-presets', (req, res) => {
+  const data = readData();
+  res.json((data.quickNotePresets || []).map(p => normQuickNotePreset(p, data.printerStations)).filter(Boolean));
+});
+app.put('/api/quicknote-presets', (req, res) => {
+  const data = readData();
+  const { presets } = req.body;
+  if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
+  data.quickNotePresets = presets.map(p => normQuickNotePreset(p, data.printerStations)).filter(Boolean).slice(0, 50);
+  logAudit(data, staffFromReq(req), 'Updated quick note presets');
+  writeData(data);
+  res.json(data.quickNotePresets);
+});
+
 // ---------- Size presets ----------
 app.get('/api/size-presets', (req, res) => {
   const data = readData();
@@ -6309,6 +6334,10 @@ app.put('/api/note-categories', (req, res) => {
       color: (c && c.color) || '#999',
       // Which printer station this note type rides to (null = every docket).
       station: (c && c.station && (data.printerStations || []).some(s => s.id === c.station)) ? c.station : null,
+      // ONE PICK OR SEVERAL, per note type (owner, Aug '26: "special occasion
+      // does not allow multiple selections — should we set this rule in
+      // admin?"). Off = the old behaviour: one tap picks and saves.
+      multi: !!(c && c.multi),
       presets: Array.isArray(c && c.presets)
         ? c.presets.map(p => {
             const o = normPresetObj(p, 80);
@@ -9275,7 +9304,7 @@ app.post('/api/import', (req, res) => {
 // (GET /api/staff strips them), so restoring staff would wipe every PIN.
 // 'floorPlans' is deliberately excluded — the table-layout editor saves live
 // (every place/move/delete persists immediately), so it must survive Discard.
-const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
+const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
 app.post('/api/restore-config', (req, res) => {
   const data = readData();
   const snap = req.body || {};
@@ -11013,6 +11042,7 @@ let state = {
   vipType: '',
   vipModal: null, // { type }
   vipPresets: [],
+  quickNotePresets: [], // standing one-shot messages for the ⚡ pad, each may name its station
   sizePresets: [],
   notes: [], // [{ seat, categoryId, text }]
   quickNote: '', // one-shot note — prints on the NEXT docket only, then clears
@@ -12940,6 +12970,7 @@ function applyImageForKind(kind, id, image) {
   // Preset buttons (VIP / allergy / note) can carry a photo like item tiles;
   // setting one clears the colour so the card shows the photo.
   else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, image: image || null, ...(image ? { color: null } : {}) } : p));
+  else if (kind === 'quicknote-preset') saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === parseInt(id) ? { ...p, image: image || null, ...(image ? { color: null } : {}) } : p));
   else if (kind === 'allergy-preset') updateAllergyPreset(parseInt(id), image ? { image, color: null } : { image: null });
   else if (kind === 'note-preset') {
     const [catId, idx] = String(id).split(':');
@@ -13052,6 +13083,7 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-color-modal') { state.bulkColorModal.color = color; render(); }
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
   else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
+  else if (kind === 'quicknote-preset') saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
   else if (kind === 'bulk-vip') bulkSetVipColor(color);
   else if (kind === 'discount-preset') updateDiscountPresetField(id, { color: color || null });
   else if (kind === 'bulk-discount-preset') bulkSetDiscountPresetColor(color);
@@ -14015,12 +14047,14 @@ async function loadInitial() {
     _menuReady = (async () => {
       const [menu, categories, subcategories, salesCategories, modifierGroups,
         allergyPresets, savedColors, vipPresets, sizePresets, noteCategories,
+        quickNotePresets,
         discountPresets, voidReasons, happyHours, printerStations, customers, combos,
         ruleFields] = await Promise.all([
           api('/api/menu'), api('/api/categories'), api('/api/subcategories'),
           api('/api/sales-categories'), api('/api/modifier-groups'),
           api('/api/allergy-presets'), api('/api/saved-colors').catch(() => []),
           api('/api/vip-presets'), api('/api/size-presets'), api('/api/note-categories'),
+          api('/api/quicknote-presets').catch(() => []),
           api('/api/discount-presets'), api('/api/void-reasons'), api('/api/happy-hours'),
           api('/api/printer-stations'), api('/api/customers'), api('/api/combos'),
           api('/api/rule-fields').catch(() => ({})),
@@ -14035,6 +14069,7 @@ async function loadInitial() {
       state.vipPresets = normPresetList(vipPresets);
       state.sizePresets = sizePresets;
       state.noteCategories = normNoteCategories(noteCategories);
+      state.quickNotePresets = normPresetList(quickNotePresets);
       state.discountPresets = discountPresets;
       state.ruleFields = ruleFields || {};
       state.voidReasons = voidReasons;
@@ -15839,7 +15874,13 @@ function toggleItemFlagCategory(id) {
   saveSettingsPart({ itemFlagCategoryIds: next }, 'Could not save.');
 }
 function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
-function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', seats: [], wholeTable: false }; }
+// A note type that takes SEVERAL picks gathers them and saves on the tick;
+// a single-pick one still saves itself the moment a preset is tapped.
+function noteCatMulti(categoryId) {
+  const c = (state.noteCategories || []).find(x => x.id === categoryId);
+  return !!(c && c.multi);
+}
+function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', picks: [], seats: [], wholeTable: false }; }
 
 function toggleQuickNotePad() {
   if (state.quickNotePad) { state.quickNotePad = false; render(); return; }
@@ -15860,7 +15901,7 @@ function paneSaveEnabled() {
     const tab = state.notesPanel.tab;
     if (tab === 'vip') { const m = state.vipModal; return !!m && (m.type || '').trim() !== (state.vipType || '').trim(); }
     if (tab === 'allergy') { const m = state.allergyModal; return !!m && (m.selectedAllergies.length > 0 || (m.customAllergy || '').trim().length > 0); }
-    const m = state.customNoteDraft; return !!m && (m.text || '').trim().length > 0;
+    const m = state.customNoteDraft; return !!m && ((m.text || '').trim().length > 0 || (m.picks || []).length > 0);
   }
   if (state.discountModal) return parseFloat(state.discountModal.value) > 0;
   if (state.quickNotePad) return (state.quickNote || '').trim().length > 0;
@@ -15975,7 +16016,12 @@ async function saveTableAllergies(tableId, allergies) {
 function saveCustomNoteDraft() {
   const m = state.customNoteDraft;
   const text = m.text.trim();
-  if (!text) { state.adminError = 'Type a note.'; render(); return; }
+  // A gathering type saves EVERY pick, each as its own note — one chip each
+  // on the docket, one line each on the print, the way allergies read.
+  const texts = noteCatMulti(m.categoryId)
+    ? [...new Set([...(m.picks || []), text].filter(t => t && t.trim()))]
+    : (text ? [text] : []);
+  if (!texts.length) { state.adminError = 'Type a note.'; render(); return; }
   if (!m.wholeTable && m.seats.length === 0) {
     // Same grammar as adding an item: the centred seat pop asks which
     // cover the note applies to (All = whole table). No seats set up →
@@ -15984,7 +16030,7 @@ function saveCustomNoteDraft() {
     m.wholeTable = true;
   }
   const targets = m.wholeTable ? [null] : m.seats;
-  const newEntries = targets.map(seat => ({ seat, categoryId: m.categoryId || null, text }));
+  const newEntries = targets.flatMap(seat => texts.map(t => ({ seat, categoryId: m.categoryId || null, text: t })));
   // Editing an existing chip replaces it instead of appending a duplicate.
   const kept = m.editIdx !== undefined ? state.notes.filter((_, i) => i !== m.editIdx) : state.notes;
   const updated = [...kept, ...newEntries];
@@ -19153,6 +19199,14 @@ function renderQuickNoteMiddle() {
   <div class="modal-bg" data-act="pane-escape">
     <div class="modal modal-pane" data-stop="1" style="width:min(460px,94vw);">
       <div class="pane-name" style="padding:0 0 12px;">Quick note</div>
+      ${/* THE STANDING ONES FIRST (owner, Aug '26). A quick note is one-shot,
+            so nobody wants to type "86 the lamb" again — tap the preset and
+            it is attached, station and all. The box below is still there for
+            anything that has never been said before. */ ''}
+      ${(state.quickNotePresets || []).length ? `
+      <div class="grid note-preset-grid fixed4" style="margin-bottom:12px;">
+        ${state.quickNotePresets.map((p, i) => `<button type="button" class="item-card allergy-item-card ${state.quickNote === p.name ? 'selected' : ''}" data-act="pick-quick-note" data-idx="${i}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('')}
+      </div>` : ''}
       <input id="quick-note-input" type="text" maxlength="120" placeholder="Next docket only" value="${esc(state.quickNote || '')}" style="width:100%;box-sizing:border-box;padding:12px 12px;border-radius:var(--r-control);border:1px solid var(--steel-300);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);font-family:inherit;margin-bottom:14px;">
       ${stations.length ? `
       <div class="pay-options" style="flex-wrap:wrap;margin-bottom:16px;">
@@ -19367,10 +19421,11 @@ function renderCustomNoteTabContent(categoryId) {
   const m = state.customNoteDraft;
   if (!m) return '';
   const cat = state.noteCategories.find(c => c.id === categoryId);
+  const multi = noteCatMulti(categoryId);
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${m.text === p.name ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
+      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(multi ? (m.picks || []).includes(p.name) : m.text === p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
       <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
       ${noteGhostTiles((cat ? (cat.presets || []).length : 0) + 1)}
   </div>
@@ -24011,6 +24066,38 @@ function renderVipSettingsAdmin() {
   `;
 }
 
+// QUICK NOTE: the standing one-shot messages, listed the same way the VIP
+// types are. A quick note rides the NEXT docket only and then clears itself,
+// which is why it lives beside the order notes rather than among them — the
+// order notes stay on the table and print every time (owner, Aug '26).
+function renderQuickNoteSettingsAdmin() {
+  const list = state.quickNotePresets || [];
+  const stations = state.printerStations || [];
+  return `
+  <div class="select-all-row"><span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-quicknote-preset">+ Note</button></div>
+  <div class="menu-items-list" style="max-width:var(--admin-list-w,560px);display:flex;flex-direction:column;gap:8px;">
+    ${list.length === 0 ? `<div class="empty-hist">No quick notes yet.</div>` : ''}
+    ${list.map((p, idx) => `
+      <div class="menu-item-expandable${(state.expandedQuickNoteIdxs || []).includes(idx) ? ' open' : ''}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;">
+        <div class="menu-item-header" data-act="quicknote-toggle-open" data-idx="${idx}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
+          ${colorDotButton('quicknote-preset', idx, p.color, { size: 20, photo: true, image: p.image })}
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
+          <span style="flex:1;"></span>
+          ${p.station ? `<span class="ts">${esc((stations.find(s => s.id === p.station) || {}).name || '')}</span>` : ''}
+        </div>
+        ${(state.expandedQuickNoteIdxs || []).includes(idx) ? `
+        <div style="padding:0 12px 12px 40px;">
+          <div style="display:flex;flex-direction:column;max-width:280px;margin-bottom:12px;">
+            <label class="field-label">Name</label>
+            <input class="quicknote-preset-name-input" data-idx="${idx}" type="text" value="${esc(p.name)}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+          </div>
+          ${stations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin-bottom:12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveQuickNotePresetStation(${idx}, this.value)"><option value="">All stations</option>${stations.map(st => `<option value="${st.id}" ${p.station === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></div>` : ''}
+          <button class="icon-sq" data-act="delete-quicknote-preset" data-idx="${idx}" aria-label="Delete">${ACT_TRASH_SVG}</button>
+        </div>` : ''}
+      </div>`).join('')}
+  </div>`;
+}
+
 // Order Notes: a Sections-style list of note TYPES. Each type is a row that
 // expands to reveal what's inside. Built-in VIP and Allergies expand to their
 // own editors; custom types expand to a simple checkbox note list. Collapsed
@@ -24026,6 +24113,7 @@ function renderOrderNotesAdmin() {
   const allTypeIds = [
     ...(!hidden.includes('vip') ? ['vip'] : []),
     ...(!hidden.includes('allergy') ? ['allergy'] : []),
+    ...(!hidden.includes('quicknote') ? ['quicknote'] : []),
     ...cats.map(c => c.id),
   ];
 
@@ -24042,12 +24130,14 @@ function renderOrderNotesAdmin() {
         <span style="flex:1;"></span>
       </div>
       ${open ? `<div style="padding:0 12px 12px;">${
-        builtin ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-builtin-name-input" data-id="${id}" type="text" value="${esc(name)}" placeholder="${id === 'vip' ? 'VIP' : 'Allergies'}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>` : ''
+        builtin && id !== 'quicknote' ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-builtin-name-input" data-id="${id}" type="text" value="${esc(name)}" placeholder="${id === 'vip' ? 'VIP' : 'Allergies'}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>` : ''
       }${
         id === 'vip' ? renderVipSettingsAdmin()
         : id === 'allergy' ? renderAllergySettingsAdmin()
+        : id === 'quicknote' ? renderQuickNoteSettingsAdmin()
         : `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === catId)}" type="text" value="${esc(name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>`
           + (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${catId}', this.value)"><option value="">All stations</option>${state.printerStations.map(s => `<option value="${s.id}" ${(cats.find(c => c.id === catId) || {}).station === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>` : '')
+          + `<div style="display:flex;align-items:center;gap:8px;margin:0 0 12px;"><label class="field-label" style="margin:0;">More than one</label>${togglePill(!!(cats.find(c => c.id === catId) || {}).multi, 'toggle-note-multi', `data-id="${catId}"`)}</div>`
           + renderNotePresetList(cats.find(c => c.id === catId), selP)
       }</div>` : ''}
     </div>`;
@@ -24056,6 +24146,7 @@ function renderOrderNotesAdmin() {
   const rows = [
     ...(!hidden.includes('vip') ? [typeRow('vip', vipLabel(), state.vipPresets.length, true)] : []),
     ...(!hidden.includes('allergy') ? [typeRow('allergy', allergyLabel(), state.allergyPresets.length, true)] : []),
+    ...(!hidden.includes('quicknote') ? [typeRow('quicknote', 'Quick note', (state.quickNotePresets || []).length, true)] : []),
     ...cats.map(c => typeRow(c.id, c.name, (c.presets || []).length, false, c.id)),
   ];
 
@@ -30565,6 +30656,9 @@ document.addEventListener('pointerdown', (e) => {
     _npHoldFired = true;
     if (el.dataset.act === 'pick-note-preset') {
       if (!state.customNoteDraft) return;
+      // Holding for a seat picks ONE note — a gathering type asks for the
+      // seat once, on the tick, for everything picked.
+      if (noteCatMulti(state.customNoteDraft.categoryId)) return;
       state.customNoteDraft.text = el.dataset.val;
       state.noteSeatPop = true;
     } else {
@@ -31384,6 +31478,28 @@ async function saveVipPresets(presets) {
     render();
   } catch (e) {}
 }
+// QUICK NOTE PRESETS — the standing one-shot messages. Same shape as the VIP
+// presets, plus a station of their own: a quick note already picks where it
+// prints, so the preset carries that too and "86 the lamb → kitchen" is one
+// tap instead of typing and then choosing (owner, Aug '26).
+async function saveQuickNotePresets(presets) {
+  state.quickNotePresets = presets;
+  render();
+  try {
+    state.quickNotePresets = normPresetList(await api('/api/quicknote-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) }));
+    render();
+  } catch (e) {}
+}
+function addQuickNotePreset() { saveQuickNotePresets([...state.quickNotePresets, { name: 'New note', color: null }]); }
+function updateQuickNotePreset(idx, value) {
+  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, name: value } : p));
+}
+function saveQuickNotePresetStation(idx, val) {
+  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, station: val || null } : p));
+}
+function deleteQuickNotePreset(idx) {
+  saveQuickNotePresets(state.quickNotePresets.filter((_, i) => i !== idx));
+}
 function addVipPreset() { saveVipPresets([{ name: 'New type', color: null }, ...state.vipPresets]); }
 function updateVipPreset(idx, value) {
   saveVipPresets(state.vipPresets.map((p, i) => i === idx ? { ...p, name: value } : p));
@@ -31538,6 +31654,12 @@ function reorderVipPresets(fromIdx, toIdx) {
 }
 
 // Route a note type's docket line to one printer station ('' = every docket).
+// ONE PICK OR SEVERAL (owner, Aug '26). Off, a preset saves itself the
+// moment it is tapped; on, taps gather and the tick saves the lot — each
+// pick becoming its own note, the way allergies already work.
+function saveNoteCategoryMulti(catId, on) {
+  saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, multi: !!on } : c));
+}
 function saveNoteCategoryStation(catId, val) {
   saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, station: val || null } : c));
 }
@@ -34891,6 +35013,9 @@ function bindEvents() {
   document.querySelectorAll('.vip-preset-name-input').forEach(el => {
     el.addEventListener('change', (e) => { updateVipPreset(parseInt(el.dataset.idx), e.target.value); });
   });
+  document.querySelectorAll('.quicknote-preset-name-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateQuickNotePreset(parseInt(el.dataset.idx), e.target.value); });
+  });
   document.querySelectorAll('.note-section-name-input').forEach(el => {
     el.addEventListener('change', (e) => { updateNoteCategory(parseInt(el.dataset.idx), 'name', e.target.value); saveNoteCategories(state.noteCategories); });
   });
@@ -36418,6 +36543,15 @@ function handleActClick(el, e) {
       else if (act === 'toggle-item-size-preset') { toggleItemSizePreset(el.dataset.id, el.dataset.preset); }
       else if (act === 'add-note-category') { addNoteCategory(); }
       else if (act === 'remove-note-category') { removeNoteCategory(parseInt(el.dataset.idx)); }
+      else if (act === 'quicknote-toggle-open') {
+        const i = parseInt(el.dataset.idx, 10);
+        const open = state.expandedQuickNoteIdxs || [];
+        state.expandedQuickNoteIdxs = open.includes(i) ? open.filter(x => x !== i) : [...open, i];
+        render();
+      }
+      else if (act === 'add-quicknote-preset') { addQuickNotePreset(); }
+      else if (act === 'delete-quicknote-preset') { deleteQuickNotePreset(parseInt(el.dataset.idx, 10)); }
+      else if (act === 'toggle-note-multi') { saveNoteCategoryMulti(el.dataset.id, el.dataset.val === 'true'); }
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }
@@ -37067,12 +37201,32 @@ function handleActClick(el, e) {
         state.notesPanel = { tab: 'allergy' };
         render();
       }
+      else if (act === 'pick-quick-note') {
+        // One tap = the whole job, the same beat the note presets use: the
+        // tile lights, the note (and its station) is attached, the pad shuts.
+        const p = (state.quickNotePresets || [])[parseInt(el.dataset.idx, 10)];
+        if (!p) return;
+        state.quickNote = p.name;
+        state.quickNoteStation = p.station || null;
+        render();
+        setTimeout(() => { if (state.quickNotePad) { state.quickNotePad = false; render(); } }, IO_PICK_BEAT);
+      }
       else if (act === 'pick-note-preset') {
         // One tap = the whole job (owner, Aug '26): the preset lights up for a
         // beat, then saves itself — the seat pop still asks when covers > 1.
+        // A type set to take SEVERAL gathers instead: tap to add, tap again to
+        // take it off, and the tick saves the lot (owner, Aug '26).
         if (_npHoldFired) { _npHoldFired = false; return; }
         const m = state.customNoteDraft;
         if (m._done) return; // the pick is being SHOWN — pop is on its way out
+        if (noteCatMulti(m.categoryId)) {
+          const v = el.dataset.val;
+          m.picks = m.picks || [];
+          const at = m.picks.indexOf(v);
+          if (at === -1) m.picks.push(v); else m.picks.splice(at, 1);
+          render();
+          return;
+        }
         m.text = el.dataset.val;
         m._done = true; render();
         setTimeout(() => { m._done = false; if (state.customNoteDraft === m && state.notesPanel) saveCustomNoteDraft(); }, IO_PICK_BEAT);

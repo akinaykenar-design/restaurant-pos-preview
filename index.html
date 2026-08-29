@@ -2715,7 +2715,15 @@ body[data-fs-picker] .tp-actions{ flex:none; }
   margin-bottom:calc(var(--fc-base, 100%) * (var(--tp-zoom,1) - 1) * var(--fc-ar, 1));
   }   /* will-change is set only WHILE pinching — a permanent one keeps the whole floor in its own GPU layer for nothing */
 @media (max-width:768px){
-  .tp-canvas-wrap{ height:calc(100dvh - 125px); }
+  .tp-canvas-wrap{ height:calc(100dvh - 125px);
+    /* NO VERTICAL CENTRING ON A PHONE (owner, Aug '26: "while zoomed I can't
+       scroll up down"). Sideways is the flex row's MAIN axis, where the end
+       margin that makes the zoomed room reachable is plain scrollable room —
+       which is why panning sideways worked. Up and down is the CROSS axis,
+       and a centred item's end margin there is not reliably scrollable, so
+       the bottom of a zoomed room could not be reached. The map already fills
+       the height exactly at 1x here, so centring was doing nothing anyway. */
+    align-items:flex-start; }
   /* Phones: the map is taller than the screen by design, so Close floats
      above the app bar (a Close in the page flow scrolled out of reach). */
   /* No floating Close on a phone — the swipe off the map's end goes back.
@@ -30200,7 +30208,20 @@ document.addEventListener('touchend', () => {
   // later render read this), then let go of the gesture.
   if (_tpWant) document.documentElement.style.setProperty('--tp-zoom', _tpPinch.shown || _tpWant.z);
   if (_tpFrame) { cancelAnimationFrame(_tpFrame); _tpFrame = 0; }
-  if (_tpPinch.canvas) _tpPinch.canvas.style.willChange = '';   // give the layer back
+  if (_tpPinch.canvas) {
+    _tpPinch.canvas.style.willChange = '';   // give the layer back
+    // AND HAND THE MAP BACK TO THE STYLESHEET (owner, Aug '26: "zoomed out,
+    // the layout snaps up"). The pinch writes its own margins every frame with
+    // the plain formula; the phone's are different — they carry the room under
+    // the map that the floating Close sits over, and the map's own shape. Left
+    // behind, those inline numbers outlived the pinch, so the reachable area
+    // was wrong the whole time you were zoomed in and collapsed on the way
+    // back out, which is what threw the room upward. Clearing them lets the
+    // CSS work it out from --tp-zoom, which was just published.
+    _tpPinch.canvas.style.transform = '';
+    _tpPinch.canvas.style.marginRight = '';
+    _tpPinch.canvas.style.marginBottom = '';
+  }
   _tpPinch = null; _tpWant = null; _tpPinchGuard = Date.now() + 400;
 }, { passive: true });
 document.addEventListener('click', (e) => {
@@ -30357,6 +30378,7 @@ document.addEventListener('pointerdown', (e) => {
   const stop = (immediate) => {
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('touchmove', tmv);
+    document.removeEventListener('scroll', scrolled, true);
     document.removeEventListener('pointerup', up);
     document.removeEventListener('pointercancel', up);
     const dropPressed = () => {
@@ -30378,18 +30400,15 @@ document.addEventListener('pointerdown', (e) => {
     document.addEventListener('click', onClick, true);
     setTimeout(clear, 600); // gesture produced no click — release anyway
   };
-  // Same drift budget as the qty hold (16px) — an 8px cutoff dropped the
-  // sunk look on natural finger drift while the hold itself kept arming.
-  const slack = el.classList.contains('item-card') ? 16 : 8;
-  // A SWIPE is not a press (owner, Aug '26: swiping over to the floor flashed
-  // the indent on every tile it passed). A finger going sideways is the one
-  // gesture that is never a tap, so it drops the press at 6px instead of
-  // waiting for the full drift budget — that is inside the first frame of a
-  // real swipe, so nothing flashes. Straight-down drift keeps the old budget,
-  // because scrolling a hair while pressing IS still a press.
+  // A MOVING FINGER IS NOT A PRESS (owner, Aug '26: swiping over to the floor
+  // flashed the indent on every tile it passed, and so did scrolling a long
+  // menu). Either way the finger is travelling, so 8px in ANY direction drops
+  // the press — that is inside the first frame or two of a real swipe or
+  // scroll, so nothing flashes, while a finger held still on a tile still
+  // sinks the instant it lands. Six is under a still finger's own jitter and
+  // inside the first two move events of anything that is actually travelling.
   const drift = (cx, cy) => {
-    const dx = Math.abs(cx - x0), dy = Math.abs(cy - y0);
-    if ((dx > 6 && dx >= dy) || dx > slack || dy > slack) stop(true);
+    if (Math.abs(cx - x0) > 6 || Math.abs(cy - y0) > 6) stop(true);
   };
   const mv = (ev) => drift(ev.clientX, ev.clientY);
   // Touch is judged on touchmove as well: on the venue tablet a swipe streams
@@ -30398,8 +30417,12 @@ document.addEventListener('pointerdown', (e) => {
   // painted on every tile the finger crossed.
   const tmv = (ev) => { const t = ev.touches && ev.touches[0]; if (t) drift(t.clientX, t.clientY); };
   const up = () => stop(false);
+  // Belt and braces: the moment a pane under the finger actually scrolls, the
+  // gesture was a scroll — whatever the pixels said.
+  const scrolled = () => stop(true);
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('touchmove', tmv, { passive: true });
+  document.addEventListener('scroll', scrolled, { capture: true, passive: true });
   document.addEventListener('pointerup', up);
   document.addEventListener('pointercancel', up);
 }, { passive: true });

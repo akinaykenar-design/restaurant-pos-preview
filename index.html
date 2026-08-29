@@ -17317,7 +17317,10 @@ function render() {
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
   if (state.view === 'admin' && state.adminTab === 'design') attachPreviewHooks();
   if (_pressState && _pressState.sel) {
-    const held = document.querySelector(_pressState.sel);
+    // Exactly one match, or nothing: an ambiguous selector used to light the
+    // first tile in the family instead of the one under the finger.
+    let held = null;
+    try { const hits = document.querySelectorAll(_pressState.sel); if (hits.length === 1) held = hits[0]; } catch (e) {}
     if (held) { held.classList.add('pressed'); _pressState.el = held; }
   } else if (!state.qtyPopItemId && !state.itemOptions) {
     // No finger down and no pad open, so nothing may still look held. A press
@@ -30773,6 +30776,15 @@ document.addEventListener('pointerup', (e) => {
 // paints — so on phones the universal darken-on-press cue never showed. Add
 // a .pressed class instantly on pointerdown; a finger that starts scrolling
 // (>8px) drops it, a real tap keeps it ~150ms so the flash is visible.
+// Every data-* the element carries, in one attribute selector — that is what
+// makes a tile itself and not its neighbour.
+function pressSelectorFor(el) {
+  const d = el && el.dataset;
+  if (!d || !d.act) return null;
+  const dash = (k) => k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+  const esc = (v) => String(v).replace(/["\\]/g, '\\$&');
+  return Object.keys(d).sort().map((k) => `[data-${dash(k)}="${esc(d[k])}"]`).join('');
+}
 document.addEventListener('pointerdown', (e) => {
   if (e.pointerType === 'mouse') return; // mouse gets native :active
   if (e.isPrimary === false) return; // a second finger never claims the press
@@ -30784,12 +30796,18 @@ document.addEventListener('pointerdown', (e) => {
   // only on this node vanished with it — the tile visibly popped back up
   // DURING a long-press, before the pad's qp-held state took over. render()
   // re-applies .pressed from this selector (see its tail).
-  _pressState = {
-    el,
-    sel: el.dataset && el.dataset.act
-      ? `[data-act="${el.dataset.act}"]${el.dataset.id ? `[data-id="${el.dataset.id}"]` : ''}`
-      : null,
-  };
+  // THE SELECTOR HAS TO NAME THIS TILE, NOT ITS FAMILY (owner, Aug '26:
+  // "Regular does the pressed animation every time another VIP button is
+  // pressed"). It used to be built from data-act plus data-id ONLY — and a
+  // VIP preset tells itself apart by data-VAL, a note preset by data-key, a
+  // seat by data-seat. With no data-id the selector was just
+  // [data-act="pick-vip-preset"], so after the re-render querySelector
+  // handed back the FIRST tile in the row and painted the press on that.
+  // Every tile family that numbers itself by anything other than data-id had
+  // the same fault. Build it from ALL of the element's own data attributes,
+  // and if that still matches more than one node, restore nothing — a press
+  // on the wrong tile is worse than no press at all.
+  _pressState = { el, sel: pressSelectorFor(el) };
   const mine = _pressState; // this press's claim on the shared state
   const stop = (immediate) => {
     document.removeEventListener('pointermove', mv);

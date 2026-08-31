@@ -3742,13 +3742,27 @@ body[data-fixed-rows="1"] .qty-pop.covers-pop.seat-pop .qp-actions .icon-action{
   /* Slim shell — no fat gap around the pinned preview (owner, Aug '26). */
   padding:8px 12px 12px; }
 .settings-card.mock-card .mk-wrap{ margin:0; }
-/* Notes popup: the order-hub grid rule — 4 across, one tile size, ghost
-   slots hold the shape, so every tab is the same size (owner, Aug '26). */
-/* Columns keep the hub's auto-fill (adapts to popup width); rows are pinned
-   so tiles stay ONE size and ghosts square the shape off. */
-.note-preset-grid.fixed4{ grid-auto-rows:78px; }
+/* THE NOTES POPUP IS A SMALL HUB (owner, Aug '26: "tiles are a percentage of
+   tiles on hub?" / "I prefer proportions to remain the same" / "how about 1
+   less row? 75% of the size"). Its tile is three quarters of a hub tile, it
+   shows the same number across as the hub and one row fewer, it wears the
+   hub's edge on all four sides and the hub's gap of 6, and the box is sized
+   BY its tiles so nothing is left over down the right. Measured before: a
+   phone drew 181x58 tiles against hub tiles of 184x116 - full width, half
+   height - in a box 718 tall on an 844 screen. */
+.note-preset-grid.fixed4{
+  grid-template-columns:repeat(var(--np-cols,2), minmax(0,1fr));
+  grid-auto-rows:var(--np-tile-h,87px);
+  gap:6px;
+  height:var(--np-grid-h,270px);
+  overflow-y:auto;
+  overscroll-behavior:contain;
+}
 .note-preset-grid.fixed4 .item-card{ height:auto; min-height:0; }
-.note-ghost{ border:1.5px dashed var(--steel-200); border-radius:var(--radius); opacity:.5; pointer-events:none; }
+/* The popup wears the hub's edge, one number on all four sides. It carried
+   20/12 on a phone and 24 on a tablet, neither of them the hub's. */
+.modal.np-pane{ padding:var(--hub-edge); }
+.np-pane .np-scroll{ overflow-y:auto; flex:1; margin:0; padding:0; }
 /* The reserved kitchen-notes row: takes exactly the space that row takes on
    the allergy tab, so every tab of the notes pane is one height. */
 .np-reserve{ margin-top:8px; visibility:hidden; pointer-events:none; }
@@ -13500,6 +13514,55 @@ function applyGridDims() {
     ac.style.setProperty('--admin-list-w', Math.max(320, ac.clientWidth - tkt) + 'px'); // on the element: it hosts the scoped definition
   }
   if (rows && rowH) root.style.setProperty('--fixed-row-h', rowH + 'px'); else root.style.removeProperty('--fixed-row-h');
+  publishHubTile();
+}
+// THE HUB PUBLISHES ITS OWN TILE so a popup can be a PROPORTION of it
+// (owner, Aug '26: "tiles are a percentage of tiles on hub?" - "I prefer
+// proportions to remain the same"). Nothing else knew how big a hub tile was,
+// so the notes popup guessed: on a phone it drew tiles the FULL hub width and
+// half its height - squat slabs with a huge indent down the right - while on a
+// tablet the same code drew them at half size. One measured number, one rule.
+function publishHubTile() {
+  const root = document.documentElement;
+  const grid = document.querySelector('.menu-panel .menu-scroll .grid');
+  const tile = grid && grid.querySelector('.item-card:not(.subcat-tile)');
+  if (!grid || !tile) return;
+  const r = tile.getBoundingClientRect();
+  if (!(r.width > 0 && r.height > 0)) return;
+  // NEVER MEASURE WHILE SOMETHING SQUASHES THE HUB - the same rule the row
+  // height already obeys (a floor sliding across flattened the tiles).
+  if (state.showTablePicker || state.showCheckout || state.moveItems || state.mobileCartOpen) return;
+  const cs = getComputedStyle(grid);
+  const cols = (cs.gridTemplateColumns || '').trim().split(/\s+/).filter(Boolean).length || 1;
+  const gap = parseFloat(cs.rowGap) || 6;
+  const room = grid.parentElement ? grid.parentElement.clientHeight : 0;
+  const fit = Math.max(1, Math.floor((room + gap) / (r.height + gap)));
+  root.style.setProperty('--hub-tile-w', Math.round(r.width) + 'px');
+  root.style.setProperty('--hub-tile-h', Math.round(r.height) + 'px');
+  root.style.setProperty('--hub-cols', String(cols));
+  root.style.setProperty('--hub-rows', String(fit));
+}
+// What a popup's tile grid should be: THREE QUARTERS of a hub tile, the same
+// number across as the hub, and ONE ROW FEWER (owner, Aug '26: "how about 1
+// less row? 75% of the size"), never taller than half the screen.
+function popupTileGrid() {
+  const cs = getComputedStyle(document.documentElement);
+  const num = (k, d) => { const v = parseFloat(cs.getPropertyValue(k)); return v > 0 ? v : d; };
+  const w = Math.max(44, Math.round(num('--hub-tile-w', 184) * 0.75));
+  const h = Math.max(44, Math.round(num('--hub-tile-h', 116) * 0.75));
+  const edge = num('--hub-edge', 8);
+  const gap = 6;
+  let cols = Math.max(2, Math.round(num('--hub-cols', 2)));
+  // The box is sized BY its tiles, so nothing is left over on the right
+  // (owner: "the right hand is a huge indent"). If that box will not fit the
+  // screen, drop a column rather than shrink the tile.
+  const room = (window.innerWidth || 390) - edge * 2;
+  while (cols > 2 && cols * w + (cols - 1) * gap + edge * 2 > room) cols--;
+  const rows = Math.max(2, Math.min(Math.max(2, Math.round(num('--hub-rows', 4)) - 1),
+    Math.floor(((window.innerHeight || 800) * 0.5 + gap) / (h + gap))));
+  return { w, h, cols, rows, gap, edge,
+    boxW: Math.min(cols * w + (cols - 1) * gap + edge * 2, room),
+    gridH: rows * h + (rows - 1) * gap };
 }
 // 'auto' theme follows the DEVICE's light/dark setting (the tablet's own
 // display mode), resolved live so flipping the tablet flips the till.
@@ -17499,7 +17562,6 @@ function applyMotion(prev) {
   });
 }
 let _lastMenuGridGeom = null;
-let _notesPaneMaxH = 0; // tallest tab the notes pane has shown — one box size across tabs
 // Biggest table in the whole venue — the seat pad is built to hold it.
 function venueMaxSeats() {
   let m = 0;
@@ -17621,52 +17683,55 @@ function syncPopupTileGrids() {
       // Columns MATCH the order hub (owner, Aug '26) — as many as the screen
       // allows. The popup's width IS the grid plus the frame's padding, so no
       // dead strip ever sits to the right of the tiles.
-      // Same size as the covers/seat selection (owner, Aug '26): keys are
-      // HALF an order tile, half the gap, the hub's column count — one
-      // popup grammar for every picker.
-      const halfW = Math.max(44, Math.round(tileW / 2));
-      const halfGap = Math.max(4, Math.round(gap / 2));
-      const halfH = Math.max(44, Math.round((tileH || 92) / 2));
-      const fitCols = Math.floor((window.innerWidth * 0.94 - pad2 + halfGap) / (halfW + halfGap));
-      const tabCols = Math.max(2, Math.min(cols, fitCols));
+      // THREE QUARTERS OF A HUB TILE, one row fewer, the hub's gap and the
+      // hub's edge (owner, Aug '26: "I prefer proportions to remain the same"
+      // / "how about 1 less row? 75% of the size"). It used to be HALF a tile
+      // with half the gap, and on a phone that came out 181x58 against hub
+      // tiles of 184x116 - full width, half height, a squat slab with a dead
+      // strip down the right, in a box 718 tall on an 844 screen.
+      // popupTileGrid() is the ONE place that rule lives now.
+      const q = popupTileGrid();
+      // A phone's pane is a full-bleed sheet - it spans the screen and wears
+      // square corners - so its tiles cannot also be three-quarter width.
+      // Take the column count that lands CLOSEST to the three-quarter tile
+      // and let them FILL the row exactly, so nothing is left over on the
+      // right (owner: "the right hand is a huge indent").
+      const avail = Math.min(window.innerWidth, 560) - pad2;
+      const fitCols = Math.max(2, Math.round((avail + q.gap) / (q.w + q.gap)));
+      const tabCols = Math.max(2, Math.min(cols + 1, fitCols));
       paneGrids.forEach(g => {
         g.style.gridTemplateColumns = `repeat(${tabCols}, minmax(0,1fr))`;
-        g.style.gap = halfGap + 'px';
-        g.style.gridAutoRows = halfH + 'px';
+        g.style.gap = q.gap + 'px';
+        g.style.gridAutoRows = q.h + 'px';
         g.style.alignContent = 'start';
         g.style.justifyContent = 'stretch';
       });
-      const w2 = Math.round(halfW * tabCols + halfGap * (tabCols - 1) + pad2);
       pane.style.maxWidth = 'none';
-      pane.style.width = Math.min(window.innerWidth * 0.94, Math.max(320, w2)) + 'px';
-      // Height lands on a WHOLE ROW of tiles (owner: never a cut-off tile at
-      // the fold). Fits entirely under 86% of the screen → no scroll at all;
-      // taller than that → shows exactly N full rows, the rest scrolls.
+      pane.style.width = Math.min(window.innerWidth,
+        Math.round(q.w * tabCols + q.gap * (tabCols - 1) + pad2)) + 'px';
+      // ONE height, worked out from the rule - not learned tab by tab. The
+      // old code grew the box to the tallest tab it had ever shown, so the
+      // popup opened one size and jumped the moment you looked at another.
+      // The grid stands exactly N rows tall on every tab; a tab with fewer
+      // presets leaves the rest empty (the dashed ghost slots are gone) and a
+      // tab with more scrolls INSIDE that shape. The box never moves.
       const scrollEl = pane.querySelector('.np-scroll');
-      const tile = [...paneGrids].flatMap(g => [...g.children]).find(t => t.offsetParent);
-      if (scrollEl && tile) {
+      const g0 = paneGrids[0];
+      if (scrollEl && g0) {
         pane.style.height = 'auto';
-        pane.style.maxHeight = 'none';
-        const budget = window.innerHeight * 0.86;
-        // ONE size across the pane's tabs (owner, Aug '26: "remain the same
-        // size when switching between types"): the box holds the tallest
-        // height any tab has needed, so switching tabs never resizes it.
-        _notesPaneMaxH = Math.max(_notesPaneMaxH, pane.offsetHeight); // now a no-op: every tab measures the same
-        const H0 = _notesPaneMaxH;
-        pane.style.height = Math.min(H0, budget) + 'px';
-        if (H0 > budget) {
-          const g0 = tile.parentElement;
-          const rowGap = parseFloat(getComputedStyle(g0).rowGap) || gap;
-          const rowH = tile.offsetHeight + rowGap;
-          const chrome = pane.offsetHeight - scrollEl.offsetHeight;
-          // "Tiles down" (Design → Menu tiles) rules here too: set to a number,
-          // the popup shows that many rows, screen allowing; Auto = as many
-          // whole rows as fit under the 86% budget.
-          const setRows = gridDimFor('gridRows', activeLayoutDevice() === 'mobile' ? 'mobile' : 'pc');
-          let visRows = Math.max(2, Math.floor((budget - chrome + rowGap) / rowH));
-          if (setRows) visRows = Math.max(2, Math.min(visRows, setRows));
-          pane.style.height = Math.min(H0, Math.round(chrome + visRows * rowH - rowGap)) + 'px';
-        }
+        let rows = q.rows;
+        g0.style.height = Math.round(rows * (q.h + q.gap) - q.gap) + 'px';
+        g0.style.overflowY = 'auto';
+        // The whole BOX keeps to two thirds of the screen, not just its grid.
+        // The tab strip wraps to two or three lines on a phone, so four rows
+        // of tiles put the box at 620 of an 844 screen. Drop a row until it
+        // fits - the extra presets scroll inside the shape.
+        const budget = (window.innerHeight || 800) * 0.68;
+        const chrome = pane.offsetHeight - g0.offsetHeight;
+        const fit = Math.floor((budget - chrome + q.gap) / (q.h + q.gap));
+        rows = Math.max(2, Math.min(rows, fit));
+        g0.style.height = Math.round(rows * (q.h + q.gap) - q.gap) + 'px';
+        pane.style.maxHeight = '86vh';
       } else {
         pane.style.maxHeight = '86vh';
       }
@@ -19259,13 +19324,16 @@ function renderNotesMiddle() {
     { key: 'allergy', label: allergyLabel() },
     ...state.noteCategories.map(c => ({ key: c.id, label: c.name })),
   ];
+  // Worked out BEFORE the first paint, so the box never lands one size and
+  // grows when you look at another tab (owner, Aug '26).
+  const g = popupTileGrid();
   return `
   <div class="modal-bg" data-act="pane-escape">
-    <div class="modal modal-pane" data-stop="1" style="width:min(560px,94vw);max-width:94vw;height:auto;max-height:86vh;display:flex;flex-direction:column;">
+    <div class="modal modal-pane np-pane" data-stop="1" style="--np-cols:${g.cols};--np-tile-h:${g.h}px;--np-grid-h:${g.gridH}px;width:${g.boxW}px;max-width:calc(100vw - ${g.edge * 2}px);height:auto;max-height:86vh;display:flex;flex-direction:column;">
       <div class="seg" style="width:fit-content;flex-wrap:wrap;margin-bottom:10px;">
         ${tabs.map(t => `<button data-act="switch-notes-tab" data-val="${t.key}" class="${tab === t.key ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
       </div>
-      <div class="np-scroll" style="overflow-y:auto;flex:1;margin:0 -4px;padding:0 4px;">
+      <div class="np-scroll">
         ${tab === 'vip' ? renderVipTabContent() : tab === 'allergy' ? renderAllergyTabContent() : renderCustomNoteTabContent(tab)}
       </div>
       <div class="modal-actions">
@@ -19276,21 +19344,10 @@ function renderNotesMiddle() {
   </div>`;
 }
 
-// Notes-popup grids follow the order-hub tile rule (owner, Aug '26): a fixed
-// 4-across grid, tiles one constant size, ghost slots padding the last rows —
-// so every tab of the popup is the same size and nothing balloons to fit.
-function notePresetSlots() {
-  // +1: the "+ <name>" input rides the grid as a tile of its own.
-  const counts = [state.vipPresets.length + 1, state.allergyPresets.length + 1,
-    ...state.noteCategories.map(c => (c.presets || []).length + 1)];
-  return Math.max(4, Math.ceil(Math.max(...counts, 1) / 4) * 4);
-}
-function noteGhostTiles(count) {
-  const total = notePresetSlots();
-  let out = '';
-  for (let i = count; i < total; i++) out += '<span class="note-ghost"></span>';
-  return out;
-}
+// THE DASHED GHOST SLOTS ARE GONE (owner, Aug '26). They existed only to
+// hold the box's shape - empty dashed squares padding out the last rows so
+// every tab measured the same. The grid now stands a fixed number of rows
+// tall on its own, so the shape holds with nothing drawn in it.
 // THE NOTES PANE IS FURNITURE — every tab is the same height from the FIRST
 // paint (owner, Aug '26: "the VIP section is smaller than the others, then
 // switching categories resizes it"). The pane used to learn its size tab by
@@ -19310,7 +19367,6 @@ function renderVipTabContent() {
   <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
       ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join(''); })()}
       <div class="item-card allergy-item-card note-add-cell"><input id="vip-type-input" type="text" value="${m.type}" placeholder="+ ${esc(vipLabel())}"></div>
-      ${noteGhostTiles(state.vipPresets.length + 1)}
   </div>
   ${npReserveRow()}
 `;
@@ -19353,8 +19409,7 @@ function renderAllergyTabContent() {
       return `<button type="button" class="item-card allergy-item-card ${selected ? 'selected' : ''}" data-act="toggle-allergy-preset" data-allergy="${esc(p.name)}" ${presetCardStyle(p)}>
         <div class="item-name">${esc(p.name)}</div>
       </button>`;
-    }).join('')}${state.settings.allergyCustomEnabled ? `<div class="item-card allergy-item-card note-add-cell"><input id="allergy-custom-input" type="text" placeholder="+ ${esc(allergyLabel())}" value="${m.customAllergy}"></div>` : ''}${noteGhostTiles(state.allergyPresets.length + (state.settings.allergyCustomEnabled ? 1 : 0))}
-  </div>
+    }).join('')}${state.settings.allergyCustomEnabled ? `<div class="item-card allergy-item-card note-add-cell"><input id="allergy-custom-input" type="text" placeholder="+ ${esc(allergyLabel())}" value="${m.customAllergy}"></div>` : ''}  </div>
   ${m.selectedAllergies.filter(name => {
     const preset = findAllergyPreset(name);
     return preset && preset.subTypes && preset.subTypes.length > 0;
@@ -19458,7 +19513,6 @@ function renderCustomNoteTabContent(categoryId) {
   <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
       ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(multi ? (m.picks || []).includes(p.name) : m.text === p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
       <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
-      ${noteGhostTiles((cat ? (cat.presets || []).length : 0) + 1)}
   </div>
   ${npReserveRow()}
 `;

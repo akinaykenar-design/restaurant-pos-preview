@@ -2168,6 +2168,28 @@ select.tb-ctl{appearance:none;-webkit-appearance:none;} /* no OS arrow — the v
     box-shadow:var(--lift-left);
   }
   .ticket-panel.open{ transform:translateX(0); }
+  /* Docket PEEK (Design → Docket, phone): the drawer rests as a strip above
+     the app bar — the latest lines, the money and the action row stay on
+     screen — and opening GROWS the same panel upward. One docket, one door,
+     two heights. */
+  .peek{
+    inset:auto 0 var(--appbar-off,0px) 0; height:240px;
+    transform:none; transition:height var(--t-move) ease;
+    border-top:1px solid var(--steel-300); box-shadow:var(--lift-up);
+  }
+  .peek.open{ height:calc(100dvh - var(--appbar-top-off,0px) - var(--appbar-off,0px)); }
+  .peek:not(.open) :is(.ticket-head, .course-tabs){ display:none; }
+  .peek:not(.open) .ticket-items{ overflow:hidden;
+    /* A row caught by the strip's top edge fades out instead of slicing —
+       the same rule as the rails: nothing on this till is cut mid-body. */
+    -webkit-mask-image:linear-gradient(180deg, transparent 0, #000 28px);
+    mask-image:linear-gradient(180deg, transparent 0, #000 28px); }
+  /* The resting strip's one tap target: the lines open the docket, the
+     action row stays its own live self on top of the overlay. */
+  .peek-open{ position:absolute; inset:0; z-index:1; background:none; border:0; padding:0; cursor:pointer; }
+  .peek:not(.open) .ticket-actions{ position:relative; z-index:2; }
+  /* The menu keeps clear of the resting strip. */
+  body[data-peek] .middle-view{ padding-bottom:248px; }
   /* A pane opened FROM the docket sits ON TOP of the drawer (the drawer is
      z-index 45), so the docket is still there underneath when you close it. */
   body[data-mob-pane] .middle-view{
@@ -2204,7 +2226,6 @@ select.tb-ctl{appearance:none;-webkit-appearance:none;} /* no OS arrow — the v
      right-aligned tabular numbers, and full-width touch actions. */
   .ticket-head{ padding:12px 16px 8px; }
   .course-tabs{ padding:8px 8px; }
-  .ticket-line{ padding:0 8px 0 0; }
   .tl-price, .tot-row, .tot-row.grand{ font-variant-numeric:tabular-nums; text-align:right; }
   .ticket-actions{ padding:12px 8px 12px; }
   .action-icons{ gap:8px; }
@@ -3637,6 +3658,10 @@ body.mk-drag .mk-toprow > .mk-panel,body.mk-drag .mk-appmain > .mk-panel{border-
 .mk-mob-rail{display:flex;gap:4px;padding:4px 8px;background:var(--surface);border-bottom:1px solid var(--steel-200);overflow:hidden;flex-shrink:0;}
 .mk-mob-chip{flex:0 0 auto;display:flex;align-items:center;gap:4px;padding:8px 12px;height:var(--rail-btn-h,auto);border-radius:var(--btn-radius);background:var(--steel-100);color:var(--charcoal-soft);font-size:var(--rail-fs,13px);font-weight:600;white-space:nowrap;}
 .mk-mob-chip.active{background:var(--orange);color:#fff;}
+/* Docket peek in the phone preview: the live docket clipped to its foot,
+   resting above the app bar — exactly what the till draws. */
+.mk-peek{position:relative;flex:none;height:150px;overflow:hidden;border-top:1px solid var(--steel-300);background:var(--chit);}
+.mk-peek > *{position:absolute;bottom:0;left:0;right:0;}
 /* THE PREVIEW PHONE WEARS THE PHONE'S OWN EDGE AND CHROME (owner, Aug '26:
    "nope dont match"). Measured side by side at 390x844: the preview's menu
    was inset 12/24 where the phone insets 8 all round, its chip row was 44
@@ -7546,6 +7571,8 @@ app.put('/api/settings', (req, res) => {
     data.settings.railPositions = next;
   }
   if (subcatStyle === 'bar' || subcatStyle === 'tiles') data.settings.subcatStyle = subcatStyle;
+  // Phone docket: tucked away ('sheet', default) or resting as a strip ('peek').
+  if (req.body.phoneDocket === 'sheet' || req.body.phoneDocket === 'peek') data.settings.phoneDocket = req.body.phoneDocket;
   if (req.body.docketShortcuts && typeof req.body.docketShortcuts === 'object') {
     const next = Object.assign({}, data.settings.docketShortcuts);
     for (const k of ['table', 'notes', 'quickNote', 'callAway', 'auto', 'customer', 'reprint', 'move', 'showOrder']) {
@@ -17657,6 +17684,14 @@ function render() {
   // The mark lifts that one row out to the front; the CSS does the rest.
   document.body.toggleAttribute('data-paying', !!state.showCheckout);
   document.body.toggleAttribute('data-tiles-bottom', !!(state.settings.tilesBottomUp && state.view === 'order'));
+  // Docket peek: the menu keeps clear of the resting strip, and the strip
+  // shows the LATEST lines — the ones the thumb just added — not the oldest.
+  const peekResting = phoneDocketPeek() && !state.mobileCartOpen;
+  document.body.toggleAttribute('data-peek', peekResting);
+  if (peekResting) {
+    const ti = document.querySelector('.ticket-panel.peek .ticket-items');
+    if (ti) ti.scrollTop = ti.scrollHeight;
+  }
   // In Link mode a finger on a table must DRAG the table, never scroll the page.
   // A finger still holding a button keeps its sunk look on the rebuilt node.
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
@@ -19317,7 +19352,11 @@ function renderTicketPanel() {
   if (state.billSplit) return renderSplitPanel();
 
   return `
-  <div class="ticket-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}">
+  <div class="ticket-panel ${state.mobileCartOpen && !state._sheetEntering ? 'open' : ''}${phoneDocketPeek() ? ' peek' : ''}">
+    ${/* Resting peek: one tap anywhere on the lines opens the full docket —
+          the overlay eats stray line taps so a thumb can't open an edit
+          popup from the strip. The action row stays live above it. */ ''}
+    ${phoneDocketPeek() && !state.mobileCartOpen ? '<button class="peek-open" data-act="toggle-mobile-cart" aria-label="Open the docket"></button>' : ''}
     <div class="ticket-head">
       <button class="ticket-close-mobile" data-act="toggle-mobile-cart">✕</button>
       ${/* THE VENUE'S NAME BELONGS ON THE PRINT, NOT THE TILL (owner, Aug '26:
@@ -19966,6 +20005,14 @@ function payPairHtml() {
       </div>`;
 }
 function payPhone() { return window.innerWidth <= 768; }
+// Design → Docket, phone: the docket either tucks away (default) or PEEKS —
+// rests as a strip above the app bar with the last lines, the money and the
+// action row on screen. The strip IS the drawer at a smaller height: opening
+// grows the same panel upward, so there is one docket and one door.
+function phoneDocketPeek() {
+  return payPhone() && state.settings.phoneDocket === 'peek' && state.view === 'order'
+    && !state.showCheckout && !state.billSplit && !state.showTablePicker;
+}
 function renderCheckoutMiddle() {
   const total = cartTotal();
   const tipAmount = cartTipAmount();
@@ -26905,12 +26952,18 @@ function renderScreenMockup() {
   // Phone chips dock top (default) or bottom (thumb reach) — drag the row.
   const mobBottom = (state.settings.railPositions || {}).mobile === 'bottom';
   const mobRail = `<div class="mk-mob-rail mk-mobrail" data-act="mock-jump" data-target="ctl-rail" style="${mobBottom ? 'border-top:1px solid var(--steel-200);border-bottom:none;' : ''}">${cats.map(mkChip).join('')}</div>`;
+  // Docket peek preview: the SAME live docket the docket-phone shows, clipped
+  // to its foot, resting above the app bar — the preview cannot drift from
+  // the till because it is the till's own markup.
+  const mkPeek = state.settings.phoneDocket === 'peek'
+    ? `<div class="mk-peek" data-act="mock-jump" data-target="ctl-docket" data-mkname="Docket peek">${panels.ticket.replace('class="mk-ticket mk-panel"', 'class="mk-ticket mk-panel mk-mob-ticket"')}</div>` : '';
   const phone = `
     <div class="mk-phone">
       ${abPos === 'top' ? mkAppbar() : ''}
       ${mobBottom ? '' : mobRail}
       <div class="mk-mob-menu" data-act="mock-jump" data-target="ctl-rail">${subSeg}<div class="grid">${mkSubTiles}${items.slice(0, 9).map(mkCard).join('')}</div></div>
       ${mobBottom ? mobRail : ''}
+      ${mkPeek}
       ${abPos === 'bottom' ? mkAppbar('style="border-top:1px solid var(--steel-200);border-bottom:none;"') : ''}
     </div>`;
   // Same segmented control as the Printers page tabs — one tab grammar
@@ -27067,7 +27120,12 @@ function renderScreenAdmin() {
       return stepper('dkw-step', 'tktWidth', w + 'px', w <= DKW_MIN, w >= DKW_MAX);
     })()}
     <div class="ts" style="margin:2px 0 14px;">Follows the preview's docket edge too.</div>` : `
-    <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>`}
+    <div class="th" style="margin-bottom:14px;">4 · Docket — ${devName}</div>
+    <div class="pay-options">
+      <div class="pay-opt ${(state.settings.phoneDocket || 'sheet') !== 'peek' ? 'active' : ''}" data-act="set-phone-docket" data-val="sheet">Tucked away</div>
+      <div class="pay-opt ${state.settings.phoneDocket === 'peek' ? 'active' : ''}" data-act="set-phone-docket" data-val="peek">Peek</div>
+    </div>
+    <div class="ts" style="margin-top:8px;">Peek pins the money row.</div>`}
   </div>
   ${fold('extras', 'Extras', 'Icon pack · item icons · prices on tiles · subsection style · icon-only bar · tiles start at the bottom', `
     <div id="ctl-subcat">
@@ -37189,6 +37247,7 @@ function handleActClick(el, e) {
       else if (act === 'set-show-staff-ticket') { saveTicketSetting({ showStaffOnTicket: el.dataset.val === 'true' }); }
       else if (act === 'set-show-covers-ticket') { saveTicketSetting({ showCoversOnTicket: el.dataset.val === 'true' }); }
       else if (act === 'set-subcat-style') { saveTicketSetting({ subcatStyle: el.dataset.val }); }
+      else if (act === 'set-phone-docket') { saveTicketSetting({ phoneDocket: el.dataset.val }); }
       else if (act === 'set-tiles-bottom') { saveTicketSetting({ tilesBottomUp: el.dataset.val === 'true' }); }
       else if (act === 'set-table-lock') { saveTicketSetting({ tableLockEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-takeaway-enabled') { saveTicketSetting({ takeawayEnabled: el.dataset.val === 'true' }); }

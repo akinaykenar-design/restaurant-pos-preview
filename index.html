@@ -963,7 +963,10 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .shape-chip{ min-width:44px; width:44px; height:44px; flex:0 0 auto; display:flex; align-items:center; justify-content:center;
   border:1px solid var(--steel-300); border-radius:var(--r-control); background:var(--surface); cursor:pointer; padding:0 4px; }
 .shape-chip.active{ border-color:var(--orange); box-shadow:inset 0 0 0 var(--ring) var(--orange); }
-.shape-chip-preview{ display:block; border:1px solid rgba(20,24,25,.18); }
+/* A plain table is the surface colour, so on a white card the drawing had no
+   edge at all — the palette read as empty (measured, Aug '26). The hairline is
+   the standard one, and a token, not a hand-typed alpha. */
+.shape-chip-preview{ display:block; border:1px solid var(--steel-300); }
 /* Colour swatches (floor bg, objects): a tidy row of fixed choices, no full picker. */
 .swatch-row{ display:flex; gap:var(--swatch-gap); flex-wrap:wrap; }
 /* Object / area place chips: icon or colour block + short label, matches shape chips. */
@@ -3129,10 +3132,19 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 .fp-sub:first-of-type{ margin-top:0; }
 .fp-sub-flat{ margin:0; }
 .fp-inline-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:44px; margin-top:12px; }
+/* The buttons for the picked table sit on the SAME 4-wide grid as the shapes
+   above them, so the card is one column of squares rather than a wrapping row
+   that left a lone bin on a line of its own. */
+.fp-act-row{ display:grid; grid-template-columns:repeat(4,var(--sq-ctl)); gap:8px; justify-content:start; }
 /* The table card carries its shape chips AND its colour, and its heading may
    hold a Turn button on the right — never on a round table, which has nothing
    to turn (owner, Aug '26: "round tables should not be able to rotate"). */
-.fp-rail-side > .pp-group.fp-table-card > .pp-label{ display:flex; align-items:center; gap:8px; }
+/* The title row holds the Turn button, so it is a flex row — which made the
+   card's one-line note a THIRD item in that row and shoved the number onto a
+   line of its own. The note takes the full width and drops underneath, the
+   way it does on every other card. */
+.fp-rail-side > .pp-group.fp-table-card > .pp-label{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.fp-rail-side > .pp-group.fp-table-card > .pp-label[data-sub]::after{ flex:0 0 100%; margin-top:0; }
 .fp-table-card .fp-rot{ margin-left:auto; flex:none; }
 /* THE ADD CARD HAD NO GAP AT ALL between its Tables / Structure switch and
    the shapes under it — measured 0px, the two rows touching (owner, Aug '26).
@@ -3151,10 +3163,6 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 /* "New table colour" rides UNDER the Add card as one continuous card rather
    than a 94px card of its own — it is part of adding a table, not a decision
    in its own right (owner: "simplify the options panel"). */
-.fp-rail-side > .pp-group.fp-add-group{ margin-bottom:0; border-bottom-left-radius:0; border-bottom-right-radius:0; border-bottom:none; }
-.fp-rail-side > .pp-group.fp-newcolour{ border-top-left-radius:0; border-top-right-radius:0; padding-top:0; }
-.fp-rail-side > .pp-group.fp-newcolour > .pp-label{ font-size:var(--fs-md); font-weight:600; color:var(--charcoal-soft); counter-increment:none; }
-.fp-rail-side > .pp-group.fp-newcolour > .pp-label::before{ content:none; }
 /* ONE NUMBER ON ALL FOUR SIDES, like every other card in the app — it carried
    8 on top and 12 everywhere else (owner, Aug '26: "spacing in add tables
    options is shit"). */
@@ -10976,6 +10984,18 @@ function tableSizeChips(tables) {
   const common = idxs.length && idxs.every(i => i === idxs[0]) ? idxs[0] : -1;
   return `<div class="shape-chip-row">${TABLE_SIZE_STEPS.map((s, i) =>
     `<button class="shape-chip${i === common ? ' active' : ''}" data-act="set-table-size" data-step="${s}">${TABLE_SIZE_LABELS[i]}</button>`).join('')}</div>`;
+}
+// The size the FLOOR is on: the step most of its tables sit at (decor doesn't
+// count). A floor of hand-dragged sizes still reads as one letter, so the
+// stepper always has somewhere to start; an empty floor starts at M.
+function floorSizeStepIndex(fp) {
+  const tables = ((fp && fp.tables) || []).filter(t => t.type !== 'decor');
+  if (!tables.length) return 1;
+  const tally = [];
+  tables.forEach(t => { const i = tableSizeStepIndex(t); if (i >= 0) tally[i] = (tally[i] || 0) + 1; });
+  let best = 1, n = -1;
+  TABLE_SIZE_STEPS.forEach((_, i) => { if ((tally[i] || 0) > n) { n = tally[i] || 0; best = i; } });
+  return best;
 }
 // Table-top textures, drawn in-code (inline SVG tiles + gradient layers) so the
 // app stays fully offline. Wood shows grain, marble shows veins, metals show a
@@ -26160,24 +26180,40 @@ function renderFloorPlanAdmin() {
         : multi
           ? colorDotButton('table-color', 'multi', mColor, { ...dotOpts, title: 'Colour & finish for all selected' })
           : colorDotButton('floor-table-new', 'new', state.floorTableColor, { ...dotOpts, title: 'Style applied to tables you place' });
-      const tableCard = cat !== 'tables' && !selTable && !multi ? '' : `
+      // ONE CARD, NOT TWO (owner, Aug '26: "I want table shape and colour in
+      // same box"). It was an "Add to floor" card carrying the shape row and a
+      // table card that drew THE SAME shape row again right underneath it —
+      // one job, two doors, and with nothing selected they were identical.
+      // Now: one card. Picking a table renames its heading and adds its
+      // buttons; the shapes and the colour never move.
+      const picking = !!(selTable || multi);
+      const tableCard = `
       <div class="pp-group fp-table-card">
-        <div class="pp-label">${selTable ? `Table ${esc(selTable.label)}` : multi ? `${multi} selected` : 'New tables'}${turnBtn}</div>
-        ${chipsHtml(selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '')}
-        <div class="fp-inline-row">
+        <div class="pp-label" data-sub="${picking ? 'Its look, and what you can do.' : 'Pick a shape, then tap the floor.'}">${selTable ? `Table ${esc(selTable.label)}` : multi ? `${multi} selected` : 'Add to floor'}${turnBtn}</div>
+        ${/* The Tables/Structure switch is for PLACING. With a table picked
+              this card is that table's card, so the switch stands down rather
+              than offering to swap the controls out from under the selection. */ ''}
+        ${picking ? '' : `<div class="fp-add-row">${catSeg}</div>`}
+        ${picking || cat === 'tables'
+          ? chipsHtml(selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '')
+            + `<div class="fp-inline-row">
           <span class="fp-sub fp-sub-flat">Colour &amp; finish</span>
           ${colourDot}
-        </div>
-        ${(selTable || multi) ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="pp-row" style="align-items:center;flex-wrap:wrap;gap:8px;">
+        </div>`
+          : picker}
+        ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
+        ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control,
+              the number included. It was a 40-tall pill sitting beside 44
+              squares (owner, Aug '26: "icons and colour boxes all diff.
+              shapes and sizes"). */ ''}
         ${selTable
-          ? `<button class="btn-secondary" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="min-width:40px;height:40px;padding:0 4px;display:inline-flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:800;font-size:var(--fs-lg);">${esc(String(selected.label))}</button>`
-          : `<button class="btn-secondary" disabled style="min-width:40px;height:40px;padding:0 4px;display:inline-flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:800;font-size:var(--fs-lg);opacity:.4;cursor:default;">#</button>`}
+          ? `<button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${esc(String(selected.label))}</button>`
+          : `<button class="icon-sq" disabled style="font-family:'IBM Plex Mono',monospace;font-weight:800;opacity:var(--dim-ghost);cursor:default;">#</button>`}
         ${selTable
           ? `<button class="icon-sq" data-act="cycle-table-size" data-id="${selected.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${TABLE_SIZE_LABELS[tableSizeStepIndex(selected)] || 'M'}</button>`
           : (() => { const cs = same(selMany.map(t => tableSizeStepIndex(t))); return `<button class="icon-sq" data-act="cycle-size-selected" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${cs == null ? '·' : (TABLE_SIZE_LABELS[cs] || 'M')}</button>`; })()}
-        ${selTable
-          ? (() => { const cf = selTable.finish || 'plain'; return colorDotButton('table-color', selTable.id, selTable.color, { bg: selTable.color ? null : tableFinish(cf).bg, finish: cf, title: 'Table colour & finish' }); })()
-          : colorDotButton('table-color', 'multi', mColor, { bg: mColor ? null : tableFinish(mFinish).bg, finish: mFinish, title: 'Colour & finish — all selected' })}
+        ${/* NO SECOND COLOUR DOT HERE. The card already carries one, on its
+              own Colour &amp; finish row above — the same door twice. */ ''}
         ${selTable
           ? (selTable.mergedInto && selTable.mergedInto !== selTable.id
             ? `<button class="icon-sq" data-act="unlink-table" data-id="${selected.id}" style="border-color:var(--orange);color:var(--orange);">${SYS_LINK_SVG}</button>`
@@ -26188,7 +26224,7 @@ function renderFloorPlanAdmin() {
         <button class="icon-sq" data-act="${selTable ? 'delete-table' : 'delete-selected-tables'}" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_TRASH_SVG}</button>
       </div>` : ''}
       </div>`;
-      return `<div class="pp-group fp-add-group"><div class="pp-label" data-sub="Pick a shape, then tap the floor.">Add to floor</div><div class="fp-add-row">${catSeg}${picker}</div></div>` + tableCard;
+      return tableCard;
     })()}
     ${/* THE COLOUR A NEW TABLE GETS BELONGS WITH ADDING ONE, not in a card of
           its own between Add and the floor's settings (owner, Aug '26:
@@ -26233,7 +26269,19 @@ function renderFloorPlanAdmin() {
           separate decisions behind a single heading. */ ''}
     <div class="pp-group">
       <div class="pp-label" data-sub="Every table on this floor at once.">Table size</div>
-      <div class="seg">${TABLE_SIZE_STEPS.map((s, i) => `<button data-act="size-all-tables" data-step="${s}">${TABLE_SIZE_LABELS[i]}</button>`).join('')}</div>
+      ${/* A STEPPER, like every number on the Design page (owner, Aug '26:
+            "take some notes from the design section"). It was three small
+            pills; a stepper is two finger-sized keys and the value between
+            them, and it obeys the stepper law. */ ''}
+      ${(() => {
+        const i = Math.max(0, floorSizeStepIndex(fp));
+        const at = (n) => TABLE_SIZE_STEPS[Math.max(0, Math.min(TABLE_SIZE_STEPS.length - 1, n))];
+        return `<div class="grid-stepper" style="margin-bottom:0;">
+          <button class="btn-secondary sm" data-act="size-all-tables" data-step="${at(i - 1)}" ${i <= 0 ? 'disabled' : ''}>−</button>
+          <span class="grid-step-val">${TABLE_SIZE_LABELS[i] || 'M'}</span>
+          <button class="btn-secondary sm" data-act="size-all-tables" data-step="${at(i + 1)}" ${i >= TABLE_SIZE_STEPS.length - 1 ? 'disabled' : ''}>+</button>
+        </div>`;
+      })()}
     </div>
     <div class="pp-group">
       <div class="pp-label" data-sub="The room under the tables.">Floor colour</div>

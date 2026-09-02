@@ -2863,6 +2863,19 @@ body[data-fs-picker] .tp-actions{ flex:none; }
   inset:-1px; border-radius:inherit;
   box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange); }
 .simple-table-btn{ isolation:isolate; }
+/* Hold-drag transfer (till floor): the lifted copy rides the finger with the
+   floor's own lift shadow; the table it left dims until the move settles;
+   the table under the finger wears the ONE selection ring (it gets .mk-sel,
+   the same class a picked table wears — one ring, one law). */
+.mk-drag-ghost{ position:fixed !important; z-index:44; pointer-events:none;
+  opacity:.95; margin:0; box-shadow:var(--lift-2) !important; }
+.mk-drag-src{ opacity:.35; }
+/* The browser must NEVER own a gesture that starts on a till-floor table —
+   touch-action is judged at touchstart, so a hold that becomes a drag would
+   be eaten by the canvas scroll (pointercancel on the first frame; same
+   lesson as .admin-floor-marker.mk-sel). Pans that begin on a table are
+   done by hand in the drag handler instead, so nothing is lost. */
+.middle-view .floor-canvas .floor-marker[data-act]{ touch-action:none; }
 /* Glow halo: "this table needs a human" — ring + soft radiance in the
    status colour (--glow-c/--glow-soft set inline). Gentle pulse unless the
    user prefers reduced motion. Selected-table inline rings still win. */
@@ -28923,7 +28936,7 @@ function transferPickTable(id) {
   if (id === state.transferFrom) { state.transferFrom = null; render(); return; }
   transferToTable(id);
 }
-function transferToTable(newTableId) {
+function transferToTable(newTableId, extra) {
   const oldTableId = state.transferFrom || state.table;
   const newTable = findTableById(newTableId);
   if (!newTable || newTableId === oldTableId) { state.transferMode = false; state.transferFrom = null; state.showTablePicker = false; render(); return; }
@@ -28944,6 +28957,9 @@ function transferToTable(newTableId) {
       ? `Move ${part(tableDisplayLabel(oldTableId), srcN)} to ${part(tableDisplayLabel(newTableId), destN)}? The two tabs become one.`
       : `Move ${part(tableDisplayLabel(oldTableId), srcN)} to ${tableDisplayLabel(newTableId)}?`,
     confirmLabel: 'Move', danger: false,
+    // The drag path arms transferFrom outside transfer mode, so its "no"
+    // must put the arming away — the tap flow keeps its armed source.
+    onCancel: extra && extra.onCancel,
   }, () => doTransferToTable(newTableId));
 }
 async function doTransferToTable(newTableId) {
@@ -30796,6 +30812,139 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
+}, { passive: true });
+// §§ Floor: hold a table and drag its sitting to another table
+// The still hold stays the peek's (450ms → read the order). Keep holding and
+// MOVE and the same grip becomes a transfer: the peek folds away, the table
+// lifts under the finger with the drawer's shadow, the table beneath wears
+// the one selection ring, and the drop lands on the ⇄ door's own confirm —
+// counts and all, so nothing moves un-asked. A finger that moves BEFORE the
+// hold still pans the map; a release over nothing floats the table home.
+let _tblGrab = null, _tblDropAt = 0;
+function _tblGrabCancel() {
+  const g = _tblGrab; if (!g) return;
+  clearTimeout(g.timer);
+  document.removeEventListener('pointermove', g.mv);
+  document.removeEventListener('pointerup', g.up);
+  document.removeEventListener('pointercancel', g.pc);
+  if (g.blockTouch) document.removeEventListener('touchmove', g.blockTouch);
+  if (g.ghost) g.ghost.remove();
+  const src = document.querySelector(`[data-act="pick-table"][data-id="${g.id}"]`);
+  if (src) src.classList.remove('mk-drag-src');
+  if (g.overEl) g.overEl.classList.remove('mk-drop', 'mk-sel');
+  const was = g.dragging;
+  _tblGrab = null;
+  if (was) { state._sortDragging = false; render(); }
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.isPrimary === false) { _tblGrabCancel(); return; } // a pinch is never a drag
+  const m = e.target.closest && e.target.closest('[data-act="pick-table"]');
+  if (!m || _tblGrab) return;
+  if (!(state.view === 'order' && state.showTablePicker)) return;
+  if (state.frozen || state.transferMode || state.moveItemsPicking || state._sortDragging) return;
+  const t = findTableById(m.dataset.id);
+  if (!t) return;
+  // Only a table with a sitting lifts — the same rule as the ⇄ door's first tap.
+  if (t.mergedInto && t.mergedInto !== t.id) return;
+  const hasOrder = state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+  if (!hasOrder && !(t.covers > 0)) return;
+  const g = _tblGrab = {
+    id: t.id, x0: e.clientX, y0: e.clientY, lifted: false, dragging: false,
+    panning: false, lx: 0, ly: 0,
+    ghost: null, rect: null, overEl: null, overId: null, blockTouch: null,
+    timer: setTimeout(() => { g.lifted = true; try { navigator.vibrate && navigator.vibrate(10); } catch (err) {} }, 450),
+  };
+  // The non-passive listener must exist from the GESTURE'S START — Chromium
+  // fixes how it dispatches a touch at touchstart, so a blocker added when
+  // the lift fires is too late and the canvas scroll eats the drag. It sits
+  // idle until the lift, so a pan before the hold stays a pan.
+  g.blockTouch = (te) => { if (g.lifted && te.cancelable) te.preventDefault(); };
+  document.addEventListener('touchmove', g.blockTouch, { passive: false });
+  g.mv = (ev) => {
+    const dx = ev.clientX - g.x0, dy = ev.clientY - g.y0, dist = Math.hypot(dx, dy);
+    if (g.panning) {
+      // Manual pan: markers wear touch-action:none (see the CSS note), so a
+      // pan that starts on a table is scrolled by hand, 1:1 with the finger.
+      const w = document.querySelector('.middle-view .tp-canvas-wrap');
+      if (w) { w.scrollLeft -= ev.clientX - g.lx; w.scrollTop -= ev.clientY - g.ly; }
+      g.lx = ev.clientX; g.ly = ev.clientY;
+      return;
+    }
+    if (!g.lifted) {
+      // Moving before the hold is a pan, exactly as it always was — just
+      // driven from here now.
+      const slop = ev.pointerType === 'touch' ? 18 : 8;
+      if (dist > slop) {
+        if (ev.pointerType === 'touch') {
+          clearTimeout(g.timer);
+          g.panning = true; g.lx = ev.clientX; g.ly = ev.clientY;
+        } else _tblGrabCancel();
+      }
+      return;
+    }
+    if (!g.dragging && dist > 10) {
+      // The grip becomes a drag: fold the peek, freeze renders, lift a copy.
+      // The peek's pop is plucked out by hand, NOT via render() — a render
+      // mid-gesture rebuilds the floor under the live touch and Chromium
+      // answers with pointercancel, killing the drag on its first frame.
+      g.dragging = true;
+      state.tablePeek = null;
+      const pk = document.querySelector('.peek-pop');
+      if (pk) { const sc = pk.previousElementSibling; if (sc && sc.classList.contains('pop-scrim')) sc.remove(); pk.remove(); }
+      state._sortDragging = true;
+      const src = document.querySelector(`[data-act="pick-table"][data-id="${g.id}"]`);
+      if (!src) { _tblGrabCancel(); return; }
+      g.rect = src.getBoundingClientRect();
+      const gh = src.cloneNode(true);
+      gh.classList.add('mk-drag-ghost');
+      gh.classList.remove('mk-drag-src');
+      gh.style.left = g.rect.left + 'px'; gh.style.top = g.rect.top + 'px';
+      gh.style.width = g.rect.width + 'px'; gh.style.height = g.rect.height + 'px';
+      document.body.appendChild(gh);
+      g.ghost = gh;
+      src.classList.add('mk-drag-src');
+    }
+    if (!g.dragging) return;
+    g.ghost.style.left = (g.rect.left + ev.clientX - g.x0) + 'px';
+    g.ghost.style.top = (g.rect.top + ev.clientY - g.y0) + 'px';
+    // What's underneath: another table lights the one selection ring.
+    const under = document.elementFromPoint(ev.clientX, ev.clientY);
+    const tgt = under && under.closest && under.closest('[data-act="pick-table"]');
+    const tt = tgt && tgt.dataset.id !== g.id ? findTableById(tgt.dataset.id) : null;
+    const ok = tt && !tt.mergedInto;
+    const el = ok ? tgt : null;
+    if (g.overEl && g.overEl !== el) g.overEl.classList.remove('mk-drop', 'mk-sel');
+    if (el && g.overEl !== el) el.classList.add('mk-drop', 'mk-sel');
+    g.overEl = el; g.overId = ok ? tt.id : null;
+  };
+  g.up = () => {
+    // A hand-driven pan that ends on a table must not also pick it.
+    if (g.panning) { _tblDropAt = Date.now(); _tblGrabCancel(); return; }
+    if (!g.dragging) { _tblGrabCancel(); return; } // a still hold stays the peek's
+    const dropId = g.overId, srcId = g.id, ghost = g.ghost, home = g.rect;
+    document.removeEventListener('pointermove', g.mv);
+    document.removeEventListener('pointerup', g.up);
+    document.removeEventListener('pointercancel', g.pc);
+    if (g.blockTouch) document.removeEventListener('touchmove', g.blockTouch);
+    if (g.overEl) g.overEl.classList.remove('mk-drop', 'mk-sel');
+    state._sortDragging = false;
+    _tblDropAt = Date.now();
+    _tblGrab = null;
+    if (dropId) {
+      ghost.remove();
+      state.transferFrom = srcId;
+      transferToTable(dropId, { onCancel: () => { state.transferFrom = null; render(); } });
+    } else {
+      // Nowhere to land: the copy floats home, then the floor repaints.
+      ghost.style.transition = `left var(--t-move) ease, top var(--t-move) ease`;
+      ghost.style.left = home.left + 'px'; ghost.style.top = home.top + 'px';
+      setTimeout(() => { ghost.remove(); render(); }, 260);
+    }
+  };
+  g.pc = () => _tblGrabCancel();
+  document.addEventListener('pointermove', g.mv, { passive: true });
+  document.addEventListener('pointerup', g.up);
+  document.addEventListener('pointercancel', g.pc);
 }, { passive: true });
 // Hold a cover in the item's seat pop to start multi-select — arm several
 // covers, then ✓ adds the dish to each. Only in the seat-only pop; 'All' is
@@ -36750,6 +36899,8 @@ function handleActClick(el, e) {
         // eat the NEXT tap on any table — "I tapped and nothing happened"
         // (found by the Aug '26 monkey test).
         if (_peekHoldFired) { _peekHoldFired = false; if (Date.now() - _peekHoldAt < 700) return; }
+        // The release of a drag-drop must not also open the table it landed on.
+        if (Date.now() - _tblDropAt < 700) return;
         if (state.moveItemsPicking) doMoveItems(el.dataset.id);
         else if (state.transferMode) transferPickTable(el.dataset.id);
         else if (state.showTablePicker && state.floorStatusView === 'booked' && (() => {

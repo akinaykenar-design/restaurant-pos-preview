@@ -11166,6 +11166,7 @@ function tableWouldOverlap(fp, x, y, w, h, excludeId) {
 let state = {
   view: 'order',
   mobileCartOpen: false, // on phones the ticket panel is an off-canvas drawer
+  docketShowAll: false, // course-paged docket: the All tab shows every course at once
   idleWarn: false, // idle auto-logoff countdown showing
   menu: [],
   menuAdminShown: 100,   // how much of the Items list is drawn — grows as you reach the end of it
@@ -15728,6 +15729,9 @@ function addToCart(item, variant, modifiers, seat) {
   // SECOND time right after this add's render — doubling the cost at the worst
   // moment (the lag felt when selecting an item straight after searching).
   if (window._menuSearchTimer) { clearTimeout(window._menuSearchTimer); window._menuSearchTimer = null; }
+  // Adding while the paged docket shows All snaps back to the dish's course
+  // page, so where it landed is SEEN, never trusted to memory.
+  state.docketShowAll = false;
   const needsVariant = item.variants && item.variants.length > 0;
   // Only 'ordering' groups force the options pane; 'default' groups auto-apply
   // and 'later' groups wait for the line editor.
@@ -19545,10 +19549,17 @@ function renderTicketPanel() {
         return shown.map(n => {
           const info = courseInfo(n);
           return `
-          <button class="course-tab ${state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}">
+          <button class="course-tab ${!state.docketShowAll && state.activeCourse === n ? 'active' : ''}${auto ? ' auto-dim' : ''}" data-act="set-course" data-val="${n}">
             ${esc(info.name)}${lastFiredCourse() === n ? `<span class="ct-fired">${ACT_TICK_SVG}</span>` : state.stagedCallAway === n ? `<span class="ct-fired ct-staged">${ACT_TICK_SVG}</span>` : ''}
           </button>`;
-        }).join('');
+        }).join('')
+        // Course pages only (owner ask, Sep '26): with the docket paged there
+        // was NO way to read the whole ticket — All shows every course
+        // grouped, exactly as the unpaged docket draws it. Adding a dish
+        // snaps back to its course's page, so you always SEE where it went.
+        // Unpaged dockets already show everything; no second door there.
+        + (state.settings.coursePagedDocket === true
+          ? `<button class="course-tab ${state.docketShowAll ? 'active' : ''}" data-act="docket-show-all">All</button>` : '');
       })()}
     </div>
     <div class="ticket-items">
@@ -19565,7 +19576,7 @@ function renderTicketPanel() {
         }
         // Course pages (Settings → Courses): the docket shows only the active
         // course; the course tabs are the pages.
-        if (state.settings.coursePagedDocket === true) {
+        if (state.settings.coursePagedDocket === true && !state.docketShowAll) {
           const hasItems = coursesToShow.includes(state.activeCourse);
           coursesToShow = coursesToShow.filter(n => n === state.activeCourse);
           if (!hasItems) {
@@ -30896,8 +30907,12 @@ document.addEventListener('pointerdown', (e) => {
     id: t.id, x0: e.clientX, y0: e.clientY, lifted: e.pointerType !== 'touch', dragging: false,
     panning: false, lx: 0, ly: 0,
     ghost: null, rect: null, overEl: null, overId: null, blockTouch: null,
+    // ONE moment (owner: "drag and hold-to-show-bill clash"): the grab arms
+    // at the peek's own 450ms — one vibration, the peek opens AND the table
+    // is in the hand. No earlier stage, so reading the bill never buzzes
+    // first; only a deliberate pull past 24px becomes the drag.
     timer: e.pointerType === 'touch'
-      ? setTimeout(() => { g.lifted = true; armSrc(); try { navigator.vibrate && navigator.vibrate(10); } catch (err) {} }, 300)
+      ? setTimeout(() => { g.lifted = true; armSrc(); try { navigator.vibrate && navigator.vibrate(10); } catch (err) {} }, 450)
       : 0,
   };
   g.armSrc = armSrc;
@@ -30939,7 +30954,10 @@ document.addEventListener('pointerdown', (e) => {
       return;
     }
     if (!g.dragging && g.armSrc) g.armSrc(); // the peek's render can replace the marker mid-arm — re-mark it
-    if (!g.dragging && dist > 10) {
+    // 24px, not a twitch: a hand settling in to READ the peek must not set
+    // the table moving. (A mouse is lifted from the start and keeps the
+    // same deliberate threshold.)
+    if (!g.dragging && dist > 24) {
       // The grip becomes a drag: fold the peek, freeze renders, lift a copy.
       // The peek's pop is plucked out by hand, NOT via render() — a render
       // mid-gesture rebuilds the floor under the live touch and Chromium
@@ -36815,8 +36833,10 @@ function handleActClick(el, e) {
         // no need to tap Auto off first.
         if (autoCourseOn()) state.autoCourseOverride = (state.settings.autoCourse !== false) ? false : null;
         state.allCourseTabs = false;
+        state.docketShowAll = false;
         setActiveCourse(parseInt(el.dataset.val));
       }
+      else if (act === 'docket-show-all') { state.docketShowAll = true; render(); }
       else if (act === 'toggle-all-courses') { state.allCourseTabs = !state.allCourseTabs; render(); }
       else if (act === 'auto-assign-courses') { autoAssignCourses(); }
       else if (act === 'toggle-auto-course-order') { toggleAutoCourseOrder(); }

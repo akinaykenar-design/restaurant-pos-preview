@@ -28966,7 +28966,7 @@ function transferToTable(newTableId, extra) {
   const oldTableId = state.transferFrom || state.table;
   const newTable = findTableById(newTableId);
   if (!newTable || newTableId === oldTableId) { state.transferMode = false; state.transferFrom = null; state.showTablePicker = false; render(); return; }
-  if (newTable.mergedInto) { state.toast = 'Pick a table that is not merged into another.'; render(); return; }
+  if (newTable.mergedInto && newTable.mergedInto !== newTable.id) { state.toast = 'Pick a table that is not merged into another.'; render(); return; }
   // A destination with its own open tab is fine — the two tabs COMBINE.
   const destOpenOrder = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
   // Both sides carry their area AND how much is on them (owner, Aug '26):
@@ -30850,6 +30850,8 @@ let _tblGrab = null, _tblDropAt = 0;
 function _tblGrabCancel() {
   const g = _tblGrab; if (!g) return;
   clearTimeout(g.timer);
+  if (g.praf) cancelAnimationFrame(g.praf);
+  if (g.draf) cancelAnimationFrame(g.draf);
   document.removeEventListener('pointermove', g.mv);
   document.removeEventListener('pointerup', g.up);
   document.removeEventListener('pointercancel', g.pc);
@@ -30901,9 +30903,18 @@ document.addEventListener('pointerdown', (e) => {
     if (g.panning) {
       // Manual pan: markers wear touch-action:none (see the CSS note), so a
       // pan that starts on a table is scrolled by hand, 1:1 with the finger.
-      const w = document.querySelector('.middle-view .tp-canvas-wrap');
-      if (w) { w.scrollLeft -= ev.clientX - g.lx; w.scrollTop -= ev.clientY - g.ly; }
+      // Deltas accumulate and land ONCE PER FRAME — writing scroll on every
+      // pointermove (fingers report faster than the screen paints) is what
+      // made a zoomed pan jitter.
+      g.pdx = (g.pdx || 0) + (ev.clientX - g.lx);
+      g.pdy = (g.pdy || 0) + (ev.clientY - g.ly);
       g.lx = ev.clientX; g.ly = ev.clientY;
+      if (!g.praf) g.praf = requestAnimationFrame(() => {
+        g.praf = 0;
+        const w = document.querySelector('.middle-view .tp-canvas-wrap');
+        if (w) { w.scrollLeft -= g.pdx; w.scrollTop -= g.pdy; }
+        g.pdx = 0; g.pdy = 0;
+      });
       return;
     }
     if (!g.lifted) {
@@ -30933,6 +30944,10 @@ document.addEventListener('pointerdown', (e) => {
       if (!src) { _tblGrabCancel(); return; }
       src.classList.remove('mk-armed');
       g.rect = src.getBoundingClientRect();
+      // Anchor the drag HERE, not at the press: the finger has already
+      // drifted past the start threshold, and measuring from the press
+      // point made the ghost jump that drift and ride beside the finger.
+      g.gx = ev.clientX; g.gy = ev.clientY;
       const gh = src.cloneNode(true);
       gh.classList.add('mk-drag-ghost');
       gh.classList.remove('mk-drag-src', 'mk-armed');
@@ -30943,22 +30958,37 @@ document.addEventListener('pointerdown', (e) => {
       src.classList.add('mk-drag-src');
     }
     if (!g.dragging) return;
-    g.ghost.style.left = (g.rect.left + ev.clientX - g.x0) + 'px';
-    g.ghost.style.top = (g.rect.top + ev.clientY - g.y0) + 'px';
-    // What's underneath: another table lights the one selection ring.
-    const under = document.elementFromPoint(ev.clientX, ev.clientY);
-    const tgt = under && under.closest && under.closest('[data-act="pick-table"]');
-    const tt = tgt && tgt.dataset.id !== g.id ? findTableById(tgt.dataset.id) : null;
-    const ok = tt && !tt.mergedInto;
-    const el = ok ? tgt : null;
-    if (g.overEl && g.overEl !== el) g.overEl.classList.remove('mk-drop', 'mk-sel');
-    if (el && g.overEl !== el) el.classList.add('mk-drop', 'mk-sel');
-    g.overEl = el; g.overId = ok ? tt.id : null;
+    // One paint per frame: fingers report faster than the screen draws, and
+    // a hit-test on every report is wasted work that reads as lag.
+    g.dex = ev.clientX; g.dey = ev.clientY;
+    if (g.draf) return;
+    g.draf = requestAnimationFrame(() => {
+      g.draf = 0;
+      if (!g.dragging || !g.ghost) return;
+      const gl = g.rect.left + g.dex - g.gx, gt = g.rect.top + g.dey - g.gy;
+      g.ghost.style.left = gl + 'px';
+      g.ghost.style.top = gt + 'px';
+      // The drop target is what sits under the GHOST'S CENTRE, not under the
+      // fingertip — the eye lands the table it can see, and the finger can
+      // be holding its corner (owner: "some tables allow ... some don't" —
+      // the ones that 'didn't' were the ones the finger missed).
+      const under = document.elementFromPoint(
+        Math.max(0, Math.min(window.innerWidth - 1, gl + g.rect.width / 2)),
+        Math.max(0, Math.min(window.innerHeight - 1, gt + g.rect.height / 2)));
+      const tgt = under && under.closest && under.closest('[data-act="pick-table"]');
+      const tt = tgt && tgt.dataset.id !== g.id ? findTableById(tgt.dataset.id) : null;
+      const ok = tt && !(tt.mergedInto && tt.mergedInto !== tt.id);
+      const el = ok ? tgt : null;
+      if (g.overEl && g.overEl !== el) g.overEl.classList.remove('mk-drop', 'mk-sel');
+      if (el && g.overEl !== el) el.classList.add('mk-drop', 'mk-sel');
+      g.overEl = el; g.overId = ok ? tt.id : null;
+    });
   };
   g.up = () => {
     // A hand-driven pan that ends on a table must not also pick it.
     if (g.panning) { _tblDropAt = Date.now(); _tblGrabCancel(); return; }
     if (!g.dragging) { _tblGrabCancel(); return; } // a still hold stays the peek's
+    if (g.draf) cancelAnimationFrame(g.draf);
     const dropId = g.overId, srcId = g.id, ghost = g.ghost, home = g.rect;
     document.removeEventListener('pointermove', g.mv);
     document.removeEventListener('pointerup', g.up);

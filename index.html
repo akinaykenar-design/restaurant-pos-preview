@@ -2889,15 +2889,12 @@ body[data-fs-picker] .tp-actions{ flex:none; }
   inset:-1px; border-radius:inherit;
   box-shadow:inset 0 0 0 var(--tbl-sel-ring,4px) var(--orange); }
 .simple-table-btn{ isolation:isolate; }
-/* Hold-drag transfer (till floor): the BILL rides the finger as a small ⇄
-   chip (the table itself never appears to move); the table it left dims
-   until the move settles; the table under the finger wears the ONE
-   selection ring (.mk-sel, the same class a picked table wears). */
-.mk-drag-chip{ position:fixed; z-index:44; pointer-events:none; transform:translateX(-50%);
-  display:flex; align-items:center; gap:6px; height:36px; padding:0 14px;
-  border-radius:18px; background:var(--surface); border:1px solid var(--steel-300);
-  box-shadow:var(--lift-2); color:var(--text-primary); font-weight:800; font-size:var(--fs-md); }
-.mk-drag-chip svg{ width:20px; height:20px; }
+/* Hold-drag transfer (till floor): the TABLE lifts and rides the finger
+   with the drawer's shadow (a still hold moves nothing — the lift is the
+   first news); the spot it left dims until the move settles; the table
+   under it wears the ONE selection ring (.mk-sel, as a picked table). */
+.mk-drag-ghost{ position:fixed !important; z-index:44; pointer-events:none;
+  opacity:.95; margin:0; box-shadow:var(--lift-2) !important; }
 .mk-drag-src{ opacity:.35; }
 /* The browser must NEVER own a gesture that starts on a till-floor table —
    touch-action is judged at touchstart, so a hold that becomes a drag would
@@ -28831,10 +28828,22 @@ function openTablePicker() {
       state._tpEntering = false;
       const live = document.querySelector('.middle-view.tp-view');
       if (live && state.showTablePicker) live.classList.remove('tp-entering');
+      tpCentreOnOpen();
     }));
     return;
   }
   render();
+  requestAnimationFrame(tpCentreOnOpen);
+}
+// A cover-fitted floor overflows its box, and a fresh open used to land on
+// the TOP-LEFT CORNER of the room (floor audit) — the middle is where the
+// room is. Only a fresh open: a remembered pan spot (SCROLL_KEEP) stays.
+function tpCentreOnOpen() {
+  const w = document.querySelector('.middle-view .tp-canvas-wrap');
+  if (!w || !state.showTablePicker) return;
+  if (w.scrollLeft !== 0 || w.scrollTop !== 0) return;
+  w.scrollLeft = Math.max(0, (w.scrollWidth - w.clientWidth) / 2);
+  w.scrollTop = Math.max(0, (w.scrollHeight - w.clientHeight) / 2);
 }
 function openTransferPicker() { state.transferMode = true; openTablePicker(); }
 // Leaving a table that was set up (covers/notes) but never ordered: offer to
@@ -30897,21 +30906,23 @@ document.addEventListener('pointerdown', (e) => {
   if (state.frozen || state.moveItemsPicking || state._sortDragging) return;
   const t = findTableById(m.dataset.id);
   if (!t) return;
-  // Only a table with a sitting lifts — the same rule as the ⇄ door's first tap.
-  if (t.mergedInto && t.mergedInto !== t.id) return;
-  const hasOrder = state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
-  if (!hasOrder && !(t.covers > 0)) return;
+  // Only a table with a sitting LIFTS — but every table must still PAN:
+  // markers wear touch-action:none, so if the grab stands down here a pan
+  // that starts on an empty table is simply dead (found by the floor
+  // audit). Eligibility gates the lift timer, never the pan.
+  const liftable = !(t.mergedInto && t.mergedInto !== t.id)
+    && (state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label)) || t.covers > 0);
   // A mouse can't pan the floor, so it needs no hold at all: grab and pull
   // (the owner's first try was exactly that, and nothing happened).
   const g = _tblGrab = {
-    id: t.id, x0: e.clientX, y0: e.clientY, lifted: e.pointerType !== 'touch', dragging: false,
+    id: t.id, x0: e.clientX, y0: e.clientY, lifted: liftable && e.pointerType !== 'touch', dragging: false,
     panning: false, lx: 0, ly: 0,
     ghost: null, rect: null, overEl: null, overId: null, blockTouch: null,
     // ONE moment (owner: "drag and hold-to-show-bill clash"): everything
     // arms at the peek's own 450ms and NOTHING on the floor changes — the
     // peek opening IS the whole feedback, the table never shifts under a
     // reading hand. Only a deliberate pull past 24px becomes the move.
-    timer: e.pointerType === 'touch'
+    timer: liftable && e.pointerType === 'touch'
       ? setTimeout(() => { g.lifted = true; }, 450)
       : 0,
   };
@@ -30968,13 +30979,17 @@ document.addEventListener('pointerdown', (e) => {
       state._sortDragging = true;
       const src = document.querySelector(`[data-act="pick-table"][data-id="${g.id}"]`);
       if (!src) { _tblGrabCancel(); return; }
-      // You drag the BILL, not the furniture (owner: a cloned table "looks
-      // weird ... doesn't feel natural"): the peek folds into a small ⇄ chip
-      // riding just above the finger. The table itself never appears to
-      // move until the confirm says it did.
-      const gh = document.createElement('div');
-      gh.className = 'mk-drag-chip';
-      gh.innerHTML = `${SYS_SWAP_SVG}<b>${esc(String(t.label))}</b>`;
+      // The TABLE moves (owner: "I want to see the table move") — a full
+      // clone lifts under the finger, anchored at the LIFT point so it never
+      // jumps the pre-drag drift. The still hold before this changed
+      // nothing; the lift is the first visible news.
+      g.rect = src.getBoundingClientRect();
+      g.gx = ev.clientX; g.gy = ev.clientY;
+      const gh = src.cloneNode(true);
+      gh.classList.add('mk-drag-ghost');
+      gh.classList.remove('mk-drag-src');
+      gh.style.left = g.rect.left + 'px'; gh.style.top = g.rect.top + 'px';
+      gh.style.width = g.rect.width + 'px'; gh.style.height = g.rect.height + 'px';
       document.body.appendChild(gh);
       g.ghost = gh;
       src.classList.add('mk-drag-src');
@@ -30987,14 +31002,15 @@ document.addEventListener('pointerdown', (e) => {
     g.draf = requestAnimationFrame(() => {
       g.draf = 0;
       if (!g.dragging || !g.ghost) return;
-      // The chip rides just above the fingertip so the thumb never hides
-      // it; the FINGER is the pointer now — a small chip can't cover the
-      // target the way the old full-size clone did.
-      g.ghost.style.left = g.dex + 'px';
-      g.ghost.style.top = (g.dey - 46) + 'px';
+      const gl = g.rect.left + g.dex - g.gx, gt = g.rect.top + g.dey - g.gy;
+      g.ghost.style.left = gl + 'px';
+      g.ghost.style.top = gt + 'px';
+      // The drop target is what sits under the GHOST'S CENTRE, not the
+      // fingertip — the eye lands the table it can see, and the finger can
+      // be holding its corner.
       const under = document.elementFromPoint(
-        Math.max(0, Math.min(window.innerWidth - 1, g.dex)),
-        Math.max(0, Math.min(window.innerHeight - 1, g.dey)));
+        Math.max(0, Math.min(window.innerWidth - 1, gl + g.rect.width / 2)),
+        Math.max(0, Math.min(window.innerHeight - 1, gt + g.rect.height / 2)));
       const tgt = under && under.closest && under.closest('[data-act="pick-table"]');
       const tt = tgt && tgt.dataset.id !== g.id ? findTableById(tgt.dataset.id) : null;
       const ok = tt && !(tt.mergedInto && tt.mergedInto !== tt.id);
@@ -31009,7 +31025,7 @@ document.addEventListener('pointerdown', (e) => {
     if (g.panning) { _tblDropAt = Date.now(); _tblGrabCancel(); return; }
     if (!g.dragging) { _tblGrabCancel(); return; } // a still hold stays the peek's
     if (g.draf) cancelAnimationFrame(g.draf);
-    const dropId = g.overId, srcId = g.id, ghost = g.ghost;
+    const dropId = g.overId, srcId = g.id, ghost = g.ghost, home = g.rect;
     document.removeEventListener('pointermove', g.mv);
     document.removeEventListener('pointerup', g.up);
     document.removeEventListener('pointercancel', g.pc);
@@ -31023,9 +31039,9 @@ document.addEventListener('pointerdown', (e) => {
       state.transferFrom = srcId;
       transferToTable(dropId, { onCancel: () => { state.transferFrom = null; render(); } });
     } else {
-      // Nowhere to land: the chip fades where it was let go; nothing moved.
-      ghost.style.transition = `opacity var(--t-move) ease`;
-      ghost.style.opacity = '0';
+      // Nowhere to land: the table floats home, then the floor repaints.
+      ghost.style.transition = `left var(--t-move) ease, top var(--t-move) ease`;
+      ghost.style.left = home.left + 'px'; ghost.style.top = home.top + 'px';
       setTimeout(() => { ghost.remove(); render(); }, 260);
     }
   };
@@ -31373,6 +31389,11 @@ document.addEventListener('wheel', (e) => {
     const dx = t.clientX - sx, dy = t.clientY - sy;
     // Finger travelling LEFT = asking for more map to the right.
     if (dx > -60 || Math.abs(dx) < Math.abs(dy) * 1.6) return;
+    // "There's nothing more this way" only MEANS something when there was a
+    // way: with no horizontal overflow at all (a width-fitted floor), every
+    // left flick was trivially "at the end" and threw you off the map mid-
+    // gesture (found by the floor audit on the tablet's cover fit).
+    if (w.scrollWidth - w.clientWidth < 8) return;
     if (!wasAtEnd || !atRightEnd(w)) return; // there was still map to see
     // A table half-picked mid-transfer keeps its own doors — never bin that
     // with a swipe.

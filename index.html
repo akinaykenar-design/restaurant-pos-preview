@@ -910,8 +910,12 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
   body[data-ticket-side="left"]{ --seam-l:none; --seam-r:1px solid var(--steel-300); }
   body[data-ticket-pos="bottom"]{ --seam-l:none; --seam-r:none; --seam-t:1px solid var(--steel-300); }
 }
-}
-.ticket-head{padding:12px 8px 8px;flex-shrink:0;} /* no divider: the docket is the quietest panel, the gap does the dividing (owner, Aug '26) */
+/* The head wears the hub's edge at its sides, like the list under it — one
+   number (owner, Sep '26: "quick notes and pill touching the border"). A
+   stray brace above this rule (left by the seam block, Sep '26) had the
+   browser drop the whole rule: measured 0 padding on tablet, chips 1px off
+   the docket's edge. */
+.ticket-head{padding:12px var(--hub-edge) 8px;flex-shrink:0;} /* no divider: the docket is the quietest panel, the gap does the dividing (owner, Aug '26) */
 /* Every quick setting off → the head holds nothing (the ✕ only shows on
    phones), so it takes no room at all instead of an empty strip (owner). */
 .ticket-head:not(:has(> :not(.ticket-close-mobile))){padding:0;border-bottom:none;}
@@ -1301,7 +1305,13 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .menu-items-list{ gap:0 !important; }
 .menu-item-expandable,.category-row,.sales-cat-row,.subcategory-row,.order-row,
 .combo-choice-card,.customer-row,.inventory-item-row{ margin-bottom:var(--list-gap) !important; }
-.menu-item-expandable.selected,.category-row.selected,.order-row.selected,.sales-cat-row.selected,.subcategory-row.selected,.combo-choice-card.selected{border-color:var(--orange)!important;box-shadow:0 0 0 var(--ring) var(--orange);background:var(--orange-dim)!important;}
+/* A ROW'S RING IS INSIDE THE ROW (owner, Sep '26: "containers might be too
+   close, when selecting the outline touches each other"). Rows stand 4 apart
+   and the ring is 2 — drawn outside, two picked neighbours filled the gap to
+   the pixel and read as one block. Inset, the ring lives in the row's own box
+   and the 4 of ground between rows is never painted. The gap stays 4 (spacing
+   law); the ring stays --ring (shadow law); only its side changed. */
+.menu-item-expandable.selected,.category-row.selected,.order-row.selected,.sales-cat-row.selected,.subcategory-row.selected,.combo-choice-card.selected{border-color:var(--orange)!important;box-shadow:inset 0 0 0 var(--ring) var(--orange);background:var(--orange-dim)!important;}
 .menu-item-expandable.selected .menu-item-header,.category-row.selected>div:first-child,.sales-cat-row.selected .sel-head,.sel-head.selected,.combo-choice-card.selected .menu-item-header{background:var(--orange-dim);}
 
 /* Uniform admin list-row card height across every menu-list admin.
@@ -4465,12 +4475,12 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 /* A ROW HERE IS A DOCKET LINE (owner, Aug '26: "split bill container should be
    same size as item container in docket"). It carries .ticket-line, so the
    quantity block, the height and the type come from there and cannot drift. */
-.split-lines > *{ box-shadow:0 0 0 var(--ring) transparent; }
+.split-lines > *{ box-shadow:inset 0 0 0 var(--ring) transparent; }
 .split-lines > .pickable{cursor:pointer;}
 /* THE APP'S SELECTED LOOK, unchanged: accent block, accent ring (same rule as
    every admin list). Nothing here changes size or weight, so the panel never
    shifts as lines go on and off. */
-.split-lines > .selected{border-color:var(--orange);box-shadow:0 0 0 var(--ring) var(--orange);background:var(--orange-dim);}
+.split-lines > .selected{border-color:var(--orange);box-shadow:inset 0 0 0 var(--ring) var(--orange);background:var(--orange-dim);} /* inset: rows are 4 apart, see the row-ring note */
 .split-lines > .selected .tl-name,.split-lines > .selected .tl-price{color:var(--orange);}
 .split-lines > .selected .tl-qty{background:transparent;border-right-color:var(--orange);}
 /* Already on ANOTHER bill: faded, not tagged. */
@@ -14474,11 +14484,26 @@ async function reorderPanels(fromIdx, toIdx) {
 // nothing else. Those go first and the room is on screen; the rest arrives
 // behind it and re-renders when it does.
 let _menuReady = null;   // resolves when the menu and its lists are in
+// Whose shift is open: the one call at sign-in that needs to know the person.
+async function loadShift() {
+  if (!state.currentStaff) return;
+  const shifts = await api('/api/shifts');
+  state.activeShift = shifts.find(s => s.staffId === state.currentStaff.id && s.clockOut === null) || null;
+}
 async function loadInitial() {
   try {
-    // First: the little that the floor and the login screen actually need.
+    // First: what the floor needs — in ONE trip. The theme, settings and
+    // floor used to go out first and the orders, summary, locks and shift
+    // only once they were back; nothing in the second group actually waited
+    // on the first (the locks are two bytes, so they simply always come).
+    // Two trips in a row were a third of the sign-in (owner, Sep '26:
+    // "signing in takes a bit of time").
     const [theme, settings, floorPlans] = await Promise.all([
       api('/api/theme'), api('/api/settings'), api('/api/floorplans'),
+      refreshOrders(),
+      refreshSummary(),
+      refreshTableLocks(),
+      state.currentStaff ? loadShift() : Promise.resolve(),
     ]);
     state.theme = theme; applyTheme();
     state.settings = settings; applyPanelLayout();
@@ -14488,19 +14513,11 @@ async function loadInitial() {
     state.pickerFloorPlanId = state.adminFloorPlanId;
     state.courseCount = state.settings.courses.length || 1;
     state.activeCourse = firstEnabledCourseNumber();
-    const needLocks = !state.table && state.floorPlans[0] && state.floorPlans[0].tables.length;
-    await Promise.all([
-      refreshOrders(),
-      refreshSummary(),
-      needLocks ? refreshTableLocks() : Promise.resolve(),
-      state.currentStaff
-        ? api('/api/shifts').then(shifts => { state.activeShift = shifts.find(s => s.staffId === state.currentStaff.id && s.clockOut === null) || null; })
-        : Promise.resolve(),
-    ]);
-    // Re-check state.table AFTER the awaits: on a slow load the waiter may have
-    // already picked a table while data was still coming in — don't bounce them
+    // Judged AFTER the trip: on a slow load the waiter may have already
+    // picked a table while data was still coming in — don't bounce them
     // back to the picker.
-    if (needLocks && !state.table && state.view === 'order' && state.orderType === 'dine-in') state.showTablePicker = true;
+    const needLocks = !state.table && state.floorPlans[0] && state.floorPlans[0].tables.length;
+    if (needLocks && state.view === 'order' && state.orderType === 'dine-in') state.showTablePicker = true;
     render();   // the room is on screen from here
 
     // Then: everything the ORDER screen needs. Still one round-trip's worth —
@@ -14593,7 +14610,7 @@ function hideSpinner() {
   const el = document.getElementById('app-spinner');
   if (el) el.style.display = 'none';
 }
-function finishLogin(staff) {
+function finishLogin(staff, warm) {
   state.currentStaff = staff;
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
   // A fresh PIN entry proves the person — any held screen from before the
@@ -14630,7 +14647,9 @@ function finishLogin(staff) {
   render();
   showSpinner('Signing in…'); // the menu can be big — show it's loading, not stuck
   const done = () => hideSpinner();
-  loadInitial().then(() => {
+  // `warm` is the load already in flight since the PIN was entered. It ran
+  // without a signed-in person, so the shift is fetched here on top.
+  (warm ? warm.then(() => loadShift()) : loadInitial()).then(() => {
     if (staff.role === 'chef') { loadKdsData(); done(); return; }
     done();
   }).catch(() => { done(); });
@@ -14652,12 +14671,19 @@ async function pressPinEnter() {
   if (!state.loginPin) return;
   state.loginError = '';
   try {
+    // The room's data goes out WITH the PIN, not after it (owner, Sep '26:
+    // "signing in takes a bit of time"). Measured: PIN check, then theme +
+    // settings + floor, then orders + summary + locks + shift — three trips
+    // in a row before a table was on screen. None of that data waits on who
+    // is signing in, so it loads while the PIN is checked; a wrong PIN just
+    // leaves the till warmed.
+    const warm = loadInitial();
     const r = await api('/api/staff/verify-pin', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pin: state.loginPin, force: true }),
     });
-    if (r && r.id) finishLogin(r);
+    if (r && r.id) finishLogin(r, warm);
     else { state.loginError = 'shake'; state.loginPin = ''; render(); }
   } catch (e) {
     state.loginError = 'shake'; state.loginPin = ''; render();
@@ -14670,9 +14696,9 @@ function pressPinBackspace() { state.loginPin = state.loginPin.slice(0, -1); ren
 // scrim swallows every tap, so nobody can exit the order, send a half round,
 // or log them off. Their own PIN (or a manager's) hands the screen back
 // exactly as they left it. The order itself is never touched.
-// The bar's log-off (reached by HOLDING power). Only stops to warn when there
-// are UNSENT items to lose - otherwise straight off. A hold is deliberate, but
-// an unsent order is still never eaten silently.
+// The bar's log-off (a TAP on power; the hold locks). Only stops to warn when
+// there are UNSENT items to lose - otherwise straight off. An unsent order is
+// never eaten silently.
 function logOffFromBar() {
   const go = () => offerCloseEmptyTable(() => logOut());
   if (state.cart.length) openConfirm({ message: 'Log off? Items not yet sent will be discarded.', confirmLabel: 'Log off', danger: true }, go);
@@ -18218,33 +18244,63 @@ function placeTileCounts() {
 // reflow after reflow and was the hottest per-render cost on the tablets.
 // '' = fits untouched; anything else = the middle-cut text to show.
 const _fitCache = new Map();
+// THE TRIM IS SEARCHED FOR ALL TILES AT ONCE (owner, Sep '26: "the wine
+// section takes a while to load"). Measured on a 48-wine subsection: 51ms a
+// tap, 41 of them in middleCut — every wine name is long, and the old loop
+// set one tile's text and had the browser lay the page out again after EACH
+// trim, ~15 layouts a tile, ~700 a tap (4x slower on a tablet: 284ms, a
+// visible stall). Now every unresolved tile takes its next trim in the same
+// round and the page is measured ONCE per round — ~15 layouts a tap however
+// many tiles, and exactly the trims the old loop produced (checked: 692
+// tiles, 0 differences).
 function fitTileNames() {
   // One id→item map per pass — a per-tile state.menu.find() made this
   // O(tiles × menu), a real stall on big menus + cheap tablets.
   const byId = new Map(state.menu.map(x => [String(x.id), x]));
   if (_fitCache.size > 3000) _fitCache.clear();
+  const tiles = [];
   document.querySelectorAll('.item-card[data-id] .item-name').forEach(el => {
-    el.style.fontSize = '';
-    const card = el.closest('.item-card');
-    const m = byId.get(String(card.dataset.id));
-    if (!m) return;
-    const name = m.name;
-    const key = `${name}|${el.clientWidth}x${el.clientHeight}`;
-    const hit = _fitCache.get(key);
-    if (hit !== undefined) {
-      if (hit === '') { if (el.textContent !== name) el.textContent = name; return; }
-      el.dataset.mcut = '1';
-      if (el.textContent !== hit) el.textContent = hit;
-      return;
-    }
-    if (el.textContent !== name) el.textContent = name;
-    // Overflow is EITHER too many lines OR one long word running off the side
-    // ("Mograbieh|") — both get the middle-cut ellipsis, never a hard clip.
-    if (el.scrollHeight <= el.clientHeight + 1 && el.scrollWidth <= el.clientWidth + 1) { _fitCache.set(key, ''); return; }
-    el.dataset.mcut = '1';
-    middleCut(el, name, 8);
-    _fitCache.set(key, el.textContent);
+    const m = byId.get(String(el.closest('.item-card').dataset.id));
+    if (m) tiles.push({ el, name: m.name });
   });
+  tiles.forEach(t => { if (t.el.style.fontSize) t.el.style.fontSize = ''; });
+  // READ every tile's box first — one layout for the lot.
+  const keys = tiles.map(t => `${t.name}|${t.el.clientWidth}x${t.el.clientHeight}`);
+  const over = (el) => el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1;
+  const pend = [];
+  tiles.forEach((t, i) => {
+    const hit = _fitCache.get(keys[i]);
+    if (hit === undefined) { if (t.el.textContent !== t.name) t.el.textContent = t.name; pend.push({ el: t.el, name: t.name, i }); return; }
+    if (hit === '') { if (t.el.textContent !== t.name) t.el.textContent = t.name; return; }
+    t.el.dataset.mcut = '1';
+    if (t.el.textContent !== hit) t.el.textContent = hit;
+  });
+  // Overflow is EITHER too many lines OR one long word running off the side
+  // ("Mograbieh|") — both get the middle-cut ellipsis, never a hard clip.
+  let live = pend.filter(p => over(p.el)); // one layout
+  pend.forEach(p => { if (!live.includes(p)) _fitCache.set(keys[p.i], ''); });
+  live.forEach(p => {
+    p.el.dataset.mcut = '1';
+    // Short names can't afford the full tail window — a 9-char name with an
+    // 8-char tail would "cut" LONGER than the original.
+    p.end = Math.min(8, Math.max(2, Math.floor(p.name.length / 2) - 1));
+    p.front = Math.max(2, p.name.length - p.end - 1);
+    p.set = () => { p.el.textContent = p.name.slice(0, p.front).trimEnd() + '…' + p.name.slice(-p.end).trimStart(); };
+    p.set();
+  });
+  let guard = 0;
+  while (live.length && guard++ < 80) {
+    const still = live.filter(p => over(p.el)); // one layout a round
+    live.filter(p => !still.includes(p)).forEach(p => _fitCache.set(keys[p.i], p.el.textContent));
+    live = [];
+    still.forEach(p => {
+      if (p.front > 2) p.front = Math.max(2, p.front - 2);
+      else if (p.end > 2) p.end -= 1;
+      else { _fitCache.set(keys[p.i], p.el.textContent); return; }
+      p.set(); live.push(p);
+    });
+  }
+  live.forEach(p => _fitCache.set(keys[p.i], p.el.textContent));
   // SUBSECTION tiles get the same treatment (owner scan, Aug '26): they carry
   // no item id, so they were falling through to the CSS clamp, which cuts the
   // END — on a phone at two columns "Mains & To Share" read "Mains & To…" and
@@ -18538,7 +18594,7 @@ function renderTopbar() {
         const on = state.view === 'admin' && state.adminTab === k;
         return pm ? `<button class="${on ? 'active' : ''}" data-act="open-admin-pin" data-val="${k}">${adminPinIcon(k)}</button>` : '';
       }).join('')}</div>` : ''}
-      <button data-act="logout" aria-label="Lock (hold to log off)">${ACT_POWER_SVG}</button>
+      <button data-act="logout" aria-label="Log off (hold to lock)">${ACT_POWER_SVG}</button>
     </div>
   </div>`;
 }
@@ -29027,10 +29083,8 @@ function pickTable(id) {
   const resolvedId = rt && rt.mergedInto && rt.mergedInto !== id ? rt.mergedInto : id;
   if (state.table && resolvedId !== state.table && !state._pickResuming) {
     // The resume re-enters pickTable with the guard held so it can't loop.
-    offerCloseEmptyTable(() => {
-      state._pickResuming = true;
-      try { pickTable(id); } finally { state._pickResuming = false; }
-    });
+    const resume = () => { state._pickResuming = true; try { pickTable(id); } finally { state._pickResuming = false; } };
+    offerCloseEmptyTable(resume);
     return; // offerCloseEmptyTable either prompted or already resumed synchronously
   }
   const target = findTableById(id);
@@ -29047,8 +29101,13 @@ function pickTable(id) {
     state.table = id;
     const t = findTableById(id);
     // Keep an unsent cart when this is the FIRST table picked (fresh login has
-    // no table now) — the waiter may have rung items up before choosing.
-    if (hadTable) { state.cart = []; state.firedCourses = {}; }
+    // no table now) — the waiter may have rung items up before choosing — and
+    // when the table is the SAME one: tapping your own table is coming back,
+    // not starting over. Until Sep '26 it wiped the cart with no warning —
+    // the "Switch tables?" guard above only asks for a DIFFERENT table, so a
+    // swipe onto the floor and a tap on your own table silently ate the
+    // round (owner: "swiping left while ordering deletes the order").
+    if (hadTable && prevTable !== id) { state.cart = []; state.firedCourses = {}; }
     state.autoCourseOverride = null;
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
@@ -31354,12 +31413,12 @@ document.addEventListener('pointerdown', (e) => {
       render();
       armToastTimer(3000);
     } else {
-      // Hold power = LOG OFF (owner, Sep '26). The two gestures swapped: the
-      // tap is now the LOCK - the safe, frequent thing a hand does walking
-      // away - and the rare exit takes the hold, so a brushed edge can never
-      // log the till out mid-service. The unsent-items warning rides along.
+      // Hold power = LOCK (owner, Sep '26: "tapping should not lock, it
+      // should be the other way around"). The tap is the log-off, as it was
+      // for months; the hold is the held screen. The unsent-items warning
+      // still guards the tap.
       _powerHoldFired = true;
-      setTimeout(() => logOffFromBar(), 220);
+      if (state.currentStaff && !state.frozen) setTimeout(() => freezeScreen(), 220);
     }
   }, 500);
   document.addEventListener('pointermove', mv, { passive: true });
@@ -36725,10 +36784,10 @@ function handleActClick(el, e) {
       else if (act === 'frz-back') { state.frozenPin = state.frozenPin.slice(0, -1); render(); }
       else if (act === 'frz-enter') { pressFrzEnter(); }
       else if (act === 'logout') {
-        // Tap = LOCK (owner, Sep '26); hold = log off. A completed hold just
-        // logged off - its release must not ALSO lock.
+        // Tap = LOG OFF (owner, Sep '26); hold = lock. A completed hold just
+        // locked - its release must not ALSO log off.
         if (_powerHoldFired) { _powerHoldFired = false; return; }
-        if (state.currentStaff && !state.frozen) freezeScreen();
+        if (state.currentStaff && !state.frozen) logOffFromBar();
       }
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }

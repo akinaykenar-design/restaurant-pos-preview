@@ -1346,6 +1346,10 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    one you have picked takes none, because the finger on it is moving it. */
 .admin-floor-marker{ touch-action:auto; }
 .admin-floor-marker.mk-sel{ touch-action:none; }
+/* Tablet and desk: the room fits its box and nothing pans, so a finger on
+   ANY table is a move from the first pixel — the browser may not take it
+   for a scroll (owner, Sep '26). The phone keeps tap-then-drag above. */
+@media (min-width:769px){ .admin-floor-marker{ touch-action:none; } }
 /* Phone: 30+ tables shrunk into a ~360px width collapse to 18px specks with
    unreadable numbers. Instead the map keeps a legible size and pans sideways
    inside its frame (drag empty floor to pan; a table still drags/​holds to move
@@ -13735,7 +13739,9 @@ function sortMenuItems(items) {
     const aSeq = a.sequence === null || a.sequence === undefined ? Infinity : a.sequence;
     const bSeq = b.sequence === null || b.sequence === undefined ? Infinity : b.sequence;
     if (aSeq !== bSeq) return aSeq - bSeq;
-    return a.name.localeCompare(b.name);
+    // The same vintage-blind key the admin's A–Z uses (owner, Sep '26: "sort
+    // wines by name, ignoring the vintage in front") — one rule, both lists.
+    return smartNameKey(a.name).localeCompare(smartNameKey(b.name));
   });
 }
 
@@ -13755,7 +13761,9 @@ function sortAllergyPresets(presets) {
     const aSeq = a.sequence === null || a.sequence === undefined ? Infinity : a.sequence;
     const bSeq = b.sequence === null || b.sequence === undefined ? Infinity : b.sequence;
     if (aSeq !== bSeq) return aSeq - bSeq;
-    return a.name.localeCompare(b.name);
+    // The same vintage-blind key the admin's A–Z uses (owner, Sep '26: "sort
+    // wines by name, ignoring the vintage in front") — one rule, both lists.
+    return smartNameKey(a.name).localeCompare(smartNameKey(b.name));
   });
 }
 function findAllergyPreset(name) { return state.allergyPresets.find(p => p.name === name); }
@@ -16043,8 +16051,10 @@ function editLineQty(delta) {
   const idx = state.editLine ? state.editLine.idx : -1;
   const line = state.cart[idx];
   if (!line) { state.editLine = null; render(); return; }
-  line.qty += delta;
-  if (line.qty <= 0) { state.cart.splice(idx, 1); state.editLine = null; }
+  // One is the floor (owner, Sep '26: "reducing to zero exits the item
+  // menu, which should not happen"). Taking a line OFF is Remove's job; the
+  // minus dims at its limit like every stepper (stepper law).
+  line.qty = Math.max(1, line.qty + delta);
   render();
 }
 // Break a qty>1 line into separate single lines so each can go to its own
@@ -17109,8 +17119,11 @@ function renderTableNumPop() {
 // Account → Show order: the table's FULL history in the order it happened —
 // one block per docket, stamped with who rang it and at what time.
 function renderOrderHistoryPop() {
-  const o = state.orders.find(x => x.id === state.openOrderId);
-  if (!o) return '';
+  const o = state.orders.find(x => x.id === state.openOrderId) || null;
+  // Nothing sent yet is still an order (owner, Sep '26: "show order should
+  // still work even if not sent"): the pop opens on the docket's unsent
+  // lines, and once rounds exist they sit under them as "Not sent yet".
+  if (!o && !state.cart.length) return '';
   const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat';
   const line = (it) => `
       <div class="peek-line">
@@ -17120,11 +17133,11 @@ function renderOrderHistoryPop() {
         </span>
         <span class="peek-price">${it.price > 0 ? money(it.price * it.qty) : ''}</span>
       </div>`;
-  const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
+  const total = ((o && o.items) || []).reduce((s, i) => s + i.price * i.qty, 0) + state.cart.reduce((s, i) => s + i.price * i.qty, 0);
   // The night as it happened: every put-through docket (its items split by
   // course) and every call-away, one stream, in time order.
   const events = [];
-  (o.rounds || []).forEach(r => events.push({ at: r.sentAt || 0, html: (() => {
+  ((o && o.rounds) || []).forEach(r => events.push({ at: r.sentAt || 0, html: (() => {
     const byCourse = [];
     (r.items || []).forEach(it => {
       const c = it.course || 0;
@@ -17140,16 +17153,20 @@ function renderOrderHistoryPop() {
         ${g.items.map(line).join('')}`).join('')}
       ${r.quickNote ? `<div class="peek-line"><span class="peek-name"><span class="peek-note">${esc(r.quickNote)}</span></span></div>` : ''}`;
   })() }));
-  Object.entries(o.firedCourses || {}).forEach(([n, ts]) => {
+  Object.entries((o && o.firedCourses) || {}).forEach(([n, ts]) => {
     if (!(ts > 0)) return;
     events.push({ at: ts, html: `<div class="peek-fire">${esc(courseInfo(parseInt(n)).name)} called away · ${fmtTime(ts)}</div>` });
   });
   events.sort((a, b) => a.at - b.at);
+  if (state.cart.length) events.push({ at: Infinity, html: `
+      <div class="peek-course">Not sent yet</div>
+      ${state.cart.map(line).join('')}` });
+  const tbl = findTableById(state.table);
   return `
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop peek-pop">
-        <div class="sp-item">${o.orderType === 'dine-in' ? 'Table ' + esc(String(o.table)) : esc(o.customerName || o.orderType || '')}</div>
-        <div class="peek-meta">Opened ${fmtTime(o.createdAt)} · ${esc(o.staffName || '')}</div>
+        <div class="sp-item">${o ? (o.orderType === 'dine-in' ? 'Table ' + esc(String(o.table)) : esc(o.customerName || o.orderType || '')) : (tbl ? 'Table ' + esc(String(tbl.label)) : '')}</div>
+        <div class="peek-meta">${o ? `Opened ${fmtTime(o.createdAt)} · ${esc(o.staffName || '')}` : 'Nothing sent yet'}</div>
         <div class="peek-list">
           ${events.map(e => e.html).join('')}
         </div>
@@ -18536,8 +18553,10 @@ function renderTopbar() {
         // slot shows the floor map and walks back to the till. One button,
         // two directions, always the icon of where it takes you.
         if (!isManager) return '';
+        // The map goes to the MAP (owner, Sep '26: "the icon should only work
+        // if it takes you to the floor plan, not the order hub").
         return state.view === 'admin'
-            ? `<span class="staff-badge"><button data-act="view-order" aria-label="Back to the till">${SYS_MAP_SVG}</button></span>`
+            ? `<span class="staff-badge"><button data-act="view-floor" aria-label="Back to the floor">${SYS_MAP_SVG}</button></span>`
             : `<span class="staff-badge"><button data-act="view-admin" aria-label="Admin">${SYS_ADMIN_SVG}</button></span>`;
       })()}
       ${(() => {
@@ -29778,7 +29797,7 @@ function renderLineEditMiddle() {
       ${(() => { if (!item) return ''; const only = matchedAllergenBases(item, line.seat != null ? line.seat : 'all'); return only.length ? allergenChipRow(item, only) : ''; })()}
       <label>Quantity</label>
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:${line.qty > 1 ? '10px' : '16px'};">
-        <button style="${qtyBtn}" data-act="edit-line-qty" data-dir="-1">−</button>
+        <button style="${qtyBtn}${line.qty <= 1 ? 'opacity:.4;' : ''}" data-act="edit-line-qty" data-dir="-1" ${line.qty <= 1 ? 'disabled' : ''}>−</button>
         <span style="font-family:'IBM Plex Mono',monospace;font-size:var(--fs-xl);font-weight:700;min-width:30px;text-align:center;">${line.qty}</span>
         <button style="${qtyBtn}" data-act="edit-line-qty" data-dir="1">＋</button>
         <span class="tl-price" style="margin-left:auto;font-size:var(--fs-lg);">${money(line.price * line.qty)}</span>
@@ -30335,7 +30354,12 @@ function startFloorDrag(e, tableId) {
   // dragging the table (markers are touch-action:pan-y). Mouse drags commit
   // immediately, as before.
   const isTouch = e.type === 'touchstart' && e.touches && e.touches[0];
-  floorDrag.pending = !!isTouch;
+  // Tap-then-drag is the PHONE's rule, where the map pans and a finger on a
+  // table could mean either. On tablet and desk the room fits its box and
+  // nothing pans, so a finger on a table moves it at once (owner, Sep '26:
+  // "dragging tables in floor layout on tablet is dogshit" — it needed a
+  // tap first, and the hold after that tap toggled multi-select).
+  floorDrag.pending = !!isTouch && window.innerWidth <= 768;
   floorDrag.startClientX = isTouch ? e.touches[0].clientX : e.clientX;
   floorDrag.startClientY = isTouch ? e.touches[0].clientY : e.clientY;
   // HOLD a marker = toggle it into the multi-selection (touch ctrl+click).
@@ -36487,6 +36511,13 @@ function handleActClick(el, e) {
         const cur = state[key];
         if (cur && cur.id) openConfirm({ message: msg, confirmLabel: 'Delete', danger: true }, () => { state[key] = null; state.adminError = ''; fn(cur.id); });
       }
+      else if (act === 'view-floor') {
+        // Admin's map key: back to the till AND onto the floor, one tap.
+        if (state.currentStaff && state.currentStaff.role === 'chef') return;
+        if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
+        state.view = 'order'; setOrderType('dine-in');
+        if (!state.showTablePicker) openTablePicker(); else render();
+      }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
         // Already on the order screen with the map open: the Order chip is
@@ -37136,8 +37167,8 @@ function handleActClick(el, e) {
           }
         }
         else if (target === 'show-order-history') {
-          if (!state.openOrderId) { state.toast = 'Nothing sent yet.'; render(); armToastTimer(2200); }
-          else { state.orderHistoryPop = true; refreshOrders().then(() => render()).catch(() => {}); render(); }
+          if (!state.openOrderId && !state.cart.length) { state.toast = 'Nothing on the order yet.'; render(); armToastTimer(2200); }
+          else { state.orderHistoryPop = true; if (state.openOrderId) refreshOrders().then(() => render()).catch(() => {}); render(); }
         }
         else if (target === 'open-move-items') {
           const o = state.orders.find(x => x.id === state.openOrderId);

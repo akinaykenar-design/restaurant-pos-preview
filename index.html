@@ -6305,7 +6305,10 @@ function writeData(data) {
   _cacheOrdersDirMtime = statMs(ORDERS_DIR);
 }
 
-module.exports = { readData, writeData, STAFF_ROLE_OPTIONS };
+// What the till's poll asks every 15s instead of fetching everything: the
+// store file's and the orders folder's last-write times. Any write moves one.
+function dataVersion() { return { store: statMs(DB_FILE), orders: statMs(ORDERS_DIR) }; }
+module.exports = { readData, writeData, STAFF_ROLE_OPTIONS, dataVersion };
 
   })(module, module.exports, window.__POS__.requireShim, '', window.__POS__.process);
   window.__POS__.modules['./db'] = module;
@@ -6324,7 +6327,7 @@ const express = require('express');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { readData, writeData, STAFF_ROLE_OPTIONS } = require('./db');
+const { readData, writeData, STAFF_ROLE_OPTIONS, dataVersion } = require('./db');
 const printing = require('./printing');
 const terminal = require('./terminal');
 const doshii = require('./doshii');
@@ -9677,6 +9680,9 @@ function csvEscape(value) {
 const tableLocks = new Map(); // tableId -> { staff, device, ts }
 const TABLE_LOCK_TTL = 75 * 1000;
 const lockFresh = l => l && (Date.now() - l.ts) < TABLE_LOCK_TTL;
+// The poll's question: "has anything changed?" — two timestamps, no payload.
+app.get('/api/version', (req, res) => { res.json(dataVersion()); });
+
 app.get('/api/table-locks', (req, res) => {
   const out = {};
   for (const [id, l] of tableLocks) if (lockFresh(l)) out[id] = { staff: l.staff, device: l.device };
@@ -22385,7 +22391,7 @@ async function pollPrintAlerts() {
     if (alerts.length) {
       printAlertLastId = alerts[alerts.length - 1].id;
       state.toast = alerts[alerts.length - 1].message;
-      render();
+      renderWhenStill();
       armToastTimer(6000);
     }
   } catch (e) { /* server unreachable — the offline dot already shows that */ }
@@ -27005,7 +27011,7 @@ function fitScreenMockup() {
 let _mkFitScale = 0;
 // Phone: pinch on the Design preview zooms it (it renders small there); the
 // zoomed preview pans inside its half. One finger still taps and drags.
-let _mkZoom = 1;
+let _mkZoom = 1, _mkPinchMove = null; // the move handler is bound on the mock card (bindEvents), never the document
 (function () {
   let d0 = 0, z0 = 1, wrap0 = null, mid0 = null;
   const dist = (e) => Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
@@ -27023,7 +27029,7 @@ let _mkZoom = 1;
       mid0 = { x: wrap0.scrollLeft + (m.x - r.left), y: wrap0.scrollTop + (m.y - r.top), ox: m.x - r.left, oy: m.y - r.top };
     }
   }, { passive: true });
-  document.addEventListener('touchmove', (e) => {
+  _mkPinchMove = (e) => {
     if (!d0 || e.touches.length !== 2) return;
     e.preventDefault(); // the page itself must never zoom with the preview
     const before = _mkZoom;
@@ -27035,7 +27041,7 @@ let _mkZoom = 1;
       wrap0.scrollLeft = mid0.x - mid0.ox;
       wrap0.scrollTop = mid0.y - mid0.oy;
     }
-  }, { passive: false });
+  };
   document.addEventListener('touchend', (e) => { if (e.touches.length < 2) { d0 = 0; wrap0 = null; mid0 = null; } }, { passive: true });
 })();
 
@@ -31492,9 +31498,11 @@ document.addEventListener('gesturestart', (e) => e.preventDefault());
 // sets _tpPinch on touchstart and handles its own move.
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 document.addEventListener('gestureend', (e) => e.preventDefault());
-document.addEventListener('touchmove', (e) => {
-  if (e.touches.length > 1 && !_tpPinch && e.cancelable) e.preventDefault();
-}, { passive: false });
+// (A page-wide non-passive touchmove that refused two-finger zoom lived here
+// until Sep '26. html/body already carry touch-action:pan-x pan-y, which is
+// what actually stops the page zooming — and a non-passive touch listener on
+// the DOCUMENT makes the browser wait for the main thread on every finger
+// move, app-wide, so a busy moment became a scroll stutter. Measured, gone.)
 document.addEventListener('dblclick', (e) => e.preventDefault());
 document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
 // Phone: swipe right-to-left over the menu to pull the docket in, left-to-right
@@ -31746,7 +31754,10 @@ document.addEventListener('touchstart', (e) => {
   _tpWant = null;
   _tpPinchGuard = Date.now() + 600;
 }, { passive: true });
-document.addEventListener('touchmove', (e) => {
+// Bound on the FLOOR WRAP itself (bindEvents), not the document: a
+// non-passive touchmove on the document made every scroll in the app wait
+// for the main thread (owner, Sep '26: "jitters and lags").
+function _tpPinchMove(e) {
   if (!_tpPinch || e.touches.length !== 2) return;
   e.preventDefault(); // the browser must neither scroll nor page-zoom mid-pinch
   const [a, b] = e.touches;
@@ -31756,7 +31767,7 @@ document.addEventListener('touchmove', (e) => {
   _tpWant = { z, midX: (a.clientX + b.clientX) / 2 - r.left, midY: (a.clientY + b.clientY) / 2 - r.top };
   if (!_tpFrame) _tpFrame = requestAnimationFrame(tpApply);
   _tpPinchGuard = Date.now() + 600;
-}, { passive: false });
+}
 document.addEventListener('touchend', () => {
   if (!_tpPinch) return;
   // The fingers are off: publish the zoom everywhere (the CSS margins and any
@@ -35454,6 +35465,11 @@ function wireListSelect() {
 }
 
 function bindEvents() {
+  // The two pinches keep their non-passive touchmove ON THEIR OWN BOXES — the
+  // floor wrap and the designer's mock card — so nothing on the document
+  // makes the browser wait for JS on every finger move (owner, Sep '26).
+  document.querySelectorAll('.tp-canvas-wrap').forEach(el => el.addEventListener('touchmove', _tpPinchMove, { passive: false }));
+  if (_mkPinchMove) document.querySelectorAll('.mock-card').forEach(el => el.addEventListener('touchmove', _mkPinchMove, { passive: false }));
   const app = document.getElementById('app');
   app.querySelectorAll('[data-act]').forEach(el => {
     el._actBound = true;
@@ -38624,15 +38640,42 @@ document.addEventListener('click', (e) => {
 });
 
 // Refresh orders/summary quietly every 15s so other terminals' activity shows up
+// §§ Background renders wait for the hand
+// A render is a whole-screen rebuild. Landing one under a finger or into a
+// fling stopped the fling dead and, on a zoomed floor mid-pan, threw the map
+// ~2000px (measured, Sep '26: "jitters and lags"). Anything the USER does
+// still renders at once; the background — polls, alerts — waits until no
+// finger is down and nothing has scrolled for a beat.
+let _fingersDown = 0, _scrollUntil = 0, _bgRenderQueued = false, _bgFlushTimer = 0;
+function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil; }
+function _flushBgRender() { if (!_bgRenderQueued || gestureLive()) return; _bgRenderQueued = false; render(); }
+function renderWhenStill() { if (gestureLive()) { _bgRenderQueued = true; return; } render(); }
+document.addEventListener('touchstart', (e) => { _fingersDown = e.touches.length; }, { passive: true, capture: true });
+document.addEventListener('touchend', (e) => { _fingersDown = e.touches.length; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
+document.addEventListener('touchcancel', (e) => { _fingersDown = e.touches.length; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
+document.addEventListener('scroll', () => { _scrollUntil = Date.now() + 240; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
+
+// THE POLL ASKS BEFORE IT FETCHES. It used to pull every order (1.3MB here)
+// and the whole menu every 15s and rebuild the screen whether or not anything
+// had changed — a hitch every 15s, all shift. Now one tiny call asks the
+// server's data version; the big fetches and the rebuild only follow a
+// change. A slow heartbeat (60s) still repaints the clocks and stale badges.
+// A server without /api/version (the preview) falls back to the old path.
+let _dataVersion = null, _lastBgRender = 0;
 setInterval(() => {
   if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal && !state.printerStationModal) {
     // Table-lock heartbeat: keep our claim on the current table alive, and
     // pick up other tills' locks for the picker.
     if (tableLocksOn() && state.table != null && !tableLockedBy(state.table)) claimTableLock(state.table);
     refreshTableLocks();
-    refreshOrders().then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary(); return api('/api/menu'); })
-      .then(menu => { state.menu = menu; if (!typingInField()) render(); })
-      .catch(() => { if (!typingInField()) render(); });
+    api('/api/version').catch(() => null).then(v => {
+      const same = v && _dataVersion && v.store === _dataVersion.store && v.orders === _dataVersion.orders;
+      if (v) _dataVersion = v;
+      if (same) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
+      return refreshOrders().then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary(); return api('/api/menu'); })
+        .then(menu => { state.menu = menu; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
+        .catch(() => { if (!typingInField()) renderWhenStill(); });
+    });
   }
 }, 15000);
 

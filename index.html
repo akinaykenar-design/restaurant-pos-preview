@@ -9838,6 +9838,10 @@ app.post('/api/import', (req, res) => {
   const current = readData();
   if (!Array.isArray(incoming.staff) || !incoming.staff.length) incoming.staff = current.staff;
   if (!Array.isArray(incoming.combos)) incoming.combos = current.combos || [];
+  // The counters and ledgers a file may lack keep today's values — a missing
+  // ticket counter or audit log must never reset the venue's numbering.
+  if (!Number.isInteger(incoming.ticketCounter) || incoming.ticketCounter < 1) incoming.ticketCounter = current.ticketCounter;
+  for (const k of ['auditLog', 'customers', 'giftCards', 'vouchers', 'registerCloses', 'shifts', 'inventoryItems']) if (!Array.isArray(incoming[k])) incoming[k] = current[k] || [];
   writeData(incoming);
   res.json({ ok: true });
 });
@@ -10207,7 +10211,7 @@ app.post('/api/orders', (req, res) => {
     return res.json(order);
   }
 
-  const { discountRecord, discountAmount } = computeDiscount(subtotal, discount);
+  const { discountRecord, discountAmount } = computeDiscount(subtotal, discount, items, data);
   const taxableSubtotal = subtotal - discountAmount;
   const taxCalc = computeTax(data, taxableSubtotal - voucherSaleTotal(items));
   const tax = taxCalc.tax;
@@ -10263,7 +10267,7 @@ app.post('/api/orders', (req, res) => {
     logAudit(data, order.staffName, `Applied ${discountRecord.type === 'percent' ? discountRecord.value + '%' : '$' + discountRecord.value.toFixed(2)} ${label} ($${Math.abs(discountAmount).toFixed(2)}) to Ticket #${order.id}${discountRecord.reason ? ' — ' + discountRecord.reason : ''}`);
   }
   issueSoldVouchers(data, order, order.staffName);
-  creditLoyalty(data, customerId, grandTotal);
+  creditLoyalty(data, customerId, order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(items));
   writeData(data);
   printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), 1);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
@@ -10354,7 +10358,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { match, action, newPrice, newSeat, newCourse, staffName, reason } = req.body || {};
+  const { match, action, newPrice, newSeat, newCourse, newNote, staffName, reason } = req.body || {};
   if (!match || !match.name) return res.status(400).json({ error: 'Missing item to modify' });
   const norm = v => (v === null || v === undefined || v === '') ? null : v;
   const matches = (i) =>
@@ -10390,13 +10394,15 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const seat = (newSeat === undefined) ? undefined : (newSeat === 'all' || newSeat === null ? null : parseInt(newSeat, 10));
     const course = (newCourse === undefined) ? undefined : parseInt(newCourse, 10);
     let n = 0;
-    const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined) i.course = course; };
+    const note = (newNote === undefined) ? undefined : String(newNote || '').trim().slice(0, 120);
+    const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined) i.course = course; if (note !== undefined) i.note = note; };
     (order.items || []).forEach(i => { if (matches(i)) { apply(i); n++; } });
     (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (matches(i)) apply(i); }));
     if (n === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
     const bits = [];
     if (seat !== undefined) bits.push('seat ' + (seat === null ? 'All' : seat));
     if (course !== undefined) bits.push('course ' + course);
+    if (note !== undefined) bits.push(note ? `note "${note}"` : 'no note');
     logAudit(data, staff, `Moved ${match.name} to ${bits.join(', ')} on Ticket #${order.id}`);
   } else if (action === 'reprice') {
     const p = parseFloat(newPrice);
@@ -10471,7 +10477,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId, cardType } = req.body;
 
   const subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
-  const { discountRecord, discountAmount } = computeDiscount(subtotal, discount);
+  const { discountRecord, discountAmount } = computeDiscount(subtotal, discount, order.items, data);
   const taxableSubtotal = subtotal - discountAmount;
   const taxCalc = computeTax(data, taxableSubtotal - voucherSaleTotal(order.items));
   const tax = taxCalc.tax;
@@ -10530,7 +10536,9 @@ app.post('/api/orders/:id/close', (req, res) => {
   }
   logAudit(data, order.closedBy, `Closed tab & charged Ticket #${order.id} (${order.grandTotal.toFixed(2)})`);
   issueSoldVouchers(data, order, order.closedBy);
-  creditLoyalty(data, order.customerId, grandTotal);
+  // Points on what was BOUGHT: not the tip, not a gift card's face value (the
+  // points came when it was bought, not again when it is spent) — Sep '26.
+  creditLoyalty(data, order.customerId, order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(order.items));
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
   res.json(order);
@@ -10844,7 +10852,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   // paid at 11pm, after the 10pm close, was on no Z at all — Sep '26).
   const orders = data.orders.filter(o => periodAt(o) > fromTs && periodAt(o) <= toTs && !o.practice);
   const paid = orders.filter(o => o.status === 'paid');
-  const voidCount = orders.filter(o => o.status === 'void').length;
+  const voidCount = orders.filter(o => o.status === 'void' && (o.items || []).length && !/^Combined into/.test(o.voidReason || '') && !/^Nothing ordered/.test(o.voidReason || '')).length;
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
@@ -14938,6 +14946,20 @@ function finishLogin(staff, warm) {
   // without a signed-in person, so the shift is fetched here on top.
   (warm ? warm.then(() => loadShift()) : loadInitial()).then(() => {
     if (staff.role === 'chef') { loadKdsData(); done(); return; }
+    // A table handed back after a reload comes back WITH its sitting —
+    // covers, allergies, notes, VIP, the ticket and its called-away courses —
+    // the way a tap on the floor reads them (Sep '26).
+    if (state.table != null && !state.showTablePicker) {
+      const t = findTableById(state.table);
+      if (t) {
+        const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || '';
+        if (oo) state.openOrderId = oo.id;
+        state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
+        claimTableLock(state.table, false, true);
+        render();
+      }
+    }
     done();
   }).catch(() => { done(); });
 }
@@ -16618,21 +16640,6 @@ function clearFiredCourse(n) {
 }
 // One-tap call-away straight from the floor map: stamp the order and reset its
 // table-map timer. Optimistically updates locally, then confirms with the server.
-async function callAwayTable(orderId) {
-  const order = (state.orders || []).find(o => String(o.id) === String(orderId));
-  if (order) order.calledAwayAt = Date.now();
-  const label = order && order.table ? 'Table ' + order.table : 'Table';
-  state.toast = `${label} called away`;
-  render();
-  try {
-    await api('/api/orders/' + orderId + '/call-away', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    await refreshOrders();
-    render();
-  } catch (e) {
-    state.toast = 'Could not call away — try again';
-    render();
-  }
-}
 
 async function markBillPrinted(orderId) {
   const order = (state.orders || []).find(o => String(o.id) === String(orderId));
@@ -16758,7 +16765,6 @@ function escapeMiddlePane() {
       || state.coversPad || state.showCheckout || state.billSplit || state.callAway
       || state.quickNotePad || state.notesPanel || state.itemOptions || state.priceEntry
       || state.editLine || state.editSent || state.customerPane || state.moveItems) ? null
-    : state.tablesCallAway ? () => { state.tablesCallAway = false; render(); }
     : state.showTablePicker ? (state.table ? () => { state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; state.pickFlashId = null; state.moveItemsPicking = false; render(); } : null)
     : state.accountMenuOpen ? () => { state.accountMenuOpen = false; render(); }
     : null;
@@ -16912,12 +16918,6 @@ async function saveTableVip(tableId, vipType) {
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vipType }) });
   } catch (e) {}
-}
-function cycleSeat(idx) {
-  const line = state.cart[idx];
-  const max = state.covers || 1;
-  line.seat = line.seat ? (line.seat % max) + 1 : 1;
-  render();
 }
 function updateLineNote(idx, value) {
   const line = state.cart[idx];
@@ -18935,7 +18935,7 @@ function renderCoachMark() {
 // shared by the Close act and the pager, so the two can never disagree.
 function resetFloorPicker() {
   state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
-  state.pickFlashId = null; state.tablesCallAway = false; state.moveItemsPicking = false;
+  state.pickFlashId = null; state.moveItemsPicking = false;
 }
 function barPagerOn() {
   return payPhone() && state.view === 'order' && state.orderType === 'dine-in' && !!state.table
@@ -19497,12 +19497,13 @@ async function doMoveSent(match, patch) {
   if (!match || !o) return;
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'move', newSeat: patch.seat, newCourse: patch.course,
+      body: JSON.stringify({ match, action: 'move', newSeat: patch.seat, newCourse: patch.course, newNote: patch.note,
                              staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     // The signature the editor is holding has just changed - follow it, or the
     // next tap edits a line that no longer exists.
     const next = { ...match };
+    if (patch.note !== undefined) next.note = patch.note;
     if (patch.seat !== undefined) next.seat = (patch.seat === 'all' ? null : patch.seat);
     if (patch.course !== undefined) {
       next.course = patch.course;
@@ -19824,7 +19825,7 @@ function renderEditSentMiddle() {
           <input id="sent-price-input" type="number" min="0" step="0.01" value="${agg.price}" class="le-price">
         </div>` : ''}
       <label>Note</label>
-      <input id="sent-note-input" type="text" value="${esc(agg.note || '')}" class="le-note" data-act="noop">
+      <input id="sent-note-input" type="text" value="${esc(agg.note || '')}" class="le-note">
       <div class="pane-actions">
         ${isManager ? `<button class="icon-action discard bin-left" data-act="remove-sent">${ACT_CROSS_SVG}<span class="ia-label">Remove</span></button>` : ''}
         <button class="icon-action send" data-act="close-edit-sent">${ACT_TICK_SVG}<span class="ia-label">Done</span></button>
@@ -20367,7 +20368,7 @@ function renderTicketPanel() {
         <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder || !state.online ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
         <button class="icon-action pay" data-act="checkout" ${(!openOrder && !state.cart.length) || !state.online ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" data-act="clear" ${state.cart.length === 0 ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Discard</span></button>
-        <button class="icon-action send${state.sendFailed && !state.sending ? (state.online ? ' send-failed' : ' will-send') : ''}" data-act="send-to-kitchen" ${state.sending || !cartSendable() ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : state.sendFailed ? SYS_WARN_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : state.sendFailed ? (state.online ? 'Not sent' : 'Will send') : 'Send'}</span></button>
+        <button class="icon-action send${state.sendFailed && !state.sending ? (state.online ? ' send-failed' : ' will-send') : ''}" data-act="send-to-kitchen" ${state.sending ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : state.sendFailed ? SYS_WARN_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : state.sendFailed ? (state.online ? 'Not sent' : 'Will send') : 'Send'}</span></button>
       </div>`}
     </div>
     ${state.settings.ticketFooter ? `<div class="ticket-footer-msg">${esc(state.settings.ticketFooter)}</div>` : ''}
@@ -22101,8 +22102,6 @@ async function searchCustomers(q) {
   try { state.customerSearchResults = await api(`/api/customers/search?q=${encodeURIComponent(q)}`); } catch (e) { state.customerSearchResults = []; }
   render();
 }
-function attachCustomer(id) { state.attachedCustomerId = id; state.customerSearch = ''; state.customerSearchResults = []; render(); }
-function detachCustomer() { state.attachedCustomerId = null; render(); }
 async function redeemLoyaltyPoints() {
   const customer = state.customers.find(c => c.id === state.attachedCustomerId);
   if (!customer) return;
@@ -29570,7 +29569,7 @@ function openTablePicker() {
   // and landed straight back on the tiles instead of the floor (owner,
   // Aug '26). One place, every caller.
   state.accountMenuOpen = false;
-  state.tablesCallAway = false;
+ 
   state.transferMode = false; state.transferFrom = null; // open in Select mode; the picker's mode bar switches
   state.callAway = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
@@ -29602,16 +29601,6 @@ function tpCentreOnOpen() {
   if (w.scrollLeft !== 0 || w.scrollTop !== 0) return;
   w.scrollLeft = Math.max(0, (w.scrollWidth - w.clientWidth) / 2);
   w.scrollTop = Math.max(0, (w.scrollHeight - w.clientHeight) / 2);
-}
-function openTransferPicker() { state.transferMode = true; openTablePicker(); }
-// Leaving a table that was set up (covers/notes) but never ordered: offer to
-// close it so the floor doesn't collect ghost sittings. BOTH answers proceed
-// with the switch/logout — "Close table" additionally clears the setup.
-// A closed table is a CLEAN table on the server too — the next party must
-// not inherit the last one's covers, allergies, notes or VIP (Sep '26).
-function clearTableSitting(tableId) {
-  if (tableId == null) return;
-  saveTableCovers(tableId, 0); saveTableAllergies(tableId, []); saveTableNotes(tableId, []); saveTableVip(tableId, '');
 }
 function offerCloseEmptyTable(next) {
   const t = findTableById(state.table);
@@ -36543,6 +36532,9 @@ function bindEvents() {
   });
   const sentPriceInput = document.getElementById('sent-price-input');
   if (sentPriceInput) sentPriceInput.addEventListener('change', () => repriceSentItem());
+  // The sent line's note saves the same way (it was a dead field until Sep '26).
+  const sentNoteInput = document.getElementById('sent-note-input');
+  if (sentNoteInput) sentNoteInput.addEventListener('change', (e) => { if (state.editSent) doMoveSent(state.editSent, { note: e.target.value.trim() }); });
   document.querySelectorAll('.allergy-subtype-input').forEach(el => {
     el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
   });
@@ -37148,7 +37140,7 @@ function handleActClick(el, e) {
         // table-less dine-in still has to pick.
         if (state.view === 'order' && state.showTablePicker && (state.table || state.transferMode || state.moveItemsPicking)) {
           state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
-          state.pickFlashId = null; state.tablesCallAway = false; state.moveItemsPicking = false; render(); return;
+          state.pickFlashId = null; state.moveItemsPicking = false; render(); return;
         }
         state.view = 'order'; if (state.orderType !== 'dine-in') setOrderType('dine-in'); render(); }
       else if (act === 'toggle-mobile-cart') {
@@ -37157,7 +37149,7 @@ function handleActClick(el, e) {
       else if (act === 'cat') {
         const switchCat = () => {
           state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
-          state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; state.pickFlashId = null; state.tablesCallAway = false;
+          state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; state.pickFlashId = null;
           state.notesPanel = null; state.vipModal = null; state.allergyModal = null; state.customNoteDraft = null;
           state.comboBuilder = null; // tapping any category just leaves the set-menu builder
           state.callAway = false; state.quickNotePad = false; state.coversPad = null; // same for call-away / quick-note / covers panes
@@ -37180,7 +37172,6 @@ function handleActClick(el, e) {
         } else addToCart(item);
       }
       else if (act === 'qty-inc') { changeQty(parseInt(el.dataset.idx), 1); }
-      else if (act === 'qty-dec') { changeQty(parseInt(el.dataset.idx), -1); }
       else if (act === 'remove') { removeLine(parseInt(el.dataset.idx)); }
       else if (act === 'edit-line') { openLineEdit(parseInt(el.dataset.idx)); }
       else if (act === 'close-line-edit') { state.editLine = null; render(); }
@@ -37265,7 +37256,6 @@ function handleActClick(el, e) {
         state._moFlick = Date.now();
         markBillPrinted(el.dataset.order);
       }
-      else if (act === 'retry-send') { sendToKitchen(); }
       else if (act === 'send-to-kitchen') {
         if (_sendHoldFired) { _sendHoldFired = false; return; }
         state._logoffOnce = false; // plain tap never inherits an old hold's intent
@@ -37752,12 +37742,6 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'fire-course') { stageCourse(parseInt(el.dataset.val)); }
-      else if (act === 'call-away-table') { callAwayTable(el.dataset.order); }
-      else if (act === 'toggle-tables-callaway') {
-        state.tablesCallAway = !state.tablesCallAway;
-        if (state.tablesCallAway) { state.toast = 'Tap a table to call it away.'; armToastTimer(2600); }
-        render();
-      }
       else if (act === 'open-table-picker') { openTablePicker(); }
       else if (act === 'toggle-account-menu') { state.accountMenuOpen = !state.accountMenuOpen; render(); }
       else if (act === 'acct-go') {
@@ -37898,25 +37882,6 @@ function handleActClick(el, e) {
           const t = findTableById(el.dataset.id);
           const r = upcomingBookingFor(t.id);
           openConfirm({ message: `Seat ${esc(r.name)} · ${r.partySize} at table ${esc(t.label)}?`, confirmLabel: 'Seat', danger: false }, () => seatBookingFromFloor(t.id));
-        }
-        else if (state.tablesCallAway) {
-          // Call-away mode: tapping a table opens THE call-away pane — the
-          // exact same one as the docket's flame button — for that table.
-          // Close brings you straight back to the picker.
-          const t = findTableById(el.dataset.id);
-          const cs = t ? tableCourseStatus(t.label) : null;
-          if (!cs) { state.toast = 'Nothing to call away on that table.'; render(); armToastTimer(2200); }
-          else {
-            state.tablesCallAway = false;
-            pickTable(t.id);
-            if (String(state.table) === String(t.id)) {
-              state.coversPad = null; state.showTablePicker = false;
-              state.callAway = true; state._callAwayReturn = true;
-              render();
-            } else {
-              state.tablesCallAway = true; // blocked (e.g. locked) — stay armed
-            }
-          }
         }
         else {
           // Show the pick BEFORE moving on: the tapped chip flashes the
@@ -38917,7 +38882,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'covers-inc') { incCovers(); }
       else if (act === 'covers-dec') { decCovers(); }
-      else if (act === 'cycle-seat') { cycleSeat(parseInt(el.dataset.idx)); }
       else if (act === 'add-floorplan') { openAddFloorPlan(); }
       else if (act === 'edit-floorplan') { openEditFloorPlan(el.dataset.id); }
       else if (act === 'delete-floorplan') {
@@ -38927,7 +38891,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'close-floorplan-modal') { closeFloorPlanModal(); }
       else if (act === 'save-floorplan-modal') { saveFloorPlanModal(); }
-      else if (act === 'open-discount') { openDiscountModal(); }
       else if (act === 'remove-discount') { removeDiscount(); }
       else if (act === 'close-discount-modal') { closeDiscountModal(); }
       else if (act === 'discount-type') { state.discountModal.type = el.dataset.val; render(); }
@@ -38951,7 +38914,6 @@ function handleActClick(el, e) {
       else if (act === 'toggle-callaway') { toggleCallAway(); }
       else if (act === 'close-callaway') { closeCallAwayPane(); }
       else if (act === 'pane-escape') { escapeMiddlePane(); } // popup scrim tap — keeps the unsaved-input guard
-      else if (act === 'clear-fired-course') { clearFiredCourse(parseInt(el.dataset.val)); }
       else if (act === 'practice-exit') { exitPracticeMode(); }
       else if (act === 'set-staff-trainee') { saveStaffTrainee(el.dataset.id, el.dataset.val === 'true'); }
       else if (act === 'coach-ok') { coachDismiss(el.dataset.val); }
@@ -39059,7 +39021,6 @@ function handleActClick(el, e) {
           render();
         }
       }
-      else if (act === 'open-transfer-picker') { openTransferPicker(); }
       else if (act === 'save-vip-modal') { saveVipModal(); }
       else if (act === 'pick-vip-preset') {
         const cur = (state.vipModal.type || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -39145,8 +39106,6 @@ function handleActClick(el, e) {
       else if (act === 'delete-customer') { openConfirm({ message: 'Delete this customer?', confirmLabel: 'Delete', danger: true }, () => deleteCustomerAction(el.dataset.id)); }
       else if (act === 'close-customer-modal') { closeCustomerModal(); }
       else if (act === 'save-customer-modal') { saveCustomerModal(); }
-      else if (act === 'attach-customer') { attachCustomer(el.dataset.id); }
-      else if (act === 'detach-customer') { detachCustomer(); }
       else if (act === 'redeem-loyalty-points') { redeemLoyaltyPoints(); }
       else if (act === 'submit-expense') { submitExpense(); }
       else if (act === 'open-adjust-stock') { openAdjustStock(el.dataset.id); }

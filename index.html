@@ -4404,6 +4404,13 @@ select.ie-field{font-weight:700;}
    the strip. It stays pinned to the end — that is what it means — and the
    space before it is a STRETCH, not a gap: the deck's own bar does exactly
    the same with its spacer. */
+/* Every native select wears the house dropdown (see §§ Dropdowns): the select
+   itself is hidden, the chip beside it is the control. */
+select.dd-native{display:none !important;}
+.dd-chip{justify-content:flex-start;text-align:left;font-size:var(--fs-md);font-weight:600;background:var(--surface);border:1px solid var(--steel-200);color:var(--text-primary);max-width:100%;overflow:hidden;text-overflow:ellipsis;}
+.dd-chip.active{background:var(--orange-dim);color:var(--orange);border-color:var(--orange);}
+.dd-chip:disabled{opacity:var(--dim-ghost);cursor:default;}
+.dd-menu{max-height:60vh;overflow-y:auto;}
 .fp-dd{position:relative;}
 .fp-dd-end{margin-left:auto;}
 .fp-dd-scrim{position:fixed;inset:0;z-index:calc(var(--z-menu) - 1);}
@@ -18765,6 +18772,84 @@ function barPagerOn() {
   return payPhone() && state.view === 'order' && state.orderType === 'dine-in' && !!state.table
     && !(state.currentStaff && state.currentStaff.role === 'chef');
 }
+// The table Admin's key returns to: the one the till was ordering on when it
+// left, if it is still this till's. Null means "back to the floor".
+function tillReturnTable() {
+  const r = state._tillReturn;
+  if (!r || !r.onOrder || r.table == null || r.table !== state.table) return null;
+  if (tableLockedBy(state.table)) return null;
+  return findTableById(state.table) || null;
+}
+// §§ Dropdowns: one menu for every select
+// EVERY native <select> wears the house dropdown (owner, Sep '26: "convert
+// them to our dropdown menu graphic instead of the Windows dropdown"). The
+// select stays in the page, hidden, and keeps its id, classes, inline
+// handler and value — so every save that reads it still works. A chip shows
+// the current option; tapping it opens the .fp-dd menu (the floor-view
+// picker's, the one reference dropdown); picking sets the select's value and
+// fires its change. A MutationObserver dresses selects that partial renders
+// add later, so there is one door and no per-select wiring.
+let _ddOpen = null;
+function ddClose() {
+  if (!_ddOpen) return;
+  _ddOpen.menu.remove(); _ddOpen.scrim.remove(); _ddOpen.chip.classList.remove('active');
+  _ddOpen = null;
+}
+function ddLabelOf(sel) {
+  const o = sel.options[sel.selectedIndex];
+  return o ? (o.textContent.trim() || '\u00a0') : '\u00a0';
+}
+function ddOpen(sel, chip) {
+  ddClose();
+  const scrim = document.createElement('div'); scrim.className = 'fp-dd-scrim';
+  const menu = document.createElement('div'); menu.className = 'fp-dd-menu dd-menu';
+  [...sel.options].forEach(o => {
+    if (o.disabled && !o.value) return;
+    const b = document.createElement('button'); b.type = 'button';
+    b.className = 'fp-dd-item' + (o.selected ? ' on' : '');
+    b.textContent = o.textContent.trim() || '\u00a0';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      sel.value = o.value;
+      chip.textContent = ddLabelOf(sel);
+      ddClose();
+      sel.dispatchEvent(new Event('input', { bubbles: true }));
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    menu.appendChild(b);
+  });
+  scrim.addEventListener('click', (e) => { e.stopPropagation(); ddClose(); });
+  document.body.appendChild(scrim); document.body.appendChild(menu);
+  const r = chip.getBoundingClientRect();
+  menu.style.minWidth = Math.max(150, Math.round(r.width)) + 'px';
+  const mw = menu.offsetWidth, mh = menu.offsetHeight;
+  let left = Math.round(r.left); if (left + mw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - mw);
+  let top = Math.round(r.bottom + 4); if (top + mh > window.innerHeight - 8) top = Math.max(8, Math.round(r.top) - 4 - mh);
+  menu.style.left = left + 'px'; menu.style.top = top + 'px';
+  chip.classList.add('active');
+  _ddOpen = { sel, chip, menu, scrim };
+}
+function dressSelect(sel) {
+  if (sel.dataset.dd || sel.multiple || sel.closest('.mk-wrap')) return;
+  sel.dataset.dd = '1';
+  const chip = document.createElement('button');
+  chip.type = 'button'; chip.className = 'fp-chip dd-chip';
+  chip.textContent = ddLabelOf(sel);
+  if (sel.disabled) chip.disabled = true;
+  // The chip takes the select's place in the layout: its width and margins.
+  ['width', 'minWidth', 'maxWidth', 'flex', 'margin', 'marginTop', 'marginLeft', 'marginRight', 'marginBottom', 'display'].forEach(k => { if (sel.style[k]) chip.style[k] = sel.style[k]; });
+  if (sel.getAttribute('aria-label')) chip.setAttribute('aria-label', sel.getAttribute('aria-label'));
+  chip.addEventListener('click', (e) => { e.stopPropagation(); if (_ddOpen && _ddOpen.sel === sel) ddClose(); else ddOpen(sel, chip); });
+  sel.classList.add('dd-native');
+  sel.insertAdjacentElement('afterend', chip);
+  // A value set by code (a save that re-reads the store) still shows.
+  sel.addEventListener('change', () => { chip.textContent = ddLabelOf(sel); });
+}
+function dressSelects(root) {
+  (root || document).querySelectorAll('select:not([data-dd])').forEach(dressSelect);
+}
+new MutationObserver(() => { if (_ddOpen && !document.body.contains(_ddOpen.sel)) ddClose(); dressSelects(); }).observe(document.documentElement, { childList: true, subtree: true });
+
 function renderBarPager() {
   // JUST DOTS (owner, Sep '26, after trying glyphs): three page dots like
   // the phone's own home screen — floor · menu · docket — the lit one in
@@ -18814,8 +18899,11 @@ function renderTopbar() {
         if (!isManager) return '';
         // The map goes to the MAP (owner, Sep '26: "the icon should only work
         // if it takes you to the floor plan, not the order hub").
+        const rt = state.view === 'admin' ? tillReturnTable() : null;
         return state.view === 'admin'
-            ? `<span class="staff-badge"><button data-act="view-floor" aria-label="Back to the floor">${SYS_MAP_SVG}</button></span>`
+            ? (rt
+              ? `<span class="staff-badge"><button class="bar-table-key" data-act="view-floor" aria-label="Back to table ${esc(String(rt.label))}">${esc(String(rt.label))}</button></span>`
+              : `<span class="staff-badge"><button data-act="view-floor" aria-label="Back to the floor">${SYS_MAP_SVG}</button></span>`)
             : `<span class="staff-badge"><button data-act="view-admin" aria-label="Admin">${SYS_ADMIN_SVG}</button></span>`;
       })()}
       ${(() => {
@@ -19031,15 +19119,27 @@ function renderMenuScrollBody() {
             ...topSubs.map(sub => ({ id: sub.id, label: sub.name })),
             ...(itemsWithoutSub.length > 0 ? [{ id: '__none__', label: 'Other' }] : []),
           ];
-          const activeSub = state.activeSubcat && subTabs.some(t => t.id === state.activeSubcat) ? state.activeSubcat : '__all__';
+          // A picked subsection OPENS its sub-subsections as a second row
+          // under the bar (owner, Sep '26: the wine bar "doesn't expand or
+          // reduce to sub-subsections"). Picking another subsection closes it.
+          const activeKid = state.activeSubcat ? subcats.find(s => s.id === state.activeSubcat && s.parentSubcategoryId && topSubs.some(t => t.id === s.parentSubcategoryId)) : null;
+          const activeSub = activeKid ? activeKid.parentSubcategoryId : (state.activeSubcat && subTabs.some(t => t.id === state.activeSubcat) ? state.activeSubcat : '__all__');
           const activeTopSub = topSubs.find(s => s.id === activeSub);
+          const kids = activeTopSub ? childSubcats(activeTopSub.id).filter(subtreeHasItems) : [];
+          const kidRow = kids.length ? `
+            <div class="seg subcat-seg subcat-seg-kids" style="margin-bottom:12px;">
+              <button data-act="subcat" data-val="${activeTopSub.id}" class="${!activeKid ? 'active' : ''}">All ${esc(activeTopSub.name)}</button>
+              ${kids.map(k => `<button data-act="subcat" data-val="${k.id}" class="${activeKid && activeKid.id === k.id ? 'active' : ''}">${esc(k.name)}</button>`).join('')}
+            </div>` : '';
           return `
-            <div class="seg subcat-seg" style="margin-bottom:12px;">
+            <div class="seg subcat-seg" style="margin-bottom:${kids.length ? 8 : 12}px;">
               ${subTabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${activeSub === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
             </div>
+            ${kidRow}
             ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
             ${activeSub === '__all__' ? groupedAll
             : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>`
+            : activeKid ? renderSubGroup(activeKid, 0, false)
             : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
             : `<div class="grid">${items.filter(i => i.subcategoryId === activeSub).map(renderItemCard).join('')}</div>`}
           `;
@@ -36835,10 +36935,14 @@ function handleActClick(el, e) {
         if (cur && cur.id) openConfirm({ message: msg, confirmLabel: 'Delete', danger: true }, () => { state[key] = null; state.adminError = ''; fn(cur.id); });
       }
       else if (act === 'view-floor') {
-        // Admin's map key: back to the till AND onto the floor, one tap.
+        // Admin's key: back to the till — onto the ORDER screen of the table
+        // you left (the key wears that table's number), or onto the floor
+        // when there is none (the key wears the map). The icon always says
+        // where it goes.
         if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
         state.view = 'order'; setOrderType('dine-in');
+        if (tillReturnTable()) { state.showTablePicker = false; render(); return; }
         if (!state.showTablePicker) openTablePicker(); else render();
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return;
@@ -37146,6 +37250,10 @@ function handleActClick(el, e) {
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }
       else if (act === 'view-admin') {
+        // Remember where the till WAS, so Admin's key walks back to it: the
+        // order screen on your table (owner, Sep '26: "from admin it should
+        // take you back to order"), or the floor when there was no table.
+        state._tillReturn = { onOrder: state.view === 'order' && !state.showTablePicker && !!state.table, table: state.table };
         state.view = 'admin';
         // Come back to where you WERE — page and exact scroll spot (owner,
         // Aug '26). First visit of the session starts on Service as before.

@@ -6452,7 +6452,13 @@ app.use((req, res, next) => {
 // /api/undo puts back exactly what went, ids and order included. The trading
 // collections are deliberately NOT snapshotted: undoing a deleted item must
 // never roll back orders rung, money taken or hours clocked in the meantime.
-const UNDO_SKIP = new Set(['orders', 'register', 'timeclock', 'auditLog', 'houseLog', 'ticketCounter', 'roster', 'timeoff']);
+// ONLY the SETUP collections are snapshotted — an allow-list, never a
+// skip-list (Sep '26: the skip-list named keys that don't exist, so an Undo
+// at 11pm rolled gift cards, points, stock, paid-outs, the float and the
+// time clock back to a delete at 10am). Menu rows come back WITHOUT their
+// stock fields, and a snapshot older than ten minutes is gone.
+const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
+const UNDO_TTL = 10 * 60 * 1000;
 let _undoSnap = null, _undoSnapAt = 0;
 app.use((req, res, next) => {
   if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
@@ -6463,7 +6469,7 @@ app.use((req, res, next) => {
       try {
         const d = readData();
         const snap = {};
-        for (const k of Object.keys(d)) if (!UNDO_SKIP.has(k)) snap[k] = d[k];
+        for (const k of UNDO_KEEP) if (d[k] !== undefined) snap[k] = d[k];
         _undoSnap = JSON.parse(JSON.stringify(snap));
       } catch (e) { _undoSnap = null; }
     }
@@ -6471,10 +6477,17 @@ app.use((req, res, next) => {
   }
   next();
 });
+const STOCK_FIELDS = ['stockCount', 'servingsLeft', 'out', 'trackStock', 'lowStockThreshold'];
 app.post('/api/undo', (req, res) => {
-  if (!_undoSnap) return res.status(404).json({ error: 'Nothing to undo' });
+  if (!_undoSnap || Date.now() - _undoSnapAt > UNDO_TTL) { _undoSnap = null; return res.status(404).json({ error: 'Nothing to undo' }); }
   const d = readData();
-  Object.assign(d, _undoSnap);
+  const live = new Map((d.menu || []).map(m => [m.id, m]));
+  for (const k of Object.keys(_undoSnap)) {
+    if (k === 'menu') {
+      // A dish comes back as it was set up; what has been SOLD since stays sold.
+      d.menu = _undoSnap.menu.map(m => { const cur = live.get(m.id); if (!cur) return m; const out = { ...m }; STOCK_FIELDS.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; }); return out; });
+    } else d[k] = _undoSnap[k];
+  }
   _undoSnap = null;
   writeData(d);
   res.json({ ok: true });
@@ -10044,6 +10057,34 @@ function parsePayments(payments, grandTotal) {
 
 // A gift card pays the full amount due (no partial/split support yet). Deducts
 // the balance immediately since this only runs once the order is finalized.
+// A voucher or loyalty points ride on the discount and are spent HERE, when
+// the money is taken — not when Apply was tapped (Sep '26: Cancel after Apply
+// left the voucher "already used" and the points gone, with nothing paid).
+function checkDiscountExtras(data, discount) {
+  if (!discount) return null;
+  if (discount.voucherCode) {
+    const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
+    if (!v) return 'That voucher no longer exists';
+    if (v.used) return 'This voucher has already been used';
+  }
+  if (discount.loyaltyPoints && discount.customerId) {
+    const c = (data.customers || []).find(x => x.id === discount.customerId);
+    if (!c) return 'That customer no longer exists';
+    if ((c.points || 0) < discount.loyaltyPoints) return 'Not enough loyalty points';
+  }
+  return null;
+}
+function spendDiscountExtras(data, order, discount, staffName) {
+  if (!discount) return;
+  if (discount.voucherCode) {
+    const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
+    if (v) { v.used = true; v.usedAt = Date.now(); order.voucherCodes = [...new Set([...(order.voucherCodes || []), v.code])]; logAudit(data, staffName, `Redeemed voucher ${v.code} on Ticket #${order.id}`); }
+  }
+  if (discount.loyaltyPoints && discount.customerId) {
+    const c = (data.customers || []).find(x => x.id === discount.customerId);
+    if (c) { c.points = (c.points || 0) - discount.loyaltyPoints; logAudit(data, staffName, `Redeemed ${discount.loyaltyPoints} loyalty points on Ticket #${order.id} for ${c.name}`); }
+  }
+}
 function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal) {
   if (paymentMethod !== 'giftcard') return { ok: true };
   if (!giftCardCode) return { error: 'Missing gift card code' };
@@ -10169,6 +10210,8 @@ app.post('/api/orders', (req, res) => {
   // PAY-ONCE for a pay-without-send: the same pay key twice is one payment.
   const payKey = String(req.body.payKey || '').slice(0, 64) || null;
   if (payKey) { const dup = (data.orders || []).find(o => o.payKey === payKey); if (dup) return res.json(dup); }
+  const extrasError = checkDiscountExtras(data, discount);
+  if (extrasError) return res.status(400).json({ error: extrasError });
   const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
 
@@ -10198,6 +10241,7 @@ app.post('/api/orders', (req, res) => {
   };
 
   adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
+  spendDiscountExtras(data, order, discount, order.staffName);
   data.orders.push(order);
   data.ticketCounter += 1;
   if (discountRecord) {
@@ -10423,6 +10467,8 @@ app.post('/api/orders/:id/close', (req, res) => {
     if (result.error) return res.status(400).json({ error: result.error });
     splitPayments = result.payments;
   }
+  const extrasError = checkDiscountExtras(data, discount);
+  if (extrasError) return res.status(400).json({ error: extrasError });
   const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
   // A bill in parts closes only when every part has been taken — otherwise a
@@ -10449,6 +10495,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   order.payKey = payKey;
   order.closedBy = staffName || order.staffName;
   order.closedAt = Date.now();
+  spendDiscountExtras(data, order, discount, staffName || order.staffName);
   if (customerId !== undefined) order.customerId = customerId || null;
 
   if (discountRecord) {
@@ -10544,6 +10591,7 @@ app.post('/api/orders/:id/void', (req, res) => {
   // A ticket is voided ONCE, and never after money went back: each void put
   // the stock back again and the audit said it twice (Sep '26).
   if (order.status === 'void') return res.status(400).json({ error: 'That ticket is already void' });
+  if (order.status === 'open' && (order.splitPaid || []).length) return res.status(400).json({ error: 'Money has been taken on this ticket in parts — refund it before voiding' });
   if (order.status === 'paid' && (order.refundedTotal || 0) > 0.005) return res.status(400).json({ error: 'A refunded ticket cannot be voided' });
   if (order.status === 'paid' && data.settings.managerApprovalForVoid && !managerFromReq(req, data)) {
     return res.status(403).json({ error: 'A manager PIN is needed to void a paid ticket' });
@@ -10586,6 +10634,7 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   const { table, staffName } = req.body;
   if (!table) return res.status(400).json({ error: 'Missing destination table' });
+  if ((order.splitPaid || []).length) return res.status(400).json({ error: 'Money has been taken on this table in parts — finish the bill here first' });
   const oldTable = order.table;
   // Destination already has an open tab → COMBINE: its lines and rounds ride
   // over, totals re-add, and the source ticket closes as merged.
@@ -10660,6 +10709,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'That ticket is closed' });
   const { itemIds, targetTable, staffName } = req.body || {};
+  if ((order.splitPaid || []).length) return res.status(400).json({ error: 'Money has been taken on this table in parts — finish the bill first' });
   const ids = (Array.isArray(itemIds) ? itemIds : []).map(String);
   if (!ids.length) return res.status(400).json({ error: 'Pick items to move' });
   if (!targetTable || String(targetTable) === String(order.table)) return res.status(400).json({ error: 'Pick a different table' });
@@ -10756,10 +10806,15 @@ app.get('/api/summary', (req, res) => {
 });
 
 // ---------- Register / Z-report ----------
+// When a ticket counts: the moment it was paid; a ticket not (yet) paid, the
+// moment it was opened.
+function periodAt(o) { return (o.status === 'paid' && o.closedAt) ? o.closedAt : o.createdAt; }
 function computePeriodSummary(data, fromTs, toTs) {
   // Practice rings never reach the till's money. They printed nothing and
   // they count nothing (owner rule: a trainee cannot spoil the cash-up).
-  const orders = data.orders.filter(o => o.createdAt > fromTs && o.createdAt <= toTs && !o.practice);
+  // A ticket belongs to the period it was PAID in (a tab opened at 9pm and
+  // paid at 11pm, after the 10pm close, was on no Z at all — Sep '26).
+  const orders = data.orders.filter(o => periodAt(o) > fromTs && periodAt(o) <= toTs && !o.practice);
   const paid = orders.filter(o => o.status === 'paid');
   const voidCount = orders.filter(o => o.status === 'void').length;
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
@@ -10877,7 +10932,7 @@ function computeReportsOverview(data) {
   const dayMs = 86400000;
   const startOfDay = (ts) => { const d2 = new Date(ts); d2.setHours(4, 0, 0, 0); return d2.getTime() > ts ? d2.getTime() - dayMs : d2.getTime(); };
   const todayFrom = startOfDay(now);
-  const paidIn = (from, to) => data.orders.filter(o => o.status === 'paid' && !o.practice && o.createdAt > from && o.createdAt <= to);
+  const paidIn = (from, to) => data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) > from && periodAt(o) <= to);
   const netOf = (list) => list.reduce((a, o) => a + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0)), 0);
   const coversOf = (list) => list.reduce((a, o) => a + (o.covers || 0), 0);
   const menuById = new Map(data.menu.map(m => [m.id, m]));
@@ -17547,7 +17602,10 @@ function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.ran
 // A failed send is spent the moment the cart is dropped or the person leaves:
 // it used to follow the next waiter onto the table and send their food into
 // a ticket that had since been voided (owner, Sep '26).
-function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; }
+// Everything that belongs to THIS cart goes when the cart goes: the send
+// keys, a discount, a staged call-away, a quick note (Sep '26: a 10% off on
+// table 22 followed the till onto table 222 and the next person's log-in).
+function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; state.discount = null; state.stagedCallAway = null; state.quickNote = ''; state.quickNoteStation = null; }
 async function sendToKitchen() {
   if (state.sending) return;
   // The phone Save button is always tappable (its hold is the log-off
@@ -22019,9 +22077,9 @@ async function redeemLoyaltyPoints() {
   const points = Math.floor((customer.points || 0) / LOYALTY_POINTS_PER_DOLLAR) * LOYALTY_POINTS_PER_DOLLAR;
   if (points <= 0) return;
   try {
-    const result = await api(`/api/customers/${customer.id}/redeem-points`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ points }) });
-    state.customers = state.customers.map(c => c.id === customer.id ? result.customer : c);
-    state.discount = { type: 'fixed', value: result.amount, reason: `${points} loyalty points`, kind: 'discount' };
+    // Points leave the customer when the bill is PAID, not now.
+    const amount = points / LOYALTY_POINTS_PER_DOLLAR;
+    state.discount = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
     render();
   } catch (e) {
     state.toast = e.message || 'Could not redeem points.';
@@ -24415,8 +24473,9 @@ async function applyVoucherCode() {
   if (!code) return;
   try {
     const voucher = await api(`/api/vouchers/lookup/${encodeURIComponent(code)}`);
-    await api(`/api/vouchers/${voucher.code}/redeem`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
-    state.discount = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount' };
+    if (voucher.used) throw new Error('This voucher has already been used');
+    // Spent when the bill is PAID, not now — Cancel keeps the voucher whole.
+    state.discount = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount', voucherCode: voucher.code };
     state.checkoutVoucherCode = '';
     state.toast = `Voucher ${voucher.code} applied`;
     render();
@@ -29601,7 +29660,7 @@ function pickTable(id) {
     // the "Switch tables?" guard above only asks for a DIFFERENT table, so a
     // swipe onto the floor and a tap on your own table silently ate the
     // round (owner: "swiping left while ordering deletes the order").
-    if (hadTable && prevTable !== id) { state.cart = []; state.firedCourses = {}; clearSendState(); }
+    if (hadTable && prevTable !== id) { state.cart = []; clearSendState(); }
     state.autoCourseOverride = null;
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
@@ -29611,6 +29670,9 @@ function pickTable(id) {
     state.notes = (t && t.notes) || [];
     state.vipType = (t && t.vipType) || '';
     state.openOrderId = (oo && oo.id) || null;
+    // The called-away courses come back with the table (Sep '26: leaving and
+    // returning forgot the call-away, so mains were called twice).
+    state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
     // Ask for covers at the natural moment ONLY: seating a FRESH table
     // (covers enabled, none recorded, no order in progress). The pad POPS
     // OVER the table screen — ✓ moves on to the order, ✕ backs out of the pick.

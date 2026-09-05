@@ -6583,7 +6583,12 @@ function pinRecordSuccess(req) {
 function logAudit(data, staffName, action) {
   if (!data.auditLog) data.auditLog = [];
   data.auditLog.unshift({ id: Date.now() + Math.random().toString(36).slice(2, 7), timestamp: Date.now(), staffName, action });
-  if (data.auditLog.length > 500) data.auditLog.length = 500;
+  // Ninety days, then a hard ceiling — a night's sends alone used to push
+  // "who voided" out of a 500-line window within a day (Sep '26).
+  const floor = Date.now() - 90 * 86400000;
+  if (data.auditLog.length > 5000 || (data.auditLog.length > 500 && data.auditLog[data.auditLog.length - 1].timestamp < floor)) {
+    data.auditLog = data.auditLog.filter(e => e.timestamp >= floor).slice(0, 5000);
+  }
 }
 
 // One loyalty point per dollar spent, credited once an order is actually paid.
@@ -6611,8 +6616,9 @@ function computeTax(data, taxable) {
   const t = taxSettings(data);
   const r = (parseFloat(t.ratePercent) || 0) / 100;
   if (t.mode === 'none' || r <= 0) return { tax: 0, add: 0 };
-  if (t.mode === 'inclusive') return { tax: taxable - taxable / (1 + r), add: 0 };
-  return { tax: taxable * r, add: taxable * r };
+  const c = (x) => Math.round(x * 100) / 100;
+  if (t.mode === 'inclusive') return { tax: c(taxable - taxable / (1 + r)), add: 0 };
+  return { tax: c(taxable * r), add: c(taxable * r) };
 }
 
 // ---------- Audit log ----------
@@ -8335,10 +8341,12 @@ app.post('/api/tables/move-sitting', (req, res) => {
     .map(a => ({ seat: (a.seat === null || a.seat === undefined || a.seat === '') ? null : parseInt(a.seat),
       allergy: String(a.allergy).trim().slice(0, 60), notes: String((a && a.notes) || '').trim().slice(0, 200) }));
   const vipType = String(req.body.vipType || '').trim().slice(0, 60);
+  const notes = Array.isArray(req.body.notes) ? req.body.notes.slice(0, 50) : (from ? (from.notes || []) : []);
   to.covers = combine ? (to.covers || 0) + covers : covers;
   to.allergies = combine ? [...(to.allergies || []), ...allergies].slice(0, 50) : allergies;
   to.vipType = combine ? (to.vipType || vipType) : vipType;
-  if (from && from !== to) { from.covers = 0; from.allergies = []; from.vipType = ''; }
+  to.notes = combine ? [...(to.notes || []), ...notes].slice(0, 50) : notes; // the notes go with the party (Sep '26)
+  if (from && from !== to) { from.covers = 0; from.allergies = []; from.vipType = ''; from.notes = []; }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -10027,6 +10035,7 @@ function computeDiscount(subtotal, discount, items, data) {
       if (kind === 'discount') rawAmount = Math.min(base, rawAmount);
     }
     if (rawAmount > 0) {
+      rawAmount = Math.round(rawAmount * 100) / 100; // cents, never fractions of one (Sep '26: a close stored 110.3228)
       discountAmount = kind === 'surcharge' ? -rawAmount : rawAmount;
       discountRecord = { type, value, reason: discount.reason || '', amount: discountAmount, kind };
       if (scope.length) discountRecord.scope = scope;
@@ -10091,7 +10100,7 @@ function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal) {
   const card = (data.giftCards || []).find(g => g.code.toLowerCase() === String(giftCardCode).toLowerCase());
   if (!card) return { error: 'Gift card not found' };
   if (!card.active) return { error: 'This gift card is inactive' };
-  if (card.balance < grandTotal - 0.01) return { error: `Insufficient gift card balance ($${card.balance.toFixed(2)} available)` };
+  if (card.balance + 0.005 < grandTotal) return { error: `Insufficient gift card balance ($${card.balance.toFixed(2)} available)` };
   card.balance -= grandTotal;
   return { ok: true, card };
 }
@@ -10104,9 +10113,13 @@ app.post('/api/practice/purge', (req, res) => {
   const before = (data.orders || []).length;
   // A trainee clears their OWN practice; a manager with no id clears the lot.
   const only = req.body && req.body.staffId;
+  const gone = (data.orders || []).filter(o => o.practice && !(only && o.staffId !== only) && o.status === 'open');
   data.orders = (data.orders || []).filter(o => !o.practice || (only && o.staffId !== only));
   const removed = before - data.orders.length;
-  tableLocks.clear(); // practice tables release with their orders
+  // The PRACTICE tables release with their orders — real tables mid-service
+  // keep their locks (Sep '26: this cleared every till's lock).
+  const labels = new Set(gone.map(o => String(o.table)));
+  (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (labels.has(String(t.label))) tableLocks.delete(String(t.id)); }));
   if (removed) logAudit(data, staffFromReq(req), `Cleared ${removed} practice order${removed === 1 ? '' : 's'}`);
   writeData(data);
   res.json({ removed });
@@ -10166,6 +10179,7 @@ app.post('/api/orders', (req, res) => {
       orderType: orderType || 'dine-in',
       table: orderType === 'dine-in' ? table : null,
       customerName: orderType !== 'dine-in' ? (customerName || 'Guest') : null,
+      customerId: customerId || null,
       covers: orderType === 'dine-in' && covers ? parseInt(covers) : null,
       practice: isPractice,
       items,
@@ -10266,6 +10280,9 @@ app.post('/api/orders', (req, res) => {
 function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); }
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
+  // A RESTORE (undo of a removed sent line) puts the line back on the ticket
+  // and nothing else: the kitchen made it already, the stock already moved.
+  const restore = !!(body && body.restore);
   const items = (rawItems || []).map(i => ({ ...i, uid: lineUid(i), status: i.status || 'ordered' }));
   const roundNumber = (order.rounds || []).length + 1;
   const quickNote = String(req.body.quickNote || '').trim().slice(0, 120) || null;
@@ -10278,7 +10295,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
-  adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
+  if (!restore) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
   writeData(data);
   // Later rounds ALWAYS print only the added items — reprinting the whole
@@ -10286,7 +10303,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   // order). The old settings.docket.roundPrint switch is retired.
   // (was: settings.docket.roundPrint =
   // 'full') so the kitchen sees the complete table, or just the added items.
-  printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), roundNumber, quickNote ? { quickNote, quickNoteStation } : undefined);
+  if (!restore) printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), roundNumber, quickNote ? { quickNote, quickNoteStation } : undefined);
   return order;
 }
 // EVERY LINE CARRIES ITS OWN KEY (owner, Sep '26). A send used to carry one
@@ -10312,6 +10329,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { items: rawItems, staffName } = req.body;
   const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
+  if (req.body.customerId !== undefined && req.body.customerId !== null) order.customerId = req.body.customerId || null;
   // SEND-ONCE, per LINE: whatever this ticket already holds is skipped, the
   // rest rings. A retry of an unchanged cart adds nothing and gets the ticket
   // back; a cart with a new dish rings just that dish.
@@ -10458,10 +10476,10 @@ app.post('/api/orders/:id/close', (req, res) => {
   const taxCalc = computeTax(data, taxableSubtotal - voucherSaleTotal(order.items));
   const tax = taxCalc.tax;
   const total = taxableSubtotal + taxCalc.add;
-  const tipAmount = Math.max(0, parseFloat(tip) || 0);
-  const grandTotal = total + tipAmount;
+  let tipAmount = Math.max(0, parseFloat(tip) || 0);
+  let grandTotal = total + tipAmount;
 
-  let splitPayments = null;
+  let splitPayments = null, partTip = null;
   if (Array.isArray(payments) && payments.length > 0) {
     const result = parsePayments(payments, grandTotal);
     if (result.error) return res.status(400).json({ error: result.error });
@@ -10479,8 +10497,16 @@ app.post('/api/orders/:id/close', (req, res) => {
     if (already < owed - 1) {
       return res.status(400).json({ error: `$${((owed - already) / 100).toFixed(2)} of this bill is still unpaid — settle every part first.` });
     }
+    // The parts ARE the payment: what was taken, by which method, with their
+    // tips — never the pane's default "card" and a zero tip (Sep '26: a close
+    // after a dropped wifi recorded $80 card, $0 cash and lost the tips).
+    const byMethod = {};
+    order.splitPaid.forEach(p => { byMethod[p.method || 'card'] = (byMethod[p.method || 'card'] || 0) + (p.amount || 0); });
+    splitPayments = Object.entries(byMethod).map(([method, amount]) => ({ method, amount: Math.round(amount * 100) / 100 }));
+    partTip = Math.round(order.splitPaid.reduce((a, p) => a + (p.tip || 0), 0) * 100) / 100;
   }
 
+  if (partTip !== null) { tipAmount = partTip; grandTotal = Math.round((total + tipAmount) * 100) / 100; }
   order.subtotal = subtotal;
   order.discount = discountRecord;
   order.tax = tax;
@@ -10566,6 +10592,8 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   if (order.splitPaid.some(p => p.key === k)) return res.status(400).json({ error: 'That part is already paid.' });
   const amt = Math.round((parseFloat(amount) || 0) * 100) / 100;
   if (!(amt > 0)) return res.status(400).json({ error: 'That part has no amount' });
+  const billNow = order.grandTotal !== undefined ? order.grandTotal : order.total;
+  if (splitPaidTotal(order) + amt > billNow + 0.01) return res.status(400).json({ error: `Only $${Math.max(0, billNow - splitPaidTotal(order)).toFixed(2)} is still owing on this bill` });
   if (!order.splitParts && Array.isArray(parts) && parts.length) {
     order.splitParts = parts.slice(0, 60).map(p => ({
       key: String(p.key || '').slice(0, 40),
@@ -15404,7 +15432,7 @@ function toggleSplitMode() {
   state.evenSplit = null;
   state.splitMode = !state.splitMode;
   if (state.splitMode && state.splitTenders.length === 0) {
-    const total = cartGrandTotal();
+    const total = amountOwing(); // what is still owing, never the whole bill (Sep '26)
     const half = Math.round(total * 50) / 100;
     const rest = Math.round((total - half) * 100) / 100;
     state.splitTenders = [
@@ -15760,7 +15788,7 @@ function seatShares() {
   }
   seats.forEach(s => { bySeat[s] += shared / seats.length; });
   const rawSum = seats.reduce((s, n) => s + bySeat[n], 0);
-  const target = Math.round(cartGrandTotal() * 100);
+  const target = Math.round(amountOwing() * 100); // the parts still owing (Sep '26)
   const rows = seats.map(s => {
     const cents = rawSum > 0 ? (bySeat[s] / rawSum) * target : target / seats.length;
     return { seat: s, cents, floor: Math.floor(cents) };
@@ -15808,7 +15836,7 @@ async function paySeatShare(seatKey) {
 // method; the last one closes the tab, recording every share as its own tender.
 function evenShares() {
   const n = Math.max(2, (state.evenSplit && state.evenSplit.n) || 2);
-  const target = Math.round(cartGrandTotal() * 100);
+  const target = Math.round(amountOwing() * 100);
   const base = Math.floor(target / n);
   let leftover = target - base * n;
   const rows = [];
@@ -17157,7 +17185,9 @@ function openCheckout() {
   state.customerSearch = '';
   state.customerSearchResults = [];
   const openOrder = state.orders.find(o => o.id === state.openOrderId);
-  state.attachedCustomerId = (openOrder && openOrder.customerId) || null;
+  // A customer attached on this till stays attached — the local order copy
+  // may not have caught up yet (Sep '26: attach, pay within 15s, gone).
+  state.attachedCustomerId = state.attachedCustomerId || (openOrder && openOrder.customerId) || null;
   render();
 }
 function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
@@ -17537,7 +17567,7 @@ function renderTablePeekPop() {
   const firedC = o.firedCourses || {};
   const nextCallAway = Object.keys(byCourse).map(Number).sort((a, b) => a - b).find(n => !firedC[n]);
   const line = (it) => {
-    const removed = lineBuild(it).removed.map(c => 'no ' + c.name);
+    const removed = lineBuild(it).removed.map(c => 'no ' + c.label);
     return `
       <div class="peek-line">
         <span class="peek-qty">${it.qty} ×</span>
@@ -17659,7 +17689,7 @@ async function sendToKitchen() {
       order = await api(`/api/orders/${state.openOrderId}/rounds`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: state.cart, staffName, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null }),
+        body: JSON.stringify({ items: state.cart, staffName, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null, customerId: state.attachedCustomerId || null }),
       });
     } else {
       const payload = {
@@ -17674,6 +17704,7 @@ async function sendToKitchen() {
         open: true,
         quickNote: state.quickNote || null,
         quickNoteStation: state.quickNoteStation || null,
+        customerId: state.attachedCustomerId || null,
       };
       order = await api('/api/orders', {
         method: 'POST',
@@ -17895,6 +17926,7 @@ async function confirmPaymentInner() {
         // staying for another round (owner, Aug '26: "completing payment
         // should ask if you want to close table"). Cancel keeps it seated.
         openConfirm({ message: 'Close the table?', confirmLabel: 'Close', danger: false }, () => {
+          clearTableSitting(state.table);
           releaseTableLock(state.table);
           state.table = null;
           state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
@@ -17954,6 +17986,7 @@ async function confirmPaymentInner() {
     // payment ask it (owner, Aug '26). Cancel keeps the table seated.
     if (state.orderType === 'dine-in' && state.table) {
       openConfirm({ message: 'Close the table?', confirmLabel: 'Close', danger: false }, () => {
+        clearTableSitting(state.table);
         releaseTableLock(state.table);
         state.table = null;
         state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
@@ -19716,7 +19749,7 @@ async function reAddSentLine(orderId, items) {
   if (!items || !items.length) return;
   try {
     await api(`/api/orders/${orderId}/rounds`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ items, restore: true, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     state.toast = 'Restored'; render(); armToastTimer(2000);
   } catch (e) { state.toast = 'Could not restore item'; render(); armToastTimer(2500); }
@@ -24490,7 +24523,7 @@ async function applyGiftCardCode() {
   try {
     const card = await api(`/api/gift-cards/lookup/${encodeURIComponent(code)}`);
     if (!card.active) { state.toast = 'This gift card is inactive.'; render(); return; }
-    if (card.balance < cartGrandTotal() - 0.01) { state.toast = `Gift card balance (${money(card.balance)}) is less than the total due.`; render(); return; }
+    if (card.balance < amountOwing() - 0.01) { state.toast = `Gift card balance (${money(card.balance)}) is less than the total due.`; render(); return; }
     state.paymentMethod = 'giftcard';
     state.giftCardAppliedCode = card.code;
     render();
@@ -29291,7 +29324,7 @@ function renderCustomerMiddle() {
         <span class="seat-chip" style="font-size:var(--fs-md);">${esc(attached.name)}${attached.phone ? ` · ${esc(attached.phone)}` : ''}</span>
         <button class="btn-secondary sm" style="width:auto;" data-act="detach-customer">Remove</button>
       </div>` : ''}
-      <input id="customer-search-input" type="text" placeholder="Search name or phone…" value="${esc(state.customerPane.q || '')}" oninput="customerSearchInput(this.value)" style="padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);">
+      <input id="customer-pane-search" type="text" placeholder="Search name or phone…" value="${esc(state.customerPane.q || '')}" oninput="customerSearchInput(this.value)" style="padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);">
       <div id="customer-results" style="display:flex;flex-direction:column;gap:4px;overflow-y:auto;flex:1;align-content:flex-start;min-height:120px;">
         ${customerResultsHtml()}
       </div>
@@ -29574,6 +29607,12 @@ function openTransferPicker() { state.transferMode = true; openTablePicker(); }
 // Leaving a table that was set up (covers/notes) but never ordered: offer to
 // close it so the floor doesn't collect ghost sittings. BOTH answers proceed
 // with the switch/logout — "Close table" additionally clears the setup.
+// A closed table is a CLEAN table on the server too — the next party must
+// not inherit the last one's covers, allergies, notes or VIP (Sep '26).
+function clearTableSitting(tableId) {
+  if (tableId == null) return;
+  saveTableCovers(tableId, 0); saveTableAllergies(tableId, []); saveTableNotes(tableId, []); saveTableVip(tableId, '');
+}
 function offerCloseEmptyTable(next) {
   const t = findTableById(state.table);
   const order = t && state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
@@ -29606,6 +29645,7 @@ function offerCloseEmptyTable(next) {
         body: JSON.stringify({ reason: 'Nothing ordered', note: 'Closed with the table', staffName: (state.currentStaff || {}).name || '' }) });
       await saveTableCovers(t.id, 0);
       await saveTableAllergies(t.id, []);
+      await saveTableNotes(t.id, []);
       await saveTableVip(t.id, '');
       releaseTableLock(t.id);
     } catch (e) {}
@@ -29786,6 +29826,7 @@ async function doTransferToTable(newTableId) {
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
   const allergies = movingOwn ? state.allergies : (oldTable && oldTable.allergies) || [];
   const vipType = movingOwn ? state.vipType : (oldTable && oldTable.vipType) || '';
+  const notes = movingOwn ? (state.notes || []) : (oldTable && oldTable.notes) || [];
   // Combining into a live table: sitting details ADD to what's there.
   const combined = !!srcOrder && state.orders.some(o => o.id !== srcOrder.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
   // ONE call, not six (owner, Aug '26: "table transfer is slow"). The sitting
@@ -29799,7 +29840,7 @@ async function doTransferToTable(newTableId) {
   newTable.allergies = combined ? [...(newTable.allergies || []), ...allergies] : allergies;
   newTable.vipType = combined ? (newTable.vipType || vipType) : vipType;
   const sittingMove = api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, allergies, vipType, combine: combined }) }).catch(() => {});
+    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, allergies, vipType, notes, combine: combined }) }).catch(() => {});
   if (tabMove) {
     let moved;
     try { moved = await tabMove; } catch (e) {
@@ -30469,22 +30510,28 @@ function addComboToCart() {
   // One ticket line per section, each firing on its assigned course (or the
   // active course). The set-menu price sits on the first line; the rest are $0
   // components so the whole set totals the combo price once.
+  // ONE LINE PER DISH, each carrying the dish's own id (Sep '26: a set menu
+  // rang as nameless group lines, so it printed on no station, moved no
+  // stock and reported as "Other"). The set's price sits on the first line.
   let priced = false;
   combo.groups.forEach((g, gi) => {
     const pickedIds = comboGroupForced(g) ? g.itemIds : (b.selections[g.id] || []);
     const items = pickedIds.map(id => state.menu.find(m => m.id === id)).filter(Boolean);
-    if (!items.length) return;
-    const names = items.map(i => i.name).join(', ');
-    state.cart.push({
-      lineKey: mintLineKey(),
-      id: 'combo-' + combo.id + '-' + stamp + '-' + gi,
-      name: `${combo.name} · ${names}`,
-      price: priced ? 0 : combo.price,
-      qty: 1,
-      course: g.course || state.activeCourse,
-      comboRef: combo.id,
+    items.forEach((it, ii) => {
+      state.cart.push({
+        lineKey: mintLineKey(),
+        id: 'combo-' + combo.id + '-' + stamp + '-' + gi + '-' + ii,
+        menuItemId: it.id,
+        category: it.category,
+        name: `${combo.name} · ${it.name}`,
+        price: priced ? 0 : combo.price,
+        qty: 1,
+        course: g.course || it.defaultCourse || state.activeCourse,
+        comboRef: combo.id,
+        comboStamp: stamp,
+      });
+      priced = true;
     });
-    priced = true;
   });
   state.comboBuilder = null;
   render();
@@ -37317,7 +37364,7 @@ function handleActClick(el, e) {
       else if (act === 'split-tender-rest') {
         const idx = parseInt(el.dataset.idx, 10);
         const others = state.splitTenders.reduce((sum, t, i) => i === idx ? sum : sum + (parseFloat(t.amount) || 0), 0);
-        const rest = Math.max(0, cartGrandTotal() - others);
+        const rest = Math.max(0, amountOwing() - others);
         state.splitTenders[idx].amount = rest.toFixed(2);
         render();
       }

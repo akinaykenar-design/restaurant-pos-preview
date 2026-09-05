@@ -10062,11 +10062,15 @@ app.post('/api/orders', (req, res) => {
     if (result.error) return res.status(400).json({ error: result.error });
     splitPayments = result.payments;
   }
+  // PAY-ONCE for a pay-without-send: the same pay key twice is one payment.
+  const payKey = String(req.body.payKey || '').slice(0, 64) || null;
+  if (payKey) { const dup = (data.orders || []).find(o => o.payKey === payKey); if (dup) return res.json(dup); }
   const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
 
   const order = {
     id: data.ticketCounter,
+    payKey,
     createdAt: Date.now(),
     orderType: orderType || 'dine-in',
     table: orderType === 'dine-in' ? table : null,
@@ -10287,7 +10291,13 @@ app.post('/api/orders/:id/close', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
-  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  // PAY-ONCE: a second Confirm carrying the same pay key is the same payment
+  // — hand back the ticket already paid, never charge it again.
+  const payKey = String(req.body.payKey || '').slice(0, 64) || null;
+  if (order.status !== 'open') {
+    if (payKey && order.payKey === payKey) return res.json(order);
+    return res.status(400).json({ error: 'This ticket is not an open tab' });
+  }
   const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId, cardType } = req.body;
 
   const subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
@@ -10328,6 +10338,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   order.giftCardCode = paymentMethod === 'giftcard' ? giftCardResult.card.code : null;
   order.cardType = CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null;
   order.status = 'paid';
+  order.payKey = payKey;
   order.closedBy = staffName || order.staffName;
   order.closedAt = Date.now();
   if (customerId !== undefined) order.customerId = customerId || null;
@@ -16895,6 +16906,9 @@ function maybeApplyAutoSurcharge() {
 }
 function openCheckout() {
   if (state.cart.length === 0 && !state.openOrderId) return;
+  // ONE pay key per visit to the pay screen: a second Confirm that slips past
+  // the guard is recognised by the server as the same payment.
+  state.payKey = 'pay-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
   // A dine-in bill needs a table — prompt for one first.
   if (state.orderType === 'dine-in' && !state.table) { openTablePicker(); return; }
   keepMobileDrawer();
@@ -17513,7 +17527,17 @@ async function runTerminalPurchase(amount) {
   }
 }
 
+// CONFIRM GOES DEAD WHILE THE PAYMENT IS ON ITS WAY (owner, Sep '26: two taps
+// on Confirm paid twice — two paid tickets for one drink). Same guard the
+// Send key has had since the dropped-round work; and every payment carries a
+// pay key the server recognises, so a second one that still slips through
+// is answered with the ticket already paid, never charged again.
 async function confirmPayment() {
+  if (state.paying) return;
+  state.paying = true; render();
+  try { await confirmPaymentInner(); } finally { state.paying = false; render(); }
+}
+async function confirmPaymentInner() {
   // A bill being split is settled part by part, never in one lump.
   if (state.billSplit) return;
   // A card taking less than the whole bill — or landing on a table that has
@@ -17562,7 +17586,7 @@ async function confirmPayment() {
       const order = await api(`/api/orders/${state.openOrderId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType }),
+        body: JSON.stringify({ payKey: state.payKey, paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType }),
       });
       state.openOrderId = null;
       state.cart = [];
@@ -17610,6 +17634,7 @@ async function confirmPayment() {
     return;
   }
   const payload = {
+    payKey: state.payKey,
     orderType: state.orderType,
     table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null,
     customerName: state.customerName,
@@ -20357,7 +20382,7 @@ function payPairHtml() {
   return `
       <div class="action-icons pay-pair">
         <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
+        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending && !state.paying ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
       </div>`;
 }
 function payPhone() { return window.innerWidth <= 768; }
@@ -34321,7 +34346,8 @@ async function saveMenuItemInline(itemId) {
   if (!newName) { state.toast = 'Item name is required.'; render(); return; }
 
   try {
-    const payload = { ...item, name: newName, category: newCategory, price: newPrice };
+    const payload = {
+      ...item, name: newName, category: newCategory, price: newPrice };
     await api(`/api/menu/${itemId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     state.menu = await api('/api/menu');
     state.toast = 'Item saved!';

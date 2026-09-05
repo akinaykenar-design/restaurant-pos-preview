@@ -16920,6 +16920,18 @@ function maybeApplyAutoSurcharge() {
 }
 function openCheckout() {
   if (state.cart.length === 0 && !state.openOrderId) return;
+  // Pay presses Send first. The pay screen adds up sent AND unsent lines, but
+  // the server only closes what it was sent — so a dish added and not sent
+  // was charged on screen and dropped from the ticket (owner, Sep '26: the
+  // Gimlet vanished, unpaid and unsent). Now the unsent lines go to the
+  // kitchen and the bill opens once they are on the ticket; if that send
+  // fails, Pay stops there and nothing is charged for food the kitchen never got.
+  if (state.openOrderId && state.cart.length) {
+    if (state.sending) return;
+    state._payAfterSend = true;
+    sendToKitchen();
+    return;
+  }
   // ONE pay key per visit to the pay screen: a second Confirm that slips past
   // the guard is recognised by the server as the same payment.
   state.payKey = 'pay-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
@@ -17372,7 +17384,7 @@ function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.ran
 // A failed send is spent the moment the cart is dropped or the person leaves:
 // it used to follow the next waiter onto the table and send their food into
 // a ticket that had since been voided (owner, Sep '26).
-function clearSendState() { state.sendKey = null; state.sendFailed = null; }
+function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; }
 async function sendToKitchen() {
   if (state.sending) return;
   // The phone Save button is always tappable (its hold is the log-off
@@ -17459,7 +17471,8 @@ async function sendToKitchen() {
     // straight to the next person (send + log off in one tap). Only on
     // SUCCESS: a failed send must never dump someone onto the lock screen.
     // _logoffOnce is the hold-Send gesture: same handover, just this once.
-    if (state.settings.logoffAfterSend || state._logoffOnce) {
+    // (Not when Pay pressed Send for us — the person is paying, not handing over.)
+    if ((state.settings.logoffAfterSend || state._logoffOnce) && !state._payAfterSend) {
       state._logoffOnce = false;
       logOut();
       return;
@@ -17478,18 +17491,21 @@ async function sendToKitchen() {
     if (recovered) state.toast = `Online — ${recovered} line${recovered === 1 ? '' : 's'} sent`;
     await refreshOrders();
     state.menu = await api('/api/menu');
+    // Pay pressed Send: the lines are on the ticket, now open the bill.
+    if (state._payAfterSend) { state._payAfterSend = false; openCheckout(); armToastTimer(3200); return; }
     render();
     armToastTimer(3200);
   } catch (e) {
     state._logoffOnce = false;
+    const wasPay = state._payAfterSend; state._payAfterSend = false;
     // TWO things, because one is not enough. The toast says it now; the SEND
     // BUTTON carries it until the round actually goes - a toast alone is gone
     // in three seconds, and after that an unsent round looks exactly like one
     // nobody has sent yet (owner, Aug '26).
     state.sendFailed = { at: Date.now(), items: state.cart.length };
-    state.toast = state.online
-      ? 'Not sent — tap Send to try again.'
-      : 'Offline — it sends by itself when the server is back.';
+    state.toast = !state.online
+      ? 'Offline — it sends by itself when the server is back.'
+      : wasPay ? 'Not sent — nothing charged. Tap Send to try again.' : 'Not sent — tap Send to try again.';
     render();
     armToastTimer(4000);
   } finally {
@@ -36831,7 +36847,7 @@ function handleActClick(el, e) {
         state._logoffOnce = false; // plain tap never inherits an old hold's intent
         sendToKitchen();
       }
-      else if (act === 'close-stock-warn') { state.stockWarnModal = null; state._logoffOnce = false; render(); }
+      else if (act === 'close-stock-warn') { state.stockWarnModal = null; state._logoffOnce = false; state._payAfterSend = false; render(); }
       else if (act === 'allergen-warn-add') {
         // Resume exactly the flow the warning interrupted — direct add, the
         // per-serving seat pick, or the options-pane confirm.

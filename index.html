@@ -1046,6 +1046,18 @@ body[data-theme="dark"] .acct-tile .acct-pin svg{fill:#8A847A !important;}
    in this state it is not (owner, Aug '26). */
 .icon-action.send.send-failed{ background:var(--red-btn); border-color:var(--red-btn); }
 .icon-action.send.send-failed .ia-label{ color:#fff; }
+/* OFFLINE IS AMBER, NOT RED (owner, Sep '26). Red means "you must act"; an
+   outage needs nothing from the waiter — the round goes by itself when the
+   server answers — so the key waits in amber and reads "Will send". Same
+   size as every state (layout-shift law). */
+.icon-action.send.will-send{ background:color-mix(in srgb, var(--gold) 22%, var(--surface)); border-color:var(--gold); color:var(--text-primary); }
+.icon-action.send.will-send .ia-label{ color:var(--text-primary); }
+/* The bar's offline mark: one red chip where the dot lived (owner: "a red off-line"). */
+.bar-offline{ display:inline-flex; align-items:center; gap:8px; height:var(--sq-ctl,44px); padding:0 14px; border-radius:22px;
+  background:color-mix(in srgb, var(--red) 14%, var(--surface)); color:var(--text-primary); font-weight:800; font-size:var(--fs-md); }
+.bar-offline i,.lg-offline i{ width:8px; height:8px; border-radius:50%; background:var(--red); }
+.lg-offline{ display:inline-flex; align-items:center; gap:8px; margin-top:14px; padding:10px 16px; border-radius:22px;
+  background:color-mix(in srgb, var(--red) 14%, var(--surface)); color:var(--text-primary); font-weight:800; font-size:var(--fs-md); }
 .ticket-footer-msg{padding:8px;text-align:center;font-size:var(--fs-chip);color:var(--charcoal-soft);border-top:1px solid var(--steel-200);font-style:italic;}
 .tl-price{font-family:var(--font-mono);font-size:calc(12.5px*var(--tkt-fs,1));font-weight:600;}
 .tl-price-btn{flex:none;font-family:var(--font-mono);font-size:var(--fs-md);font-weight:600;color:var(--orange);background:transparent;border:1px solid transparent;border-radius:var(--r-control);padding:4px 8px;cursor:pointer;}
@@ -14759,7 +14771,9 @@ async function pressPinEnter() {
     if (r && r.id) finishLogin(r, warm);
     else { state.loginError = 'shake'; state.loginPin = ''; render(); }
   } catch (e) {
-    state.loginError = 'shake'; state.loginPin = ''; render();
+    // The server is away: the line under the clock says so — a shake would
+    // say "wrong PIN", which is not what happened.
+    state.loginError = state.online ? 'shake' : ''; state.loginPin = ''; render();
   }
 }
 function pressPinBackspace() { state.loginPin = state.loginPin.slice(0, -1); render(); }
@@ -15399,8 +15413,8 @@ function renderSplitPanel() {
     </div>
     <div class="ticket-actions">
       <div class="action-icons split-acts">
-        <button class="icon-action bill ${part && sp.printed[part.key] ? 'active' : ''}" data-act="split-print" data-key="${part ? part.key : ''}" ${part && part.amount > 0.005 ? '' : 'disabled'}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
-        <button class="icon-action pay" data-act="split-then-pay">${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
+        <button class="icon-action bill ${part && sp.printed[part.key] ? 'active' : ''}" data-act="split-print" data-key="${part ? part.key : ''}" ${part && part.amount > 0.005 && state.online ? '' : 'disabled'}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
+        <button class="icon-action pay" data-act="split-then-pay" ${state.online ? '' : 'disabled'}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" data-act="close-bill-split">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
       </div>
     </div>
@@ -17432,6 +17446,7 @@ async function sendToKitchen() {
     // items vanish from a course-paged docket the moment they went out.
     const sentCourses = [...new Set(state.cart.map(c => c.course || 1))];
     if (sentCourses.length && !sentCourses.includes(state.activeCourse)) state.activeCourse = sentCourses[0];
+    const recovered = state._recoveredLines; state._recoveredLines = 0;
     state.cart = [];
     state.sendKey = null; state.sendFailed = null;
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
@@ -17460,6 +17475,7 @@ async function sendToKitchen() {
     state.toast = sentItemCount
       ? (sentStationLabel ? `Items sent to ${sentStationLabel}` : 'Items sent to the kitchen')
       : 'Notes sent to the kitchen';
+    if (recovered) state.toast = `Online — ${recovered} line${recovered === 1 ? '' : 's'} sent`;
     await refreshOrders();
     state.menu = await api('/api/menu');
     render();
@@ -17471,9 +17487,9 @@ async function sendToKitchen() {
     // in three seconds, and after that an unsent round looks exactly like one
     // nobody has sent yet (owner, Aug '26).
     state.sendFailed = { at: Date.now(), items: state.cart.length };
-    state.toast = navigator.onLine
+    state.toast = state.online
       ? 'Not sent — tap Send to try again.'
-      : 'Not sent — no connection. It goes on its own when the wifi is back.';
+      : 'Offline — it sends by itself when the server is back.';
     render();
     armToastTimer(4000);
   } finally {
@@ -17490,6 +17506,24 @@ window.addEventListener('online', () => {
   else render();  // the band's wording changes with the connection
 });
 window.addEventListener('offline', () => { if (state.sendFailed) render(); });
+// THE SERVER COMES BACK ON ITS OWN TOO (owner, Sep '26: an outage of the
+// laptop, not the wifi — the browser's 'online' event never fires, so the
+// round sat there until someone noticed). While the till is offline it asks
+// the server every 5s with the two-number version call; the first answer
+// sends the queued round and says so.
+let _offlineWatch = 0;
+setInterval(() => {
+  if (state.online || _offlineWatch) return;
+  _offlineWatch = 1;
+  api('/api/version').then(() => {
+    // api() has just set state.online = true
+    const n = state.cart.length;
+    if (state.sendFailed && !state.sending && n) {
+      state._recoveredLines = n;
+      sendToKitchen();
+    } else { state.toast = 'Online'; render(); armToastTimer(2000); }
+  }).catch(() => { render(); }).finally(() => { _offlineWatch = 0; });
+}, 5000);
 
 // Is an integrated card terminal set up?
 function terminalActive() {
@@ -18523,6 +18557,7 @@ function renderLoginScreen() {
       ${venue ? `<div class="lg-venue">${esc(venue)}</div>` : ''}
       <div class="lg-clock">${esc(time)}</div>
       <div class="lg-date">${esc(date)}</div>
+      ${!state.online ? `<div class="lg-offline"><i></i>Offline — sign-in returns when online</div>` : ''}
       ${s.messageOfTheDay ? `<div class="lg-motd">${esc(s.messageOfTheDay)}</div>` : ''}
     </div>
     <div class="lg-right">
@@ -18714,7 +18749,7 @@ function renderTopbar() {
     </div>
     ${barPagerOn() ? renderBarPager() : ''}
     <div class="staff-badge" style="margin-left:auto;">
-      ${!state.online ? `<span style="display:flex;align-items:center;gap:4px;font-family:var(--font-mono);font-size:var(--fs-chip);color:var(--red);"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);"></span>Offline</span>` : ''}
+      ${!state.online ? `<span class="bar-offline"><i></i>Offline</span>` : ''}
       ${state.view === 'order' && !isChef && state.orderType === 'dine-in' && state.table && (!state.showTablePicker || barPagerOn()) ? (() => {
         const t = findTableById(state.table);
         // PHONE ONLY (CSS hides it on bigger screens): the docket is a drawer
@@ -19954,10 +19989,10 @@ function renderTicketPanel() {
       ${payPhone() ? '' /* on a phone they ride with the pay pane, in the layer
                              that is actually on top */ : payPairHtml()}` : `
       <div class="action-icons">
-        <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
-        <button class="icon-action pay" data-act="checkout" ${!openOrder && !state.cart.length ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
+        <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder || !state.online ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
+        <button class="icon-action pay" data-act="checkout" ${(!openOrder && !state.cart.length) || !state.online ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" data-act="clear" ${state.cart.length === 0 ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Discard</span></button>
-        <button class="icon-action send${state.sendFailed && !state.sending ? ' send-failed' : ''}" data-act="send-to-kitchen" ${state.sending || !cartSendable() ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : state.sendFailed ? SYS_WARN_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : state.sendFailed ? 'Not sent' : 'Send'}</span></button>
+        <button class="icon-action send${state.sendFailed && !state.sending ? (state.online ? ' send-failed' : ' will-send') : ''}" data-act="send-to-kitchen" ${state.sending || !cartSendable() ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : state.sendFailed ? SYS_WARN_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : state.sendFailed ? (state.online ? 'Not sent' : 'Will send') : 'Send'}</span></button>
       </div>`}
     </div>
     ${state.settings.ticketFooter ? `<div class="ticket-footer-msg">${esc(state.settings.ticketFooter)}</div>` : ''}
@@ -20382,7 +20417,7 @@ function payPairHtml() {
   return `
       <div class="action-icons pay-pair">
         <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending && !state.paying ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
+        ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending && !state.paying && state.online ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
       </div>`;
 }
 function payPhone() { return window.innerWidth <= 768; }

@@ -4005,7 +4005,6 @@ body[data-fixed-rows="1"] .qty-pop.covers-pop.seat-pop .qp-actions .icon-action{
 .qty-pop.num-pad .qp-actions .icon-action{ flex:none; width:auto; min-width:0; height:var(--num-key-h); border-radius:var(--num-key-r); padding:0; }
 .qty-pop.num-pad .qp-actions .icon-action.neutral{ grid-column:1; }
 .qty-pop.num-pad .qp-actions .icon-action.send{ grid-column:-2 / -1; }
-.qty-pop.num-pad .qp-actions .np-neg{ grid-column:2; width:var(--num-key-w); height:var(--num-key-h); min-width:0; padding:0; margin:0; box-sizing:border-box; } /* ± is a number key in the slot between ✕ and ✓, only on a pad that takes a minus */
 /* Dark mode: a key one step off the pad, or the two are one colour and only a hairline says "key" (owner, Sep '26). The green ✓ keeps its paint. */
 body[data-theme="dark"] .qty-pop.num-pad .covers-pad-key, body[data-theme="dark"] .pin-pad.lg button:not([data-act$="-enter"]){ background:var(--steel-200); }
 /* Clear key: a ✕ on the display row wipes the whole entry (every pad). A
@@ -14575,9 +14574,6 @@ function openNumPad(el) {
   const allowDot = dec > 0 || stepAttr == null; // no step = unopinionated: keep the dot
   const maxDec = dec > 0 ? dec : 2;
   const minAttr = el.getAttribute('min'), maxAttr = el.getAttribute('max');
-  // A minus only where the field says so (data-neg) or its min goes below zero —
-  // a field with no min is not an invitation (owner, Sep '26: "why do we need ±").
-  const allowNeg = el.dataset.neg === '1' || (minAttr != null && parseFloat(minAttr) < 0);
   const wrap = document.createElement('div');
   wrap.className = 'num-pop-wrap';
   wrap.innerHTML = `
@@ -14591,7 +14587,6 @@ function openNumPad(el) {
       </div>
       <div class="qp-row qp-actions">
         <button class="icon-action neutral np-cancel">${ACT_CROSS_SVG}</button>
-        ${allowNeg ? `<button class="covers-pad-key np-neg" aria-label="Plus or minus">±</button>` : ''}<!-- a number key in the slot between ✕ and ✓; a pad that never goes below zero leaves the slot empty (owner, Sep '26) -->
         <button class="icon-action send np-ok">${ACT_TICK_SVG}</button>
       </div>
     </div>`;
@@ -14608,12 +14603,13 @@ function openNumPad(el) {
     if (wrap.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault(); ev.stopImmediatePropagation(); }
   };
   document.addEventListener('click', _numPadSwallow, true);
-  let neg = /^-/.test(el.value);
+  // No minus on the pad, ever (owner, Sep '26: "why do we need a ± button?").
+  // A form that can take stock away says so in words — Add / Remove.
   let buf = el.value.replace(/^-/, '');
   let touched = false;
   const disp = wrap.querySelector('.qp-display');
   const paint = () => {
-    disp.textContent = buf === '' ? '—' : (neg ? '-' : '') + buf;
+    disp.textContent = buf === '' ? '—' : buf;
     disp.classList.toggle('placeholder', buf === '');
   };
   paint();
@@ -14627,10 +14623,9 @@ function openNumPad(el) {
     paint();
   };
   wrap.querySelectorAll('.qp-grid button').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); press(b.dataset.k); }));
-  const negBtn = wrap.querySelector('.np-neg');
-  if (negBtn) negBtn.addEventListener('click', (e) => { e.stopPropagation(); touched = true; neg = !neg; paint(); });
   wrap.querySelector('.np-cancel').addEventListener('click', (e) => { e.stopPropagation(); closeNumPad(); });
-  wrap.querySelector('.pop-scrim').addEventListener('click', (e) => { e.stopPropagation(); closeNumPad(); });
+  // A tap on the dark does NOTHING (Popup law) — it used to bin the typed number.
+  wrap.querySelector('.pop-scrim').addEventListener('click', (e) => { e.stopPropagation(); });
   wrap.querySelector('.np-ok').addEventListener('click', (e) => {
     e.stopPropagation();
     // A poll can re-render while the pad is up — write to the LIVE field.
@@ -14642,7 +14637,7 @@ function openNumPad(el) {
     if (raw !== '') {
       // Keep the typed string ("12.50" stays 12.50); clamp only when the
       // field's own min/max say so.
-      out = (neg ? '-' : '') + raw;
+      out = raw;
       const v = parseFloat(out);
       if (isNaN(v)) out = '0';
       else if (minAttr != null && v < parseFloat(minAttr)) out = String(parseFloat(minAttr));
@@ -22490,7 +22485,7 @@ function closeAdjustInventoryModal() {
 
 async function confirmAdjustInventory() {
   const m = state.adjustInventoryModal;
-  const change = parseInt(m.change);
+  const change = Math.abs(parseInt(m.change)) * (m.dir === 'remove' ? -1 : 1);
   if (isNaN(change) || change === 0) { state.toast = 'Enter a non-zero amount.'; render(); return; }
   try {
     await api(`/api/inventory-items/${m.itemId}/adjust`, {
@@ -22513,8 +22508,11 @@ function renderAdjustInventoryModal() {
     <div class="modal" data-stop="1">
       <h2>Adjust stock — ${m.itemName}</h2>
       <div class="sub">Current: ${m.currentStock} units</div>
-      <label>Change (negative to remove)</label>
-      <input id="adjust-inventory-change" type="number" step="1" data-neg="1" value="${m.change}" placeholder="e.g. 10 or -2">
+<div class="pay-options" style="margin-bottom:12px;">
+        ${[['add', 'Add'], ['remove', 'Remove']].map(([v, l]) => `<div class="pay-opt ${(m.dir || 'add') === v ? 'active' : ''}" data-act="adjust-dir" data-modal="inventory" data-val="${v}">${l}</div>`).join('')}
+      </div>
+      <label>Amount</label>
+      <input id="adjust-inventory-change" type="number" step="1" min="0" value="${m.change}" placeholder="e.g. 10">
       <label>Reason</label>
       <input id="adjust-inventory-reason" type="text" value="${esc(m.reason)}" placeholder="e.g. Delivery, Shrinkage, Inventory count">
       <div class="modal-actions">
@@ -22640,7 +22638,7 @@ function openAdjustStock(itemId) { state.adjustStockModal = { itemId, change: ''
 function closeAdjustStockModal() { state.adjustStockModal = null; render(); }
 async function confirmAdjustStock() {
   const m = state.adjustStockModal;
-  const change = parseInt(m.change);
+  const change = Math.abs(parseInt(m.change)) * (m.dir === 'remove' ? -1 : 1);
   if (isNaN(change) || change === 0) { state.toast = 'Enter a non-zero amount.'; render(); return; }
   try {
     await api(`/api/menu/${m.itemId}/stock-adjust`, {
@@ -22663,8 +22661,11 @@ function renderAdjustStockModal() {
     <div class="modal" data-stop="1">
       <h2>Adjust stock — ${item ? esc(item.name) : ''}</h2>
       <div class="sub">Current: ${item ? item.stockCount : '?'}</div>
-      <label>Change (use negative to remove)</label>
-      <input id="adjust-stock-change-input" type="number" step="1" data-neg="1" value="${m.change}" placeholder="e.g. 10 or -2">
+<div class="pay-options" style="margin-bottom:12px;">
+        ${[['add', 'Add'], ['remove', 'Remove']].map(([v, l]) => `<div class="pay-opt ${(m.dir || 'add') === v ? 'active' : ''}" data-act="adjust-dir" data-modal="stock" data-val="${v}">${l}</div>`).join('')}
+      </div>
+      <label>Amount</label>
+      <input id="adjust-stock-change-input" type="number" step="1" min="0" value="${m.change}" placeholder="e.g. 10">
       <label>Reason</label>
       <input id="adjust-stock-reason-input" type="text" value="${esc(m.reason)}" placeholder="e.g. Delivery, Breakage, Count correction">
       <div class="modal-actions">
@@ -27376,7 +27377,7 @@ function renderModifiersAdmin() {
           ${g.options.map((o, oIdx) => `
             <div style="display:flex;gap:8px;margin-bottom:8px;align-items:center;">
               <input class="modifier-opt-label" data-id="${g.id}" data-oidx="${oIdx}" type="text" value="${esc(o.label)}" placeholder="e.g. Medium" style="flex:2;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:inherit;">
-              <input class="modifier-opt-price" data-id="${g.id}" data-oidx="${oIdx}" type="number" step="0.01" data-neg="1" value="${o.priceDelta}" placeholder="0.00" style="flex:1;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:inherit;">
+              <input class="modifier-opt-price" data-id="${g.id}" data-oidx="${oIdx}" type="number" step="0.01" min="0" value="${o.priceDelta}" placeholder="0.00" style="flex:1;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:inherit;">
               ${g.options.length > 1 ? `<button class="delete-icon-btn" data-act="remove-modifier-option-inline" data-id="${g.id}" data-oidx="${oIdx}" style="padding:4px 8px;">${ACT_TRASH_SVG}</button>` : ''}
             </div>`).join('')}
           <div style="display:flex;justify-content:flex-end;margin-top:2px;"><button class="btn-add inline" data-act="add-modifier-option-inline" data-id="${g.id}">+ Option</button></div>
@@ -27401,7 +27402,7 @@ function renderModifierGroupModal() {
       ${m.options.map((o, oIdx) => `
         <div style="display:flex;gap:8px;margin-bottom:8px;">
           <input class="mod-option-label-input" data-oidx="${oIdx}" type="text" value="${esc(o.label)}" placeholder="e.g. Medium" style="flex:2;">
-          <input class="mod-option-price-input" data-oidx="${oIdx}" type="number" step="0.01" data-neg="1" value="${o.priceDelta}" placeholder="0.00" style="flex:1;">
+          <input class="mod-option-price-input" data-oidx="${oIdx}" type="number" step="0.01" min="0" value="${o.priceDelta}" placeholder="0.00" style="flex:1;">
           <button class="delete-icon-btn" data-act="remove-mod-option" data-oidx="${oIdx}">${ACT_TRASH_SVG}</button>
         </div>`).join('')}
       <div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><button class="btn-add inline" data-act="add-mod-option">+ Option</button></div>
@@ -39162,6 +39163,7 @@ function handleActClick(el, e) {
       else if (act === 'open-adjust-stock') { openAdjustStock(el.dataset.id); }
       else if (act === 'close-adjust-stock-modal') { closeAdjustStockModal(); }
       else if (act === 'confirm-adjust-stock') { confirmAdjustStock(); }
+      else if (act === 'adjust-dir') { const m = el.dataset.modal === 'stock' ? state.adjustStockModal : state.adjustInventoryModal; if (m) { m.dir = el.dataset.val; render(); } }
       else if (act === 'add-printer-station') { openAddPrinterStation(); }
       else if (act === 'edit-printer-station') { openEditPrinterStation(el.dataset.id); }
       else if (act === 'close-printer-station-modal') { closePrinterStationModal(); }

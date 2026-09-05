@@ -9989,8 +9989,15 @@ app.post('/api/orders', (req, res) => {
   // ticket that already exists, never a second one for the same table.
   const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
   if (sendKey) {
-    const already = (data.orders || []).find(o => o.sendKey === sendKey);
-    if (already) return res.json(already);
+    // Only an OPEN ticket counts — a voided or paid one is finished, and food
+    // sent after it must open a fresh ticket, never land on a dead one.
+    const already = (data.orders || []).find(o => o.sendKey === sendKey && o.status === 'open');
+    if (already) {
+      const fresh = unseenLines(already, rawItems);
+      if (!fresh.length) return res.json(already);
+      ringRound(data, already, fresh, req.body, staffName, sendKey);
+      return res.json(already);
+    }
   }
   const noteOnly = !rawItems || rawItems.length === 0;
   if (noteOnly && !(open && (String(req.body.quickNote || '').trim() || (orderType || 'dine-in') === 'dine-in' && table))) {
@@ -10098,25 +10105,11 @@ app.post('/api/orders', (req, res) => {
   res.json(order);
 });
 
-app.post('/api/orders/:id/rounds', (req, res) => {
-  const data = readData();
-  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
-  if (!order) return res.status(404).json({ error: 'Order not found' });
-  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { items: rawItems, staffName } = req.body;
-  // SEND-ONCE. A round carries a key the till minted before it left. If the
-  // wifi dropped after we wrote the round but before the reply got home, the
-  // till retries with the SAME key - so return the order we already have
-  // instead of ringing the food twice (owner, Aug '26: a dropped round).
-  const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
-  if (sendKey && (order.rounds || []).some(r => r.sendKey === sendKey)) {
-    return res.json(order);
-  }
-  // A notes-only round rides out with the table's notes or the quick note.
-  if ((!rawItems || rawItems.length === 0) &&
-      !(String(req.body.quickNote || '').trim() || (order.orderType === 'dine-in' && order.table))) {
-    return res.status(400).json({ error: 'Round has no items' });
-  }
+// RING A ROUND onto an open ticket: what the rounds route did, shared with
+// the order route so a retry of a dropped send can add the NEW lines to the
+// ticket that already exists (see the line keys below).
+function ringRound(data, order, rawItems, body, staffName, sendKey) {
+  const req = { body };
   const items = (rawItems || []).map(i => ({ ...i, status: i.status || 'ordered' }));
   const roundNumber = (order.rounds || []).length + 1;
   const quickNote = String(req.body.quickNote || '').trim().slice(0, 120) || null;
@@ -10138,6 +10131,43 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   // (was: settings.docket.roundPrint =
   // 'full') so the kitchen sees the complete table, or just the added items.
   printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), roundNumber, quickNote ? { quickNote, quickNoteStation } : undefined);
+  return order;
+}
+// EVERY LINE CARRIES ITS OWN KEY (owner, Sep '26). A send used to carry one
+// key for the whole round: a retry with a matching key was answered "already
+// have it" and ignored — right for the dish that landed, wrong for the dish
+// added after the wifi dropped, which never rang anywhere. Now the server
+// keeps the lines whose key it has never seen and skips the rest, so the
+// same cart sent twice doubles nothing and a changed cart rings only what is
+// new. Lines from older tills carry no key and are never skipped.
+function knownLineKeys(order) {
+  const keys = new Set();
+  (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (i.lineKey) keys.add(String(i.lineKey)); }));
+  return keys;
+}
+function unseenLines(order, rawItems) {
+  const known = knownLineKeys(order);
+  return (rawItems || []).filter(i => !(i.lineKey && known.has(String(i.lineKey))));
+}
+app.post('/api/orders/:id/rounds', (req, res) => {
+  const data = readData();
+  const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  const { items: rawItems, staffName } = req.body;
+  const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
+  // SEND-ONCE, per LINE: whatever this ticket already holds is skipped, the
+  // rest rings. A retry of an unchanged cart adds nothing and gets the ticket
+  // back; a cart with a new dish rings just that dish.
+  const fresh = unseenLines(order, rawItems);
+  const dropped = (rawItems || []).length - fresh.length;
+  if (dropped > 0 && fresh.length === 0) return res.json(order);
+  // A notes-only round rides out with the table's notes or the quick note.
+  if ((!fresh || fresh.length === 0) &&
+      !(String(req.body.quickNote || '').trim() || (order.orderType === 'dine-in' && order.table))) {
+    return res.status(400).json({ error: 'Round has no items' });
+  }
+  ringRound(data, order, fresh, req.body, staffName, sendKey);
   res.json(order);
 });
 
@@ -14852,7 +14882,7 @@ function backToTableSelect() {
   state.table = null;
   state.covers = 0;
   state.openOrderId = null;
-  state.cart = [];
+  state.cart = []; clearSendState();
   state.attachedCustomerId = null;
   state.transferMode = false; state.transferFrom = null;
   state.callAway = false; state.notesPanel = null; state.quickNotePad = false;
@@ -14863,6 +14893,7 @@ function backToTableSelect() {
 }
 function logOut() {
   clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
+  clearSendState();
   releaseTableLock(state.table);
   try { localStorage.removeItem('pos-signed-in'); } catch (e) {}
   try { localStorage.removeItem('pos-cart'); } catch (e) {} // deliberate log-off = cart gone
@@ -15991,15 +16022,27 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
     // 'later' groups start empty — added from the line editor.
   });
   const composed = composeCartLine(item, variantId, modSelections);
-  const line = { id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
+  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
   // A noted line never merges into a differently-noted one — the note is
   // part of what the kitchen reads.
   const existing = state.cart.find(c => c.id === line.id && c.course === course && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
-  if (existing) existing.qty += qty;
+  // A line that already went out (sentQty) is never grown — the server would
+  // skip its key and the extra would vanish. The extra becomes its own line.
+  if (existing && existing.sentQty == null) existing.qty += qty;
   else state.cart.push(line);
 }
+// Growing a line that already went out splits the extra into a new line with
+// its own key (see sentQty above). Shrinking is allowed as it always was.
+function growCartLine(idx, delta) {
+  const l = state.cart[idx];
+  if (delta > 0 && l.sentQty != null) {
+    state.cart.splice(idx + 1, 0, { ...l, lineKey: mintLineKey(), sentQty: undefined, qty: delta, modSelections: { ...(l.modSelections || {}) }, removed: [...(l.removed || [])] });
+    return true;
+  }
+  return false;
+}
 function changeQty(idx, delta) {
-  state.cart[idx].qty += delta;
+  if (!growCartLine(idx, delta)) state.cart[idx].qty += delta;
   if (state.cart[idx].qty <= 0) state.cart.splice(idx, 1);
   render();
 }
@@ -16078,7 +16121,7 @@ function editLineQty(delta) {
   // Zero takes the line off (owner, Sep '26: "the count should be able to
   // go to zero as well, to remove") and the editor closes with it — there is
   // nothing left to edit.
-  line.qty += delta;
+  if (!growCartLine(idx, delta)) line.qty += delta;
   if (line.qty <= 0) { state.cart.splice(idx, 1); state.editLine = null; }
   render();
 }
@@ -16091,7 +16134,7 @@ function splitCartLine() {
   const n = Math.floor(line.qty);
   line.qty = 1;
   const copies = [];
-  for (let i = 1; i < n; i++) copies.push({ ...line, qty: 1, modSelections: { ...(line.modSelections || {}) }, removed: [...(line.removed || [])] });
+  for (let i = 1; i < n; i++) copies.push({ ...line, lineKey: mintLineKey(), sentQty: undefined, modSelections: { ...(line.modSelections || {}) }, removed: [...(line.removed || [])], qty: 1 });
   state.cart.splice(idx + 1, 0, ...copies);
   state.editLine = null;
   state.toast = `Split into ${n} lines`;
@@ -16213,7 +16256,7 @@ function undoRemoveLine() {
   render();
 }
 function clearCart() {
-  state.cart = [];
+  state.cart = []; clearSendState();
   state.activeSeat = null;
   state.covers = (findTableById(state.table) || {}).covers || 0;
   state.allergies = (findTableById(state.table) || {}).allergies || [];
@@ -17297,6 +17340,11 @@ function cartSendable() {
   if ((state.quickNote || '').trim()) return true;
   return state.orderType === 'dine-in' && !!state.table && (state.notes.length > 0 || state.allergies.length > 0);
 }
+function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
+// A failed send is spent the moment the cart is dropped or the person leaves:
+// it used to follow the next waiter onto the table and send their food into
+// a ticket that had since been voided (owner, Sep '26).
+function clearSendState() { state.sendKey = null; state.sendFailed = null; }
 async function sendToKitchen() {
   if (state.sending) return;
   // The phone Save button is always tappable (its hold is the log-off
@@ -17318,10 +17366,15 @@ async function sendToKitchen() {
     if (mis.length) { state.stockWarnModal = mis; render(); return; }
   }
   state._stockWarnAck = false;
-  // ONE key per attempt at THIS cart. A retry reuses it, so if the round
-  // actually landed and only the reply was lost, the server hands back the
-  // same ticket instead of ringing the food twice.
+  // ONE key per attempt at THIS cart names the ticket a retry belongs to; and
+  // EVERY LINE carries its own key (mintLineKey), which is what the server
+  // actually dedupes on — so a retry after a dropped reply rings only the
+  // lines the kitchen does not have yet (owner, Sep '26: the Gimlet added
+  // after a failed send never rang). Each line remembers the quantity it
+  // went out with, so a later change becomes a NEW line, not a bigger one
+  // the server would skip.
   if (!state.sendKey) state.sendKey = 'snd-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+  state.cart.forEach(l => { if (!l.lineKey) l.lineKey = mintLineKey(); l.sentQty = l.qty; });
   state.sending = true;
   state.sendFailed = null;
   render();
@@ -18973,7 +19026,7 @@ function doAddServing(match) {
   const o = activeOpenOrder();
   const item = (o && match) ? (o.items || []).find(i => sentItemMatches(i, match)) : null;
   if (!item) return false;
-  state.cart.push({ id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.price, qty: 1,
+  state.cart.push({ lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.price, qty: 1,
     course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
     variantId: item.variantId, modSelections: item.modSelections });
   state.toast = `Added another ${item.name}`;
@@ -29175,7 +29228,7 @@ function pickTable(id) {
     // the "Switch tables?" guard above only asks for a DIFFERENT table, so a
     // swipe onto the floor and a tap on your own table silently ate the
     // round (owner: "swiping left while ordering deletes the order").
-    if (hadTable && prevTable !== id) { state.cart = []; state.firedCourses = {}; }
+    if (hadTable && prevTable !== id) { state.cart = []; state.firedCourses = {}; clearSendState(); }
     state.autoCourseOverride = null;
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
@@ -29990,6 +30043,7 @@ function addComboToCart() {
     if (!items.length) return;
     const names = items.map(i => i.name).join(', ');
     state.cart.push({
+      lineKey: mintLineKey(),
       id: 'combo-' + combo.id + '-' + stamp + '-' + gi,
       name: `${combo.name} · ${names}`,
       price: priced ? 0 : combo.price,
@@ -32415,7 +32469,7 @@ function tapQtyPad(key) {
 function addVoucherSaleLine(amount) {
   const v = Math.round((parseFloat(amount) || 0) * 100) / 100;
   if (!(v > 0)) { state.toast = 'Enter a voucher amount first'; armToastTimer(2500); render(); return; }
-  state.cart.push({ id: 'gv' + Date.now(), menuItemId: null, giftcardSale: true, name: 'Gift voucher', price: v, qty: 1, seat: null, mods: [] });
+  state.cart.push({ lineKey: mintLineKey(), id: 'gv' + Date.now(), menuItemId: null, giftcardSale: true, name: 'Gift voucher', price: v, qty: 1, seat: null, mods: [] });
   const inp = document.getElementById('sell-voucher-amount');
   if (inp) inp.value = '';
   render();

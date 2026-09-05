@@ -1359,6 +1359,8 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    tool rows). Tighter on wide screens for a bigger map; the admin header grows
    taller at ≤1100px, so the budget widens there to keep the whole map on screen. */
 #admin-floor-canvas{ --floor-h-budget:215px; } /* a first guess; fitAdminFloorCanvas() measures the real one after every render */
+/* A picked table's two handles: 32 drawn, accent paint, a drawn icon. */
+.fp-handle{ position:absolute; width:32px; height:32px; background:var(--orange); color:#fff; display:flex; align-items:center; justify-content:center; pointer-events:auto; box-shadow:var(--lift-1); }
 /* The rotate and resize handles are finger-sized: 32 drawn, 44 to the touch
    (the halo, tap-target law). They were 22 and 18 — pinpricks on a tablet. */
 .rotate-handle::before,.resize-handle::before{ content:""; position:absolute; inset:-6px; border-radius:inherit; }
@@ -9733,13 +9735,24 @@ app.get('/api/table-locks', (req, res) => {
   for (const [id, l] of tableLocks) if (lockFresh(l)) out[id] = { staff: l.staff, device: l.device };
   res.json(out);
 });
+// A manager's unlock used to last 15s: the freed till's heartbeat took the
+// table straight back (Sep '26). Now the unlock remembers which till it
+// freed, and that till's HEARTBEAT is refused for two minutes — only a
+// deliberate tap (retake) or another till gets the table.
+const forcedFree = new Map(); // tableId -> { device, at }
+const FORCED_FREE_MS = 2 * 60 * 1000;
 app.post('/api/table-locks/claim', (req, res) => {
-  const { tableId, staff, device, force } = req.body || {};
+  const { tableId, staff, device, force, retake } = req.body || {};
   if (!tableId || !device) return res.status(400).json({ error: 'tableId and device required' });
   const cur = tableLocks.get(String(tableId));
   if (lockFresh(cur) && cur.device !== String(device) && !force) {
     return res.status(409).json({ error: `In use — ${cur.staff}`, staff: cur.staff });
   }
+  const freed = forcedFree.get(String(tableId));
+  if (freed && freed.device === String(device) && !force && !retake && Date.now() - freed.at < FORCED_FREE_MS) {
+    return res.status(409).json({ error: 'Unlocked by a manager', released: true });
+  }
+  forcedFree.delete(String(tableId));
   tableLocks.set(String(tableId), { staff: String(staff || 'Someone'), device: String(device), ts: Date.now() });
   res.json({ ok: true });
 });
@@ -9747,7 +9760,10 @@ app.post('/api/table-locks/release', (req, res) => {
   const { tableId, device, force } = req.body || {};
   const cur = tableLocks.get(String(tableId));
   // A manager can force a release regardless of which till holds the lock.
-  if (cur && (force || cur.device === String(device))) tableLocks.delete(String(tableId));
+  if (cur && (force || cur.device === String(device))) {
+    if (force && cur.device !== String(device)) forcedFree.set(String(tableId), { device: cur.device, at: Date.now() });
+    tableLocks.delete(String(tableId));
+  }
   res.json({ ok: true });
 });
 
@@ -10051,7 +10067,7 @@ app.post('/api/orders', (req, res) => {
   if (noteOnly && !(open && (String(req.body.quickNote || '').trim() || (orderType || 'dine-in') === 'dine-in' && table))) {
     return res.status(400).json({ error: 'Order has no items' });
   }
-  const items = (rawItems || []).map(i => ({ ...i, status: i.status || 'ordered' }));
+  const items = (rawItems || []).map(i => ({ ...i, uid: lineUid(i), status: i.status || 'ordered' }));
   // Practice: stamp the order so sales/reports skip it and the purge can find
   // it. Never inferred later — an order is practice only if the person who
   // rang it up was a trainee at the time. It was a whole-venue switch, which
@@ -10060,6 +10076,18 @@ app.post('/api/orders', (req, res) => {
   const isPractice = !!(ringer && ringer.trainee);
 
   const subtotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
+
+  // ONE open ticket per table. A second till opening a table that already
+  // has one (its lock list was stale) rings onto that ticket instead of
+  // starting another the first till would never see (Sep '26).
+  if (open && (orderType || 'dine-in') === 'dine-in' && table) {
+    const twin = (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table) && !!o.practice === isPractice);
+    if (twin) {
+      const fresh = unseenLines(twin, rawItems);
+      if (fresh.length) ringRound(data, twin, fresh, req.body, staffName, sendKey);
+      return res.json(twin);
+    }
+  }
 
   if (open) {
     const order = {
@@ -10160,9 +10188,13 @@ app.post('/api/orders', (req, res) => {
 // RING A ROUND onto an open ticket: what the rounds route did, shared with
 // the order route so a retry of a dropped send can add the NEW lines to the
 // ticket that already exists (see the line keys below).
+// Every line on a ticket carries its OWN uid — two singles of one dish share
+// a composed id, so "move 1 item" moved both (Sep '26). The till's line key
+// is that uid when it has one.
+function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); }
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
-  const items = (rawItems || []).map(i => ({ ...i, status: i.status || 'ordered' }));
+  const items = (rawItems || []).map(i => ({ ...i, uid: lineUid(i), status: i.status || 'ordered' }));
   const roundNumber = (order.rounds || []).length + 1;
   const quickNote = String(req.body.quickNote || '').trim().slice(0, 120) || null;
   const quickNoteStation = (data.printerStations || []).some(s => s.id === req.body.quickNoteStation) ? req.body.quickNoteStation : null;
@@ -10599,11 +10631,12 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   const ids = (Array.isArray(itemIds) ? itemIds : []).map(String);
   if (!ids.length) return res.status(400).json({ error: 'Pick items to move' });
   if (!targetTable || String(targetTable) === String(order.table)) return res.status(400).json({ error: 'Pick a different table' });
-  const moving = (order.items || []).filter(i => ids.includes(String(i.id)));
+  const keyOf = i => String(i.uid || i.id);
+  const moving = (order.items || []).filter(i => ids.includes(keyOf(i)));
   if (!moving.length) return res.status(400).json({ error: 'Those items are no longer on the ticket' });
-  order.items = order.items.filter(i => !ids.includes(String(i.id)));
+  order.items = order.items.filter(i => !ids.includes(keyOf(i)));
   order.rounds = (order.rounds || [])
-    .map(r => ({ ...r, items: (r.items || []).filter(i => !ids.includes(String(i.id))) }))
+    .map(r => ({ ...r, items: (r.items || []).filter(i => !ids.includes(keyOf(i))) }))
     .filter(r => (r.items || []).length);
   const retotal = (o) => { o.subtotal = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0); o.total = o.subtotal; o.grandTotal = o.subtotal; };
   retotal(order);
@@ -11110,6 +11143,12 @@ const CATEGORY_ICONS = {
 // One grid for every layout — a fine 2.5% step lets tables sit close and line
 // up precisely, while still snapping cleanly on a touchscreen.
 const FLOOR_GRID = 2.5;
+// A square, a circle and a stool look the same turned, so they never offer a
+// Turn (owner, Sep '26: "no sense to rotate symmetrical shapes").
+function symmetricalTable(t) { return !!t && (t.shape === 'round' || t.shape === 'stool' || t.shape === 'square'); }
+// The two handles on a picked table: drawn on the 24 grid like every icon.
+const FP_TURN_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12a10 10 0 1 1-3.33-7.44"/><path d="M22 2v5.56h-5.56"/></svg>';
+const FP_SIZE_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22 22 2"/><path d="M14.5 2H22v7.5"/><path d="M2 14.5V22h7.5"/></svg>';
 const TABLE_TEMPLATES = [
   { key: 'barstool', label: 'Barstool', shape: 'stool', width: 4, height: 6, seats: 1 },
   { key: 'round', label: 'Circle', shape: 'round', width: 8, height: 13, seats: 4 },
@@ -11234,13 +11273,6 @@ const DECOR_SIZE_LABELS = ['S', 'M', 'L'];
 // Floor background: a small set of calm neutrals only — a loud floor fights the
 // tables for attention. Objects/areas (walls, zones) get greys + muted tones so
 // they recede behind the tables rather than compete.
-const FLOOR_COLORS = [
-  { v: '', label: 'Default' },
-  { v: '#EFEAE0', label: 'Sand' },
-  { v: '#E8E9E9', label: 'Grey' },
-  { v: '#E1E6E2', label: 'Sage' },
-  { v: '#E6E3EA', label: 'Slate' },
-];
 const OBJECT_COLORS = [
   { v: '', label: 'Icon only' },
   { v: '#5b5f66', label: 'Charcoal' },
@@ -11364,7 +11396,6 @@ let state = {
   selectedAdminTableId: null,
   selectedAdminTableIds: [], // multi-select set (Ctrl+click / marquee) in the floor editor
   floorPlacing: null, // when set (e.g. "table:round"), click the canvas to drop that item
-  floorAddCat: 'tables', // layout editor "Add to floor" category: tables | objects | areas
   simpleCountDraft: null, // simple-numbers count being stepped, applied on "Apply"
   floorTableColor: null, // colour applied to tables placed from the toolbar
   floorStatusCardOpen: false, // Status colours & timers card starts collapsed
@@ -13165,12 +13196,14 @@ async function api(path, opts) {
     setTimeout(() => offerUndo('Deleted', undoLastAdminDelete), 0);
   }
   if (!res.ok) {
-    let message = 'Request failed';
+    let message = 'Request failed', body = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (body && body.error) message = body.error;
     } catch (e2) {}
-    throw new Error(message);
+    const err = new Error(message);
+    err.status = res.status; err.body = body;
+    throw err;
   }
   return await res.json();
 }
@@ -19882,7 +19915,9 @@ function renderTicketPanel() {
           })() : ''}
           ${state.vipType ? (() => {
             const picks = state.vipType.split(',').map(s => s.trim());
-            const vp = state.vipPresets.find(p => p.color && picks.includes(p.name));
+            // A preset with a custom note behind it ("Regular. Alan Ha") is
+            // still that preset, so it keeps the preset's colour (owner, Sep '26).
+            const vp = state.vipPresets.find(p => p.color && picks.some(x => x === p.name || x.startsWith(p.name + '.') || x.startsWith(p.name + ' ')));
             const style = vp ? `background:${vp.color};color:${contrastTextColor(vp.color)};border-color:${vp.color};` : 'background:var(--orange-dim);color:var(--orange);border-color:var(--orange);';
             return `<span class="seat-chip" style="${style}">VIP — ${esc(state.vipType)} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
           })() : ''}
@@ -26757,7 +26792,7 @@ function renderFloorPlanAdmin() {
           return `<div class="decor-chip-row">${list.map(t => {
             const val = `decor:${t.key}`;
             const thin = t.height <= 3;
-            const [sw, sh] = t.shape === 'round' ? [24, 24] : t.shape === 'square' ? [24, 24] : thin ? [42, 6] : [42, 24];
+            const [sw, sh] = t.shape === 'round' ? [20, 20] : t.shape === 'square' ? [20, 20] : thin ? [20, 4] : [20, 12];
             const rad = t.shape === 'round' ? '50%' : thin ? '3px' : '3px';
             return `<button class="decor-chip shape-only${state.floorPlacing === val ? ' active' : ''}" data-act="palette-place" data-val="${val}"><span class="decor-chip-block" style="width:${sw}px;height:${sh}px;border-radius:${rad};background:${t.color || 'var(--steel-300)'};"></span></button>`;
           }).join('')}</div>`;
@@ -26777,12 +26812,10 @@ function renderFloorPlanAdmin() {
       }
       // NOTHING selected → ONE tidy "Add to floor" group: a category segment
       // (all visual) + the matching chip picker.
-      let cat = state.floorAddCat || 'tables';
-      if (cat === 'areas' || cat === 'objects') cat = 'structure'; // migrate old persisted values
       // Objects came off the Add row (owner, Aug '26: "remove objects, I think it's
-      // a distraction"). Anything already placed stays on the floor.
-      const catSeg = `<div class="seg" style="width:auto;">${[['tables', 'Tables'], ['structure', 'Structure']].map(([v, l]) => `<button class="${cat === v ? 'active' : ''}" data-act="set-floor-cat" data-val="${v}" style="padding:8px 12px;font-size:var(--fs-md);">${l}</button>`).join('')}</div>`;
-      const picker = cat === 'tables' ? chipsHtml('') : cat === 'objects' ? placeChips('object') : placeChips('structure');
+      // a distraction"). Anything already placed stays on the floor. Tables and
+      // structure are two cards, not a switch (owner, Sep '26: "separate
+      // tables and structure").
       // SHAPE AND COLOUR ARE ONE CARD, AND IT NEVER MOVES (owner, Aug '26:
       // "I dont want table select to alter the options" / "maybe add colour to
       // table options merge together"). Picking a table used to REPLACE this
@@ -26792,10 +26825,9 @@ function renderFloorPlanAdmin() {
       // with one picked it edits that table. Same controls either way.
       // A ROUND table shows no Turn button - there is nothing to turn (owner:
       // "round tables should not be able to rotate thats weird").
-      const roundish = (t) => t && (t.shape === 'round' || t.shape === 'stool');
-      const allRound = selTable ? roundish(selTable) : (selMany.length ? selMany.every(roundish) : true);
+      const allRound = selTable ? symmetricalTable(selTable) : (selMany.length ? selMany.every(symmetricalTable) : true);
       const turnBtn = (!(selTable || multi) || allRound) ? '' :
-        `<button type="button" class="icon-sq fp-rot" data-act="rotate-selected-tables" aria-label="Turn"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v5h-5"/></svg></button>`;
+        `<button type="button" class="icon-sq fp-rot" data-act="rotate-selected-tables" aria-label="Turn">${FP_TURN_SVG}</button>`;
       const curColor = selTable ? selTable.color : multi ? mColor : state.floorTableColor;
       const curFinish = selTable ? (selTable.finish || 'plain') : multi ? mFinish : (state.floorTableFinish || 'plain');
       const dotOpts = { bg: curColor ? null : (tableFinish(curFinish).bg || 'var(--table-plain)'), finish: curFinish };
@@ -26813,18 +26845,12 @@ function renderFloorPlanAdmin() {
       const picking = !!(selTable || multi);
       const tableCard = `
       <div class="pp-group fp-table-card">
-        <div class="pp-label" data-sub="${picking ? 'Its look, and what you can do.' : 'Pick a shape, then tap the floor.'}">${selTable ? `Table ${esc(selTable.label)}` : multi ? `${multi} selected` : 'Add to floor'}${turnBtn}</div>
-        ${/* The Tables/Structure switch is for PLACING. With a table picked
-              this card is that table's card, so the switch stands down rather
-              than offering to swap the controls out from under the selection. */ ''}
-        ${picking ? '' : `<div class="fp-add-row">${catSeg}</div>`}
-        ${picking || cat === 'tables'
-          ? chipsHtml(selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '')
-            + `<div class="fp-inline-row">
+        <div class="pp-label" data-sub="${picking ? 'Its look, and what you can do.' : 'Pick a shape, then tap the floor.'}">${selTable ? `Table ${esc(selTable.label)}` : multi ? `${multi} selected` : 'Tables'}${turnBtn}</div>
+        ${chipsHtml(selTable ? `data-id="${selTable.id}"` : multi ? 'data-id="multi"' : '')}
+        <div class="fp-inline-row">
           <span class="fp-sub fp-sub-flat">Colour &amp; finish</span>
           ${colourDot}
-        </div>`
-          : picker}
+        </div>
         ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
         ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control,
               the number included. It was a 40-tall pill sitting beside 44
@@ -26848,7 +26874,7 @@ function renderFloorPlanAdmin() {
         <button class="icon-sq" data-act="${selTable ? 'delete-table' : 'delete-selected-tables'}" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_TRASH_SVG}</button>
       </div>` : ''}
       </div>`;
-      return tableCard;
+      return tableCard + `<div class="pp-group"><div class="pp-label" data-sub="Tap one, then tap the floor.">Structure</div>${placeChips('structure')}</div>`;
     })()}
     ${/* THE COLOUR A NEW TABLE GETS BELONGS WITH ADDING ONE, not in a card of
           its own between Add and the floor's settings (owner, Aug '26:
@@ -26909,7 +26935,13 @@ function renderFloorPlanAdmin() {
     </div>
     <div class="pp-group">
       <div class="pp-label" data-sub="The room under the tables.">Floor colour</div>
-      ${swatchRow('set-floor-color', fp.bgColor, FLOOR_COLORS, `data-fp="${fp.id}"`)}
+      ${/* The regular colour dot — the same picker every colour in the app
+            opens. It was five fixed tints of its own (owner, Sep '26: "just
+            add the regular colour selection"). */ ''}
+      <div class="fp-inline-row">
+        <span class="fp-sub fp-sub-flat">Colour</span>
+        ${colorDotButton('floor-bg', fp.id, fp.bgColor, { bg: 'var(--surface)', title: 'Floor colour' })}
+      </div>
     </div>
     <div class="pp-group">
       <div class="pp-label" data-sub="Tables line up as you drag them.">Snap to grid</div>
@@ -26942,8 +26974,8 @@ function renderFloorPlanAdmin() {
         ${floorMarkerInner(t, fp.height, { hideStatus: true })}
         ${state.selectedAdminTableId === t.id ? `
           <div style="position:absolute;inset:0;transform:rotate(${-(t.rotation || 0)}deg);pointer-events:none;z-index:2;">
-            ${t.shape !== 'round' ? `<span class="rotate-handle" data-id="${t.id}" style="position:absolute;top:-16px;right:-16px;width:32px;height:32px;border-radius:50%;background:var(--orange);color:#fff;display:flex;align-items:center;justify-content:center;font-size:var(--fs-lg);cursor:pointer;pointer-events:auto;box-shadow:var(--lift-1);">⟳</span>` : ''}
-            <span class="resize-handle" data-id="${t.id}" style="position:absolute;bottom:-16px;right:-16px;width:32px;height:32px;border-radius:var(--r-control);background:var(--orange);color:#fff;display:flex;align-items:center;justify-content:center;font-size:var(--fs-lg);cursor:nwse-resize;pointer-events:auto;box-shadow:var(--lift-1);">⤡</span>
+            ${symmetricalTable(t) ? '' : `<span class="rotate-handle fp-handle" data-id="${t.id}" style="top:-16px;right:-16px;border-radius:50%;cursor:pointer;">${FP_TURN_SVG}</span>`}
+            <span class="resize-handle fp-handle" data-id="${t.id}" style="bottom:-16px;right:-16px;border-radius:var(--r-control);cursor:nwse-resize;">${FP_SIZE_SVG}</span>
           </div>
         ` : ''}
       </button>
@@ -27610,7 +27642,6 @@ function renderScreenAdmin() {
       ${colorDotButton('accent', 'accent', state.theme.accent || '#3692E7', { allowClear: false, title: 'Accent colour' })}
       <span class="ts" style="margin-left:8px;">Tap to choose.</span>
     </div>
-    <div class="ts" style="margin-top:8px;">Table-status colours stay reserved.</div>
   </div>
   <div class="settings-card" id="ctl-docket">
     ${dev !== 'mobile' ? `
@@ -28830,13 +28861,30 @@ function tableLockedBy(tableId) {
   const l = (state.tableLocks || {})[String(tableId)];
   return l && l.device !== DEVICE_ID ? l : null;
 }
-async function claimTableLock(tableId, force) {
+// Returns true (ours), 'busy' (another till holds it — the server said 409),
+// 'released' (a manager unlocked it from under us) or false (no server).
+// A deliberate tap passes retake, which is allowed to take a table back
+// after a manager unlock; the heartbeat never is.
+async function claimTableLock(tableId, force, retake) {
   if (!tableLocksOn() || tableId == null) return true;
   try {
-    await api('/api/table-locks/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID, force: !!force }) });
+    await api('/api/table-locks/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID, force: !!force, retake: !!retake }) });
     state.tableLocks = { ...(state.tableLocks || {}), [String(tableId)]: { staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID } };
+    if (state._lockReleased === String(tableId)) state._lockReleased = null;
     return true;
-  } catch (e) { return false; }
+  } catch (e) {
+    if (e.status === 409 && e.body && e.body.released) {
+      // The manager freed this table: stop holding it, and say so ONCE.
+      if (state._lockReleased !== String(tableId)) {
+        state._lockReleased = String(tableId);
+        state.toast = 'A manager unlocked this table — tap it again to take it back.';
+        render(); armToastTimer(4000);
+      }
+      return 'released';
+    }
+    if (e.status === 409) { state._lockBusyStaff = (e.body && e.body.staff) || ''; return 'busy'; }
+    return false;
+  }
 }
 function releaseTableLock(tableId, force) {
   if (tableId == null) return;
@@ -29037,12 +29085,12 @@ function renderMoveItemsMiddle() {
   });
   groups.sort((a, b) => a.c - b.c);
   const row = (i) => {
-    const on = sel.includes(String(i.id));
+    const on = sel.includes(String(i.uid || i.id));
     const subBits = [];
     if (i.seat && i.seat !== 'all') subBits.push('Seat ' + esc(String(i.seat)));
     (i.mods || []).forEach(m => subBits.push(esc(m.name || String(m))));
     return `
-      <div class="mv-row${on ? ' sel' : ''}" data-act="toggle-move-item" data-id="${i.id}">
+      <div class="mv-row${on ? ' sel' : ''}" data-act="toggle-move-item" data-id="${esc(String(i.uid || i.id))}">
         <div class="mv-main">
           <div class="mv-name">${i.qty > 1 ? `${i.qty} × ` : ''}${esc(i.name)}</div>
           ${subBits.length ? `<div class="mv-sub">${subBits.join(' · ')}</div>` : ''}
@@ -29352,9 +29400,19 @@ function pickTable(id) {
     id = target.mergedInto;
     armToastTimer(2500);
   }
-  const proceed = (forceLock) => {
+  const proceed = async (forceLock) => {
+    // The claim is AWAITED: two tills tapping one table used to both open
+    // it — the 409 was thrown away — and each sent its own ticket (Sep '26).
+    // No server at all still opens the table (the till keeps working offline).
+    const claim = await claimTableLock(id, forceLock, true);
+    if (claim === 'busy') {
+      await refreshTableLocks();
+      state.pickFlashId = null;
+      state.toast = `In use — ${state._lockBusyStaff || 'another till'}`;
+      render(); armToastTimer(2500);
+      return;
+    }
     if (id !== state.table) releaseTableLock(state.table);
-    claimTableLock(id, forceLock);
     const prevTable = state.table;
     const hadTable = !!prevTable;
     state.table = id;
@@ -31333,6 +31391,12 @@ document.addEventListener('scroll', closeQtyPop, true);
 // order (same hold grammar as the qty pop). The fired flag swallows the
 // release's click so holding never also selects the table.
 let _peekHoldFired = false, _peekHoldAt = 0;
+// The finger that OPENED the peek cannot close it: the pop draws under the
+// still-down finger, so the lift lands on its own Close button. Close counts
+// only after a new finger has landed (a timer guessed wrong — a lift 460ms
+// after the hold fired walked straight through a 400ms window).
+let _peekArmed = false;
+document.addEventListener('pointerdown', () => { _peekArmed = true; }, { passive: true, capture: true });
 document.addEventListener('pointerdown', (e) => {
   if (e.isPrimary === false) return; // second finger never arms a hold
   const tile = e.target.closest && e.target.closest('[data-act="pick-table"]');
@@ -31342,7 +31406,7 @@ document.addEventListener('pointerdown', (e) => {
   const x0 = e.clientX, y0 = e.clientY;
   _peekHoldFired = false;
   const myTimer = setTimeout(() => {
-    _peekHoldFired = true; _peekHoldAt = Date.now(); state.tablePeek = t.id;
+    _peekHoldFired = true; _peekHoldAt = Date.now(); _peekArmed = false; state.tablePeek = t.id;
     // The pop is INSERTED, never render()ed in: a full render mid-hold
     // rebuilds the floor and destroys the marker under the still-down
     // finger, and a real touch screen answers that with pointercancel —
@@ -37485,7 +37549,7 @@ function handleActClick(el, e) {
         if (el.dataset.val === 'booked') api('/api/reservations').then(r => { state.reservations = r; render(); }).catch(() => {});
         render();
       }
-      else if (act === 'peek-close') { state.tablePeek = null; render(); }
+      else if (act === 'peek-close') { if (!_peekArmed) return; state.tablePeek = null; render(); }
       else if (act === 'close-order-history') { state.orderHistoryPop = null; render(); }
       else if (act === 'peek-callaway-course') {
         // Course tab on the peek header: fire exactly that course. The peek
@@ -37670,7 +37734,6 @@ function handleActClick(el, e) {
         state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
         render();
       }
-      else if (act === 'set-floor-cat') { state.floorAddCat = el.dataset.val; state.floorPlacing = null; render(); }
       else if (act === 'ask-seat-off') { toggleAskSeatOff(el.dataset.kind, el.dataset.id); }
       else if (act === 'mock-jump') {
         if (e.target.closest('.mk-grip,.mk-railgrip')) return; // edge drag, not a jump
@@ -37873,7 +37936,6 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'unlink-table') { unlinkTapTable(el.dataset.id); }
-      else if (act === 'set-floor-color') { updateFloorPlanBgColor(el.dataset.fp, el.dataset.val || null); }
       else if (act === 'toggle-floor-snap') { saveFloorPlanGrid(el.dataset.fp, { snapToGrid: el.dataset.val === 'true' }); }
       else if (act === 'set-object-color') { const fp = state.floorPlans.find(f => f.id === el.dataset.fp); const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id)); if (t) patchFloorObject(el.dataset.fp, t.id, { color: el.dataset.val || null }); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
@@ -38885,7 +38947,7 @@ setInterval(() => {
   if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal && !state.printerStationModal) {
     // Table-lock heartbeat: keep our claim on the current table alive, and
     // pick up other tills' locks for the picker.
-    if (tableLocksOn() && state.table != null && !tableLockedBy(state.table)) claimTableLock(state.table);
+    if (tableLocksOn() && state.table != null && !tableLockedBy(state.table) && state._lockReleased !== String(state.table)) claimTableLock(state.table);
     refreshTableLocks();
     api('/api/version').catch(() => null).then(v => {
       const same = v && _dataVersion && v.store === _dataVersion.store && v.orders === _dataVersion.orders;

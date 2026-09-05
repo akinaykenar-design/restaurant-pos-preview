@@ -3130,13 +3130,12 @@ body[data-fs-picker] .tp-actions{ flex:none; }
 .covers-ctl .covers-n{ font-family:var(--font-mono); font-weight:700; min-width:16px; text-align:center; }
 
 /* One-row ticket head: table button + covers chip + notes + call-away */
-/* Quick shortcuts share the panel width — proportional, ONE row, never cut
-   or wrapped (owner, Aug '26). Height stays fixed; only width flexes. */
-.ticket-head-row{display:flex;flex-wrap:nowrap;gap:4px;margin-top:2px;align-items:stretch;justify-content:flex-start;} /* icons hug the LEFT - a lone icon never floats centred (owner, Aug '26) */
-/* Pinned docket buttons never STRETCH (one pin used to fill the whole row —
-   owner, Aug '26): each keeps its size, the row spaces them evenly, and with
-   plenty of pins they shrink just enough to fill edge to edge. */
-.ticket-head-row .tkt-icon-btn.lg{flex:1 1 0;width:auto;min-width:44px;} /* the row is SHARED: tiles spread across it like the action row, instead of hugging the left and leaving a hole on the right (owner, Aug '26) */
+/* Quick shortcuts: FOUR tiles to a line, fixed width, and more pins start a
+   new line (owner, Sep '26: "one button should not expand so much — keep
+   the number of tiles fixed and if there is more create a new line"). A lone
+   pin is one tile wide, hugging the left. Height stays fixed. */
+.ticket-head-row{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px;align-items:stretch;justify-content:flex-start;}
+.ticket-head-row .tkt-icon-btn.lg{flex:0 0 calc((100% - 12px) / 4);width:auto;min-width:44px;}
 /* Docket-head glyph buttons: stroke-outline icons in the exact language of
    the admin action icons (2px currentColor strokes, no fill), with the
    table number between the table legs and the covers count on the torso. */
@@ -5801,6 +5800,18 @@ function loadAndMigrate() {
     const s = data.settings || {};
     ['panelOrders', 'railPositions', 'ticketPos', 'appBarPos'].forEach(k => fold(s[k]));
     if (folded) writeData(data);
+  }
+  // Round tables step down once (Sep '26): the circle template went from 8
+  // wide to 7.5, and every round already on a floor follows it, or the old
+  // tables would sit bigger than new ones of the same size step.
+  if (!(data.settings || {}).roundTablesV2) {
+    let touched = false;
+    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+      if (t.shape === 'round' && t.width && t.height) { t.width = Math.round(t.width * 0.9375 * 100) / 100; t.height = Math.round(t.height * 0.9385 * 100) / 100; touched = true; }
+    }));
+    data.settings = Object.assign({}, data.settings, { roundTablesV2: true });
+    writeData(data);
+    if (touched) console.log('Round tables stepped down to the new circle size');
   }
   // Kitchen dockets read from across the pass — the Normal font tier was the
   // owner's gripe ("way too small"). One-shot bump to Large for venues still
@@ -11158,7 +11169,10 @@ const FP_TURN_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none"
 const FP_SIZE_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22 22 2"/><path d="M14.5 2H22v7.5"/><path d="M2 14.5V22h7.5"/></svg>';
 const TABLE_TEMPLATES = [
   { key: 'barstool', label: 'Barstool', shape: 'stool', width: 4, height: 6, seats: 1 },
-  { key: 'round', label: 'Circle', shape: 'round', width: 8, height: 13, seats: 4 },
+  // A round of the same AREA as the square read bigger — 14% wider (owner,
+  // Sep '26: "large rounds look larger than squares"). Midway now: 70 to
+  // the square's 65 at the same size step.
+  { key: 'round', label: 'Circle', shape: 'round', width: 7.5, height: 12.2, seats: 4 },
   { key: 'oval', label: 'Oval', shape: 'oval', width: 14, height: 11, seats: 6 },
   // A square of the same footprint READS bigger than a circle (corners add
   // ~27% area), so the square template sits a step smaller than the circle
@@ -16439,7 +16453,14 @@ function lastFiredCourse() {
 // Owner rule (Aug '26): nothing reaches the kitchen without Send. Tapping or
 // holding a course STAGES the call-away (hollow tick on the tab); Send fires
 // it. Holding the already-fired course still takes it back instantly.
+// Does this course hold anything — on the docket now, or already sent?
+function courseHasItems(n) {
+  if (state.cart.some(l => (l.course || 1) === n)) return true;
+  const o = state.orders.find(x => x.id === state.openOrderId);
+  return !!(o && (o.items || []).some(i => (i.course || 1) === n));
+}
 function stageCourse(n) {
+  if (!courseHasItems(n)) { state.toast = `Nothing on ${courseInfo(n).name}`; render(); armToastTimer(2000); return; }
   state.stagedCallAway = state.stagedCallAway === n ? null : n;
   state.callAway = false;
   if (state._callAwayReturn) { state._callAwayReturn = false; state.showTablePicker = true; }
@@ -19126,16 +19147,17 @@ function renderMenuScrollBody() {
           const activeSub = activeKid ? activeKid.parentSubcategoryId : (state.activeSubcat && subTabs.some(t => t.id === state.activeSubcat) ? state.activeSubcat : '__all__');
           const activeTopSub = topSubs.find(s => s.id === activeSub);
           const kids = activeTopSub ? childSubcats(activeTopSub.id).filter(subtreeHasItems) : [];
-          const kidRow = kids.length ? `
-            <div class="seg subcat-seg subcat-seg-kids" style="margin-bottom:12px;">
-              <button data-act="subcat" data-val="${activeTopSub.id}" class="${!activeKid ? 'active' : ''}">All ${esc(activeTopSub.name)}</button>
-              ${kids.map(k => `<button data-act="subcat" data-val="${k.id}" class="${activeKid && activeKid.id === k.id ? 'active' : ''}">${esc(k.name)}</button>`).join('')}
-            </div>` : '';
+          // ONE row that REDUCES (owner pick, Sep '26, over two rows): with a
+          // subsection that has sub-subsections picked, the bar becomes
+          // "‹ All · that subsection · its list"; ‹ All brings the bar back.
+          const tabs = kids.length
+            ? [{ id: '__all__', label: '‹ All' }, { id: activeTopSub.id, label: activeTopSub.name }, ...kids.map(k => ({ id: k.id, label: k.name }))]
+            : subTabs;
+          const lit = activeKid ? activeKid.id : activeSub;
           return `
-            <div class="seg subcat-seg" style="margin-bottom:${kids.length ? 8 : 12}px;">
-              ${subTabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${activeSub === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
+            <div class="seg subcat-seg${kids.length ? ' subcat-seg-open' : ''}" style="margin-bottom:12px;">
+              ${tabs.map(t => `<button data-act="subcat" data-val="${t.id}" class="${lit === t.id ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
             </div>
-            ${kidRow}
             ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
             ${activeSub === '__all__' ? groupedAll
             : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}</div>`
@@ -26522,7 +26544,7 @@ function menuItemRowHtml(m) {
               <button class="btn-secondary sm" style="flex:none;" data-act="open-recipe-editor" data-id="${m.id}">${SYS_CLIPBOARD_SVG} Recipe</button>
               <button class="btn-secondary sm" style="flex:none;" data-act="edit-menu-item" data-id="${m.id}">${SYS_EDIT_SVG} All settings…</button>
               <span style="flex:1;"></span>
-              <span style="display:flex;align-items:center;gap:8px;white-space:nowrap;"><label class="field-label" style="margin:0;">New row</label>${togglePill(!!m.rowBreak, 'toggle-item-rowbreak', `data-id="${m.id}"`)}</span>
+              <span style="display:flex;align-items:center;gap:8px;white-space:nowrap;"><label class="field-label" style="margin:0;">New line of tiles</label>${togglePill(!!m.rowBreak, 'toggle-item-rowbreak', `data-id="${m.id}"`)}</span>
             </div>
             </div>
             <div class="ie-chips">
@@ -26585,7 +26607,7 @@ function menuItemRowHtml(m) {
                 ${[...attached, ...unattached].map(g => {
                   const on = attachedIds.includes(g.id);
                   return `<button type="button" class="pay-opt xs ${on ? 'active item-mod-pill' : ''}" data-act="toggle-item-modifier" data-id="${m.id}" data-group="${g.id}">${esc(g.name)}</button>`;
-                }).join('')}
+                }).join('')}<button type="button" class="pay-opt xs" data-act="new-modifier-from-item" data-id="${m.id}">+ New</button>
               </div>`;
             })() : `<div class="ts">No modifier groups yet.</div>`) : ''}`;
             })()}
@@ -28545,22 +28567,22 @@ function renderMenuModal() {
         ${state.categories.map(c => `<option value="${esc(c.name)}" ${m.category === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
       </select>
       ${state.salesCategories.length > 0 ? `
-        <label>Category (optional, for reports)</label>
+        <label>Sales group</label>
         <select id="menu-sales-category-input">
           <option value="">None</option>
           ${state.salesCategories.map(sc => `<option value="${sc.id}" ${m.salesCategoryId === sc.id ? 'selected' : ''}>${esc(sc.name)}</option>`).join('')}
         </select>` : ''}
       ${subcatsForCat.length > 0 ? `
-        <label>Subsection (optional)</label>
+        <label>Subsection</label>
         <select id="menu-subcategory-input">
           <option value="">None</option>
           ${catObj ? subcatOptionsHtml(catObj.id, m.subcategoryId) : ''}
         </select>` : ''}
-      <label>Image URL (optional)</label>
+      <label>Photo</label>
       <input id="menu-image-input" type="text" value="${esc(m.image || '')}" placeholder="https://example.com/photo.jpg">
-      <label>Price ${hasVariants ? '(unused while options are set below)' : ''}</label>
+      <label>${hasVariants ? 'Price — set per size below' : 'Price'}</label>
       <input id="menu-price-input" type="number" step="0.01" min="0" value="${m.price}" placeholder="0.00" ${hasVariants ? 'disabled' : ''}>
-      <label>Options (sizes, piece counts)</label>
+      <label>Sizes &amp; options</label>
       ${m.variants.map((v, vIdx) => `
         <div style="display:flex;gap:8px;margin-bottom:8px;">
           <input class="variant-label-input" data-vidx="${vIdx}" type="text" value="${esc(v.label)}" placeholder="e.g. Large" style="flex:2;">
@@ -28568,39 +28590,39 @@ function renderMenuModal() {
           <button class="delete-icon-btn" data-act="remove-variant" data-vidx="${vIdx}">${ACT_TRASH_SVG}</button>
         </div>`).join('')}
       <div style="display:flex;justify-content:flex-end;margin-bottom:6px;"><button class="btn-add inline" data-act="add-variant">+ Option</button></div>
-      <label>Default course (optional)</label>
+      <label>Course</label>
       <select id="menu-course-input">
         <option value="">None — use whichever course tab is active when ordered</option>
         ${(state.settings.courses || []).map((c, i) => `<option value="${i + 1}" ${String(m.defaultCourse) === String(i + 1) ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
       </select>
-      <label>Order in menu (blank = alphabetical)</label>
+      <label>Position in section</label>
       <input id="menu-sequence-input" type="number" step="1" value="${m.sequence === null || m.sequence === undefined ? '' : m.sequence}" placeholder="e.g. 1">
-      <label>Background color (optional)</label>
+      <label>Tile colour</label>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
         ${colorDotButton('menu-modal', 'x', m.color, { size: 28 })}
       </div>
       <label>Icon</label>
       <div style="margin-bottom:6px;">${iconDotButton('menu-modal', 'x', m.icon, m.iconEnabled)}</div>
-      ${state.modifierGroups.length > 0 ? `
+      ${true ? `
         <label>Modifiers</label>
         <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
           ${state.modifierGroups.map(g => {
             const on = m.modifierGroupIds.includes(g.id);
             return `<button type="button" class="pay-opt xs ${on ? 'active item-mod-pill' : ''}" data-act="modal-toggle-modifier" data-group="${g.id}">${esc(g.name)}</button>`;
-          }).join('')}
+          }).join('')}<button type="button" class="pay-opt xs" data-act="new-modifier-from-item">+ New</button>
         </div>` : ''}
-      <label>Track stock</label>
+      <label>Count stock</label>
       <div class="pay-options" style="margin-bottom:${m.trackStock ? '10px' : '0'};">
         ${togglePill(m.trackStock, 'menu-track-stock')}
       </div>
       ${m.trackStock ? `
         <div style="display:flex;gap:8px;">
           <div style="flex:1;">
-            <label>Current stock</label>
+            <label>In stock now</label>
             <input id="menu-stockcount-input" type="number" min="0" step="1" value="${m.stockCount}">
           </div>
           <div style="flex:1;">
-            <label>Low stock alert at</label>
+            <label>Warn when below</label>
             <input id="menu-lowstock-input" type="number" min="0" step="1" value="${m.lowStockThreshold}">
           </div>
         </div>` : `
@@ -31807,6 +31829,10 @@ document.addEventListener('pointerdown', (e) => {
         clearFiredCourse(n);
         state.toast = `${courseInfo(n).name} call away taken back`;
         render();
+      } else if (!courseHasItems(n)) {
+        // Nothing on that course, nothing to call (owner, Sep '26: the tick
+        // came up on an empty course).
+        state.toast = `Nothing on ${courseInfo(n).name}`; render(); armToastTimer(2000);
       } else stageCourse(n);
     } else if (send) {
       _sendHoldFired = true;
@@ -32693,14 +32719,20 @@ async function saveModifierGroupModal() {
   }
   const payload = { name: m.name, options: validOptions.map(o => ({ id: o.id, label: o.label, priceDelta: parseFloat(o.priceDelta) || 0 })) };
   try {
+    let created = null;
     if (m.mode === 'add') {
-      await api('/api/modifier-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      created = await api('/api/modifier-groups', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     } else {
       await api(`/api/modifier-groups/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     }
     state.modifierGroups = await api('/api/modifier-groups');
     state.modifierGroupModal = null;
     state.adminError = '';
+    // Made from a dish: put the new group straight on that dish.
+    if (created && created.id && m.attachTo) {
+      if (m.attachTo === 'item-modal') { if (state.menuModal && !state.menuModal.modifierGroupIds.includes(created.id)) state.menuModal.modifierGroupIds.push(created.id); }
+      else { const it = state.menu.find(x => x.id === m.attachTo); if (it && !(it.modifierGroupIds || []).includes(created.id)) await toggleItemModifierGroup(m.attachTo, created.id); }
+    }
     render();
   } catch (e) {
     state.adminError = 'Could not save that modifier group.';
@@ -37473,6 +37505,9 @@ function handleActClick(el, e) {
       else if (act === 'add-child-subcategory') { quickAddChildSubcategory(el.dataset.parent); }
       else if (act === 'toggle-subcat-tree') { toggleSubcatTree(el.dataset.id); }
       else if (act === 'toggle-item-modifier') { toggleItemModifierGroup(el.dataset.id, el.dataset.group); }
+      // A modifier group made FROM the dish (owner, Sep '26): the group
+      // editor opens over the item, and on save the new group is put on it.
+      else if (act === 'new-modifier-from-item') { openAddModifierGroup(); if (state.modifierGroupModal) { state.modifierGroupModal.attachTo = el.dataset.id || 'item-modal'; render(); } }
       else if (act === 'toggle-category-tree') {
         const id = el.dataset.id;
         state.expandedCategoryIds = state.expandedCategoryIds.includes(id) ? [] : [id];

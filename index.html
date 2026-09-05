@@ -11562,9 +11562,6 @@ let state = {
   showCheckout: false,
   paymentMethod: 'card',
   cashGiven: '',
-  tipMode: 'none', // 'none' | 'preset' | 'custom'
-  tipPercent: null,
-  tipCustomAmount: '',
   splitMode: false,
   payRailSplit: false, // the pay rail's Split is chosen but no kind picked yet
   payRailVouchers: false, // the pay rail's Vouchers pane is open
@@ -14518,9 +14515,9 @@ function openNumPad(el) {
     <div class="pop-scrim"></div>
     <div class="qty-pop covers-pop num-pop">
       <div class="pad-disp-row">
-        <button class="covers-pad-key util pad-clear np-neg" ${allowNeg ? '' : 'disabled style="opacity:.35;"'}>±</button>
+        ${allowNeg ? `<button class="covers-pad-key util pad-clear np-neg">±</button>` : ''}
         <div class="covers-pad-display qp-display"></div>
-        <span class="pad-clear-sp"></span><!-- mirror of the +/- slot: the amount sits dead centre (owner, Aug '26) -->
+        ${allowNeg ? `<span class="pad-clear-sp"></span>` : ''}<!-- mirror of the ± slot so the amount sits dead centre; a pad that never goes below zero shows no ± at all (owner, Sep '26) -->
       </div>
       <div class="covers-pad-grid qp-grid">
         ${['1', '2', '3', '4', '5', '6', '7', '8', '9', '.', '0', 'back'].map(k => `<button class="covers-pad-key ${k === 'back' || k === '.' ? 'util' : ''}" data-k="${k}" ${k === '.' && !allowDot ? 'disabled style="opacity:.35;"' : ''}>${k === 'back' ? PAD_BSP_SVG : k}</button>`).join('')}
@@ -15331,11 +15328,9 @@ function cartTotal() {
 function cartTipAmount() {
   // A tip left on the card is money the terminal actually took, so it counts
   // whether or not tip prompting is switched on (owner-asked, Aug '26).
-  const card = Math.max(0, parseFloat(state.cardTip) || 0);
-  if (!state.settings.tipsEnabled || state.tipMode === 'none') return card;
-  if (state.tipMode === 'preset') return cartTotal() * ((state.tipPercent || 0) / 100) + card;
-  if (state.tipMode === 'custom') return Math.max(0, parseFloat(state.tipCustomAmount) || 0) + card;
-  return card;
+  // ONE tip (owner, Sep '26: "there is two tips"): the tip field. The preset
+  // percentages fill that field; nothing stacks a second tip on top of it.
+  return Math.max(0, parseFloat(state.cardTip) || 0);
 }
 
 // §§ Paying by card
@@ -15381,6 +15376,23 @@ function cashTakenAmount() {
 function cashOver() { return Math.round((cashTakenAmount() - amountOwing()) * 100) / 100; }
 // The tip typed for THIS card — the running total less whatever earlier cards
 // already carried away, so each card shows the tip it actually took.
+// THE tip block: the field, and under it the presets that fill it (owner,
+// Sep '26: "preset tip amounts should just be below tip"). One id, one
+// handler, whichever way the bill is being paid.
+function tipBlock() {
+  const tip = Math.max(0, parseFloat(state.cardTip) || 0);
+  const pct = (p) => Math.round(cartTotal() * p) / 100;
+  const on = (v) => Math.abs(tip - v) < 0.005;
+  return `
+        <label>Tip</label>
+        <div class="pay-amount-row"><input id="card-tip-input" class="cash-read ${cardTipPending() > 0 ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${cardTipPending() ? cardTipPending().toFixed(2) : ''}"></div>
+        ${state.settings.tipsEnabled ? `
+        <div class="pay-options" style="margin-bottom:14px;">
+          <div class="pay-opt ${on(0) ? 'active' : ''}" data-act="tip-preset" data-val="0">No tip</div>
+          ${(state.settings.tipPresets || []).map(p => `<div class="pay-opt ${tip > 0 && on(pct(p)) ? 'active' : ''}" data-act="tip-preset" data-val="${p}">${p}%</div>`).join('')}
+        </div>` : ''}
+        ${tip > 0 ? `<div class="tot-row"><span>Tip</span><span>${money(tip)}</span></div><div class="tot-row grand" style="margin-bottom:14px;"><span>Total incl. tip</span><span>${money(cartGrandTotal())}</span></div>` : ''}`;
+}
 function cardTipPending() {
   const already = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
   return Math.max(0, Math.round(((parseFloat(state.cardTip) || 0) - already) * 100) / 100);
@@ -17133,9 +17145,6 @@ function openCheckout() {
   state.cashGiven = '';
   state.cardAmount = '';
   state.cardTip = 0;
-  state.tipMode = 'none';
-  state.tipPercent = null;
-  state.tipCustomAmount = '';
   state.splitMode = false;
   state.payRailSplit = false;
   state.payRailVouchers = false;
@@ -20806,16 +20815,6 @@ function renderCheckoutMiddle() {
             `).join('')}
           </div>` : ''}
       `}`}
-      ${state.settings.tipsEnabled ? `
-        <label>Tip</label>
-        <div class="pay-options" style="margin-bottom:${state.tipMode === 'custom' ? '8px' : '14px'};">
-          <div class="pay-opt ${state.tipMode === 'none' ? 'active' : ''}" data-act="tip-mode" data-val="none">No tip</div>
-          ${state.settings.tipPresets.map(p => `<div class="pay-opt ${state.tipMode === 'preset' && state.tipPercent === p ? 'active' : ''}" data-act="tip-preset" data-val="${p}">${p}%</div>`).join('')}
-          <div class="pay-opt ${state.tipMode === 'custom' ? 'active' : ''}" data-act="tip-mode" data-val="custom">Other…</div>
-        </div>
-        ${state.tipMode === 'custom' ? `<input id="tip-custom-input" type="number" min="0" step="0.01" placeholder="0.00" value="${state.tipCustomAmount}" style="margin-bottom:14px;">` : ''}
-        ${tipAmount > 0 ? `<div class="tot-row"><span>Tip</span><span>${money(tipAmount)}</span></div><div class="tot-row grand" style="margin-bottom:14px;"><span>Total incl. tip</span><span>${money(grandTotal)}</span></div>` : ''}
-      ` : ''}
       <div style="display:flex;gap:16px;flex-wrap:wrap;">
         ${state.payRailSplit || state.splitMode || state.paySeat || state.evenSplit ? `
         <div class="pay-options" style="margin-bottom:0;">
@@ -20897,8 +20896,7 @@ function renderCheckoutMiddle() {
         </div>
         <label>Amount</label>
         <div class="pay-amount-row"><input id="card-amount-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cardTakenAmount().toFixed(2)}"></div>
-        <label>Tip</label>
-        <div class="pay-amount-row"><input id="card-tip-input" class="cash-read ${cardTipPending() > 0 ? 'filled' : ''} pay-amount" type="number" min="0" step="0.01" placeholder="0.00" value="${cardTipPending() ? cardTipPending().toFixed(2) : ''}"></div>
+        ${tipBlock()}
         ${cardOver() > 0.005 ? `
           <div class="card-ask">
             <b>Keep ${money(cardOver())} as a tip?</b>
@@ -20930,6 +20928,7 @@ function renderCheckoutMiddle() {
         })() : ''}
         <div class="pay-amount-row"><input id="cash-given-input" class="cash-read filled pay-amount" type="number" min="0" step="0.01" value="${cashTakenAmount().toFixed(2)}"></div>
         ${cashOver() > 0.005 ? `<div class="change-due"><span>Change</span><span>${money(cashOver())}</span></div>` : ''}
+        ${tipBlock()}
         ${cashOver() < -0.005 ? `
           <div class="card-owing">
             <b>${money(amountOwing() - cashTakenAmount())} left after this</b>
@@ -36266,16 +36265,6 @@ function bindEvents() {
   if (cashGivenInput) {
     cashGivenInput.addEventListener('change', (e) => { state.cashGiven = String(e.target.value || ''); render(); });
   }
-  const tipCustomInput = document.getElementById('tip-custom-input');
-  if (tipCustomInput) {
-    tipCustomInput.addEventListener('input', (e) => {
-      state.tipCustomAmount = e.target.value; render();
-      requestAnimationFrame(() => {
-        const el = document.getElementById('tip-custom-input');
-        if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
-      });
-    });
-  }
   document.querySelectorAll('.split-tender-amount-input').forEach(el => {
     el.addEventListener('change', (e) => { updateSplitTenderAmount(parseInt(el.dataset.idx), e.target.value); });
   });
@@ -37361,8 +37350,7 @@ function handleActClick(el, e) {
           render();
         }
       }
-      else if (act === 'tip-mode') { state.tipMode = el.dataset.val; if (el.dataset.val !== 'preset') state.tipPercent = null; render(); }
-      else if (act === 'tip-preset') { state.tipMode = 'preset'; state.tipPercent = parseFloat(el.dataset.val); render(); }
+      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; state.cardTip = p ? Math.round(cartTotal() * p) / 100 : 0; render(); }
       else if (act === 'toggle-split-mode') { toggleSplitMode(); }
       else if (act === 'split-tender-method') { updateSplitTenderMethod(parseInt(el.dataset.idx), el.dataset.val); }
       else if (act === 'add-split-tender') { addSplitTender(); }

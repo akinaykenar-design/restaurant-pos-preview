@@ -4168,9 +4168,15 @@ select.ie-field{font-weight:700;}
 .note-add-cell input{ border:none; outline:none; background:transparent; width:100%; text-align:center; font-weight:700; color:var(--text-primary); font-size:var(--fs-md); font-family:inherit; }
 .note-add-cell input::placeholder{ color:var(--charcoal-soft); }
 /* Fixed "Tiles down": the mock pins its tile row height like the till does. */
+/* THE MOCK'S ROWS ARE THE MOCK'S OWN. The till pins --fixed-row-h on the root,
+   and it leaked into the mock: Tiles down moved the mock's row height (103 →
+   59) while every tile stayed at the till's 110 and spilled over its row
+   (owner, Sep '26: "tiles down is fucked"). Inside a mock the row height is
+   --mk-row-h and nothing else. */
 .mk-wrap[data-fixed-rows="1"] .mk-menu .grid,
-.mk-wrap[data-fixed-rows="1"] .mk-mob-menu .grid{ grid-auto-rows:var(--mk-row-h,64px); }
-.mk-wrap[data-fixed-rows="1"] .grid .item-card{ height:auto; min-height:0; }
+.mk-wrap[data-fixed-rows="1"] .mk-mob-menu .grid{ --tile-h-real:var(--mk-row-h,92px); grid-auto-rows:var(--mk-row-h,64px); }
+.mk-wrap[data-fixed-rows="1"] .mk-menu .grid .item-card,
+.mk-wrap[data-fixed-rows="1"] .mk-mob-menu .grid .item-card{ height:var(--mk-row-h,64px); min-height:0; }
 /* Phones: the Design screen is CUT IN HALF (owner ask) — the preview owns
    the top half outright, the controls scroll in their own bottom half.
    Nothing overlaps and nothing slides under anything. */
@@ -6464,6 +6470,14 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 function staffFromReq(req) {
   return req.get('X-Staff-Name') || 'Unknown';
 }
+// A manager PROVES it: the PIN a signed-in manager's till sends with every
+// request, or a manager PIN typed into a popup. Anything on the wifi could
+// read every PIN and void paid tickets until Sep '26 — the checks were only
+// in the browser.
+function managerFromReq(req, data) {
+  const pins = [req.get('X-Staff-Pin'), req.body && req.body.managerPin].filter(p => typeof p === 'string' && p);
+  return data.staff.find(s => s.role === 'manager' && pins.includes(s.pin)) || null;
+}
 
 // Save a photo the client resized + base64-encoded, writing it as a real file and
 // returning its /uploads/ URL. The URL (not the image bytes) is what gets stored
@@ -6994,13 +7008,17 @@ app.delete('/api/categories/:id', (req, res) => {
   const data = readData();
   const cat = data.categories.find(c => c.id === req.params.id);
   if (!cat) return res.status(404).json({ error: 'Category not found' });
+  // The dishes inside KEEP EXISTING and lose the grouping — that is what the
+  // admin's confirm promises. (Until Sep '26 this deleted every dish in the
+  // section while the screen said they'd survive.) Unfiled dishes stay in
+  // Items under "No section" and are hidden from the order screen.
   const itemsUsingIt = data.menu.filter(m => m.category === cat.name).length;
   const subsUsingIt = data.subcategories.filter(s => s.categoryId === cat.id).length;
-  data.menu = data.menu.filter(m => m.category !== cat.name);
+  data.menu.forEach(m => { if (m.category === cat.name) { m.category = ''; m.subcategoryId = null; } });
   data.subcategories = data.subcategories.filter(s => s.categoryId !== cat.id);
   data.categories = data.categories.filter(c => c.id !== cat.id);
   const detail = itemsUsingIt > 0 || subsUsingIt > 0
-    ? ` (also deleted ${itemsUsingIt} item(s) and ${subsUsingIt} subcategor${subsUsingIt === 1 ? 'y' : 'ies'})`
+    ? ` (${itemsUsingIt} item(s) unfiled, ${subsUsingIt} subcategor${subsUsingIt === 1 ? 'y' : 'ies'} deleted)`
     : '';
   logAudit(data, staffFromReq(req), `Deleted category: ${cat.name}${detail}`);
   writeData(data);
@@ -7919,8 +7937,9 @@ app.delete('/api/subcategories/:id', (req, res) => {
   const data = readData();
   const sub = data.subcategories.find(s => s.id === req.params.id);
   if (!sub) return res.status(404).json({ error: 'Subcategory not found' });
-  // Cascade: deleting a subsection also removes every nested subsection under it
-  // and all items filed in that whole subtree.
+  // Cascade: deleting a subsection also removes every nested subsection under
+  // it. The dishes filed in that subtree KEEP EXISTING — they drop back to the
+  // section itself, as the admin's confirm promises.
   const toDelete = new Set();
   const collect = (id) => {
     toDelete.add(id);
@@ -7929,12 +7948,12 @@ app.delete('/api/subcategories/:id', (req, res) => {
   collect(req.params.id);
   const itemsUsingIt = data.menu.filter(m => toDelete.has(m.subcategoryId)).length;
   const subsRemoved = toDelete.size;
-  data.menu = data.menu.filter(m => !toDelete.has(m.subcategoryId));
+  data.menu.forEach(m => { if (toDelete.has(m.subcategoryId)) m.subcategoryId = null; });
   data.subcategories = data.subcategories.filter(s => !toDelete.has(s.id));
   const parts = [];
-  if (subsRemoved > 1) parts.push(`${subsRemoved - 1} nested subsection(s)`);
-  if (itemsUsingIt > 0) parts.push(`${itemsUsingIt} item(s)`);
-  const detail = parts.length ? ` (also deleted ${parts.join(' and ')})` : '';
+  if (subsRemoved > 1) parts.push(`${subsRemoved - 1} nested subsection(s) deleted`);
+  if (itemsUsingIt > 0) parts.push(`${itemsUsingIt} item(s) unfiled`);
+  const detail = parts.length ? ` (${parts.join(', ')})` : '';
   logAudit(data, staffFromReq(req), `Deleted subcategory: ${sub.name}${detail}`);
   writeData(data);
   res.json({ ok: true });
@@ -7952,8 +7971,8 @@ app.get('/api/menu', (req, res) => {
 app.post('/api/menu', (req, res) => {
   const data = readData();
   const { name, category, price, variants, subcategoryId, modifierGroupIds, image, defaultCourse, trackStock, stockCount, lowStockThreshold, color, sequence, salesCategoryId, icon, iconEnabled } = req.body;
-  if (!name || !category || price === undefined || isNaN(parseFloat(price))) {
-    return res.status(400).json({ error: 'Name, category, and a valid price are required' });
+  if (!name || !String(name).trim() || !category || price === undefined || isNaN(parseFloat(price)) || parseFloat(price) < 0) {
+    return res.status(400).json({ error: 'Name, category, and a price of 0 or more are required' });
   }
   const item = {
     id: 'm' + Date.now(),
@@ -7964,7 +7983,7 @@ app.post('/api/menu', (req, res) => {
     price: parseFloat(price),
     out: false,
     image: image || '',
-    variants: Array.isArray(variants) ? variants.map((v, i) => ({ id: 'v' + Date.now() + i, label: v.label, price: parseFloat(v.price) })) : [],
+    variants: Array.isArray(variants) ? variants.filter(v => v && String(v.label || '').trim() && !isNaN(parseFloat(v.price)) && parseFloat(v.price) >= 0).map((v, i) => ({ id: 'v' + Date.now() + i, label: String(v.label).trim(), price: parseFloat(v.price) })) : [],
     modifierGroupIds: Array.isArray(modifierGroupIds) ? modifierGroupIds : [],
     defaultCourse: defaultCourse ? parseInt(defaultCourse) : null,
     trackStock: !!trackStock,
@@ -7990,6 +8009,8 @@ app.put('/api/menu/:id', (req, res) => {
   const { name, category, price, variants, subcategoryId, modifierGroupIds, image, defaultCourse, trackStock, stockCount, lowStockThreshold, color, sequence, out, salesCategoryId, icon, iconEnabled, recipes, disabled } = req.body;
   if (disabled !== undefined) item.disabled = !!disabled;
   const oldPrice = item.price;
+  if (name !== undefined && !String(name).trim()) return res.status(400).json({ error: 'An item needs a name' });
+  if (price !== undefined && parseFloat(price) < 0) return res.status(400).json({ error: 'A price cannot be below 0' });
   if (name) item.name = String(name).trim().slice(0, 45);
   if (category) item.category = category;
   if (price !== undefined && !isNaN(parseFloat(price))) item.price = parseFloat(price);
@@ -8003,7 +8024,7 @@ app.put('/api/menu/:id', (req, res) => {
   if (image !== undefined) item.image = image;
   if (defaultCourse !== undefined) item.defaultCourse = defaultCourse ? parseInt(defaultCourse) : null;
   if (Array.isArray(variants)) {
-    item.variants = variants.map((v, i) => ({ id: v.id || ('v' + Date.now() + i), label: v.label, price: parseFloat(v.price) }));
+    item.variants = variants.filter(v => v && String(v.label || '').trim() && !isNaN(parseFloat(v.price)) && parseFloat(v.price) >= 0).map((v, i) => ({ id: v.id || ('v' + Date.now() + i), label: String(v.label).trim(), price: parseFloat(v.price) }));
   }
   if (trackStock !== undefined) item.trackStock = !!trackStock;
   if (out !== undefined && !item.trackStock) item.out = !!out;
@@ -8347,6 +8368,7 @@ app.post('/api/staff/verify-manager-pin', (req, res) => {
 // Manager eye on the Team page: reveal one PIN, and leave a trace.
 app.get('/api/staff/:id/pin', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can see a PIN' });
   const staff = data.staff.find(s => s.id === req.params.id);
   if (!staff) return res.status(404).json({ error: 'Staff member not found' });
   logAudit(data, staffFromReq(req), `Viewed PIN for ${staff.name}`);
@@ -8357,8 +8379,8 @@ app.get('/api/staff/:id/pin', (req, res) => {
 app.post('/api/staff', (req, res) => {
   const data = readData();
   const { name, pin, role } = req.body;
-  if (!name || !pin || !/^\d{1,8}$/.test(pin)) {
-    return res.status(400).json({ error: 'Name and a numeric PIN (up to 8 digits) are required' });
+  if (!name || !String(name).trim() || !pin || !/^\d{4,8}$/.test(pin)) {
+    return res.status(400).json({ error: 'Name and a PIN of 4 to 8 digits are required' });
   }
   if (data.staff.some(s => s.pin === pin)) {
     return res.status(400).json({ error: 'That PIN is already in use by another staff member' });
@@ -8377,8 +8399,8 @@ app.put('/api/staff/:id', (req, res) => {
   const { name, pin, role } = req.body;
   const changes = [];
   if (pin) {
-    if (!/^\d{1,8}$/.test(pin)) {
-      return res.status(400).json({ error: 'PIN must be 1–8 digits' });
+    if (!/^\d{4,8}$/.test(pin)) {
+      return res.status(400).json({ error: 'PIN must be 4 to 8 digits' });
     }
     if (data.staff.some(s => s.pin === pin && s.id !== staff.id)) {
       return res.status(400).json({ error: 'That PIN is already in use by another staff member' });
@@ -8387,7 +8409,12 @@ app.put('/api/staff/:id', (req, res) => {
     changes.push('PIN');
   }
   if (name && name !== staff.name) { changes.push(`name to "${name}"`); staff.name = name; }
-  if (role && role !== staff.role) { changes.push(`role to ${role}`); staff.role = STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff'; }
+  if (role && role !== staff.role) {
+    if (staff.role === 'manager' && !data.staff.some(s => s.id !== staff.id && s.role === 'manager')) {
+      return res.status(400).json({ error: 'Keep at least one manager' });
+    }
+    changes.push(`role to ${role}`); staff.role = STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff';
+  }
   if (req.body.tipShare !== undefined && ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) && req.body.tipShare !== staff.tipShare) {
     changes.push(`tip share to ${req.body.tipShare}`); staff.tipShare = req.body.tipShare;
   }
@@ -8409,6 +8436,9 @@ app.delete('/api/staff/:id', (req, res) => {
     return res.status(400).json({ error: 'You must keep at least one staff member' });
   }
   const staff = data.staff.find(s => s.id === req.params.id);
+  if (staff && staff.role === 'manager' && !data.staff.some(s => s.id !== staff.id && s.role === 'manager')) {
+    return res.status(400).json({ error: 'Keep at least one manager' });
+  }
   data.staff = data.staff.filter(s => s.id !== req.params.id);
   if (staff) logAudit(data, staffFromReq(req), `Removed staff member: ${staff.name}`);
   writeData(data);
@@ -9120,7 +9150,7 @@ app.post('/api/reservations', (req, res) => {
     id: 'rv' + Date.now(),
     name: name.trim(),
     phone: String(phone || '').trim(),
-    partySize: parseInt(partySize) || 1,
+    partySize: Math.max(1, parseInt(partySize) || 1),
     time,
     tableId: tableId || null,
     notes: String(notes || '').trim(),
@@ -9140,11 +9170,12 @@ app.put('/api/reservations/:id', (req, res) => {
   const { name, phone, partySize, time, tableId, notes, status } = req.body;
   if (name !== undefined && name.trim()) r.name = name.trim();
   if (phone !== undefined) r.phone = String(phone).trim();
-  if (partySize !== undefined) r.partySize = parseInt(partySize) || 1;
+  if (partySize !== undefined) r.partySize = Math.max(1, parseInt(partySize) || 1);
   if (time !== undefined) r.time = time;
   if (tableId !== undefined) r.tableId = tableId || null;
   if (notes !== undefined) r.notes = String(notes).trim();
   if (status !== undefined) {
+    if (!['booked', 'seated', 'done', 'cancelled', 'no-show'].includes(status)) return res.status(400).json({ error: 'Unknown reservation status' });
     r.status = status;
     logAudit(data, staffFromReq(req), `Marked reservation for ${r.name} as ${status}`);
   }
@@ -9737,6 +9768,11 @@ app.post('/api/import', (req, res) => {
     return res.status(400).json({ error: 'That file does not look like POS data.' });
   }
   try { backups.snapshot('pre-import'); } catch (e) {}
+  // A file without staff (the preview strips PINs) keeps today's staff —
+  // otherwise nobody could sign in until a restart re-seeded the defaults.
+  const current = readData();
+  if (!Array.isArray(incoming.staff) || !incoming.staff.length) incoming.staff = current.staff;
+  if (!Array.isArray(incoming.combos)) incoming.combos = current.combos || [];
   writeData(incoming);
   res.json({ ok: true });
 });
@@ -10445,6 +10481,13 @@ app.post('/api/orders/:id/void', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  // A ticket is voided ONCE, and never after money went back: each void put
+  // the stock back again and the audit said it twice (Sep '26).
+  if (order.status === 'void') return res.status(400).json({ error: 'That ticket is already void' });
+  if (order.status === 'paid' && (order.refundedTotal || 0) > 0.005) return res.status(400).json({ error: 'A refunded ticket cannot be voided' });
+  if (order.status === 'paid' && data.settings.managerApprovalForVoid && !managerFromReq(req, data)) {
+    return res.status(403).json({ error: 'A manager PIN is needed to void a paid ticket' });
+  }
   const { reason, note } = req.body;
   order.status = 'void';
   order.voidedBy = req.body.staffName || 'Unknown';
@@ -13107,6 +13150,7 @@ async function api(path, opts) {
   if (state.currentStaff && opts.method && opts.method !== 'GET') {
     opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Name': state.currentStaff.name });
   }
+  if (state.staffPin) opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Pin': state.staffPin });
   let res;
   try {
     res = await fetch(path, opts);
@@ -13883,9 +13927,16 @@ const SIZE_MIN_W = { xs: 80, sm: 94, md: 118, lg: 158, xl: 192 };
 const SIZE_TILE_H = { xs: 64, sm: 76, md: 92, lg: 116, xl: 138 };
 const SIZE_GAP_PX = { xs: 3, sm: 6, md: 10, lg: 16, xl: 24 };
 const SIZE_H_MULT = { xs: 0.6, sm: 0.8, md: 1, lg: 1.25, xl: 1.55 };
+// The till frame IS THIS SCREEN. It guessed a 16:10 shape from the width,
+// so on a 1180x820 tablet the mock summed its rows over a 737-tall frame and
+// drew 103-tall tiles where the till drew 110 (owner, Sep '26: "design
+// preview not mirroring actual setup"). Below 1080 wide the frame keeps the
+// screen's shape and scales up to the floor width.
 function designFrame(dev) {
-  const tillW = Math.max(1080, window.innerWidth || 1080);
-  return dev === 'mobile' ? { w: 390, h: 844 } : { w: tillW, h: Math.round(tillW * 0.625) };
+  if (dev === 'mobile') return { w: 390, h: 844 };
+  const vw = window.innerWidth || 1080, vh = window.innerHeight || 675;
+  const tillW = Math.max(1080, vw);
+  return { w: tillW, h: Math.round(vh * (tillW / vw)) };
 }
 function designMenuBox(dev) {
   const f = designFrame(dev);
@@ -14697,6 +14748,9 @@ function hideSpinner() {
 }
 function finishLogin(staff, warm) {
   state.currentStaff = staff;
+  // A manager's till carries their PIN on every request: the server now
+  // refuses to show a PIN or void a paid ticket without one.
+  state.staffPin = staff.role === 'manager' ? state.loginPin : '';
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
   // A fresh PIN entry proves the person — any held screen from before the
   // reload is spent (the login screen was the lock in the meantime).
@@ -14919,6 +14973,7 @@ function backToTableSelect() {
 function logOut() {
   clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
   clearSendState();
+  state.staffPin = '';
   releaseTableLock(state.table);
   try { localStorage.removeItem('pos-signed-in'); } catch (e) {}
   try { localStorage.removeItem('pos-cart'); } catch (e) {} // deliberate log-off = cart gone
@@ -17743,12 +17798,12 @@ async function confirmPaymentInner() {
   }
 }
 
-async function voidOrder(id, reason, note) {
+async function voidOrder(id, reason, note, managerPin) {
   try {
     await api(`/api/orders/${id}/void`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown', reason: reason || null, note: note || '' }),
+      body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown', reason: reason || null, note: note || '', managerPin: managerPin || undefined }),
     });
     await refreshOrders();
     await refreshSummary();
@@ -18015,7 +18070,7 @@ function render() {
   // In Link mode a finger on a table must DRAG the table, never scroll the page.
   // A finger still holding a button keeps its sunk look on the rebuilt node.
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
-  if (state.view === 'admin' && state.adminTab === 'design') attachPreviewHooks();
+  if (state.view === 'admin' && state.adminTab === 'screen') attachPreviewHooks();
   if (_pressState && _pressState.sel) {
     // Exactly one match, or nothing: an ambiguous selector used to light the
     // first tile in the family instead of the one under the finger.
@@ -21730,14 +21785,21 @@ async function duplicateSelectedHappyHours() {
 }
 // One bulk-delete for every id-keyed admin list: DELETE each selected id
 // against the collection's endpoint, then let the caller refresh its state.
-async function deleteSelectedByIds(selKey, endpoint, refresh) {
-  const sel = state[selKey] || [];
-  for (const id of sel) {
-    try { await api(`${endpoint}/${id}`, { method: 'DELETE' }); } catch (e) {}
-  }
-  state[selKey] = [];
-  await refresh();
-  render();
+// Every bulk delete asks first, with the count — the Undo toast alone is six
+// seconds between the venue and an empty list (Sep '26: customers carry
+// loyalty points, which are money).
+function deleteSelectedByIds(selKey, endpoint, refresh, noun) {
+  const sel = (state[selKey] || []).slice();
+  if (!sel.length) return;
+  const n = sel.length;
+  openConfirm({ message: `Delete ${n} ${noun || 'row'}${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, async () => {
+    for (const id of sel) {
+      try { await api(`${endpoint}/${id}`, { method: 'DELETE' }); } catch (e) {}
+    }
+    state[selKey] = [];
+    await refresh();
+    render();
+  });
 }
 async function searchCustomers(q) {
   state.customerSearch = q;
@@ -24281,14 +24343,14 @@ function renderDetailModal() {
       <div class="detail-line"><span>Taken by</span><span>${esc(o.staffName || 'Unknown')}</span></div>
       <div class="detail-line"><span>Status</span><span>${o.status}</span></div>
       ${o.status === 'void' && o.voidedBy ? `<div class="detail-line"><span>Voided by</span><span>${o.voidedBy}</span></div>` : ''}
-      ${o.status === 'void' && o.voidReason ? `<div class="detail-line"><span>Void reason</span><span>${o.voidReason}${o.voidNote ? ' — ' + o.voidNote : ''}</span></div>` : ''}
+      ${o.status === 'void' && o.voidReason ? `<div class="detail-line"><span>Void reason</span><span>${esc(o.voidReason)}${o.voidNote ? ' — ' + esc(o.voidNote) : ''}</span></div>` : ''}
       ${(o.refunds || []).map(r => `<div class="detail-line"><span>Refund${r.reason ? ' (' + esc(r.reason) + ')' : ''} — ${esc(r.staffName)}</span><span>-${money(r.amount)}</span></div>`).join('')}
       ${refundedTotal > 0 ? `<div class="detail-line" style="font-weight:700;"><span>Net total</span><span>${money(remaining)}</span></div>` : ''}
       ${state.settings.ticketFooter ? `<div class="ticket-footer-msg" style="border-top:none;padding:8px 0 0;">${esc(state.settings.ticketFooter)}</div>` : ''}
       ${state.settings.printEnabled ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="print-receipt" data-id="${o.id}">🖨️ Print receipt</button>` : ''}
       ${isManager && o.status === 'paid' ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="open-add-tip" data-id="${o.id}">＋ Add tip</button>` : ''}
       ${isManager && o.status === 'paid' && remaining > 0.001 ? `<button class="btn-cancel" style="width:100%;margin-top:10px;" data-act="open-refund" data-id="${o.id}">💸 Refund</button>` : ''}
-      ${o.status !== 'void' ? `<button class="void-btn" data-act="void" data-id="${o.id}">Void this order</button>` : ''}
+      ${o.status !== 'void' && !(o.status === 'paid' && (o.refundedTotal || 0) > 0.005) ? `<button class="void-btn" data-act="void" data-id="${o.id}">Void this order</button>` : ''}
       <div class="modal-actions">
         <button class="icon-action discard" data-act="close-order-detail">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
       </div>
@@ -25620,7 +25682,7 @@ function renderStaffAdmin() {
               <div style="display:flex;flex-direction:column;">
                 <label class="field-label">PIN</label>
                 <div style="display:flex;gap:4px;align-items:center;">
-                  <input type="password" inputmode="numeric" maxlength="4" class="staff-pin-quick-edit" data-id="${s.id}" placeholder="PIN" style="padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:160px;">
+                  <input type="password" inputmode="numeric" maxlength="8" class="staff-pin-quick-edit" data-id="${s.id}" placeholder="PIN" style="padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);width:160px;">
                   <button class="icon-sq ${state.pinRevealId === s.id ? 'active' : ''}" data-act="toggle-staff-pin-view" data-id="${s.id}">
                     ${state.pinRevealId === s.id
                       ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>'
@@ -27312,13 +27374,13 @@ function renderScreenMockup() {
   // shrinking only as far as needed to fit the card.
   // PC frame = the actual browser width, so the mockup carries the till's real
   // proportions and stays a constant size while panels resize or move.
-  // True-to-device frames: the till is a 16:10 landscape screen at the real
-  // browser width, the phone a 19.5:9 handset — so each mock is shaped like
-  // the hardware it previews, not an arbitrary box.
-  const tillW = Math.max(1080, window.innerWidth || 1080);
+  // True-to-device frames: ONE source, designFrame — the till mock is THIS
+  // screen's shape (it guessed 16:10 here while the geometry used the real
+  // height, so the mock and the stepper's limits disagreed), the phone a
+  // 19.5:9 handset.
   // Phone caps at 0.55×: full-size (390×844) it dwarfs the page — the owner
   // reads it as "way too big". Proportions inside stay true (uniform scale).
-  const FRAMES = { pc: { w: tillW, h: Math.round(tillW * 0.625), cap: 1 }, mobile: { w: 390, h: 844, cap: 0.55 } };
+  const FRAMES = { pc: { ...designFrame('pc'), cap: 1 }, mobile: { ...designFrame('mobile'), cap: 0.55 } };
   const frame = FRAMES[dev] || FRAMES.pc;
   const order = panelOrderFor(dev); // was hardcoded 'pc' - the Mobile preview lied about panel order
   const ticketFirst = order.indexOf('ticket') < order.indexOf('menu');
@@ -28364,7 +28426,7 @@ function renderMenuModal() {
           ${catObj ? subcatOptionsHtml(catObj.id, m.subcategoryId) : ''}
         </select>` : ''}
       <label>Image URL (optional)</label>
-      <input id="menu-image-input" type="text" value="${m.image || ''}" placeholder="https://example.com/photo.jpg">
+      <input id="menu-image-input" type="text" value="${esc(m.image || '')}" placeholder="https://example.com/photo.jpg">
       <label>Price ${hasVariants ? '(unused while options are set below)' : ''}</label>
       <input id="menu-price-input" type="number" step="0.01" min="0" value="${m.price}" placeholder="0.00" ${hasVariants ? 'disabled' : ''}>
       <label>Options (sizes, piece counts)</label>
@@ -32666,21 +32728,6 @@ function reorderCourseTemplates(fromIdx, toIdx) {
   saveTicketSetting({ courses });
   remapCourseRefs(n => order.indexOf(n - 1) + 1);
 }
-function removeCourseTemplate(idx) {
-  if (state.settings.courses.length <= 1) return;
-  const name = state.settings.courses[idx].name;
-  const refs = courseRefLabel(idx + 1);
-  const proceed = () => {
-    const courses = state.settings.courses.filter((_, i) => i !== idx);
-    saveTicketSetting({ courses });
-    remapCourseRefs(n => n === idx + 1 ? null : n > idx + 1 ? n - 1 : n);
-  };
-  if (refs) {
-    openConfirm({ message: `${refs} default to ${name} — they'll go back to no course.`, confirmLabel: 'Remove', danger: true }, proceed);
-    return;
-  }
-  proceed();
-}
 
 async function saveAllergyPresets(presets) {
   state.allergyPresets = presets;
@@ -32925,13 +32972,27 @@ function deleteSelectedVips() {
   state.selectedVipIdxs = [];
   saveVipPresets(state.vipPresets.filter((_, i) => !sel.has(i)));
 }
+// A dish's default course is a POSITION in this list, so removing a course
+// re-files every default that pointed past it (dropping "1st" moved the
+// dessert dishes to "3rd" until Sep '26). The dishes filed on a removed course
+// go back to no course, and the owner is told how many before it happens.
 function deleteSelectedCourses() {
   const sel = new Set(state.selectedCourseIdxs || []);
   if (!sel.size) return;
-  const courses = state.settings.courses.filter((_, i) => !sel.has(i));
-  state.selectedCourseIdxs = [];
-  if (!courses.length) courses.push(state.settings.courses[0]); // never zero courses
-  saveTicketSetting({ courses });
+  const all = state.settings.courses;
+  if (sel.size >= all.length) sel.delete(0); // never zero courses
+  if (!sel.size) return;
+  const keep = all.map((_, i) => i).filter(i => !sel.has(i));
+  const mapN = n => sel.has(n - 1) ? null : keep.indexOf(n - 1) + 1;
+  const refs = [...sel].map(i => { const r = courseRefLabel(i + 1); return r ? `${r} default to ${all[i].name}` : ''; }).filter(Boolean);
+  const proceed = () => {
+    const courses = keep.map(i => all[i]);
+    state.selectedCourseIdxs = [];
+    saveTicketSetting({ courses });
+    remapCourseRefs(mapN);
+  };
+  const n = sel.size;
+  openConfirm({ message: refs.length ? `Delete ${n} course${n === 1 ? '' : 's'}? ${refs.join('; ')} — they'll go back to no course.` : `Delete ${n} course${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, proceed);
 }
 function deleteSelectedVoidReasons() {
   const sel = new Set(state.selectedVoidReasonIdxs || []);
@@ -33106,7 +33167,7 @@ async function saveVoidReasons(presets) {
     render();
   } catch (e) {}
 }
-function addVoidReason() { saveVoidReasons([...state.voidReasons, 'New reason']); }
+function addVoidReason() { saveVoidReasons(['New reason', ...state.voidReasons]); }
 const DEFAULT_VOID_REASON_NAMES = ['Order mistake', 'Customer complaint', 'Kitchen error', 'Duplicate order', 'Comp / goodwill', 'Other'];
 function updateVoidReason(idx, value) {
   saveVoidReasons(state.voidReasons.map((p, i) => i === idx ? value : p));
@@ -33143,7 +33204,7 @@ async function confirmVoidModal() {
       return;
     }
   }
-  await voidOrder(m.orderId, m.reason, m.note);
+  await voidOrder(m.orderId, m.reason, m.note, m.managerPin);
   state.voidModal = null;
 }
 
@@ -33823,16 +33884,20 @@ async function duplicateSelectedMenuItems() {
     render();
   } catch (e) { state.toast = 'Could not duplicate the selected items.'; render(); }
 }
-async function deleteSelectedMenuItems() {
+function deleteSelectedMenuItems() {
   const ids = [...state.selectedMenuItemIds];
   if (ids.length === 0) return;
-  try {
-    for (const id of ids) await api(`/api/menu/${id}`, { method: 'DELETE' });
-    state.menu = await api('/api/menu');
-    state.selectedMenuItemIds = [];
-    state.toast = ids.length > 1 ? `Deleted ${ids.length} items` : 'Item deleted';
-    render();
-  } catch (e) { state.toast = 'Could not delete the selected items.'; render(); }
+  // Select-all ticks EVERY dish, not just the fifty drawn — so the whole menu
+  // was two taps from gone with only the Undo toast in the way (Sep '26).
+  openConfirm({ message: `Delete ${ids.length} item${ids.length === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, async () => {
+    try {
+      for (const id of ids) await api(`/api/menu/${id}`, { method: 'DELETE' });
+      state.menu = await api('/api/menu');
+      state.selectedMenuItemIds = [];
+      state.toast = ids.length > 1 ? `Deleted ${ids.length} items` : 'Item deleted';
+      render();
+    } catch (e) { state.toast = 'Could not delete the selected items.'; render(); }
+  });
 }
 async function toggleMenuItemActive(id) {
   const it = state.menu.find(m => m.id === id);
@@ -33933,7 +33998,7 @@ async function saveStaffModal() {
     state.adminError = '';
     render();
   } catch (e) {
-    state.adminError = 'Could not save — check the name and PIN.';
+    state.adminError = e.message || 'Could not save — check the name and PIN.';
     render();
   }
 }
@@ -33990,12 +34055,12 @@ async function saveStaffPayRate(id, val) {
 async function saveStaffPin(id) {
   const row = document.querySelector(`.staff-pin-quick-edit[data-id="${id}"]`);
   const pin = row ? row.value.trim() : '';
-  if (!/^\d{4}$/.test(pin)) { state.toast = 'PIN must be 4 digits.'; render(); return; }
+  if (!/^\d{4,8}$/.test(pin)) { state.toast = 'PIN must be 4 to 8 digits.'; render(); return; }
   try {
     await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin }) });
     state.toast = 'PIN updated!';
   } catch (e) {
-    state.toast = 'Could not update PIN.';
+    state.toast = e.message || 'Could not update PIN.';
   }
   render();
 }
@@ -34304,6 +34369,10 @@ function refreshMenuAdminList() {
   if (!list) { render(); return; }
   list.innerHTML = renderMenuAdminRows();
   armMenuItemRows();
+  // The header's tick answers for the rows NOW shown: clearing a search
+  // widens the list, so a tick earned by fifty rows must not stand for 700.
+  const all = document.getElementById('select-all-menu-items');
+  if (all) { const items = visibleMenuItemsForAdmin(); all.checked = state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)); }
 }
 
 // Expand/collapse WITHOUT rebuilding the whole list: only one row is ever open,
@@ -37915,7 +37984,7 @@ function handleActClick(el, e) {
       else if (act === 'delete-selected-vouchers') { openConfirm({ message: `Delete ${state.selectedVoucherIds.length} selected?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedVouchers()); }
       else if (act === 'clear-voucher-selection') { state.selectedVoucherIds = []; render(); }
       else if (act === 'selall-course') { toggleSelAllList('course', state.settings.courses.map((_, i) => i)); }
-      else if (act === 'delete-selected-courses') { openConfirm({ message: `Delete ${state.selectedCourseIdxs.length} selected?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedCourses()); }
+      else if (act === 'delete-selected-courses') { deleteSelectedCourses(); }
       else if (act === 'clear-course-selection') { state.selectedCourseIdxs = []; render(); }
       else if (act === 'selall-void-reason') { toggleSelAllList('void-reason', state.voidReasons.map((_, i) => i)); }
       else if (act === 'delete-selected-void-reasons') { openConfirm({ message: `Delete ${state.selectedVoidReasonIdxs.length} selected?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedVoidReasons()); }
@@ -38686,7 +38755,7 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'selall-customer') { toggleSelAllList('customer', state.customers.map(c => c.id)); }
-      else if (act === 'delete-selected-customers') { deleteSelectedByIds('selectedCustomerIds', '/api/customers', async () => { state.customers = await api('/api/customers'); }); }
+      else if (act === 'delete-selected-customers') { deleteSelectedByIds('selectedCustomerIds', '/api/customers', async () => { state.customers = await api('/api/customers'); }, 'customer'); }
       else if (act === 'clear-customer-selection') { state.selectedCustomerIds = []; render(); }
       else if (act === 'happy-hour-toggle-open') {
         const id = el.dataset.id, open = state.expandedHappyHourIds || [];
@@ -38702,7 +38771,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'selall-happy-hour') { toggleSelAllList('happy-hour', state.happyHours.map(h => h.id)); }
       else if (act === 'duplicate-selected-happy-hours') { duplicateSelectedHappyHours(); }
-      else if (act === 'delete-selected-happy-hours') { deleteSelectedByIds('selectedHappyHourIds', '/api/happy-hours', async () => { state.happyHours = await api('/api/happy-hours'); }); }
+      else if (act === 'delete-selected-happy-hours') { deleteSelectedByIds('selectedHappyHourIds', '/api/happy-hours', async () => { state.happyHours = await api('/api/happy-hours'); }, 'happy hour'); }
       else if (act === 'clear-happy-hour-selection') { state.selectedHappyHourIds = []; render(); }
       else if (act === 'inventory-item-toggle-open') {
         const id = el.dataset.id, open = state.expandedInventoryItemIds || [];
@@ -38710,7 +38779,7 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'selall-inventory-item') { toggleSelAllList('inventory-item', (state.inventoryItems || []).map(i => i.id)); }
-      else if (act === 'delete-selected-inventory-items') { deleteSelectedByIds('selectedInventoryItemIds', '/api/inventory-items', loadInventoryData); }
+      else if (act === 'delete-selected-inventory-items') { deleteSelectedByIds('selectedInventoryItemIds', '/api/inventory-items', loadInventoryData, 'ingredient'); }
       else if (act === 'clear-inventory-item-selection') { state.selectedInventoryItemIds = []; render(); }
       else if (act === 'edit-customer') { openEditCustomer(el.dataset.id); }
       else if (act === 'delete-customer') { openConfirm({ message: 'Delete this customer?', confirmLabel: 'Delete', danger: true }, () => deleteCustomerAction(el.dataset.id)); }

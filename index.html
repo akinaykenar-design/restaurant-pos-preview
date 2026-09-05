@@ -4410,6 +4410,9 @@ select.dd-native{display:none !important;}
 .dd-chip.active{background:var(--orange-dim);color:var(--orange);border-color:var(--orange);}
 .dd-chip:disabled{opacity:var(--dim-ghost);cursor:default;}
 .dd-menu{max-height:60vh;overflow-y:auto;}
+/* The reprint pop's round rows: whole-width keys, the row law's look. */
+.peek-round-btn{display:block;width:100%;text-align:left;padding:10px 12px;margin-bottom:var(--list-gap,8px);border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-family:inherit;cursor:pointer;min-height:54px;}
+.peek-round-btn:active{background:var(--pick-wash);}
 .fp-dd{position:relative;}
 .fp-dd-end{margin-left:auto;}
 .fp-dd-scrim{position:fixed;inset:0;z-index:calc(var(--z-menu) - 1);}
@@ -10630,8 +10633,12 @@ app.post('/api/orders/:id/reprint-docket', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (!(order.items || []).length) return res.status(400).json({ error: 'Nothing sent yet' });
-  printing.printDocketsForRound(data, order, order.items, 0, { callAway: 'REPRINT' });
-  logAudit(data, (req.body && req.body.staffName) || order.staffName, `Reprinted docket for Ticket #${order.id}`);
+  // One round, or the whole ticket (owner, Sep '26: "specify which docket").
+  const which = req.body && req.body.round;
+  const round = which && which !== 'all' ? (order.rounds || []).find(r => r.id === parseInt(which, 10)) : null;
+  if (which && which !== 'all' && !round) return res.status(404).json({ error: 'That round is not on the ticket' });
+  printing.printDocketsForRound(data, order, round ? round.items : order.items, round ? round.id : 0, { callAway: 'REPRINT' });
+  logAudit(data, (req.body && req.body.staffName) || order.staffName, `Reprinted ${round ? 'round ' + round.id : 'docket'} for Ticket #${order.id}`);
   writeData(data);
   res.json({ ok: true });
 });
@@ -17342,6 +17349,35 @@ function renderTableNumPop() {
 // scrim closes it (it's read-only, there's nothing to decide).
 // Account → Show order: the table's FULL history in the order it happened —
 // one block per docket, stamped with who rang it and at what time.
+// Reprint: sends ONE round (or the whole ticket) back to the printers.
+function reprintDocket(round) {
+  state.reprintPick = false;
+  api(`/api/orders/${state.openOrderId}/reprint-docket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown', round: round == null ? undefined : round }) })
+    .then(() => { state.toast = round && round !== 'all' ? `Round ${round} reprinted.` : 'Docket reprinted.'; render(); armToastTimer(2200); })
+    .catch(e => { state.toast = e.message || 'Could not reprint.'; render(); armToastTimer(2500); });
+  render();
+}
+// "Which docket?" — the ticket's rounds, newest first, and the whole ticket.
+function renderReprintPop() {
+  const o = state.orders.find(x => x.id === state.openOrderId);
+  if (!o) return '';
+  const rounds = (o.rounds || []).slice().reverse();
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop peek-pop reprint-pop">
+        <div class="sp-item">Reprint which docket?</div>
+        <div class="peek-list">
+          ${rounds.map(r => `<button type="button" class="peek-round-btn" data-act="acct-go" data-target="reprint-round" data-round="${r.id}">
+            <span class="peek-course" style="margin:0;">Round ${r.id} · ${fmtTime(r.sentAt)}${r.staffName ? ' · ' + esc(r.staffName) : ''}</span>
+            <span class="peek-name" style="display:block;">${(r.items || []).map(i => `${i.qty} × ${esc(i.name)}`).join(', ')}</span>
+          </button>`).join('')}
+          <button type="button" class="peek-round-btn" data-act="acct-go" data-target="reprint-round" data-round="all"><span class="peek-course" style="margin:0;">Whole ticket</span><span class="peek-name" style="display:block;">${(o.items || []).length} line${(o.items || []).length === 1 ? '' : 's'}</span></button>
+        </div>
+        <div class="qp-actions" style="margin-top:8px;">
+          <button class="icon-action discard" data-act="acct-go" data-target="close-reprint-pick">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        </div>
+      </div>`;
+}
 function renderOrderHistoryPop() {
   const o = state.orders.find(x => x.id === state.openOrderId) || null;
   // Nothing sent yet is still an order (owner, Sep '26: "show order should
@@ -18043,6 +18079,7 @@ function render() {
     ${state.allergySeatPop && state.allergyModal ? renderAllergySeatPop() : ''}
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
+    ${state.reprintPick ? renderReprintPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.splitAmtPad ? renderSplitAmtPop() : ''}
     ${state.callAway ? renderCallAwayPop() : ''}
@@ -22235,15 +22272,16 @@ function renderRecipesAdmin() {
       </div>
     </div>`;
   };
+  // The Items page's bar and row, so the two lists read as one family
+  // (owner, Sep '26: "this looks cluttered").
+  const q = (state.recipesSearch || '').toLowerCase();
   return `
+  ${menuFilterBar('recipes-search', state.recipesSearch, 'Search dishes…')}
+  <div class="select-all-row hub-w"><span style="flex:1;"></span>${sortControl('menu-items:recipes')}</div>
   <div style="max-width:var(--admin-list-w,640px);">
-    <div class="settings-card wide" style="max-width:var(--admin-list-w,640px);">
-      <div class="th" style="margin-bottom:4px;display:flex;align-items:center;gap:8px;">Recipes<span style="flex:1;"></span>${sortControl('menu-items:recipes')}</div>
-      <input id="recipes-search" type="text" placeholder="Search dishes…" value="${esc(state.recipesSearch || '')}" style="width:100%;max-width:300px;margin-top:8px;padding:8px 12px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-family:inherit;">
-    </div>
     ${inv.length === 0 ? `<div class="empty-hist">No ingredients yet.</div>` : `
     <div id="recipes-list" style="display:flex;flex-direction:column;gap:8px;">
-      ${applyListSort('menu-items:recipes', state.menu.filter(m => !state.recipesSearch || m.name.toLowerCase().includes(state.recipesSearch.toLowerCase()))).map(row).join('')}
+      ${applyListSort('menu-items:recipes', visibleMenuItemsForAdmin().filter(m => !q || m.name.toLowerCase().includes(q))).map(row).join('')}
     </div>`}
   </div>`;
 }
@@ -26304,6 +26342,27 @@ function maFilterDd(id, label, options, current) {
     ${options.map(o => `<option value="${esc(o.v)}" ${o.v === current ? 'selected' : ''}>${esc(o.l)}</option>`).join('')}
   </select>`;
 }
+// THE ONE filter bar over a list of dishes: section, subsection,
+// sub-subsection, search — Items and Recipes share it (owner, Sep '26:
+// "recipes sort in the same fashion as items").
+function menuFilterBar(inputId, value, placeholder) {
+  const filterCatObj = state.menuAdminCategoryFilter ? state.categories.find(c => c.name === state.menuAdminCategoryFilter) : null;
+  // Three flat cascading filters. The subsection box only appears once a
+  // section is chosen (and that section actually has subsections).
+  const subcatOptions = filterCatObj
+    ? state.subcategories.filter(s => s.categoryId === filterCatObj.id && !s.parentSubcategoryId).map(s => ({ id: s.id, label: s.name }))
+    : [];
+  const subsubOptions = (state.menuAdminSubcategoryFilter && state.menuAdminSubcategoryFilter !== '__none__')
+    ? state.subcategories.filter(s => s.parentSubcategoryId === state.menuAdminSubcategoryFilter)
+    : [];
+  return `
+  <div class="admin-toolbar">
+    ${maFilterDd('cat', 'All sections', [{ v: '', l: 'All sections' }].concat(state.categories.map(c => ({ v: c.name, l: c.name }))), state.menuAdminCategoryFilter)}
+    ${subcatOptions.length > 0 ? maFilterDd('sub', 'Subsection…', [{ v: '', l: 'All subsections' }].concat(subcatOptions.map(s => ({ v: s.id, l: s.label }))), state.menuAdminSubcategoryFilter) : ''}
+    ${subsubOptions.length > 0 ? maFilterDd('subsub', 'Sub-subsection…', [{ v: '', l: 'All sub-subsections' }].concat(subsubOptions.map(s => ({ v: s.id, l: s.name }))), state.menuAdminSubsubFilter) : ''}
+    <input id="${inputId}" class="tb-ctl" type="text" placeholder="${placeholder}" value="${esc(value || '')}" style="width:160px;">
+  </div>`;
+}
 function maFilterPick(dd, v) {
   state.menuAdminShown = MENU_ADMIN_PAGE;   // any filter change starts at the top of the list
   if (dd === 'cat') { state.menuAdminCategoryFilter = v; state.menuAdminSubcategoryFilter = ''; state.menuAdminSubsubFilter = ''; }
@@ -26386,22 +26445,8 @@ function renderAdminGroupHub(groupKey) {
 function renderMenuHub() { return renderAdminGroupHub('menu'); }
 function renderMenuAdmin() {
   const items = visibleMenuItemsForAdmin();
-  const filterCatObj = state.menuAdminCategoryFilter ? state.categories.find(c => c.name === state.menuAdminCategoryFilter) : null;
-  // Three flat cascading filters. The subsection box only appears once a
-  // section is chosen (and that section actually has subsections).
-  const subcatOptions = filterCatObj
-    ? state.subcategories.filter(s => s.categoryId === filterCatObj.id && !s.parentSubcategoryId).map(s => ({ id: s.id, label: s.name }))
-    : [];
-  const subsubOptions = (state.menuAdminSubcategoryFilter && state.menuAdminSubcategoryFilter !== '__none__')
-    ? state.subcategories.filter(s => s.parentSubcategoryId === state.menuAdminSubcategoryFilter)
-    : [];
   return `
-  <div class="admin-toolbar">
-    ${maFilterDd('cat', 'All sections', [{ v: '', l: 'All sections' }].concat(state.categories.map(c => ({ v: c.name, l: c.name }))), state.menuAdminCategoryFilter)}
-    ${subcatOptions.length > 0 ? maFilterDd('sub', 'Subsection…', [{ v: '', l: 'All subsections' }].concat(subcatOptions.map(s => ({ v: s.id, l: s.label }))), state.menuAdminSubcategoryFilter) : ''}
-    ${subsubOptions.length > 0 ? maFilterDd('subsub', 'Sub-subsection…', [{ v: '', l: 'All sub-subsections' }].concat(subsubOptions.map(s => ({ v: s.id, l: s.name }))), state.menuAdminSubsubFilter) : ''}
-    <input id="menu-admin-search-input" class="tb-ctl" type="text" placeholder="Search items…" value="${state.menuAdminSearch}" style="width:160px;">
-  </div>
+  ${menuFilterBar('menu-admin-search-input', state.menuAdminSearch, 'Search items…')}
   <div class="select-all-row hub-w"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-menu-items" ${state.selectedMenuItemIds.length > 0 && items.every(m => state.selectedMenuItemIds.includes(m.id)) ? 'checked' : ''}></label>${sortControl('menu-items')}${state.selectedMenuItemIds.length > 0 ? `
       
       <button class="icon-sq" data-act="open-bulk-edit">${ACT_PENCIL_SVG}</button>
@@ -37624,14 +37669,15 @@ function handleActClick(el, e) {
           api('/api/customers').then(c => { state.customers = c; render(); }).catch(() => {});
         }
         else if (target === 'reprint-docket') {
-          if (!state.openOrderId) { state.toast = 'Nothing sent yet.'; render(); armToastTimer(2200); }
-          else {
-            api(`/api/orders/${state.openOrderId}/reprint-docket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) })
-              .then(() => { state.toast = 'Docket reprinted.'; render(); armToastTimer(2200); })
-              .catch(e => { state.toast = e.message || 'Could not reprint.'; render(); armToastTimer(2500); });
-            render();
-          }
+          const o = state.orders.find(x => x.id === state.openOrderId);
+          if (!o || !(o.items || []).length) { state.toast = 'Nothing sent yet.'; render(); armToastTimer(2200); }
+          // WHICH docket (owner, Sep '26): with more than one round on the
+          // ticket a pop asks; a single round goes straight to the printer.
+          else if ((o.rounds || []).length > 1) { state.reprintPick = true; render(); }
+          else reprintDocket(null);
         }
+        else if (target === 'reprint-round') { reprintDocket(el.dataset.round === 'all' ? 'all' : parseInt(el.dataset.round)); }
+        else if (target === 'close-reprint-pick') { state.reprintPick = false; render(); }
         else if (target === 'show-order-history') {
           if (!state.openOrderId && !state.cart.length) { state.toast = 'Nothing on the order yet.'; render(); armToastTimer(2200); }
           else { state.orderHistoryPop = true; if (state.openOrderId) refreshOrders().then(() => render()).catch(() => {}); render(); }

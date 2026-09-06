@@ -213,6 +213,14 @@ body[data-fixed-rows="1"] .menu-panel .grid,
 [data-font-size="md"]{ --menu-fs:1; }
 [data-font-size="lg"]{ --menu-fs:1.18; }
 [data-font-size="xl"]{ --menu-fs:1.34; }
+/* The same slider moves the chrome and admin text too ("the whole till at
+   once") on a flatter curve — the comment below promised this since Aug '26
+   and .admin-shell pinned --ui-fs at 1, so admin never moved (caught Sep '26). */
+[data-font-size="xs"]{ --ui-fs:.9; }
+[data-font-size="sm"]{ --ui-fs:.95; }
+[data-font-size="md"]{ --ui-fs:1; }
+[data-font-size="lg"]{ --ui-fs:1.08; }
+[data-font-size="xl"]{ --ui-fs:1.16; }
 /* TYPE SCALE — the ONLY text sizes interface chrome may use (enforced by
    design/check-type-scale.js). Menu tiles keep their own --menu-fs sizing.
    --ui-fs is a flatter curve of the same per-device Design → Font size
@@ -1082,9 +1090,10 @@ body[data-theme="dark"] .acct-tile .acct-pin svg{fill:#8A847A !important;}
 .btn-clear{background:none;border:none;color:var(--charcoal-soft);font-size:var(--fs-md);cursor:pointer;text-decoration:underline;align-self:center;}
 
 /* Design → font-size is a WAITER setting: it scales the order screen only.
-   Admin pins the type tokens to fixed px so back-office text never moves. */
-.admin-shell{flex:1;display:flex;overflow:hidden;--ui-fs:1;
-  --fs-chip:10.5px;--fs-md:13.5px;--fs-lg:15px;--fs-xl:19px;--fs-num:24px;font-size:var(--fs-md);}
+   Admin reads the same tokens as the till, so Design → Text size moves it too
+   ("the whole till at once"); it was pinned in px until Sep '26. */
+.admin-shell{flex:1;display:flex;overflow:hidden;
+  font-size:var(--fs-md);} /* the five sizes were pinned in pixels here, which is what kept admin off the Text size slider (caught Sep '26) */
 .admin-sidebar{width:190px;flex-shrink:0;background:var(--surface);border-right:1px solid var(--steel-200);overflow-y:auto;padding:12px 8px;}
 /* The search-refresh wrapper must not form a layout box, or the nav buttons stop
    being flex children of the sidebar (they'd stack beside the search box on the
@@ -10851,10 +10860,8 @@ app.patch('/api/orders/:id/items/:itemIndex', (req, res) => {
 // ---------- Daily summary ----------
 app.get('/api/summary', (req, res) => {
   const data = readData();
-  const today = new Date().toDateString();
-  const todaysOrders = data.orders.filter(
-    o => new Date(o.createdAt).toDateString() === today && o.status === 'paid'
-  );
+  const todayFrom = tradingDayStart(Date.now());
+  const todaysOrders = data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) >= todayFrom);
   const salesToday = todaysOrders.reduce((s, o) => s + o.total, 0);
   const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0), 0);
   const refundsToday = todaysOrders.reduce((s, o) => s + (o.refundedTotal || 0), 0);
@@ -10872,6 +10879,11 @@ app.get('/api/summary', (req, res) => {
 // When a ticket counts: the moment it was paid; a ticket not (yet) paid, the
 // moment it was opened.
 function periodAt(o) { return (o.status === 'paid' && o.closedAt) ? o.closedAt : o.createdAt; }
+// ONE trading day, everywhere money is summed (owner, Sep '26): it turns over
+// at 4am, so a 1am round belongs to the night it was part of. The till keeps
+// the same rule (tradingDayStart in app.js) — change both or neither.
+const DAY_STARTS_AT = 4;
+function tradingDayStart(ts) { const d = new Date(ts); d.setHours(DAY_STARTS_AT, 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
 function computePeriodSummary(data, fromTs, toTs) {
   // Practice rings never reach the till's money. They printed nothing and
   // they count nothing (owner rule: a trainee cannot spoil the cash-up).
@@ -10993,7 +11005,7 @@ app.delete('/api/register/paidout/:id', (req, res) => {
 function computeReportsOverview(data) {
   const now = Date.now();
   const dayMs = 86400000;
-  const startOfDay = (ts) => { const d2 = new Date(ts); d2.setHours(4, 0, 0, 0); return d2.getTime() > ts ? d2.getTime() - dayMs : d2.getTime(); };
+  const startOfDay = tradingDayStart;
   const todayFrom = startOfDay(now);
   const paidIn = (from, to) => data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) > from && periodAt(o) <= to);
   const netOf = (list) => list.reduce((a, o) => a + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0)), 0);
@@ -11032,7 +11044,7 @@ function computeReportsOverview(data) {
     const list = paidIn(from, Math.min(now, from + dayMs));
     days.push({ day: new Date(from).toLocaleDateString(undefined, { weekday: 'short' }), net: netOf(list) });
   }
-  const monthFrom = (() => { const d2 = new Date(now); d2.setDate(1); d2.setHours(0, 0, 0, 0); return d2.getTime(); })();
+  const monthFrom = (() => { const d2 = new Date(now); d2.setDate(1); d2.setHours(DAY_STARTS_AT, 0, 0, 0); return d2.getTime(); })();
   const month = paidIn(monthFrom, now);
   // How the money arrived, over the week.
   const methods = { cash: 0, card: 0, giftcard: 0 };
@@ -20342,7 +20354,12 @@ function renderTicketPanel() {
           Object.values(sentByCourse[n] || {}).forEach(s => { merged.set(keyOf(s), { name: s.name, seat: s.seat, note: s.note, price: s.price, course: n, menuItemId: s.menuItemId, modSelections: s.modSelections || {}, removed: s.removed || [], origPrice: s.origPrice, discountReason: s.discountReason, sentQty: s.qty, newQty: 0, cartIdx: null }); });
           const freshKeys = [];
           (cartByCourse[n] || []).forEach(c => {
-            const k = keyOf(c);
+            // A line the waiter deliberately split ("Split into 2") stays its own
+            // row: two identical fresh lines used to fold into one row whose taps
+            // reached only the last of them (caught Sep '26). Fresh onto SENT
+            // still folds — that is the serve-again row.
+            const k0 = keyOf(c);
+            const k = (merged.has(k0) && merged.get(k0).cartIdx != null) ? k0 + '#' + c.idx : k0;
             if (merged.has(k)) { const en = merged.get(k); en.newQty += c.qty; en.cartIdx = c.idx; }
             else { merged.set(k, { name: c.name, seat: c.seat, note: c.note, price: c.price, course: n, menuItemId: c.menuItemId, modSelections: c.modSelections || {}, removed: c.removed || [], origPrice: c.origPrice, discountReason: c.discountReason, sentQty: 0, newQty: c.qty, cartIdx: c.idx }); freshKeys.push(k); }
           });
@@ -20482,7 +20499,7 @@ function renderVipTabContent() {
 function renderVoidModal() {
   const m = state.voidModal;
   return `
-  <div class="modal-bg" data-act="void-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Void order #${m.orderId}</h2>
       <label>Reason</label>
@@ -21131,16 +21148,18 @@ function renderHistoryView() {
 // §§ Table history and past orders
 function histTime(o) { return o.closedAt || o.calledAwayAt || o.createdAt || 0; }
 
+// ONE trading day (owner, Sep '26): 4am, the same rule as server.js — change both or neither.
+const DAY_STARTS_AT = 4;
+function tradingDayStart(ts) { const d = new Date(ts); d.setHours(DAY_STARTS_AT, 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
 function renderTableHistoryView() {
   const period = state.histPeriod || 'all';
   const PERIODS = [['today', 'Today'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year'], ['all', 'All']];
-  // Period thresholds off calendar boundaries (today / this month / this year),
-  // week = the last 7 days. Everything is filtered on PAID time.
-  const d = new Date(); d.setHours(0, 0, 0, 0);
-  const startToday = d.getTime();
+  // Period thresholds off the TRADING day (turns over at 4am — the same rule
+  // the server's reports use), week = the last 7 of them. Filtered on PAID time.
+  const startToday = tradingDayStart(Date.now());
   const startWeek = startToday - 6 * 86400000;
-  const dm = new Date(); dm.setDate(1); dm.setHours(0, 0, 0, 0);
-  const dy = new Date(); dy.setMonth(0, 1); dy.setHours(0, 0, 0, 0);
+  const dm = new Date(); dm.setDate(1); dm.setHours(DAY_STARTS_AT, 0, 0, 0);
+  const dy = new Date(); dy.setMonth(0, 1); dy.setHours(DAY_STARTS_AT, 0, 0, 0);
   const threshold = period === 'today' ? startToday : period === 'week' ? startWeek : period === 'month' ? dm.getTime() : period === 'year' ? dy.getTime() : 0;
   return `
     <div class="seg" style="margin:0 0 12px;display:inline-flex;">
@@ -21162,8 +21181,8 @@ function renderTableHistoryView() {
       let lastDay = '';
       return rows.map(o => {
         const t = histTime(o);
-        const dayKey = new Date(t).toDateString();
-        const header = dayKey !== lastDay ? (lastDay = dayKey, `<div class="hist-day-head">${fmtDate(t)}</div>`) : '';
+        const dayKey = new Date(tradingDayStart(t)).toDateString(); // a 1am bill files under the night it belongs to
+        const header = dayKey !== lastDay ? (lastDay = dayKey, `<div class="hist-day-head">${fmtDate(tradingDayStart(t))}</div>`) : '';
         const paidLabel = o.closedAt ? fmtTime(o.closedAt) : (o.status === 'open' ? 'open' : fmtTime(t));
         return `${header}
         <div class="order-row" data-act="detail" data-id="${o.id}">
@@ -21552,7 +21571,7 @@ function renderTimeOffModal() {
   const m = state.timeOffModal;
   const staff = (state.staffList || []).slice().sort((a, b) => a.name.localeCompare(b.name));
   return `
-  <div class="modal-bg" data-act="timeoff-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:420px;">
       <h2>Time off</h2>
       <label>Staff</label>
@@ -21575,7 +21594,7 @@ function renderShiftModal() {
   const m = state.shiftModal;
   const staff = (state.staffList || []).slice().sort((a, b) => a.name.localeCompare(b.name));
   return `
-  <div class="modal-bg" data-act="shift-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:420px;">
       <h2>Add shift</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -21654,7 +21673,7 @@ function renderRosterShiftModal() {
   const staff = (state.staffList || []).find(s => s.id === m.staffId);
   const dateLabel = new Date(m.date + 'T00:00:00').toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
   return `
-  <div class="modal-bg" data-act="roster-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:420px;">
       <h2>${m.mode === 'edit' ? 'Edit shift' : 'Add shift'}</h2>
       <div class="ts" style="margin-bottom:12px;">${esc(staff ? staff.name : '')} · ${dateLabel}</div>
@@ -21945,7 +21964,7 @@ function renderReservationsAdmin() {
 function renderReservationModal() {
   const m = state.reservationModal;
   return `
-  <div class="modal-bg" data-act="reservation-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add reservation' : 'Edit reservation'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -22052,7 +22071,7 @@ function renderCustomersAdmin() {
 function renderCustomerModal() {
   const m = state.customerModal;
   return `
-  <div class="modal-bg" data-act="customer-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add customer' : 'Edit customer'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -22504,7 +22523,7 @@ async function confirmAdjustInventory() {
 function renderAdjustInventoryModal() {
   const m = state.adjustInventoryModal;
   return `
-  <div class="modal-bg" data-act="adjust-inventory-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Adjust stock — ${m.itemName}</h2>
       <div class="sub">Current: ${m.currentStock} units</div>
@@ -22575,7 +22594,7 @@ async function deleteSupplier(id) {
 function renderSupplierModal() {
   const m = state.supplierModal;
   return `
-  <div class="modal-bg" data-act="supplier-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:500px;">
       <h2>${m.mode === 'add' ? 'Add supplier' : 'Edit supplier'}</h2>
       ${state.adminError ? `<div class="error-msg">${state.adminError}</div>` : ''}
@@ -22602,7 +22621,7 @@ function renderInventoryItemModal() {
   const m = state.inventoryItemModal;
   const suppliers = state.suppliers || [];
   return `
-  <div class="modal-bg" data-act="inventory-item-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:var(--admin-list-w,600px);">
       <h2>${m.mode === 'add' ? 'Add inventory item' : 'Edit inventory item'}</h2>
       ${state.adminError ? `<div class="error-msg">${state.adminError}</div>` : ''}
@@ -22657,7 +22676,7 @@ function renderAdjustStockModal() {
   const m = state.adjustStockModal;
   const item = state.menu.find(x => x.id === m.itemId);
   return `
-  <div class="modal-bg" data-act="adjust-stock-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Adjust stock — ${item ? esc(item.name) : ''}</h2>
       <div class="sub">Current: ${item ? item.stockCount : '?'}</div>
@@ -24218,7 +24237,7 @@ function stationFormFields(m) {
 function renderPrinterStationModal() {
   const m = state.printerStationModal;
   return `
-  <div class="modal-bg" data-act="printer-station-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add printer' : 'Edit printer'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -24352,7 +24371,7 @@ function renderHappyHourSettingsAdmin() {
 function renderHappyHourModal() {
   const m = state.happyHourModal;
   return `
-  <div class="modal-bg" data-act="happy-hour-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add promotion' : 'Edit promotion'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -24483,7 +24502,7 @@ function renderGiftCardsSettingsAdmin() {
 function renderGiftCardModal() {
   const m = state.giftCardModal;
   return `
-  <div class="modal-bg" data-act="gift-card-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Issue gift card</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -24501,7 +24520,7 @@ function renderGiftCardModal() {
 function renderVoucherModal() {
   const m = state.voucherModal;
   return `
-  <div class="modal-bg" data-act="voucher-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Create voucher</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -24698,7 +24717,7 @@ function renderAddTipModal() {
 function renderRefundModal() {
   const m = state.refundModal;
   return `
-  <div class="modal-bg" data-act="refund-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Refund order #${m.orderId}</h2>
       <div class="sub">Up to ${money(m.remaining)} remaining to refund.</div>
@@ -25645,7 +25664,7 @@ function renderTipsSettingsAdmin() {
 function renderDiscountPresetModal() {
   const m = state.discountPresetModal;
   return `
-  <div class="modal-bg" data-act="discount-preset-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add' : 'Edit'} ${m.kind === 'surcharge' ? 'surcharge' : 'discount'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -26022,7 +26041,7 @@ function renderBulkStaffModal() {
   const m = state.bulkStaffModal;
   const n = (state.selectedStaffIds || []).length;
   return `
-  <div class="modal-bg" data-act="bulk-staff-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Set role for ${n} staff member${n === 1 ? '' : 's'}</h2>
       <label>Role</label>
@@ -27281,7 +27300,7 @@ function renderFloorPlanAdmin() {
 function renderFloorPlanModal() {
   const m = state.floorPlanModal;
   return `
-  <div class="modal-bg" data-act="floorplan-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add area' : 'Rename area'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -27299,7 +27318,7 @@ function renderFloorPlanModal() {
 function renderSubcategoryModal() {
   const m = state.subcategoryModal;
   return `
-  <div class="modal-bg" data-act="subcategory-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Add subsection</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -27392,7 +27411,7 @@ function renderModifiersAdmin() {
 function renderModifierGroupModal() {
   const m = state.modifierGroupModal;
   return `
-  <div class="modal-bg" data-act="modifier-group-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add modifier group' : 'Edit modifier group'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28117,7 +28136,7 @@ function renderQtyPad() {
 function renderCategoryModal() {
   const m = state.categoryModal;
   return `
-  <div class="modal-bg" data-act="category-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Add section</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28471,7 +28490,7 @@ function renderComboSearchHits(gIdx) {
 function renderStaffModal() {
   const m = state.staffModal;
   return `
-  <div class="modal-bg" data-act="staff-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Add staff member</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28508,7 +28527,7 @@ function renderBulkColorModal() {
   const cfg = BULK_COLOR_TARGETS[m.list];
   const n = (state[cfg.selArr] || []).length;
   return `
-  <div class="modal-bg" data-act="bulk-color-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Bulk edit ${n} selected</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28550,7 +28569,7 @@ function renderBulkCategoryModal() {
   const m = state.bulkCategoryModal;
   const n = state.selectedCategoryIds.length + state.selectedSubcatIds.length;
   return `
-  <div class="modal-bg" data-act="bulk-category-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Bulk edit ${n} selected</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28601,7 +28620,7 @@ async function saveBulkCategoryModal() {
 function renderBulkEditModal() {
   const m = state.bulkEditModal;
   return `
-  <div class="modal-bg" data-act="bulk-edit-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Bulk edit ${state.selectedMenuItemIds.length} item(s)</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -28725,7 +28744,7 @@ function renderMenuModal() {
   const catObj = state.categories.find(c => c.name === m.category);
   const subcatsForCat = catObj ? state.subcategories.filter(s => s.categoryId === catObj.id) : [];
   return `
-  <div class="modal-bg" data-act="menu-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${m.mode === 'add' ? 'Add item' : 'Edit item'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
@@ -34938,7 +34957,7 @@ function renderRecipeEditorModal() {
   const invItems = state.inventoryItems || [];
 
   return `
-  <div class="modal-bg" data-act="recipe-modal-bg">
+  <div class="modal-bg">
     <div class="modal" data-stop="1" style="max-width:700px;">
       <h2>Recipe: ${item ? esc(item.name) : ''}</h2>
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-bottom:20px;padding:12px;border-radius:var(--r-control);background:var(--steel-100);">

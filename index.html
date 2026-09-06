@@ -2707,6 +2707,7 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
    and list tails can scroll clear instead of hiding underneath it. */
 body.osk-open .admin-content{padding-bottom:var(--osk-h,220px);}
 body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
+body.osk-open .middle-view{padding-bottom:var(--osk-h,220px);} /* the pay screen's way out rises above the keyboard too (sweep, Sep '26) */
 /* Tiles start at the bottom (owner option, Aug '26): column-reverse stacks
    the sections bottom-up and anchors the scroll at the bottom — the first
    tiles sit at the thumb, older sections scroll UP. */
@@ -4772,7 +4773,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .pay-bill{ border:1px solid var(--steel-200); border-radius:var(--radius);
     background:var(--surface); margin:0 0 16px; display:flex; flex-direction:column; }
   .pay-bill .bill-title{ padding:12px var(--hub-edge) 0; }
-  .pay-bill .bill-lines{ flex:none; max-height:38vh; }
+  .pay-bill .bill-lines{ flex:none; max-height:none; overflow:visible; } /* the bill flows with the page — a scroller inside the scroller ate the thumb (sweep, Sep '26) */
   /* The money block's top rule closes the list — the last line's own rule
      would sit 8px under it, and two rules never ride that close. */
   .pay-bill .bill-line:last-child{ border-bottom:0; }
@@ -8436,7 +8437,9 @@ app.post('/api/staff/verify-pin', (req, res) => {
       return res.json({ pending: true });
     }
     pinRecordSuccess(req);
-    return res.json({ id: match.id, name: match.name, role: match.role });
+    // trainee rides the login: a trainee signing in by PIN got no practice till
+    // (their orders counted and printed) — only the pick-a-face path carried it (Sep '26).
+    return res.json({ id: match.id, name: match.name, role: match.role, trainee: !!match.trainee });
   }
   const staff = data.staff.find(s => s.id === staffId);
   if (!staff || staff.pin !== pin) {
@@ -11640,7 +11643,6 @@ let state = {
   paymentMethod: 'card',
   cashGiven: '',
   splitMode: false,
-  payRailSplit: false, // the pay rail's Split is chosen but no kind picked yet
   payRailVouchers: false, // the pay rail's Vouchers pane is open
   billSplit: null, // { way, n, amounts[], paid{}, methods{}, printed{} }
   splitTenders: [], // [{ method: 'card'|'cash', amount }]
@@ -14627,6 +14629,9 @@ function openNumPad(el) {
     if (Date.now() - openedAt < 400 && wrap.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault(); ev.stopImmediatePropagation(); }
   };
   document.addEventListener('click', _numPadSwallow, true);
+  // A real finger landing inside the pad is not the ghost: disarm at once, so
+  // a fast first tap on a digit or ✕ is never eaten (sweep, Sep '26).
+  wrap.addEventListener('pointerdown', () => { if (_numPadSwallow) { document.removeEventListener('click', _numPadSwallow, true); _numPadSwallow = null; } }, true);
   // No minus on the pad, ever (owner, Sep '26: "why do we need a ± button?").
   // A form that can take stock away says so in words — Add / Remove.
   let buf = el.value.replace(/^-/, '');
@@ -15031,7 +15036,7 @@ function pressPinDigit(d) {
   // Digits only build the PIN — they NEVER log in on their own. Logging in
   // always needs the ✓ Enter key, so a short PIN can never fire before a
   // longer one that shares its start is finished (e.g. "1" vs "13").
-  if (state.loginPin.length >= 4) return;
+  if (state.loginPin.length >= 8) return; // the server allows 4 to 8 digits; the pad stopped at 4, so a longer PIN could never be typed (Sep '26)
   state.loginPin += d;
   state.loginError = '';
   render();
@@ -15873,7 +15878,7 @@ function seatShares() {
   }
   seats.forEach(s => { bySeat[s] += shared / seats.length; });
   const rawSum = seats.reduce((s, n) => s + bySeat[n], 0);
-  const target = Math.round(amountOwing() * 100); // the parts still owing (Sep '26)
+  const target = Math.round((amountOwing() + splitSharesTaken(state.paySeat)) * 100);
   const rows = seats.map(s => {
     const cents = rawSum > 0 ? (bySeat[s] / rawSum) * target : target / seats.length;
     return { seat: s, cents, floor: Math.floor(cents) };
@@ -15898,6 +15903,12 @@ async function paySeatShare(seatKey) {
   const share = seatShares().find(s => String(s.seat) === String(seatKey));
   if (!share) return;
   const method = p.methods[seatKey] || 'card';
+  // A share on a SENT ticket is recorded on the server the moment it is
+  // taken (a part, like a card part) — it used to live only in memory until
+  // the last share, so a reload or a tap on Card lost cash already in the
+  // drawer (sweep, Sep '26). takePart runs the terminal and closes the bill
+  // itself when the last share lands.
+  if (activeOpenOrder()) { p.paid[seatKey] = share.amount || true; await takePart(share.amount, method); return; }
   if (method === 'card' && terminalActive()) {
     const ok = await runTerminalPurchase(share.amount);
     if (!ok) return;
@@ -15909,7 +15920,7 @@ async function paySeatShare(seatKey) {
     state.splitTenders = shares.map(s => ({ method: p.methods[s.seat] || 'card', amount: s.amount.toFixed(2) }));
     state.splitMode = true;
     state.paySeat = null;
-    await confirmPayment();
+    await confirmPaymentNow();
     return;
   }
   render();
@@ -15919,9 +15930,17 @@ async function paySeatShare(seatKey) {
 // Divide the amount due into N equal shares, cent-accurate (odd cents go to
 // the earliest shares so they add up exactly). Each share settles on its own
 // method; the last one closes the tab, recording every share as its own tender.
+// A share keeps its size once taken. The shares divide what is owing PLUS
+// the shares this split has already taken — dividing the remainder alone
+// shrank every later share ($12 → $6 → $3) and the bill never closed
+// (trainee probe, Sep '26). A taken share is stored as its amount.
+function splitSharesTaken(p) {
+  if (!p || !p.paid) return 0;
+  return Object.values(p.paid).reduce((a, v) => a + (typeof v === 'number' ? v : 0), 0);
+}
 function evenShares() {
   const n = Math.max(2, (state.evenSplit && state.evenSplit.n) || 2);
-  const target = Math.round(amountOwing() * 100);
+  const target = Math.round((amountOwing() + splitSharesTaken(state.evenSplit)) * 100);
   const base = Math.floor(target / n);
   let leftover = target - base * n;
   const rows = [];
@@ -15951,6 +15970,7 @@ async function payEvenShare(key) {
   const share = evenShares().find(s => String(s.key) === String(key));
   if (!share) return;
   const method = p.methods[key] || 'card';
+  if (activeOpenOrder()) { p.paid[key] = share.amount || true; await takePart(share.amount, method); return; } // recorded at once — see paySeatShare
   if (method === 'card' && terminalActive()) {
     const ok = await runTerminalPurchase(share.amount);
     if (!ok) return;
@@ -15962,7 +15982,7 @@ async function payEvenShare(key) {
     state.splitTenders = shares.map(s => ({ method: p.methods[s.key] || 'card', amount: s.amount.toFixed(2) }));
     state.splitMode = true;
     state.evenSplit = null;
-    await confirmPayment();
+    await confirmPaymentNow();
     return;
   }
   render();
@@ -17255,7 +17275,6 @@ function openCheckout() {
   state.cardAmount = '';
   state.cardTip = 0;
   state.splitMode = false;
-  state.payRailSplit = false;
   state.payRailVouchers = false;
   state.splitTenders = [];
   state.paySeat = null;
@@ -17917,6 +17936,11 @@ async function confirmPayment() {
   state.paying = true; render();
   try { await confirmPaymentInner(); } finally { state.paying = false; render(); }
 }
+// From INSIDE a payment (terminal approved, a card part that settles the
+// bill): run the inner step straight away — the outer guard is already held
+// and calling it again returned at once, so the sale never closed and the
+// next Confirm charged the card again (sweep, Sep '26).
+function confirmPaymentNow() { return state.paying ? confirmPaymentInner() : confirmPayment(); }
 async function confirmPaymentInner() {
   // A bill being split is settled part by part, never in one lump.
   if (state.billSplit) return;
@@ -17950,7 +17974,7 @@ async function confirmPaymentInner() {
     const ok = await runTerminalPurchase(grandTotal);
     if (!ok) return;
     state._terminalApproved = true;
-    try { await confirmPayment(); } finally { state._terminalApproved = false; }
+    try { await confirmPaymentNow(); } finally { state._terminalApproved = false; }
     return;
   }
   const payments = state.splitMode ? state.splitTenders.map(t => ({ method: t.method, amount: parseFloat(t.amount) || 0 })) : null;
@@ -20817,6 +20841,7 @@ function payReady() {
 }
 function payConfirmLabel() {
   const grand = cartGrandTotal();
+  if (state.paySeat || state.evenSplit) return 'Mark each share'; // the rows carry the action; the bar's key is off
   if (state.paymentMethod === 'card' && !state.splitMode) {
     const taken = cardTakenAmount();
     const part = taken < amountOwing() - 0.005;
@@ -20847,7 +20872,7 @@ async function takePart(amount, method) {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: method + n, label: method === 'cash' ? 'Cash' : cardTypeLabel(state.cardType), amount,
-        method, cardType: method === 'card' ? state.cardType : null, tip: method === 'card' ? cardTipPending() : 0, staffName }),
+        method, cardType: method === 'card' ? state.cardType : null, tip: cardTipPending(), staffName }),
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
@@ -20859,10 +20884,12 @@ async function takePart(amount, method) {
   state.cardAmount = '';
   state.cashGiven = '';
   if (amountOwing() <= 0.005) {
-    // The cards add up to the bill — close it, each card its own payment.
+    // The parts add up to the bill — close it, each part its own payment.
+    // A seat or even split ends here too, so its screen state goes first.
+    state.paySeat = null; state.evenSplit = null;
     state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
     state.splitMode = true;
-    await confirmPayment();
+    await confirmPaymentNow();
     return;
   }
   state.toast = `${money(amount)} taken — ${money(amountOwing())} still to pay`;
@@ -20913,11 +20940,9 @@ function renderCheckoutMiddle() {
         ${billBodyHtml()}
       </div>` : `
       <div class="sub">${money(total)} due${state.discount ? ' (after ' + money(Math.abs(cartDiscountAmount())) + ' ' + (state.discount.kind === 'surcharge' ? 'surcharge' : 'discount') + ')' : ''}</div>`}
-      ${isManager ? (state.discount ? `
-        <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)})${discountScopeText(state.discount) ? ' on ' + esc(discountScopeText(state.discount)) : ''} <button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></div>
-      ` : `
-        
-      `) : ''}
+      ${state.discount ? `
+        <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)})${discountScopeText(state.discount) ? ' on ' + esc(discountScopeText(state.discount)) : ''} ${isManager || state.discount.voucherCode ? `<button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button>` : ''}</div>
+      ` : ''}
       ${!(state.customers || []).length && !attachedCustomer ? '' : `
       <label>Customer (optional)</label>
       ${attachedCustomer ? `
@@ -20935,7 +20960,7 @@ function renderCheckoutMiddle() {
           </div>` : ''}
       `}`}
       <div style="display:flex;gap:16px;flex-wrap:wrap;">
-        ${state.payRailSplit || state.splitMode || state.paySeat || state.evenSplit ? `
+        ${state.splitMode || state.paySeat || state.evenSplit ? `
         <div class="pay-options" style="margin-bottom:0;">
           <div class="pay-opt ${state.evenSplit ? 'active' : ''}" data-act="toggle-even-split">Evenly</div>
           ${seatSplitAvailable ? `<div class="pay-opt ${state.paySeat ? 'active' : ''}" data-act="toggle-seat-split">By seat</div>` : ''}
@@ -37297,7 +37322,7 @@ function handleActClick(el, e) {
       // Keyboard up + a tap on a lit search result (or its subsections): the
       // keyboard steps aside and the tap does its job — pick straight from
       // the bright results without hunting for the tick first.
-      if (_oskEl && _oskEl.classList.contains('open') && el.closest('.osk-lit') && ['add', 'subcat', 'open-combo'].includes(act)) oskHide();
+      if (_oskEl && _oskEl.classList.contains('open') && el.closest('.osk-lit') && ['add', 'subcat', 'open-combo', 'apply-giftcard-code', 'apply-voucher-code', 'sell-voucher-custom'].includes(act)) oskHide();
       // The account panel ends in a Close, and that is how you leave it. This
       // only catches a tap on a REAL control somewhere else (the topbar, the
       // app bar): the pane steps aside and that tap does its normal job — BUT
@@ -37571,14 +37596,13 @@ function handleActClick(el, e) {
           // including the split pane (it trapped you until you divided).
           state.billSplit = null;
           if (state.discountModal) closeDiscountModal();
-          state.payRailSplit = false;
-          state.payRailVouchers = false;
+                  state.payRailVouchers = false;
           state.paymentMethod = k;
           state.cardAmount = '';
           render();
         }
       }
-      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; state.cardTip = p ? Math.round(cartTotal() * p) / 100 : 0; render(); }
+      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round((already + (p ? cartTotal() * p / 100 : 0)) * 100) / 100; render(); }
       else if (act === 'toggle-split-mode') { toggleSplitMode(); }
       else if (act === 'split-tender-method') { updateSplitTenderMethod(parseInt(el.dataset.idx), el.dataset.val); }
       else if (act === 'add-split-tender') { addSplitTender(); }
@@ -39092,6 +39116,7 @@ function handleActClick(el, e) {
         // swipes use. While items are half-picked for a move the floor owns
         // the gesture, so the pager sits that one out (same as the swipe).
         if (state.moveItemsPicking) return;
+        if (state.showCheckout) return; // the pay screen owns the phone until Cancel or Confirm — a pager tap used to arm a jump to the floor (sweep, Sep '26)
         const v = el.dataset.val;
         if (v === 'floor') { if (state.mobileCartOpen) closeMobileCart(); openTablePicker(); }
         else if (v === 'menu') { resetFloorPicker(); if (state.mobileCartOpen) closeMobileCart(); render(); }

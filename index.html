@@ -8317,7 +8317,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
-  const { label, x, y, shape, width, height, seats, rotation, covers, allergies, notes, vipType, mergedInto, finish, color, decorType, icon, prevX, prevY } = req.body;
+  const { label, x, y, shape, width, height, seats, rotation, covers, allergies, notes, vipType, mergedInto, finish, color, decorType, icon, prevX, prevY, discount } = req.body;
   if (label !== undefined) {
     if (table.type === 'table' && tableLabelTaken(data, label, table.id)) {
       return res.status(400).json({ error: 'That table number is already used in another layout' });
@@ -8340,6 +8340,12 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (decorType !== undefined && table.type === 'decor') table.decorType = decorType;
   if (icon !== undefined && table.type === 'decor') table.icon = icon || null;
   if (covers !== undefined) table.covers = Math.max(0, parseInt(covers) || 0);
+  // The account's own discount or surcharge, kept until the bill (Sep '26).
+  if (discount !== undefined) {
+    const d = discount && typeof discount === 'object' ? discount : null;
+    table.discount = d && ['percent', 'fixed'].includes(d.type) && parseFloat(d.value) > 0
+      ? { type: d.type, value: parseFloat(d.value), reason: String(d.reason || '').slice(0, 80), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount' } : null;
+  }
   if (Array.isArray(allergies)) {
     table.allergies = allergies.slice(0, 50)
       .filter(a => a && a.allergy && String(a.allergy).trim())
@@ -14423,6 +14429,7 @@ function oskInsert(ch) {
     if (ch === '⌫') el.value = el.value.slice(0, -1); else el.value += ch;
   }
   el.dispatchEvent(new Event('input', { bubbles: true }));
+  setTimeout(() => { if (_oskTarget === el && document.contains(el)) { oskUnlight(); oskLitFor(el).forEach(e => e.classList.add('osk-lit')); } }, 0); // relight after the keystroke's render
   if (_oskMode === 'upper') { _oskMode = 'lower'; oskPaint(); } else oskEcho();
 }
 function oskKey(k) {
@@ -14459,7 +14466,9 @@ function oskLitFor(target) {
   // "pressing search should also deactivate the keyboard") — the magnifier
   // keeps pressing the same close it always had; buried under the scrim it
   // did nothing. The bar is its own stacking context, so it lifts whole.
-  if (target.id === 'search-input') return [...document.querySelectorAll('.menu-scroll, .topbar')];
+  // The hub rises with the results — not before there is a search (owner, Sep '26:
+  // "tiles already lit up" — a spotlight on nothing while the keyboard came up).
+  if (target.id === 'search-input') return [...document.querySelectorAll(target.value.trim() ? '.menu-scroll, .topbar' : '.topbar')];
   if (target.id === 'admin-search-input') return [...document.querySelectorAll('.topbar, .admin-search-results')];
   return [];
 }
@@ -15005,7 +15014,7 @@ function finishLogin(staff, warm) {
       const t = findTableById(state.table);
       if (t) {
         const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
-        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || '';
+        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || ''; state.discount = t.discount || null;
         if (oo) state.openOrderId = oo.id;
         state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
         claimTableLock(state.table, false, true);
@@ -17009,9 +17018,25 @@ function saveDiscountModal() {
   state.discount = { type: m.type, value, reason: m.reason.trim(), kind: m.kind };
   state.discountModal = null;
   state.adminError = '';
+  saveTableDiscount(state.table, state.discount);
   render();
 }
-function removeDiscount() { state.discount = null; render(); }
+function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); render(); }
+// A discount or surcharge put on before anything is rung sticks to the
+// ACCOUNT — it lives on the table like covers do, comes back with the table,
+// and leaves with the sitting (owner, Sep '26: "add surcharges or discounts
+// to the account"). Automatic rules are not saved: they re-apply themselves.
+async function saveTableDiscount(tableId, discount) {
+  if (!tableId) return;
+  const fp = findFloorPlanForTable(tableId);
+  const t = fp && fp.tables.find(x => x.id === tableId);
+  if (!t) return;
+  const d = discount && !discount.auto ? discount : null;
+  t.discount = d;
+  try {
+    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discount: d }) });
+  } catch (e) {}
+}
 
 // §§ Automatic rules (self-applying discounts and surcharges)
 // Easter Sunday (Meeus/Jones/Butcher) — anchors Good Friday & Easter Monday.
@@ -17199,7 +17224,9 @@ function maybeApplyAutoSurcharge() {
   if (r) state.discount = { type: r.type, value: r.value, reason: r.name, kind: r.kind, auto: true, ruleId: r.id };
 }
 function openCheckout() {
-  if (state.cart.length === 0 && !state.openOrderId) return;
+  // An EMPTY account still opens (owner, Sep '26): a surcharge or discount can
+  // go on before anything is rung; Confirm stays off until there is a bill.
+  if (state.cart.length === 0 && !state.openOrderId && !state.table) return;
   // Pay presses Send first. The pay screen adds up sent AND unsent lines, but
   // the server only closes what it was sent — so a dish added and not sent
   // was charged on screen and dropped from the ticket (owner, Sep '26: the
@@ -17401,6 +17428,7 @@ function cancelCoversPad() {
     state.allergies = (pt && pt.allergies) || [];
     state.notes = (pt && pt.notes) || [];
     state.vipType = (pt && pt.vipType) || '';
+    state.discount = (pt && pt.discount) || null;
     state.openOrderId = (po && po.id) || null;
     if (fp.prev) claimTableLock(fp.prev);
     state.showTablePicker = true; // still choosing a table
@@ -17684,7 +17712,7 @@ function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.ran
 // Everything that belongs to THIS cart goes when the cart goes: the send
 // keys, a discount, a staged call-away, a quick note (Sep '26: a 10% off on
 // table 22 followed the till onto table 222 and the next person's log-in).
-function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; state.discount = null; state.stagedCallAway = null; state.quickNote = ''; state.quickNoteStation = null; }
+function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; /* the discount is the ACCOUNT's — it lives on the table and comes back with it — not the send's */ state.stagedCallAway = null; state.quickNote = ''; state.quickNoteStation = null; }
 async function sendToKitchen() {
   if (state.sending) return;
   // The phone Save button is always tappable (its hold is the log-off
@@ -19197,7 +19225,7 @@ function setOrderType(v) {
   state.orderType = v;
   if (v === 'dine-in') {
     const t = findTableById(state.table);
-    state.covers = (t && t.covers) || 0;
+    state.covers = (t && t.covers) || 0; state.discount = (t && t.discount) || null;
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
     state.vipType = (t && t.vipType) || '';
@@ -20414,7 +20442,7 @@ function renderTicketPanel() {
                              that is actually on top */ : payPairHtml()}` : `
       <div class="action-icons">
         <button class="icon-action bill ${openOrder && openOrder.billPrinted ? 'active' : ''}" data-act="print-bill" data-order="${openOrder ? openOrder.id : ''}" ${!openOrder || !state.online ? 'disabled' : ''}>${ACT_BILL_SVG}<span class="ia-label">Bill</span></button>
-        <button class="icon-action pay" data-act="checkout" ${(!openOrder && !state.cart.length) || !state.online ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
+        <button class="icon-action pay" data-act="checkout" ${(!openOrder && !state.cart.length && !state.table) || !state.online ? 'disabled' : ''}>${ACT_PAY_SVG}<span class="ia-label">Pay</span></button>
         <button class="icon-action discard" data-act="clear" ${state.cart.length === 0 ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Discard</span></button>
         <button class="icon-action send${state.sendFailed && !state.sending ? (state.online ? ' send-failed' : ' will-send') : ''}" data-act="send-to-kitchen" ${state.sending ? 'disabled' : ''}>${state.sending ? SYS_HOURGLASS_SVG : state.sendFailed ? SYS_WARN_SVG : ACT_TICK_SVG}<span class="ia-label">${state.sending ? 'Sending' : state.sendFailed ? (state.online ? 'Not sent' : 'Will send') : 'Send'}</span></button>
       </div>`}
@@ -29666,6 +29694,15 @@ function tpCentreOnOpen() {
   w.scrollLeft = Math.max(0, (w.scrollWidth - w.clientWidth) / 2);
   w.scrollTop = Math.max(0, (w.scrollHeight - w.clientHeight) / 2);
 }
+// Paid and closed: the table goes back to the floor clean — covers, allergies,
+// notes, VIP and the account's discount. (This was deleted by mistake in the
+// Sep '26 dead-handler sweep; "Close" after a payment threw and left the table
+// seated and locked. Caught Sep '26.)
+function clearTableSitting(tableId) {
+  if (tableId == null) return;
+  saveTableCovers(tableId, 0); saveTableAllergies(tableId, []); saveTableNotes(tableId, []); saveTableVip(tableId, ''); saveTableDiscount(tableId, null);
+  state.discount = null;
+}
 function offerCloseEmptyTable(next) {
   const t = findTableById(state.table);
   const order = t && state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
@@ -29757,7 +29794,7 @@ function pickTable(id) {
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
     // as "already entered", never ask twice (owner ask).
-    state.covers = (t && t.covers) || (oo && oo.covers) || 0;
+    state.covers = (t && t.covers) || (oo && oo.covers) || 0; state.discount = (t && t.discount) || null; // the account's discount comes back with the table
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
     state.vipType = (t && t.vipType) || '';
@@ -29927,7 +29964,7 @@ async function doTransferToTable(newTableId) {
     state.table = newTableId;
     // After a combine the live tab is the DESTINATION's order — re-point.
     state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
-    state.covers = newTable.covers || 0;
+    state.covers = newTable.covers || 0; state.discount = newTable.discount || null;
     state.allergies = newTable.allergies || [];
     state.vipType = newTable.vipType || '';
   }

@@ -4228,7 +4228,14 @@ select.ie-field{font-weight:700;}
     margin:12px 12px 0; width:auto; max-width:none;
     border:1px solid var(--steel-200); border-radius:var(--r-surface); padding:12px;
     box-shadow:var(--lift-1);
-    max-height:50vh; overflow:auto; touch-action:pan-x pan-y; /* pinch-zoomed preview pans inside its half — HALF, not 56 (owner, Sep '26: "no more than half of the screen") */ }
+    max-height:50vh; overflow:hidden; touch-action:pan-y; /* HALF the screen, not 56 (owner, Sep '26: "no more than half of the screen") */ }
+  /* Not zoomed, the preview is a picture: a thumb that lands on it scrolls the
+     PAGE, not a second scroller inside a third (owner, Sep '26: "scrolling is
+     not smooth at certain areas" — the areas were the mock). Pinch it and it
+     becomes its own pannable box. */
+  .admin-content:has(.screen-ctl-scroll) .settings-card.mock-card .mk-wrap{ overflow:hidden; touch-action:pan-y; }
+  .admin-content:has(.screen-ctl-scroll) .settings-card.mock-card.zoomed{ overflow:auto; touch-action:pan-x pan-y; }
+  .admin-content:has(.screen-ctl-scroll) .settings-card.mock-card.zoomed .mk-wrap{ overflow:auto; touch-action:pan-x pan-y; }
   .settings-card.mock-card .seg{ margin-bottom:8px !important; }
   /* THE TILL MOCK IS A TABLET, EVEN WHEN YOU HOLD A PHONE. The phone's own
      rail rules key off the VIEWPORT, so inside the preview the rail turned
@@ -4741,7 +4748,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
      not rendered at this width - one row, not two. */
   body[data-paying] .middle-view .pay-bar{
     position:fixed; left:0; right:0; bottom:var(--appbar-off, 0px); z-index:6;
-    background:var(--surface); border-top:1px solid var(--steel-200);
+    background:var(--steel-100); border-top:1px solid var(--steel-200); /* the docket panel's ground, not a white strip (owner, Sep '26) */
     padding:8px var(--hub-edge) calc(8px + env(safe-area-inset-bottom, 0px)); margin:0; }
   /* The pay rail is this screen's nav, so it comes to the front with the pane
      - drawn underneath, Card/Cash/Vouchers/Split could not be tapped at all.
@@ -14125,6 +14132,10 @@ const SIZE_H_MULT = { xs: 0.6, sm: 0.8, md: 1, lg: 1.25, xl: 1.55 };
 function designFrame(dev) {
   if (dev === 'mobile') return { w: 390, h: 844 };
   const vw = window.innerWidth || 1080, vh = window.innerHeight || 675;
+  // On a phone the Tablet mock wore the PHONE's tall shape (owner, Sep '26:
+  // "tablet preview using phones looks weird"). A tablet is a landscape
+  // slab whatever you're holding: below tablet width, draw a stock tablet.
+  if (vw < 900) return { w: 1180, h: 820 };
   const tillW = Math.max(1080, vw);
   return { w: tillW, h: Math.round(vh * (tillW / vw)) };
 }
@@ -14606,11 +14617,14 @@ function openNumPad(el) {
   // click would "tap" whatever key sits beneath the fingertip (same phantom
   // double-tap the qty pop guards against). Swallow the first click if it
   // lands on the pad; the first click anywhere disarms.
+  const openedAt = Date.now();
   _numPadSwallow = (ev) => {
     const fn = _numPadSwallow;
     _numPadSwallow = null;
     document.removeEventListener('click', fn, true);
-    if (wrap.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault(); ev.stopImmediatePropagation(); }
+    // Only the ghost — a click inside the first 400ms. A real tap later must
+    // land first time (owner, Sep '26: "need to press cancel twice").
+    if (Date.now() - openedAt < 400 && wrap.contains(ev.target)) { ev.stopPropagation(); ev.preventDefault(); ev.stopImmediatePropagation(); }
   };
   document.addEventListener('click', _numPadSwallow, true);
   // No minus on the pad, ever (owner, Sep '26: "why do we need a ± button?").
@@ -14661,6 +14675,10 @@ function openNumPad(el) {
     field.dispatchEvent(new FocusEvent('blur'));
   });
 }
+// The pad opens on a TAP — finger down and up on the field without moving.
+// It used to open on the finger LANDING, so scrolling the pay screen with a
+// thumb that happened to start on a field popped the pad (owner, Sep '26).
+let _numTap = null;
 document.addEventListener('pointerdown', (e) => {
   const t = e.target;
   if (!t || !t.matches || !t.matches('input[type="number"]') || t.disabled || t.readOnly) return;
@@ -14670,8 +14688,15 @@ document.addEventListener('pointerdown', (e) => {
   // touch-till rule.
   if (!t.classList.contains('pay-amount') && !oskEligible()) return;
   e.preventDefault(); // the pad IS the caret here — block the focus the tap would give
-  openNumPad(t);
+  _numTap = { t, x: e.clientX, y: e.clientY, at: Date.now() };
 }, true);
+document.addEventListener('pointerup', (e) => {
+  const tap = _numTap; _numTap = null;
+  if (!tap || e.target !== tap.t) return;
+  if (Math.abs(e.clientX - tap.x) > 8 || Math.abs(e.clientY - tap.y) > 8 || Date.now() - tap.at > 600) return; // a scroll or a hold, not a tap
+  openNumPad(tap.t);
+}, true);
+document.addEventListener('pointercancel', () => { _numTap = null; }, true);
 // Order-screen panel arrangement, per device size. Two device classes only
 // (owner-merged): the Till profile (stored under the legacy 'pc' key) covers
 // PCs AND tablets — they run the same layout engine and the venue wants them
@@ -20760,6 +20785,14 @@ function renderCallAwayPop() {
 // next two Australian notes above that. Never a note smaller than the bill.
 // Is the payment ready to go through? Asked by the docket's Confirm and by
 // the middle, so they can never disagree.
+// Has anything been typed on the pay screen? Cancel is grey until it would
+// throw something away, then red (owner, Sep '26: "should it turn red to
+// cancel entered figures?"). The account's own discount is not "typed" —
+// it stays with the table.
+function payDirty() {
+  return !!((state.cardAmount && parseFloat(state.cardAmount) > 0) || (state.cashGiven && parseFloat(state.cashGiven) > 0) || (state.cardTip > 0)
+    || state.splitMode || state.billSplit || state.paySeat || state.evenSplit);
+}
 function payReady() {
   if (state.paySeat || state.evenSplit) return false;
   const grand = cartGrandTotal();
@@ -20844,7 +20877,7 @@ async function takePart(amount, method) {
 function payPairHtml() {
   return `
       <div class="action-icons pay-pair">
-        <button class="icon-action discard" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action ${payDirty() ? 'discard' : 'neutral'}" data-act="cancel-checkout" ${state.terminalPending ? 'disabled' : ''}>${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
         ${state.billSplit ? '' : `<button class="icon-action send" data-act="confirm-payment" ${payReady() && !state.terminalPending && !state.paying && state.online ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">${payConfirmLabel()}</span></button>`}
       </div>`;
 }
@@ -27498,6 +27531,8 @@ function fitScreenMockup() {
   // the right size, and hold the pane's scroll across this resize.
   const ac = document.querySelector('.admin-content');
   const keep = ac ? ac.scrollTop : 0;
+  // A pinched preview is its own pannable box; at rest it is a picture (see the phone rules in style.css).
+  document.querySelectorAll('.settings-card.mock-card').forEach(c => c.classList.toggle('zoomed', _mkZoom > 1));
   wraps.forEach(wrap => {
     const p = wrap.parentElement;
     if (!p) return;

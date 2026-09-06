@@ -5842,17 +5842,6 @@ function loadAndMigrate() {
   // Round tables step down once (Sep '26): the circle template went from 8
   // wide to 7.5, and every round already on a floor follows it, or the old
   // tables would sit bigger than new ones of the same size step.
-  // Stools became an actual half circle (Sep '26): half as tall as wide. A
-  // stool placed before that was a full circle's box, so it is squashed once.
-  if (!(data.settings || {}).stoolsV2) {
-    let touched = false;
-    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
-      if (t.shape === 'stool' && t.width) { t.height = Math.round(t.width * 0.8125 * 100) / 100; touched = true; }
-    }));
-    data.settings = Object.assign({}, data.settings, { stoolsV2: true });
-    writeData(data);
-    if (touched) console.log('Stools reshaped to a half circle');
-  }
   if (!(data.settings || {}).roundTablesV2) {
     let touched = false;
     (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
@@ -8334,6 +8323,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (width !== undefined) table.width = width;
   if (height !== undefined) table.height = height;
   if (seats !== undefined) table.seats = seats;
+  if (req.body.stretch !== undefined) table.stretch = Math.max(1, Math.min(3, parseFloat(req.body.stretch) || 1)); // how much longer it has been pulled
   if (rotation !== undefined) table.rotation = ((rotation % 360) + 360) % 360;
   if (finish !== undefined) table.finish = finish;
   if (color !== undefined) table.color = color || null;
@@ -11321,30 +11311,24 @@ const CATEGORY_ICONS = {
 const FLOOR_GRID = 2.5;
 // A square, a circle and a stool look the same turned, so they never offer a
 // Turn (owner, Sep '26: "no sense to rotate symmetrical shapes").
-function symmetricalTable(t) { return !!t && (t.shape === 'round' || t.shape === 'square'); } // a stool is a half circle now — it has a way up, so it turns
+function symmetricalTable(t) { return !!t && (t.shape === 'round' || t.shape === 'square') && (t.stretch || 1) === 1; } // a pulled table has a long way and a short way, so it turns
 // The two handles on a picked table: drawn on the 24 grid like every icon.
 const FP_TURN_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12a10 10 0 1 1-3.33-7.44"/><path d="M22 2v5.56h-5.56"/></svg>';
+const FP_STRETCH_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h20"/><path d="M6 8l-4 4 4 4"/><path d="M18 8l4 4-4 4"/></svg>';
 const FP_SIZE_SVG = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22 22 2"/><path d="M14.5 2H22v7.5"/><path d="M2 14.5V22h7.5"/></svg>';
+// TWO shapes (owner, Sep '26, from first principles): a round table and a
+// square one. Pull a table's SIDE handle and it gets longer — a square becomes
+// a long table, a round becomes an oval — so Oval, Rectangle, Long, Half-round
+// and the Barstool are gone. `stretch` (1 = as dropped, up to 3) is how much
+// longer it has been pulled; seats follow it.
 const TABLE_TEMPLATES = [
-  // A stool is an ACTUAL half circle (owner, Sep '26: "not a cut circle"): a
-  // box half as tall as it is wide with a domed top and a flat bottom, half
-  // the round table's width. (It was a circle with its bottom third clipped.)
-  // The stool IS the round table cut in half (owner, Sep '26: "compare it to a
-  // regular circle table"): the circle's width, half the circle's height.
-  { key: 'barstool', label: 'Barstool', shape: 'stool', width: 7.5, height: 6.1, seats: 1 },
-  // A round of the same AREA as the square read bigger — 14% wider (owner,
-  // Sep '26: "large rounds look larger than squares"). Midway now: 70 to
-  // the square's 65 at the same size step.
-  { key: 'round', label: 'Circle', shape: 'round', width: 7.5, height: 12.2, seats: 4 },
-  { key: 'oval', label: 'Oval', shape: 'oval', width: 14, height: 11, seats: 6 },
+  { key: 'round', label: 'Round', shape: 'round', width: 7.5, height: 12.2, seats: 4 },
   // A square of the same footprint READS bigger than a circle (corners add
-  // ~27% area), so the square template sits a step smaller than the circle
-  // to look equal on the floor (owner, Aug '26).
+  // ~27% area), so it sits a step smaller to look equal on the floor (owner, Aug '26).
   { key: 'square', label: 'Square', shape: 'square', width: 7, height: 11.5, seats: 4 },
-  { key: 'rect', label: 'Rectangle', shape: 'rect', width: 16, height: 12, seats: 6 },
-  { key: 'long', label: 'Long', shape: 'long', width: 24, height: 9, seats: 8 },
-  { key: 'half-round', label: 'Half-round', shape: 'half', width: 12, height: 8, seats: 4 },
 ];
+const TABLE_STRETCH_STEPS = [1, 1.5, 2, 2.5, 3]; // how much longer a pulled table can be — snapped on release
+
 // Tables snap to these size steps (× the shape's base template) so the floor
 // stays a set of consistent sizes instead of a jumble of hand-dragged ones.
 // Dragging the resize handle lands on the nearest step; the shape's aspect is
@@ -11371,7 +11355,7 @@ function resnapFloorPlans() {
 }
 const TABLE_SIZE_LABELS = ['S', 'M', 'L'];
 function tableBaseDims(shape) {
-  const tpl = TABLE_TEMPLATES.find(x => x.shape === shape);
+  const tpl = TABLE_TEMPLATES.find(x => x.shape === (shape === 'rect' ? 'square' : shape));
   return tpl ? { width: tpl.width, height: tpl.height } : null;
 }
 // A circle must be a TRUE circle on the floor, whatever the floor's aspect:
@@ -11400,22 +11384,14 @@ function clampToFloor(x, y, w, h, rot, fpHeight) {
     y: Math.max(hh, Math.min(100 - hh, Math.round(y * 10) / 10)),
   };
 }
-// Corner rounding per shape — 'oval' is a stretched circle, 'half' a booth
-// dome (flat bottom edge you can rotate against a wall).
-const STOOL_RADIUS = '50% 50% 0 0 / 100% 100% 0 0'; // a half circle: domed top, flat bottom
-function tableRadius(shape) {
-  return shape === 'round' || shape === 'oval' ? '50%'
-    : shape === 'stool' ? STOOL_RADIUS
-    : shape === 'half' ? '50% 50% 10px 10px / 90% 90% 10px 10px'
-    : '10px';
-}
+// Corner rounding: a round table is a full radius (an oval when pulled), a
+// square one wears the tile corner. (Legacy 'rect' tables read as square.)
+function tableRadius(shape) { return shape === 'round' ? '50%' : '10px'; }
 // Corner radius for a PLACED table — proportional to the table's smaller side so
 // every square/rect rounds the same amount at any size. A fixed px radius reads
 // sharp on big tables and round on small ones (the "two different snaps" bug).
 function tableRadiusFor(t) {
-  if (!t || t.shape === 'round' || t.shape === 'oval') return '50%';
-  if (t.shape === 'stool') return STOOL_RADIUS;
-  if (t.shape === 'half') return '50% 50% 10px 10px / 90% 90% 10px 10px';
+  if (!t || t.shape === 'round') return '50%';
   const wpx = (t.width || 10) * 9, hpx = (t.height || 10) * (STD_FLOOR_H / 100);
   const r = 0.16 * Math.min(wpx, hpx);
   return `${(r / wpx * 100).toFixed(1)}% / ${(r / hpx * 100).toFixed(1)}%`;
@@ -27126,7 +27102,7 @@ function renderFloorPlanAdmin() {
         // number for the same job (caught when the owner asked "did we fuck up
         // our old rules?").
         const SHAPE_BOX = 20; // the icon law's content box — see below
-        const ratio = { barstool: 2, round: 1, oval: 36 / 22, square: 1, rect: 36 / 22, long: 40 / 13, half: 30 / 20 }; // a stool is twice as wide as it is tall — a half circle
+        const ratio = { round: 1, square: 1 };
         const dims = Object.fromEntries(Object.entries(ratio).map(([k, r]) =>
           [k, r >= 1 ? [SHAPE_BOX, Math.round(SHAPE_BOX / r)] : [Math.round(SHAPE_BOX * r), SHAPE_BOX]]));
         // In PLACEMENT mode highlight the exact template picked (barstool and the
@@ -27135,10 +27111,7 @@ function renderFloorPlanAdmin() {
         const isActive = (t) => idAttr ? (t.shape === activeShape) : (t.key === placingKey);
         // Swatch corner radius mirrors a REAL placed table (~16% of the short side),
         // not a fat fixed 10px that made every square swatch look pill-rounded.
-        const chipRadius = (shape, w, h) => shape === 'round' || shape === 'oval' ? '50%'
-          : shape === 'stool' ? STOOL_RADIUS
-          : shape === 'half' ? '50% 50% 14% 14% / 90% 90% 14% 14%'
-          : `${Math.max(2, Math.round(Math.min(w, h) * 0.16))}px`;
+        const chipRadius = (shape, w, h) => shape === 'round' ? '50%' : `${Math.max(2, Math.round(Math.min(w, h) * 0.16))}px`;
         return `<div class="shape-chip-row">${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.key] || dims[t.shape] || [26, 26];
           return `<button class="shape-chip ${isActive(t) ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" aria-label="${esc(t.label)}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${chipRadius(t.shape, w, h)};background:${pvBg};"></span></button>`; }).join('')}</div>`;
       };
@@ -27330,12 +27303,13 @@ function renderFloorPlanAdmin() {
       return `<div id="floor-place-ghost" style="position:absolute;left:-9999px;top:0;width:${tpl.width}%;height:${tpl.height}%;transform:translate(-50%,-50%);border:2px ${kind === 'decor' ? 'dashed' : 'solid'} var(--orange);border-radius:${radius};background:var(--orange-dim);opacity:0.65;pointer-events:none;z-index:6;display:flex;align-items:center;justify-content:center;font-size:var(--fs-xl);">${kind === 'decor' ? (DECOR_ART[tpl.key] ? `<span style="width:80%;height:80%;display:flex;">${DECOR_ART[tpl.key]}</span>` : (tpl.icon || '')) : ''}</div>`;
     })() : ''}
     ${fp.tables.map(t => `
-      <button class="floor-marker admin-floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}${state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id) ? ' mk-sel' : ''}" data-id="${t.id}" style="${shapeStyle(t, state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id))}cursor:pointer;">
+      <button class="floor-marker admin-floor-marker${state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id) ? ' mk-sel' : ''}" data-id="${t.id}" style="${shapeStyle(t, state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id))}cursor:pointer;">
         ${floorMarkerInner(t, fp.height, { hideStatus: true })}
         ${state.selectedAdminTableId === t.id ? `
           <div style="position:absolute;inset:0;transform:rotate(${-(t.rotation || 0)}deg);pointer-events:none;z-index:2;">
             ${symmetricalTable(t) ? '' : `<span class="rotate-handle fp-handle" data-id="${t.id}" style="top:-16px;right:-16px;border-radius:50%;cursor:pointer;">${FP_TURN_SVG}</span>`}
             <span class="resize-handle fp-handle" data-id="${t.id}" style="bottom:-16px;right:-16px;border-radius:var(--r-control);cursor:nwse-resize;">${FP_SIZE_SVG}</span>
+            ${t.type === 'decor' ? '' : `<span class="stretch-handle fp-handle" data-id="${t.id}" style="top:50%;right:-16px;transform:translateY(-50%);border-radius:var(--r-control);cursor:ew-resize;">${FP_STRETCH_SVG}</span>`}
           </div>
         ` : ''}
       </button>
@@ -28914,7 +28888,7 @@ function shapeStyle(t, selected) {
   // render through this function, so the ring can only ever be one weight
   // (DESIGN.md § Table selection law). It is drawn INSIDE the shape so a
   // selected table never appears to grow.
-  const ring = (selected && !isDecor && t.shape !== 'stool') ? 'box-shadow:var(--tbl-sel-lift, 0 0 0 rgba(0,0,0,0));z-index:3;' : (selected && !isDecor ? 'z-index:3;' : '');
+  const ring = (selected && !isDecor) ? 'box-shadow:var(--tbl-sel-lift, 0 0 0 rgba(0,0,0,0));z-index:3;' : (selected && !isDecor ? 'z-index:3;' : '');
   // A table linked into another fades whole — the main (lowest) table of the
   // group stays lit and carries the order.
   const faded = (!isDecor && t.mergedInto && t.mergedInto !== t.id) ? 'opacity:0.45;' : '';
@@ -29581,7 +29555,7 @@ function renderTablePickerMiddle() {
             room's shape is written here. */ ''}
       <div class="floor-canvas" style="position:relative;--fc-ar:${(STD_FLOOR_H/900).toFixed(4)};--fc-arw:${(900/STD_FLOOR_H).toFixed(4)};width:var(--fc-base);aspect-ratio:900 / ${STD_FLOOR_H};border-radius:var(--r-control);">
         ${fp.tables.filter(t => t.type === 'decor').map(t => `
-          <div class="floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
+          <div class="floor-marker" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').map(t => {
           const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
           const cs = tableCourseStatus(t.label);
@@ -29590,7 +29564,7 @@ function renderTablePickerMiddle() {
           const fx = tableStatusFx(t, cs, lock);
           const billEdge = fx.ring || '';
           return `
-          <div class="floor-marker${t.shape === 'stool' ? ' mk-stool' : ''}${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
+          <div class="floor-marker${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
             ${fx.wash}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
             ${mvSrcBadge(t)}
@@ -30661,7 +30635,7 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
       return;
     }
     const ph = tpl.shape === 'round' ? circleHeightPct(tpl.width) : tpl.height;
-    payload = { label: nextTableLabel(fp), x: xPct, y: yPct, shape: tpl.shape, width: tpl.width, height: ph, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    payload = { label: nextTableLabel(fp), x: xPct, y: yPct, shape: tpl.shape, width: tpl.width, height: ph, seats: tpl.seats, stretch: 1, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -30681,7 +30655,7 @@ async function addObject(fpId) {
     payload = { label: tpl.label, x: 50, y: 50, shape: 'square', width: tpl.width, height: tpl.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon, rotation: 0 };
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
-    payload = { label: nextTableLabel(fp), x: 50, y: 50, shape: tpl.shape, width: tpl.width, height: tpl.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    payload = { label: nextTableLabel(fp), x: 50, y: 50, shape: tpl.shape, width: tpl.width, height: tpl.height, seats: tpl.seats, stretch: 1, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -30716,9 +30690,9 @@ async function sizeAllTables(step) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
   await Promise.all(fp.tables.filter(t => t.type !== 'decor').map(t => {
-    const base = tableBaseDims(t.shape) || { width: t.width, height: t.height };
-    const width = Math.round(base.width * step * 10) / 10;
-    const height = t.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * step * 10) / 10;
+    const base = tableBaseDims(t.shape) || { width: t.width / (t.stretch || 1), height: t.height };
+    const width = Math.round(base.width * step * (t.stretch || 1) * 10) / 10; // a pulled table stays pulled
+    const height = t.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
     return patchFloorObject(fp.id, t.id, { width, height });
   }));
   const li = TABLE_SIZE_STEPS.indexOf(step);
@@ -30735,9 +30709,9 @@ async function sizeSelectedTables(step) {
   const targets = ids.map(id => fp.tables.find(t => t.id === id)).filter(t => t && t.type !== 'decor');
   if (!targets.length) return;
   await Promise.all(targets.map(t => {
-    const base = tableBaseDims(t.shape) || { width: t.width, height: t.height };
-    const width = Math.round(base.width * step * 10) / 10;
-    const height = t.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * step * 10) / 10;
+    const base = tableBaseDims(t.shape) || { width: t.width / (t.stretch || 1), height: t.height };
+    const width = Math.round(base.width * step * (t.stretch || 1) * 10) / 10; // a pulled table stays pulled
+    const height = t.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
     return patchFloorObject(fp.id, t.id, { width, height });
   }));
   const li = TABLE_SIZE_STEPS.indexOf(step);
@@ -31427,6 +31401,49 @@ function endRotateDrag() {
 // growing/shrinking symmetrically around its fixed center point (x/y).
 let floorResizeDrag = null; // { tableId, fpId, markerEl, canvasEl, startWidth, startHeight, startClientX, startClientY, rotationRad, maxDim }
 
+// PULL a table longer by its side handle (owner, Sep '26). Only the length
+// moves: a square becomes a long table, a round an oval. Snaps to
+// TABLE_STRETCH_STEPS on release; seats follow (a table twice as long sits
+// twice as many).
+let floorStretchDrag = null;
+function startStretchDrag(e, tableId) {
+  const markerEl = e.currentTarget.closest('.admin-floor-marker');
+  const canvasEl = markerEl.closest('.floor-canvas');
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  const t = fp && fp.tables.find(x => x.id === tableId);
+  if (!fp || !t || t.type === 'decor') return;
+  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+  const stretch = t.stretch || 1;
+  floorStretchDrag = { tableId, fpId: fp.id, markerEl, canvasEl, startClientX: clientX, startClientY: clientY, rotationRad: (t.rotation || 0) * Math.PI / 180, baseWidth: t.width / stretch, startStretch: stretch, last: stretch };
+  e.preventDefault();
+}
+function moveStretchDrag(clientX, clientY) {
+  if (!floorStretchDrag) return;
+  const d = floorStretchDrag, rect = d.canvasEl.getBoundingClientRect();
+  const dxPx = clientX - d.startClientX, dyPx = clientY - d.startClientY;
+  const localDxPx = dxPx * Math.cos(d.rotationRad) + dyPx * Math.sin(d.rotationRad);
+  const dxPct = (localDxPx / rect.width) * 100;
+  // The handle is on one side and the table is anchored at its centre, so a
+  // pull of x grows the width by 2x.
+  const min = TABLE_STRETCH_STEPS[0], max = TABLE_STRETCH_STEPS[TABLE_STRETCH_STEPS.length - 1];
+  d.last = Math.max(min, Math.min(max, d.startStretch + (dxPct * 2) / d.baseWidth));
+  d.markerEl.style.width = (Math.round(d.baseWidth * d.last * 10) / 10) + '%';
+}
+function endStretchDrag() {
+  if (!floorStretchDrag) return;
+  const d = floorStretchDrag; floorStretchDrag = null;
+  const step = TABLE_STRETCH_STEPS.reduce((a, b) => Math.abs(b - d.last) < Math.abs(a - d.last) ? b : a);
+  const fp = state.floorPlans.find(f => f.id === d.fpId);
+  const t = fp && fp.tables.find(x => x.id === d.tableId);
+  if (!t) { render(); return; }
+  const width = Math.round(d.baseWidth * step * 10) / 10;
+  if (tableWouldOverlap(fp, t.x, t.y, width, t.height, t.id)) { state.toast = 'Tables can’t overlap'; render(); return; }
+  const tpl = TABLE_TEMPLATES.find(x => x.shape === (t.shape === 'rect' ? 'square' : t.shape));
+  const seats = Math.max(1, Math.round((tpl ? tpl.seats : (t.seats || 4)) * step));
+  state.toast = step === 1 ? `Seats ${seats}` : `×${step} long · seats ${seats}`; armToastTimer(1400);
+  patchFloorObject(fp.id, t.id, { width, stretch: step, seats });
+}
 function startResizeDrag(e, tableId) {
   const markerEl = e.currentTarget.closest('.admin-floor-marker');
   const canvasEl = markerEl.closest('.floor-canvas');
@@ -31447,7 +31464,8 @@ function startResizeDrag(e, tableId) {
     base,
     // Where the current size sits on the step scale, so the drag continues
     // from the table's real size rather than jumping to a step boundary.
-    startScale: base ? (t.width / base.width + t.height / base.height) / 2 : 1,
+    stretch: t.type === 'decor' ? 1 : (t.stretch || 1),
+    startScale: base ? (t.width / (t.stretch || 1)) / base.width : 1,
   };
   e.preventDefault();
 }
@@ -31483,8 +31501,8 @@ function moveResizeDrag(clientX, clientY) {
   const growPct = (dxPct + dyPct) / 2;
   let scale = floorResizeDrag.startScale + (growPct / ((base.width + base.height) / 2)) * 1.1;
   scale = Math.max(minStep, Math.min(maxStep, scale));
-  const width = Math.round(base.width * scale * 10) / 10;
-  const height = floorResizeDrag.shape === 'round' ? circleHeightPct(width) : Math.round(base.height * scale * 10) / 10;
+  const width = Math.round(base.width * scale * floorResizeDrag.stretch * 10) / 10;
+  const height = floorResizeDrag.shape === 'round' ? circleHeightPct(base.width * scale) : Math.round(base.height * scale * 10) / 10;
   floorResizeDrag.markerEl.style.width = width + '%';
   floorResizeDrag.markerEl.style.height = height + '%';
   floorResizeDrag.lastScale = scale;
@@ -31498,8 +31516,8 @@ function endResizeDrag() {
     // Snap the continuous drag to the nearest preset step.
     const base = floorResizeDrag.base, sc = floorResizeDrag.lastScale;
     const step = TABLE_SIZE_STEPS.reduce((a, b) => Math.abs(b - sc) < Math.abs(a - sc) ? b : a);
-    lastWidth = Math.round(base.width * step * 10) / 10;
-    lastHeight = floorResizeDrag.shape === 'round' ? circleHeightPct(lastWidth) : Math.round(base.height * step * 10) / 10;
+    lastWidth = Math.round(base.width * step * floorResizeDrag.stretch * 10) / 10;
+    lastHeight = floorResizeDrag.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
     const li = TABLE_SIZE_STEPS.indexOf(step);
     if (li >= 0) { state.toast = `Size ${TABLE_SIZE_LABELS[li]}`; armToastTimer(1400); }
   }
@@ -31522,23 +31540,23 @@ function endResizeDrag() {
 document.addEventListener('mousemove', (e) => {
   moveFloorDrag(e.clientX, e.clientY);
   moveRotateDrag(e.clientX, e.clientY);
-  moveResizeDrag(e.clientX, e.clientY);
+  moveResizeDrag(e.clientX, e.clientY); moveStretchDrag(e.clientX, e.clientY);
   moveMarquee(e.clientX, e.clientY);
 });
-document.addEventListener('mouseup', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endMarquee(); });
+document.addEventListener('mouseup', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endStretchDrag(); endMarquee(); });
 document.addEventListener('touchmove', (e) => {
   if (!e.touches[0]) return;
   moveFloorDrag(e.touches[0].clientX, e.touches[0].clientY);
   moveRotateDrag(e.touches[0].clientX, e.touches[0].clientY);
-  moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY);
+  moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY); moveStretchDrag(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
-document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); });
+document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endStretchDrag(); });
 // Browser took the gesture for a native scroll: drop a still-pending drag so it
 // never lands as a stray tap/select; commit a drag that had already started.
 document.addEventListener('touchcancel', () => {
   if (floorDrag && floorDrag.pending) { if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer); floorDrag = null; }
   else endFloorDrag();
-  endRotateDrag(); endResizeDrag();
+  endRotateDrag(); endResizeDrag(); endStretchDrag();
 });
 // Long-press an item tile → quantity popover (½ ×2 ×3 ×4 ×5). No hidden mode:
 // hold the tile, pick a quantity, done. The pick funnels through the same
@@ -37205,6 +37223,10 @@ function bindEvents() {
   document.querySelectorAll('.resize-handle').forEach(el => {
     el.addEventListener('mousedown', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); });
     el.addEventListener('touchstart', (e) => { e.stopPropagation(); startResizeDrag(e, el.dataset.id); }, { passive: false });
+  });
+  document.querySelectorAll('.stretch-handle').forEach(el => {
+    el.addEventListener('mousedown', (e) => { e.stopPropagation(); startStretchDrag(e, el.dataset.id); });
+    el.addEventListener('touchstart', (e) => { e.stopPropagation(); startStretchDrag(e, el.dataset.id); }, { passive: false });
   });
 
   // HOLD an account tile to pin/unpin its icon on the docket head row. A short

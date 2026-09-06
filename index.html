@@ -7264,6 +7264,7 @@ app.put('/api/settings', (req, res) => {
   }
   if (req.body.venueName !== undefined) data.settings.venueName = String(req.body.venueName || '').trim().slice(0, 40);
   if (req.body.venueAddress !== undefined) data.settings.venueAddress = String(req.body.venueAddress || '').trim().slice(0, 80);
+  if (req.body.dayStartsAt !== undefined) data.settings.dayStartsAt = dayStartsAt({ dayStartsAt: req.body.dayStartsAt });
   if (req.body.venueLogo !== undefined) {
     const v = req.body.venueLogo;
     // '' = none, otherwise a small uploaded data URI.
@@ -7778,6 +7779,7 @@ app.put('/api/settings', (req, res) => {
     }
   }
   if (req.body.venueAddress !== undefined) data.settings.venueAddress = String(req.body.venueAddress || '').trim().slice(0, 80);
+  if (req.body.dayStartsAt !== undefined) data.settings.dayStartsAt = dayStartsAt({ dayStartsAt: req.body.dayStartsAt });
   if (req.body.venuePhone !== undefined) data.settings.venuePhone = String(req.body.venuePhone || '').trim().slice(0, 30);
   if (req.body.messageOfTheDay !== undefined) data.settings.messageOfTheDay = String(req.body.messageOfTheDay || '').slice(0, 280);
   if (req.body.autoSurcharge && typeof req.body.autoSurcharge === 'object') {
@@ -10864,7 +10866,7 @@ app.patch('/api/orders/:id/items/:itemIndex', (req, res) => {
 // ---------- Daily summary ----------
 app.get('/api/summary', (req, res) => {
   const data = readData();
-  const todayFrom = tradingDayStart(Date.now());
+  const todayFrom = tradingDayStart(Date.now(), data.settings);
   const todaysOrders = data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) >= todayFrom);
   const salesToday = todaysOrders.reduce((s, o) => s + o.total, 0);
   const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0), 0);
@@ -10886,8 +10888,9 @@ function periodAt(o) { return (o.status === 'paid' && o.closedAt) ? o.closedAt :
 // ONE trading day, everywhere money is summed (owner, Sep '26): it turns over
 // at 4am, so a 1am round belongs to the night it was part of. The till keeps
 // the same rule (tradingDayStart in app.js) — change both or neither.
-const DAY_STARTS_AT = 4;
-function tradingDayStart(ts) { const d = new Date(ts); d.setHours(DAY_STARTS_AT, 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
+// Settings → Venue → "Day starts at" (owner, Sep '26); 4am unless the venue says otherwise.
+function dayStartsAt(settings) { const h = parseInt(settings && settings.dayStartsAt, 10); return Number.isFinite(h) && h >= 0 && h <= 12 ? h : 4; }
+function tradingDayStart(ts, settings) { const d = new Date(ts); d.setHours(dayStartsAt(settings), 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
 function computePeriodSummary(data, fromTs, toTs) {
   // Practice rings never reach the till's money. They printed nothing and
   // they count nothing (owner rule: a trainee cannot spoil the cash-up).
@@ -11009,7 +11012,7 @@ app.delete('/api/register/paidout/:id', (req, res) => {
 function computeReportsOverview(data) {
   const now = Date.now();
   const dayMs = 86400000;
-  const startOfDay = tradingDayStart;
+  const startOfDay = (ts) => tradingDayStart(ts, data.settings);
   const todayFrom = startOfDay(now);
   const paidIn = (from, to) => data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) > from && periodAt(o) <= to);
   const netOf = (list) => list.reduce((a, o) => a + ((o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0)), 0);
@@ -21155,8 +21158,8 @@ function renderHistoryView() {
 function histTime(o) { return o.closedAt || o.calledAwayAt || o.createdAt || 0; }
 
 // ONE trading day (owner, Sep '26): 4am, the same rule as server.js — change both or neither.
-const DAY_STARTS_AT = 4;
-function tradingDayStart(ts) { const d = new Date(ts); d.setHours(DAY_STARTS_AT, 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
+function dayStartsAt() { const h = parseInt(state.settings && state.settings.dayStartsAt, 10); return Number.isFinite(h) && h >= 0 && h <= 12 ? h : 4; } // Settings → Venue
+function tradingDayStart(ts) { const d = new Date(ts); d.setHours(dayStartsAt(), 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
 function renderTableHistoryView() {
   const period = state.histPeriod || 'all';
   const PERIODS = [['today', 'Today'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year'], ['all', 'All']];
@@ -25800,6 +25803,13 @@ function renderVenueSettingsAdmin() {
       <input id="venue-address-input" type="text" value="${esc(s.venueAddress || '')}" maxlength="80" placeholder="Prints on receipts" style="width:320px;max-width:100%;padding:8px 12px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);" onblur="saveVenueAddress()">
     </div>
     <div style="margin-top:12px;">
+      <label class="field-label">Day starts at</label>
+      <select id="venue-day-start" onchange="saveDayStartsAt(this.value)" style="width:160px;">
+        ${Array.from({ length: 13 }, (_, h) => `<option value="${h}" ${dayStartsAt() === h ? 'selected' : ''}>${h === 0 ? 'Midnight' : h === 12 ? 'Noon' : h + ':00 am'}</option>`).join('')}
+      </select>
+      <div class="ts">Earlier bills belong to the night before.</div>
+    </div>
+    <div style="margin-top:12px;">
       <label class="field-label">Venue type</label>
       ${venueTypeTiles(s.venueType || '')}
     </div>
@@ -25832,6 +25842,7 @@ function saveVenueAddress() {
   const inp = document.getElementById('venue-address-input');
   if (inp) saveVenueSettings({ venueAddress: inp.value.trim() });
 }
+function saveDayStartsAt(v) { saveVenueSettings({ dayStartsAt: parseInt(v, 10) }); }
 
 // A receipt printer has no greys — every dot is black or it is nothing. So
 // the logo gets packed here, once, into one bit per dot: the picture is drawn

@@ -2711,7 +2711,6 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
    and list tails can scroll clear instead of hiding underneath it. */
 body.osk-open .admin-content{padding-bottom:var(--osk-h,220px);}
 body.osk-open .menu-scroll{padding-bottom:var(--osk-h,220px);}
-body.osk-open .middle-view{padding-bottom:var(--osk-h,220px);} /* the pay screen's way out rises above the keyboard too (sweep, Sep '26) */
 /* Tiles start at the bottom (owner option, Aug '26): column-reverse stacks
    the sections bottom-up and anchors the scroll at the bottom — the first
    tiles sit at the thumb, older sections scroll UP. */
@@ -4462,8 +4461,26 @@ select.dd-native{display:none !important;}
 .peek-round-btn:active{background:var(--pick-wash);}
 /* Line editor fields: a price is a short money box, a note is a sentence
    wide — neither a bar across the pane (owner, Sep '26). */
+/* ONE FAMILY ON THE LINE EDITOR (owner, Sep '26: "shapes and sizes all over
+   the place" — four heights, two edge greys, lift on some). Every choice is
+   the 44 chip at ONE width (seat and course alike); every field is 44 with
+   the chip's edge and lift; the stepper keys and Cancel / Save keep their
+   own families. The note is a KEY — no label, "Add a note" on its face. */
 .le-price{width:140px !important;flex:0 0 140px !important;font-family:var(--font-mono);}
 .middle-view > .pay-pane > input.le-note{max-width:480px;} /* outranks the pane's own 700 cap */
+.line-edit-pane input.le-price, .line-edit-pane input.le-note{ height:var(--h-control); min-height:var(--h-control); box-sizing:border-box; border-color:var(--steel-200); box-shadow:var(--lift-1); font-weight:700; margin:0; }
+.line-edit-pane .pay-opt.sm{ width:76px; padding:4px 0; overflow:hidden; text-overflow:ellipsis; }
+.line-edit-pane .pay-opt.sm.le-wide{ width:auto; padding:4px 12px; }
+/* ROWS (owner pick B, Sep '26): caption left, control right, a hairline
+   under each — the settings lists' own shape. One shape for every row,
+   the price once (in the head), no round number (a line is one line
+   however many rounds it came in — the rounds live on the show-order screen). */
+.line-edit-pane .le-row{ display:flex; align-items:center; gap:12px; min-height:60px; padding:8px 0; border-bottom:1px solid var(--steel-200); }
+.line-edit-pane .le-row > label{ flex:0 0 88px; margin:0; }
+.line-edit-pane .le-row > .le-ctl{ flex:1; min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
+.line-edit-pane .le-row .grid{ width:100%; margin:0; }
+.line-edit-pane .le-dim{ color:var(--charcoal-soft); font-weight:600; text-transform:none; }
+.line-edit-pane input.le-note{ flex:1; max-width:none; }
 .fp-dd{position:relative;}
 .fp-dd-end{margin-left:auto;}
 .fp-dd-scrim{position:fixed;inset:0;z-index:calc(var(--z-menu) - 1);}
@@ -10414,7 +10431,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { match, action, newPrice, newSeat, newCourse, newNote, staffName, reason } = req.body || {};
+  const { match, action, newPrice, newSeat, newCourse, newNote, staffName, reason, qty } = req.body || {};
   if (!match || !match.name) return res.status(400).json({ error: 'Missing item to modify' });
   const norm = v => (v === null || v === undefined || v === '') ? null : v;
   const matches = (i) =>
@@ -10426,10 +10443,33 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   const staff = staffName || 'Unknown';
 
   if (action === 'remove') {
-    const removed = (order.items || []).filter(matches);
-    if (removed.length === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
-    order.items = (order.items || []).filter(i => !matches(i));
-    (order.rounds || []).forEach(r => { r.items = (r.items || []).filter(i => !matches(i)); });
+    const have = (order.items || []).filter(matches);
+    if (have.length === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
+    // PART OF A LINE CAN COME OFF (owner, Sep '26: the editor's minus counts
+    // down and Save removes the difference). `qty` says how many; absent or
+    // more than there are, the whole line goes as before. The count comes
+    // off the latest lines first, and the round copies follow.
+    const total = have.reduce((s, i) => s + i.qty, 0);
+    let left = (qty === undefined || qty === null || qty <= 0) ? total : Math.min(total, parseInt(qty, 10) || 0);
+    const removed = [];
+    const takeFrom = (list) => {
+      for (let k = list.length - 1; k >= 0 && left > 0; k--) {
+        const i = list[k]; if (!matches(i)) continue;
+        const n = Math.min(i.qty, left);
+        removed.push({ ...i, qty: n });
+        i.qty -= n; left -= n;
+        if (i.qty <= 0) list.splice(k, 1);
+      }
+    };
+    takeFrom(order.items);
+    let leftRounds = removed.reduce((s, i) => s + i.qty, 0);
+    (order.rounds || []).forEach(r => {
+      for (let k = (r.items || []).length - 1; k >= 0 && leftRounds > 0; k--) {
+        const i = r.items[k]; if (!matches(i)) continue;
+        const n = Math.min(i.qty, leftRounds); i.qty -= n; leftRounds -= n;
+        if (i.qty <= 0) r.items.splice(k, 1);
+      }
+    });
     adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
     const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
@@ -14458,8 +14498,11 @@ function oskKey(k) {
 // the dim (owner, Aug '26): search keeps its live results lit, a form keeps
 // its own panel lit. Everything else sits behind the popup dim.
 function oskLitFor(target) {
-  const pop = target.closest('.modal-bg, .qty-pop, .covers-pop, .middle-view');
-  if (pop) return [pop];
+  // THE KEYBOARD DIMS EVERYTHING (owner, Sep '26: "there is already a text
+  // bar in the keyboard, don't need another one"). A form used to rise above
+  // the dim so its own field stayed bright; the keyboard's bar IS the field
+  // now, so the page behind it goes dark where it sits. Only a SEARCH keeps
+  // its results lit — they are what you are typing to reach.
   // The BAR stays above the dim with the results (owner, Aug '26:
   // "pressing search should also deactivate the keyboard") — the magnifier
   // keeps pressing the same close it always had; buried under the scrim it
@@ -14524,7 +14567,9 @@ function oskShow(target) {
   // keyboard instead of hiding underneath it.
   document.body.classList.add('osk-open');
   document.documentElement.style.setProperty('--osk-h', (_oskEl.offsetHeight || 220) + 'px');
-  setTimeout(() => { if (_oskTarget && document.contains(_oskTarget)) _oskTarget.scrollIntoView({ block: 'center' }); }, 120);
+  // The page does NOT move when the keyboard comes up (owner, Sep '26): the
+  // field used to scroll to the middle and the pane's keys rose over the
+  // keyboard — two jumps for one tap. The keyboard's bar shows the text.
 }
 function oskHide() {
   if (_oskEl) _oskEl.classList.remove('open');
@@ -16461,7 +16506,9 @@ function openLineEdit(idx) {
   if (isNaN(idx) || !state.cart[idx]) return;
   keepMobileDrawer();
   state.editSent = null;
-  state.editLine = { idx };
+  // Cancel puts the line back exactly as it was (owner, Sep '26): the pane
+  // edits the cart line in place, so the way out without saving is a copy.
+  state.editLine = { idx, was: JSON.parse(JSON.stringify(state.cart[idx])) };
   state.callAway = false; state.notesPanel = null; state.showCheckout = false;
   state.discountModal = null; state.showTablePicker = false;
   state.itemOptions = null; state.comboBuilder = null;
@@ -16481,7 +16528,8 @@ function editLineQty(delta) {
   // go to zero as well, to remove") and the editor closes with it — there is
   // nothing left to edit.
   if (!growCartLine(idx, delta)) line.qty += delta;
-  if (line.qty <= 0) { state.cart.splice(idx, 1); state.editLine = null; }
+  // Zero stays on the pane at 0 — Save takes the line off, Cancel keeps it.
+  if (line.qty < 0) line.qty = 0;
   render();
 }
 // Break a qty>1 line into separate single lines so each can go to its own
@@ -19557,6 +19605,37 @@ function sentItemMatches(i, m) {
   return i.name === m.name && norm(i.seat) === norm(m.seat) && (i.note || '') === (m.note || '')
     && Number(i.price) === Number(m.price) && (i.course || 1) === (m.course || 1);
 }
+// SAVE applies the draft in one go (owner, Sep '26). A count that went DOWN
+// asks why first — the same popup as always — and removes that many; then
+// seat and note move, extra servings go into the cart as a new round to send,
+// and a new price lands last so the added servings wear it too. Count to 0 +
+// Save is the one way a sent line comes off; the Remove key is gone.
+async function saveEditSent() {
+  const m = state.editSent, agg = findSentAggregate();
+  if (!m || !agg || !m.draft) { state.editSent = null; render(); return; }
+  const d = m.draft;
+  const down = Math.max(0, agg.qty - d.qty);
+  const rest = async () => {
+    const cur = state.editSent; if (!cur) return;
+    if (d.qty > 0) {
+      const moves = {};
+      const seat = d.seat === 'all' ? null : d.seat;
+      if (seat !== (agg.seat == null ? null : agg.seat)) moves.seat = d.seat;
+      if ((d.note || '').trim() !== (agg.note || '')) moves.note = (d.note || '').trim();
+      if (Object.keys(moves).length) await doMoveSent(cur, moves);
+      const up = Math.max(0, d.qty - agg.qty);
+      if (up > 0 && state.editSent) {
+        const o = activeOpenOrder(); const it = o && (o.items || []).find(i => sentItemMatches(i, state.editSent));
+        if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: it.price, qty: up,
+          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections });
+      }
+      if (d.price !== agg.price && state.editSent) { await doRepriceSent(state.editSent, d.price); }
+    }
+    state.editSent = null; state.voidItemPrompt = null; render();
+  };
+  if (down > 0) { state.voidItemPrompt = { match: { ...m, draft: undefined }, qty: down, then: rest }; render(); return; }
+  await rest();
+}
 // Live-derive the sent line (summed qty + full item fields) from the open order,
 // so the pane reflects the current server state after any edit.
 function findSentAggregate() {
@@ -19590,7 +19669,6 @@ function doAddServing(match) {
   armToastTimer(2000);
   return true;
 }
-function addAnotherServing() { const m = state.editSent; state.editSent = null; if (!doAddServing(m)) render(); }
 // Tapping the qty pill on a sent line adds another serving straight away.
 function serveAnotherFromEl(el) {
   const d = el.dataset;
@@ -19638,12 +19716,6 @@ async function doMoveSent(match, patch) {
     state.editSent = next;
     render();
   } catch (e) { state.toast = 'Could not move that item'; render(); }
-}
-function repriceSentItem() {
-  const inp = document.getElementById('sent-price-input');
-  const p = inp ? parseFloat(inp.value) : NaN;
-  if (isNaN(p) || p < 0) { state.toast = 'Enter a valid price'; render(); return; }
-  doRepriceSent(state.editSent, p);
 }
 // Inline price edit on a docket line (managers): cart lines update locally,
 // already-sent lines reprice on the server.
@@ -19830,7 +19902,7 @@ function renderVoidReasonPop() {
   return `
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop" style="width:340px;">
-        <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${esc(it.name || 'item')}</div>
+        <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${m.qty ? m.qty + ' × ' : ''}${esc(it.name || 'item')} — why?</div>
         ${m.needPin ? `
         <label class="field-label">Manager PIN</label>
         <input id="void-item-pin" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);" oninput="state.voidItemPrompt.pin = this.value;">
@@ -19847,21 +19919,24 @@ function renderVoidReasonPop() {
         </div>`}
       </div>`;
 }
-async function commitRemoveSent(match, reason) {
+async function commitRemoveSent(match, reason, qty, then) {
   const o = activeOpenOrder();
   if (!match || !o) return;
-  // Grab the exact lines coming off so Undo can re-send them.
-  const removed = (o.items || []).filter(i => sentItemMatches(i, match)).map(i => ({
-    id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: i.qty,
-    course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
-    variantId: i.variantId, modSelections: i.modSelections,
-  }));
+  // Grab the exact lines coming off so Undo can re-send them — only as many
+  // as are going when the editor takes part of a line off.
+  let left = qty || Infinity;
+  const removed = (o.items || []).filter(i => sentItemMatches(i, match)).map(i => {
+    const n = Math.min(i.qty, left); left -= n;
+    return n <= 0 ? null : { id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: n,
+      course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
+      variantId: i.variantId, modSelections: i.modSelections };
+  }).filter(Boolean);
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'remove', reason: reason || null, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'remove', qty: qty || null, reason: reason || null, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
-    state.editSent = null; state.voidItemPrompt = null;
-    render();
+    state.voidItemPrompt = null;
+    if (then) await then(); else { state.editSent = null; render(); }
     if (removed.length) offerUndo('Removed', () => reAddSentLine(o.id, removed));
     else { state.toast = reason ? `Removed — ${reason}` : 'Item removed'; render(); armToastTimer(2200); }
   } catch (e) { state.toast = 'Could not remove item'; render(); }
@@ -19877,7 +19952,6 @@ async function reAddSentLine(orderId, items) {
     state.toast = 'Restored'; render(); armToastTimer(2000);
   } catch (e) { state.toast = 'Could not restore item'; render(); armToastTimer(2500); }
 }
-function removeSentItem() { doRemoveSent(state.editSent); }
 // The inline ✕ on a sent line (managers only) — removes without opening the pane.
 function removeSentLine(el) {
   const d = el.dataset;
@@ -19900,57 +19974,44 @@ function renderEditSentMiddle() {
   const variants = item ? (item.variants || []) : [];
   const groups = item ? (item.modifierGroupIds || []).map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean) : [];
   const seatEnabled = state.settings.seatNumbersEnabled && state.covers > 0;
-  const curSeat = agg.seat == null ? 'all' : agg.seat;
+  // NOTHING SAVES UNTIL SAVE (owner, Sep '26). The pane edits a DRAFT of
+  // the line — count, seat, price, note — and Save applies the lot; Cancel
+  // drops it. Every tap used to hit the server on the spot, so Cancel could
+  // never undo anything and the minus voided before you had finished.
+  if (!state.editSent.draft) state.editSent.draft = { qty: agg.qty, seat: agg.seat == null ? 'all' : agg.seat, price: agg.price, note: agg.note || '' };
+  const d = state.editSent.draft;
+  const curSeat = d.seat;
   const qtyBtn = 'width:var(--h-control);height:var(--h-control);border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);font-size:var(--fs-xl);font-weight:700;cursor:pointer;color:var(--text-primary);display:flex;align-items:center;justify-content:center;';
-  const round = (() => { const o = activeOpenOrder(); if (!o || !o.rounds) return null;
-    for (let i = o.rounds.length - 1; i >= 0; i--) if ((o.rounds[i].items || []).some(x => sentItemMatches(x, state.editSent))) return i + 1;
-    return null; })();
   return `
   <div class="middle-view">
     <div class="pay-pane line-edit-pane" style="padding:8px 20px 24px;">
-      ${lineEditHead(agg.name, agg.price * agg.qty, true, round)}
+      ${lineEditHead(agg.name, d.price * d.qty, true)}
       ${(() => { const only = matchedAllergenBases(item, agg.seat != null ? agg.seat : 'all'); return only.length ? allergenChipRow(item, only) : ''; })()}
-      <label>Quantity</label>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;">
-        <button style="${qtyBtn}" data-act="void-one-sent">−</button>
-        <span style="font-family:'IBM Plex Mono',monospace;font-size:var(--fs-xl);font-weight:700;min-width:30px;text-align:center;">${agg.qty}</span>
-        <button style="${qtyBtn}" data-act="add-serving">＋</button>
-        <span class="tl-price" style="margin-left:auto;font-size:var(--fs-lg);">${money(agg.price * agg.qty)}</span>
-      </div>
-      <div class="ts" style="margin-bottom:16px;">＋ sends another serving · − asks why, then voids</div>
-      ${variants.length ? `
-        <label>Size <span style="color:var(--charcoal-soft);font-weight:600;text-transform:none;">· locked — the kitchen has it</span></label>
-        <div class="grid le-locked" style="margin-bottom:16px;">
+      ${leRow('Quantity', `
+        <button style="${qtyBtn}" data-act="sent-qty" data-dir="-1">−</button>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:var(--fs-xl);font-weight:700;min-width:30px;text-align:center;">${d.qty}</span>
+        <button style="${qtyBtn}" data-act="sent-qty" data-dir="1">＋</button>`)}
+      ${variants.length ? leRow('Size <span class="le-dim">· locked</span>', `<div class="grid le-locked">
           ${variants.map(v => `<div class="item-card allergy-item-card ${agg.variantId === v.id ? 'selected' : ''}"><div class="item-name">${esc(v.label)}</div><div class="item-price">${money(v.price)}</div></div>`).join('')}
-        </div>` : ''}
+        </div>`) : ''}
       ${groups.map(g => {
         const sel = modSel(agg.modSelections, g.id);
-        return `
-        <label>${esc(g.name)} <span style="color:var(--charcoal-soft);font-weight:600;text-transform:none;">· locked</span></label>
-        <div class="grid le-locked" style="margin-bottom:16px;">
+        return leRow(`${esc(g.name)} <span class="le-dim">· locked</span>`, `<div class="grid le-locked">
           ${g.options.map(o => `<div class="item-card allergy-item-card ${sel.includes(o.id) ? 'selected' : ''}"><div class="item-name">${esc(o.label)}</div></div>`).join('')}
-        </div>`; }).join('')}
-      ${seatEnabled && state.covers > 1 ? `
-        <label>Seat</label>
-        <div class="grid" style="margin:0 0 16px;">
-          <button class="item-card allergy-item-card ${curSeat === 'all' ? 'selected' : ''}" data-act="edit-sent-seat" data-seat="all"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'All')}</div></button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${curSeat === n ? 'selected' : ''}" data-act="edit-sent-seat" data-seat="${n}"><div class="item-name">${n}</div></button>`).join('')}
-        </div>` : ''}
-      <label>Course</label>
-      <div class="pay-options" style="margin-bottom:16px;flex-wrap:wrap;">
-        ${(state.settings.courses || []).map((c, i) => c.enabled === false && agg.course !== i + 1 ? '' :
-          `<div class="pay-opt sm ${agg.course === i + 1 ? 'active' : ''}" data-act="edit-sent-course" data-val="${i + 1}">${esc(c.name)}</div>`).join('')}
-      </div>
-      ${isManager ? `
-        <label>Price each</label>
-        <div style="display:flex;gap:8px;margin-bottom:16px;">
-          <input id="sent-price-input" type="number" min="0" step="0.01" value="${agg.price}" class="le-price">
-        </div>` : ''}
-      <label>Note</label>
-      <input id="sent-note-input" type="text" value="${esc(agg.note || '')}" class="le-note">
+        </div>`); }).join('')}
+      ${seatEnabled && state.covers > 1 ? leRow('Seat', `
+          <div class="pay-opt sm ${curSeat === 'all' ? 'active' : ''}" data-act="edit-sent-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</div>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<div class="pay-opt sm ${curSeat === n ? 'active' : ''}" data-act="edit-sent-seat" data-seat="${n}">${n}</div>`).join('')}`) : ''}
+      ${/* NO COURSE ROW ON A SENT LINE (owner, Sep '26): the docket has
+            printed with the course on it, and a change here printed nothing,
+            so the chip could only lie to whoever tapped it. */ ''}
+      ${isManager ? leRow('Price each', `<input id="sent-price-input" type="number" min="0" step="0.01" value="${d.price}" class="le-price">`) : ''}
+      ${/* THE NOTE IS A KEY, NOT A BOX (owner, Sep '26): tap it and the
+            keyboard's own bar is where you type. */ ''}
+      ${leRow('Note', `<input id="sent-note-input" type="text" value="${esc(d.note || '')}" placeholder="Add a note" class="le-note">`)}
       <div class="pane-actions">
-        ${isManager ? `<button class="icon-action discard bin-left" data-act="remove-sent">${ACT_CROSS_SVG}<span class="ia-label">Remove</span></button>` : ''}
-        <button class="icon-action send" data-act="close-edit-sent">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
+        <button class="icon-action neutral bin-left" data-act="cancel-edit-sent">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action send" data-act="save-edit-sent">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
     </div>
   </div>`;
@@ -19958,14 +20019,19 @@ function renderEditSentMiddle() {
 // ONE head for both states - the name of the dish, what the line comes to, and
 // a single line saying where it stands. Nothing on the old unsent editor said
 // WHICH dish you were editing (owner, Aug '26).
-function lineEditHead(name, total, sent, round) {
+function lineEditHead(name, total, sent) {
   return `
       <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;">
         <div class="th" style="font-size:var(--fs-xl);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(name)}</div>
         <div style="font-family:var(--font-mono);font-weight:800;font-size:var(--fs-lg);">${money(total)}</div>
       </div>
       <div class="sub" style="margin:2px 0 16px;font-weight:700;color:${sent ? 'var(--orange)' : 'var(--charcoal-soft)'};">
-        ${sent ? 'SENT TO THE KITCHEN' + (round ? ' · ROUND ' + round : '') : 'NOT SENT YET'}</div>`;
+        ${sent ? 'SENT TO THE KITCHEN' : 'NOT SENT YET'}</div>`;
+}
+// A ROW: caption left, control right, a hairline under (owner pick B, Sep
+// '26: the editor was a stack of shapes and widths). One shape for every row.
+function leRow(caption, control) {
+  return `<div class="le-row"><label>${caption}</label><div class="le-ctl">${control}</div></div>`;
 }
 
 // Crisp, thick-stroke action icons for the ticket action row (send/discard/
@@ -30535,59 +30601,39 @@ function renderLineEditMiddle() {
   return `
   <div class="middle-view">
     <div class="pay-pane line-edit-pane" style="padding:8px 20px 24px;">
-      ${lineEditHead(line.name, line.price * line.qty, false, null)}
+      ${lineEditHead(line.name, line.price * line.qty, false)}
       ${(() => { if (!item) return ''; const only = matchedAllergenBases(item, line.seat != null ? line.seat : 'all'); return only.length ? allergenChipRow(item, only) : ''; })()}
-      <label>Quantity</label>
-      <div style="display:flex;align-items:center;gap:12px;margin-bottom:${line.qty > 1 ? '10px' : '16px'};">
+      ${leRow('Quantity', `
         <button style="${qtyBtn}" data-act="edit-line-qty" data-dir="-1">−</button>
         <span style="font-family:'IBM Plex Mono',monospace;font-size:var(--fs-xl);font-weight:700;min-width:30px;text-align:center;">${line.qty}</span>
         <button style="${qtyBtn}" data-act="edit-line-qty" data-dir="1">＋</button>
-        <span class="tl-price" style="margin-left:auto;font-size:var(--fs-lg);">${money(line.price * line.qty)}</span>
-      </div>
-      ${line.qty > 1 ? `<button class="btn-secondary" style="width:auto;margin-bottom:16px;padding:8px 16px;" data-act="split-line">Split into ${line.qty} singles</button>` : ''}
-      ${variants.length ? `
-        <label>Size</label>
-        <div class="grid" style="margin-bottom:16px;">
+        ${line.qty > 1 ? `<div class="pay-opt sm le-wide" data-act="split-line">Split into ${line.qty}</div>` : ''}`)}
+      ${variants.length ? leRow('Size', `<div class="grid">
           ${variants.map(v => `<button class="item-card allergy-item-card ${line.variantId === v.id ? 'selected' : ''}" data-act="edit-line-variant" data-variant="${v.id}"><div class="item-name">${esc(v.label)}</div><div class="item-price">${money(v.price)}</div></button>`).join('')}
-        </div>` : ''}
+        </div>`) : ''}
       ${groups.map(g => {
         const sel = modSel(line.modSelections, g.id);
         const min = g.min != null ? g.min : 1, max = g.max || 1;
         const req = (min === 1 && max === 1) ? '' : ` <span style="color:var(--charcoal-soft);font-weight:600;">· ${min === max ? 'choose ' + min : (min === 0 ? 'up to ' + max : min + '–' + max)}</span>`;
-        return `
-        <label>${esc(g.name)}${req}</label>
-        <div class="grid" style="margin-bottom:16px;">
+        return leRow(`${esc(g.name)}${req}`, `<div class="grid">
           ${g.options.map(o => { const on = sel.includes(o.id); const off = groupIsDefault(g) && !on; return `<button class="item-card allergy-item-card ${on ? 'selected' : ''}${off ? ' build-comp removed' : ''}" data-act="edit-line-modifier" data-group="${g.id}" data-option="${o.id}"><div class="item-name">${off ? 'No ' : ''}${esc(o.label)}</div>${o.priceDelta ? `<div class="item-price">${(o.priceDelta > 0 ? '+' : '') + money(o.priceDelta)}</div>` : ''}</button>`; }).join('')}
-        </div>`; }).join('')}
-      ${recipeBuild.length ? `
-        <label>Build <span style="color:var(--charcoal-soft);font-weight:600;">· tap to remove</span></label>
-        <div class="grid" style="margin-bottom:16px;">
+        </div>`); }).join('')}
+      ${recipeBuild.length ? leRow('Build <span class="le-dim">· tap to remove</span>', `<div class="grid">
           ${recipeBuild.map(c => { const off = line.removed.includes(c.id); return `<button class="item-card allergy-item-card build-comp ${off ? 'removed' : ''}" data-act="edit-line-remove-comp" data-inv="${esc(c.id)}"><div class="item-name">${off ? 'No ' : ''}${esc(c.label)}</div></button>`; }).join('')}
-        </div>` : ''}
-      ${seatEnabled && state.covers > 1 ? `
-        <label>Seat</label>
-        <div class="grid" style="margin:0 0 16px;">
-          <button class="item-card allergy-item-card ${line.seat === 'all' || !line.seat ? 'selected' : ''}" data-act="edit-line-seat" data-seat="all"><div class="item-name">${esc(state.settings.sharedSeatLabel || 'All')}</div>${seatAvoidTag(item, 'all')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="item-card allergy-item-card ${line.seat === n ? 'selected' : ''}" data-act="edit-line-seat" data-seat="${n}"><div class="item-name">${n}</div>${seatAvoidTag(item, n)}</button>`).join('')}
-        </div>` : ''}
-      <label>Course</label>
-      <div class="pay-options" style="margin-bottom:16px;flex-wrap:wrap;">
-        ${(state.settings.courses || []).map((c, i) => c.enabled === false && line.course !== i + 1 ? '' : (() => {
+        </div>`) : ''}
+      ${seatEnabled && state.covers > 1 ? leRow('Seat', `
+          <div class="pay-opt sm ${line.seat === 'all' || !line.seat ? 'active' : ''}" data-act="edit-line-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}${seatAvoidTag(item, 'all')}</div>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<div class="pay-opt sm ${line.seat === n ? 'active' : ''}" data-act="edit-line-seat" data-seat="${n}">${n}${seatAvoidTag(item, n)}</div>`).join('')}`) : ''}
+      ${leRow('Course', (state.settings.courses || []).map((c, i) => c.enabled === false && line.course !== i + 1 ? '' : (() => {
           // A course whose allowed-sections refuse this dish still shows (so the
           // wall is visible) but dimmed — the tap explains itself with a toast.
           const ok = courseAllowsItem(i + 1, state.menu.find(m => m.id === line.menuItemId));
           return `<div class="pay-opt sm ${line.course === i + 1 ? 'active' : ''}" data-act="edit-line-course" data-val="${i + 1}"${ok ? '' : ' style="opacity:.35;"'}>${esc(c.name)}</div>`;
-        })()).join('')}
-      </div>
-      ${state.currentStaff && state.currentStaff.role === 'manager' ? `
-        <label>Price each</label>
-        <div style="display:flex;gap:8px;margin-bottom:16px;">
-          <input id="edit-line-price-input" type="number" min="0" step="0.01" value="${line.price}" class="le-price">
-        </div>` : ''}
-      <label>Note</label>
-      <input id="edit-line-note-input" type="text" value="${esc(line.note || '')}" class="le-note">
+        })()).join(''))}
+      ${state.currentStaff && state.currentStaff.role === 'manager' ? leRow('Price each', `<input id="edit-line-price-input" type="number" min="0" step="0.01" value="${line.price}" class="le-price">`) : ''}
+      ${leRow('Note', `<input id="edit-line-note-input" type="text" value="${esc(line.note || '')}" placeholder="Add a note" class="le-note">`)}
       <div class="pane-actions">
-        <button class="icon-action discard bin-left" data-act="edit-line-remove">${ACT_CROSS_SVG}<span class="ia-label">Remove</span></button>
+        <button class="icon-action neutral bin-left" data-act="cancel-line-edit">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
         <button class="icon-action send" data-act="close-line-edit">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
     </div>
@@ -36821,11 +36867,11 @@ function bindEvents() {
     const l = state.editLine ? state.cart[state.editLine.idx] : null;
     if (l) { l.price = v; state.toast = 'Price updated'; render(); armToastTimer(2000); }
   });
+  // The sent line's price and note write the DRAFT; Save applies them.
   const sentPriceInput = document.getElementById('sent-price-input');
-  if (sentPriceInput) sentPriceInput.addEventListener('change', () => repriceSentItem());
-  // The sent line's note saves the same way (it was a dead field until Sep '26).
+  if (sentPriceInput) sentPriceInput.addEventListener('change', () => { const d = state.editSent && state.editSent.draft; const v = parseFloat(sentPriceInput.value); if (!d) return; if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; } d.price = Math.round(v * 100) / 100; render(); });
   const sentNoteInput = document.getElementById('sent-note-input');
-  if (sentNoteInput) sentNoteInput.addEventListener('change', (e) => { if (state.editSent) doMoveSent(state.editSent, { note: e.target.value.trim() }); });
+  if (sentNoteInput) sentNoteInput.addEventListener('input', (e) => { const d = state.editSent && state.editSent.draft; if (d) d.note = e.target.value; });
   document.querySelectorAll('.allergy-subtype-input').forEach(el => {
     el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
   });
@@ -37469,32 +37515,33 @@ function handleActClick(el, e) {
       else if (act === 'qty-inc') { changeQty(parseInt(el.dataset.idx), 1); }
       else if (act === 'remove') { removeLine(parseInt(el.dataset.idx)); }
       else if (act === 'edit-line') { openLineEdit(parseInt(el.dataset.idx)); }
-      else if (act === 'close-line-edit') { state.editLine = null; render(); }
-      else if (act === 'edit-sent') { openEditSent(el); }
-      else if (act === 'serve-again') { serveAnotherFromEl(el); }
-      else if (act === 'add-serving') { addAnotherServing(); }
-      else if (act === 'edit-sent-seat') {
-        const v = el.dataset.seat;
-        doMoveSent(state.editSent, { seat: v === 'all' ? 'all' : parseInt(v, 10) });
-      }
-      else if (act === 'edit-sent-course') { doMoveSent(state.editSent, { course: parseInt(el.dataset.val, 10) }); }
-      else if (act === 'void-one-sent') { doRemoveSent(state.editSent); }
-      else if (act === 'edit-line-remove') {
+      else if (act === 'close-line-edit') {
+        // Save: a line counted down to 0 comes off the docket here.
         const i = state.editLine ? state.editLine.idx : -1;
-        if (i >= 0) state.cart.splice(i, 1);
+        if (i >= 0 && state.cart[i] && state.cart[i].qty <= 0) state.cart.splice(i, 1);
         state.editLine = null; render();
       }
-      else if (act === 'remove-sent') { removeSentItem(); }
+      else if (act === 'cancel-line-edit') {
+        const e = state.editLine;
+        if (e && e.was && state.cart[e.idx]) state.cart[e.idx] = e.was;
+        state.editLine = null; render();
+      }
+      else if (act === 'edit-sent') { openEditSent(el); }
+      else if (act === 'serve-again') { serveAnotherFromEl(el); }
+      else if (act === 'sent-qty') { const d = state.editSent && state.editSent.draft; if (d) { d.qty = Math.max(0, d.qty + parseInt(el.dataset.dir, 10)); render(); } }
+      else if (act === 'cancel-edit-sent') { state.editSent = null; render(); }
+      else if (act === 'save-edit-sent') { saveEditSent(); }
+      else if (act === 'edit-sent-seat') { const d = state.editSent && state.editSent.draft; if (d) { const v = el.dataset.seat; d.seat = v === 'all' ? 'all' : parseInt(v, 10); render(); } }
       else if (act === 'void-reason-pick') {
         const m = state.voidItemPrompt; if (!m) return;
         const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
-        if (isMgr) commitRemoveSent(m.match, el.dataset.val);
+        if (isMgr) commitRemoveSent(m.match, el.dataset.val, m.qty, m.then);
         else { m.reason = el.dataset.val; m.needPin = true; m.pin = ''; m.pinError = ''; render(); const pi = document.getElementById('void-item-pin'); if (pi) pi.focus(); }
       }
       else if (act === 'void-item-approve') {
         const m = state.voidItemPrompt; if (!m) return;
         api('/api/staff/verify-manager-pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: m.pin || '' }) })
-          .then(() => commitRemoveSent(m.match, m.reason))
+          .then(() => commitRemoveSent(m.match, m.reason, m.qty, m.then))
           .catch(() => { m.pinError = 'Incorrect manager PIN.'; render(); });
       }
       else if (act === 'house-reason') {
@@ -37513,7 +37560,6 @@ function handleActClick(el, e) {
       else if (act === 'close-void-reason') { state.voidItemPrompt = null; render(); }
       else if (act === 'remove-sent-line') { removeSentLine(el); }
       else if (act === 'remove-new-line') { const i = parseInt(el.dataset.idx); if (!isNaN(i)) removeLine(i); }
-      else if (act === 'close-edit-sent') { state.editSent = null; render(); }
       else if (act === 'edit-docket-price') { openPriceEntry(el); }
       else if (act === 'price-pad-key') { tapPriceKey(el.dataset.key); }
       else if (act === 'price-off') { tapPriceOff(parseInt(el.dataset.pct, 10)); }

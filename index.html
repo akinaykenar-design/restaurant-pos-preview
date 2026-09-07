@@ -3277,10 +3277,10 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    angle about its centre, so everything inside reads horizontally however the
    table is set. It is not a box you can see - only a frame of reference. */
 .tbl-badges{ position:absolute; inset:0; z-index:5; pointer-events:none; transform-origin:50% 50%; display:block; }
-/* A table that is showing a pill stands above its neighbours, or the pill -
-   which hangs outside the table's own box - was painted over by whichever
-   table came next (owner, Aug '26: "sometimes pills are not above the table"). */
-.floor-marker.has-pill, .simple-table-btn.has-pill{ z-index:6; }
+/* The floor stacks from the bottom up (shapeStyle writes each table's
+   z-index from its row), so a pill hanging off a table's foot lands on the
+   neighbour below it. A per-table "has a pill" step used to do this and
+   fell over the moment two pill tables stacked. */
 /* The pill wears the STATUS CHIP's clothes (owner-picked C, Sep '26): quiet
    = the docket's own green "⏱ fired" chip, warning = the chip's gold tint —
    the floor speaks the same word the docket does. Only OVER TIME stays a
@@ -4767,8 +4767,8 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 /* §§ Knocking money off one line
    The common discounts are one tap on the price pad, and the reason sits with
    them rather than on a screen of its own (owner, Aug '26). */
-.pp-off-row{ display:flex; gap:6px; margin:8px 0 0; }
-.pp-off{ flex:1; min-width:0; height:var(--h-control); border:1px solid var(--steel-300);
+.pp-off-row{ display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 0; }
+.pp-off{ flex:1 1 auto; padding:0 12px; white-space:nowrap; height:var(--h-control); border:1px solid var(--steel-300);
   border-radius:var(--btn-radius); background:var(--surface); color:var(--text-primary);
   font-weight:800; font-size:var(--fs-md); cursor:pointer; }
 .pp-off.on{ background:var(--orange-dim); border-color:var(--orange); color:var(--orange); }
@@ -19652,7 +19652,7 @@ async function saveEditSent() {
         if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: it.price, qty: up,
           course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections });
       }
-      if (d.price !== agg.price && state.editSent) { await doRepriceSent(state.editSent, d.price, d.pct ? '−' + d.pct + '%' : ''); }
+      if (d.price !== agg.price && state.editSent) { const c = lineOffChoice(d.off); await doRepriceSent(state.editSent, d.price, c ? c.label : ''); }
     }
     state.editSent = null; state.voidItemPrompt = null; render();
   };
@@ -19761,13 +19761,15 @@ function openPriceEntry(el) {
   state.notesPanel = null; state.showCheckout = false; state.comboBuilder = null; state.showTablePicker = false;
   render();
 }
-// A percentage off works on the price the line STARTED at, so tapping 25%
-// then 50% is half off the original, not half off the quarter off.
-function tapPriceOff(pct) {
+// A discount works on the price the line STARTED at, so tapping one then
+// another is the second off the original, not off the first. The chip's
+// name becomes the reason; a why tapped after it takes over.
+function tapPriceOff(key) {
   const pe = state.priceEntry; if (!pe) return;
-  if (pe.pct === pct) { pe.pct = null; pe.buffer = ''; render(); return; }
-  pe.pct = pct;
-  pe.buffer = (Math.round((pe.original || 0) * (100 - pct)) / 100).toFixed(2);
+  if (pe.off === key) { pe.off = null; pe.buffer = ''; pe.reason = ''; render(); return; }
+  const c = lineOffChoice(key); if (!c) return;
+  pe.off = key; pe.reason = c.label;
+  pe.buffer = lineOffPrice(pe.original || 0, c).toFixed(2);
   render();
 }
 function tapPriceWhy(why) {
@@ -19778,7 +19780,7 @@ function tapPriceWhy(why) {
 function tapPriceKey(key) {
   const pe = state.priceEntry; if (!pe) return;
   const b = pe.buffer || '';
-  pe.pct = null;
+  pe.off = null;
   if (key === 'back') pe.buffer = b.slice(0, -1);
   else if (key === '.') { if (!b.includes('.')) pe.buffer = (b || '0') + '.'; }
   else { if (b.includes('.') && b.split('.')[1].length >= 2) return; pe.buffer = (b === '0' ? '' : b) + key; }
@@ -19885,8 +19887,7 @@ function renderPricePop() {
               pad is still there for anything else. The old price and the reason
               ride with the line from here. */ ''}
         <div class="pp-off-row">
-          ${[10, 25, 50].map(n => `<button class="pp-off${pe.pct === n ? ' on' : ''}" data-act="price-off" data-pct="${n}">−${n}%</button>`).join('')}
-          <button class="pp-off${pe.pct === 100 ? ' on' : ''}" data-act="price-off" data-pct="100">Free</button>
+          ${lineDiscountChoices().map(c => `<button class="pp-off${pe.off === c.key ? ' on' : ''}" data-act="price-off" data-key="${esc(c.key)}">${esc(c.label)}</button>`).join('')}
         </div>
         ${off ? `
         <div class="pp-was">was ${money(pe.original)} · ${money(pe.original - now)} off${pe.qty > 1 ? ' each' : ''}</div>
@@ -20007,7 +20008,7 @@ function renderEditSentMiddle() {
   // the line — count, seat, price, note — and Save applies the lot; Cancel
   // drops it. Every tap used to hit the server on the spot, so Cancel could
   // never undo anything and the minus voided before you had finished.
-  if (!state.editSent.draft) state.editSent.draft = { qty: agg.qty, seat: agg.seat == null ? 'all' : agg.seat, price: agg.price, note: agg.note || '', orig: agg.origPrice !== undefined ? agg.origPrice : agg.price, pct: discountPctOf(agg.origPrice !== undefined ? agg.origPrice : agg.price, agg.price), reason: agg.discountReason || '' };
+  if (!state.editSent.draft) state.editSent.draft = { qty: agg.qty, seat: agg.seat == null ? 'all' : agg.seat, price: agg.price, note: agg.note || '', orig: agg.origPrice !== undefined ? agg.origPrice : agg.price, off: lineOffKey(agg.origPrice !== undefined ? agg.origPrice : agg.price, agg.price, agg.discountReason || ''), reason: agg.discountReason || '' };
   const d = state.editSent.draft;
   const curSeat = d.seat;
   const qtyBtn = 'width:var(--h-control);height:var(--h-control);border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);font-size:var(--fs-xl);font-weight:700;cursor:pointer;color:var(--text-primary);display:flex;align-items:center;justify-content:center;';
@@ -20034,7 +20035,7 @@ function renderEditSentMiddle() {
       ${/* NO COURSE ROW ON A SENT LINE (owner, Sep '26): the docket has
             printed with the course on it, and a change here printed nothing,
             so the chip could only lie to whoever tapped it. */ ''}
-      ${isManager ? leRow('Price each', `<input id="sent-price-input" type="number" min="0" step="0.01" value="${d.price}" class="le-price">`) + leDiscountRows(d.pct, 'edit-sent') : ''}
+      ${isManager ? leRow('Price each', `<input id="sent-price-input" type="number" min="0" step="0.01" value="${d.price}" class="le-price">`) + leDiscountRows(d.off, 'edit-sent') : ''}
       ${/* THE NOTE IS A KEY, NOT A BOX (owner, Sep '26): tap it and the
             keyboard's own bar is where you type. */ ''}
       ${leRow('Note', `<input id="sent-note-input" type="text" value="${esc(d.note || '')}" placeholder="Add a note" class="le-note">`)}
@@ -20062,15 +20063,33 @@ function lineEditHead(name, total, sent) {
 function leRow(caption, control) {
   return `<div class="le-row"><label>${caption}</label><div class="le-ctl">${control}</div></div>`;
 }
-// MONEY OFF ONE DISH, in the editor (owner, Sep '26: "add item discounts on
-// the item editor"). The same presets the docket's price pad offers — a
-// quarter, half, free — beside the price box. No reasons here (owner).
-// Managers only, like the pad.
-function leDiscountRows(pct, act) {
-  return leRow('Discount', [10, 25, 50].map(n => `<div class="pay-opt sm ${pct === n ? 'active' : ''}" data-act="${act}-off" data-pct="${n}">−${n}%</div>`).join('')
-      + `<div class="pay-opt sm ${pct === 100 ? 'active' : ''}" data-act="${act}-off" data-pct="100">Free</div>`);
+// MONEY OFF ONE DISH. The chips are the venue's own Discounts — the ones
+// staff tap, the same list the bill's Discount popup offers, edited in
+// Admin → Discounts — and a −100% at the end, because a comp is always on
+// the table (owner, Sep '26: "discount should be editable, admin"; "no
+// free — 100% better"). The price pad and both line editors read this ONE
+// list. The preset's name rides with the line as its reason. Managers only.
+function lineDiscountChoices() {
+  const venue = (state.discountPresets || []).filter(p => p.kind !== 'surcharge' && p.enabled !== false && presetOffered(p));
+  return venue.map(p => ({ key: p.id, label: p.name, type: p.type, value: p.value }))
+    .concat([{ key: 'comp', label: '−100%', type: 'percent', value: 100 }]);
 }
-function discountPctOf(orig, price) { const p = orig > 0 ? Math.round((1 - price / orig) * 100) : 0; return [10, 25, 50, 100].includes(p) ? p : null; }
+function lineOffPrice(orig, c) {
+  const off = c.type === 'percent' ? orig * c.value / 100 : c.value;
+  return Math.max(0, Math.round((orig - off) * 100) / 100);
+}
+// Which chip a line is wearing: the one its reason names if the price still
+// agrees, else the first one that lands on this price, else none.
+function lineOffKey(orig, price, reason) {
+  const all = lineDiscountChoices();
+  const named = all.find(c => c.label === reason);
+  const c = named && lineOffPrice(orig, named) === price ? named : all.find(c => lineOffPrice(orig, c) === price && price < orig);
+  return c ? c.key : null;
+}
+function lineOffChoice(key) { return lineDiscountChoices().find(c => c.key === key) || null; }
+function leDiscountRows(key, act) {
+  return leRow('Discount', lineDiscountChoices().map(c => `<div class="pay-opt sm le-wide ${key === c.key ? 'active' : ''}" data-act="${act}-off" data-key="${esc(c.key)}">${esc(c.label)}</div>`).join(''));
+}
 
 // Crisp, thick-stroke action icons for the ticket action row (send/discard/
 // bill/pay) — replace the thin emoji glyphs.
@@ -29105,13 +29124,20 @@ function shapeStyle(t, selected) {
   // render through this function, so the ring can only ever be one weight
   // (DESIGN.md § Table selection law). It is drawn INSIDE the shape so a
   // selected table never appears to grow.
-  const ring = (selected && !isDecor) ? 'box-shadow:var(--tbl-sel-lift, 0 0 0 rgba(0,0,0,0));z-index:3;' : (selected && !isDecor ? 'z-index:3;' : '');
+  const ring = (selected && !isDecor) ? 'box-shadow:var(--tbl-sel-lift, 0 0 0 rgba(0,0,0,0));' : '';
+  // THE FLOOR STACKS FROM THE BOTTOM UP: a table higher on the map paints
+  // over the one under it, so a pill hanging off its foot lands ON the
+  // neighbour below, never under it. The picked table sits over everything.
+  // It used to be "a table with a pill stands at 6" — so two pill tables
+  // stacked fell back to source order and the lower one's body covered
+  // the upper one's pill (owner, Sep '26: "some pills are under tables").
+  const stack = isDecor ? '' : `z-index:${(selected ? 300 : 100) - Math.round(t.y || 0)};`;
   // A table linked into another fades whole — the main (lowest) table of the
   // group stays lit and carries the order.
   const faded = (!isDecor && t.mergedInto && t.mergedInto !== t.id) ? 'opacity:0.45;' : '';
   // A stool is its own half-circle box now (Sep '26), painted like any table.
   const skin = `border:${border};background:${bg};`;
-  return `position:absolute;left:${t.x}%;top:${t.y}%;width:${t.width}%;height:${t.height}%;transform:translate(-50%,-50%) rotate(${rot}deg);border-radius:${radius};${skin}display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;cursor:pointer;color:${textColor};${ring}${faded}${container}`;
+  return `position:absolute;left:${t.x}%;top:${t.y}%;width:${t.width}%;height:${t.height}%;transform:translate(-50%,-50%) rotate(${rot}deg);border-radius:${radius};${skin}display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-weight:700;cursor:pointer;color:${textColor};${ring}${stack}${faded}${container}`;
 }
 
 // For an occupied table, the latest course sent and how long ago (uses the
@@ -29731,7 +29757,7 @@ function renderTablePickerMiddle() {
         const tables = allTables().slice().sort(tableLabelCompare);
         if (!tables.length) return `<div class="ts" style="margin-top:10px;">No tables set up yet.</div>`;
         return `<div class="simple-table-grid">
-          ${tables.map(t => {
+          ${tables.map((t, i) => {
             const cs = tableCourseStatus(t.label);
             const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
             // Status grammar: glow halo = needs a human, soft wash = ticking
@@ -29746,7 +29772,7 @@ function renderTablePickerMiddle() {
             const body = _bg ? `background:${_bg};${_txt ? `color:${_txt};` : ''}` : '';
             const billEdge = fx.ring || '';
             return `
-            <div class="simple-table-btn${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${body}${billEdge}${fx.glow}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
+            <div class="simple-table-btn${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="z-index:${state.table === t.id ? 3000 : 1000 - i};${body}${billEdge}${fx.glow}${t.mergedInto && t.mergedInto !== t.id ? 'opacity:0.45;' : ''}">
               ${fx.wash}
               ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : ''}
               ${mvSrcBadge(t)}
@@ -29782,7 +29808,7 @@ function renderTablePickerMiddle() {
           const fx = tableStatusFx(t, cs, lock);
           const billEdge = fx.ring || '';
           return `
-          <div class="floor-marker${!lock && floorPillHtml(t, cs) ? ' has-pill' : ''}${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
+          <div class="floor-marker${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
             ${fx.wash}
             ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
             ${mvSrcBadge(t)}
@@ -30705,7 +30731,7 @@ function renderLineEditMiddle() {
           const ok = courseAllowsItem(i + 1, state.menu.find(m => m.id === line.menuItemId));
           return `<div class="pay-opt sm ${line.course === i + 1 ? 'active' : ''}" data-act="edit-line-course" data-val="${i + 1}"${ok ? '' : ' style="opacity:.35;"'}>${esc(c.name)}</div>`;
         })()).join(''))}
-      ${state.currentStaff && state.currentStaff.role === 'manager' ? leRow('Price each', `<input id="edit-line-price-input" type="number" min="0" step="0.01" value="${line.price}" class="le-price">`) + leDiscountRows(discountPctOf(line.origPrice !== undefined ? line.origPrice : line.price, line.price), 'edit-line') : ''}
+      ${state.currentStaff && state.currentStaff.role === 'manager' ? leRow('Price each', `<input id="edit-line-price-input" type="number" min="0" step="0.01" value="${line.price}" class="le-price">`) + leDiscountRows(lineOffKey(line.origPrice !== undefined ? line.origPrice : line.price, line.price, line.discountReason || ''), 'edit-line') : ''}
       ${leRow('Note', `<input id="edit-line-note-input" type="text" value="${esc(line.note || '')}" placeholder="Add a note" class="le-note">`)}
       <div class="pane-actions">
         <button class="icon-action neutral bin-left" data-act="cancel-line-edit">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
@@ -36960,7 +36986,13 @@ function bindEvents() {
     const v = parseFloat(editLinePriceInput.value);
     if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; }
     const l = state.editLine ? state.cart[state.editLine.idx] : null;
-    if (l) { l.price = Math.round(v * 100) / 100; render(); }
+    if (l) {
+      const orig = l.origPrice !== undefined ? l.origPrice : l.price;
+      l.price = Math.round(v * 100) / 100;
+      if (l.price < orig) { l.origPrice = orig; const c = lineOffChoice(lineOffKey(orig, l.price, '')); if (c) l.discountReason = c.label; else delete l.discountReason; }
+      else { delete l.origPrice; delete l.discountReason; }
+      render();
+    }
   });
   const editLineNoteInput = document.getElementById('edit-line-note-input');
   if (editLineNoteInput) {
@@ -36968,7 +37000,7 @@ function bindEvents() {
   }
   // The sent line's price and note write the DRAFT; Save applies them.
   const sentPriceInput = document.getElementById('sent-price-input');
-  if (sentPriceInput) sentPriceInput.addEventListener('change', () => { const d = state.editSent && state.editSent.draft; const v = parseFloat(sentPriceInput.value); if (!d) return; if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; } d.price = Math.round(v * 100) / 100; d.pct = discountPctOf(d.orig, d.price); render(); });
+  if (sentPriceInput) sentPriceInput.addEventListener('change', () => { const d = state.editSent && state.editSent.draft; const v = parseFloat(sentPriceInput.value); if (!d) return; if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; } d.price = Math.round(v * 100) / 100; d.off = lineOffKey(d.orig, d.price, ''); render(); });
   const sentNoteInput = document.getElementById('sent-note-input');
   if (sentNoteInput) sentNoteInput.addEventListener('input', (e) => { const d = state.editSent && state.editSent.draft; if (d) d.note = e.target.value; });
   document.querySelectorAll('.allergy-subtype-input').forEach(el => {
@@ -37632,7 +37664,7 @@ function handleActClick(el, e) {
       else if (act === 'cancel-edit-sent') { state.editSent = null; render(); }
       else if (act === 'save-edit-sent') { saveEditSent(); }
       else if (act === 'edit-sent-seat') { const d = state.editSent && state.editSent.draft; if (d) { const v = el.dataset.seat; d.seat = v === 'all' ? 'all' : parseInt(v, 10); render(); } }
-      else if (act === 'edit-sent-off') { const d = state.editSent && state.editSent.draft; if (d) { const n = parseInt(el.dataset.pct, 10); d.pct = d.pct === n ? null : n; d.price = d.pct ? Math.round(d.orig * (100 - d.pct)) / 100 : d.orig; render(); } }
+      else if (act === 'edit-sent-off') { const d = state.editSent && state.editSent.draft; if (d) { const k = el.dataset.key; d.off = d.off === k ? null : k; const c = lineOffChoice(d.off); d.price = c ? lineOffPrice(d.orig, c) : d.orig; render(); } }
       else if (act === 'void-reason-pick') {
         const m = state.voidItemPrompt; if (!m) return;
         const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
@@ -37663,7 +37695,7 @@ function handleActClick(el, e) {
       else if (act === 'remove-new-line') { const i = parseInt(el.dataset.idx); if (!isNaN(i)) removeLine(i); }
       else if (act === 'edit-docket-price') { openPriceEntry(el); }
       else if (act === 'price-pad-key') { tapPriceKey(el.dataset.key); }
-      else if (act === 'price-off') { tapPriceOff(parseInt(el.dataset.pct, 10)); }
+      else if (act === 'price-off') { tapPriceOff(el.dataset.key); }
       else if (act === 'price-why') { tapPriceWhy(el.dataset.why || ''); }
       else if (act === 'confirm-price-entry') { confirmPriceEntry(); }
       else if (act === 'close-price-entry') { state.priceEntry = null; render(); }
@@ -37671,11 +37703,10 @@ function handleActClick(el, e) {
       else if (act === 'edit-line-off') {
         const line = state.editLine ? state.cart[state.editLine.idx] : null; if (!line) return;
         const orig = line.origPrice !== undefined ? line.origPrice : line.price;
-        const n = parseInt(el.dataset.pct, 10);
-        const pct = discountPctOf(orig, line.price) === n ? null : n;
-        if (pct) { if (line.origPrice === undefined) line.origPrice = line.price; line.price = Math.round(orig * (100 - pct)) / 100; }
+        const k = el.dataset.key;
+        const c = lineOffKey(orig, line.price, line.discountReason || '') === k ? null : lineOffChoice(k);
+        if (c) { if (line.origPrice === undefined) line.origPrice = line.price; line.price = lineOffPrice(orig, c); line.discountReason = c.label; }
         else { line.price = orig; delete line.origPrice; delete line.discountReason; }
-        if (pct) line.discountReason = '−' + pct + '%';
         render();
       }
       else if (act === 'split-line') { splitCartLine(); }

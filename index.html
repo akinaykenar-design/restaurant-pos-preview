@@ -19124,10 +19124,10 @@ function barPagerOn() {
 }
 // The table Admin's key returns to: the one the till was ordering on when it
 // left, if it is still this till's. Null means "back to the floor".
-// The table Admin's key walks back to: the one you have, unless someone
-// else has locked it meanwhile.
 function tillReturnTable() {
-  if (state.table == null || tableLockedBy(state.table)) return null;
+  const r = state._tillReturn;
+  if (!r || !r.onOrder || r.table == null || r.table !== state.table) return null;
+  if (tableLockedBy(state.table)) return null;
   return findTableById(state.table) || null;
 }
 // §§ Dropdowns: one menu for every select
@@ -19250,12 +19250,11 @@ function renderTopbar() {
         // In Admin the key wears the ORDER SCREEN's shape — hub and docket,
         // the pair of Admin's three lines (owner, Sep '26). It wore the
         // table's number for a day (owner: "it's already used") and the map
-        // before that. It lands on the ORDER SCREEN, always: your table if
-        // you have one, else the hub with no table (owner, Sep '26: "this
-        // takes me back to floor layout, not order hub").
+        // before that. Where it lands is unchanged: your table if you left
+        // one open, else the floor.
         const rt = state.view === 'admin' ? tillReturnTable() : null;
         return state.view === 'admin'
-            ? `<span class="staff-badge"><button data-act="view-floor" aria-label="${rt ? `Back to table ${esc(String(rt.label))}` : (state.table != null ? 'Back to the floor' : 'Order hub')}">${SYS_ORDER_SVG}</button></span>`
+            ? `<span class="staff-badge"><button data-act="view-floor" aria-label="${rt ? `Back to table ${esc(String(rt.label))}` : 'Back to the floor'}">${SYS_ORDER_SVG}</button></span>`
             : `<span class="staff-badge"><button data-act="view-admin" aria-label="Admin">${SYS_ADMIN_SVG}</button></span>`;
       })()}
       ${(() => {
@@ -19272,7 +19271,7 @@ function renderTopbar() {
         // With the pager up the bar is the SAME on all three pages — search
         // shows on the floor and docket too, and pressing it walks to the
         // menu where the field lives.
-        if (state.view !== 'order' || (state.showTablePicker && !barPagerOn())) return '';
+        if (state.view !== 'order' || (state.showTablePicker && !barPagerOn()) || (state.orderType === 'dine-in' && !state.table)) return '';
         const on = state.searchOpen || state.search;
         // Phones (owner pick, Aug '26 sheet C): searching lives ON the
         // keyboard — the field rides its top edge and the best matches stack
@@ -19564,10 +19563,14 @@ function renderOrderView() {
   // takeover — so on phones the docket panel stays put behind it.
   // A stale editor pointing at a removed cart line falls back to the menu
   // instead of rendering a blank panel.
-  // A dine-in order with no table is allowed to BUILD — the table is asked
-  // at Send (sendToKitchen), the one door. The render used to force the
-  // picker back open here, which is why Admin's key could never land on
-  // the hub after a fresh login (owner, Sep '26).
+  // A dine-in order MUST have a table before anything else can happen. Whenever
+  // a non-chef sits on a dine-in order with no table picked (fresh login, a
+  // cancelled setup, a refresh), force the table picker back open — you can't
+  // ring items to nowhere. Only when there are tables to choose from.
+  if (state.orderType === 'dine-in' && !state.table && state.currentStaff
+      && state.currentStaff.role !== 'chef' && allTables().length) {
+    state.showTablePicker = true;
+  }
   if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null;
   if (state.editLine && !state.cart[state.editLine.idx]) state.editLine = null; // line gone — never blank the panel
   if (state.editLine) return shell(renderLineEditMiddle());
@@ -37544,24 +37547,23 @@ function handleActClick(el, e) {
         if (cur && cur.id) openConfirm({ message: msg, confirmLabel: 'Delete', danger: true }, () => { state[key] = null; state.adminError = ''; fn(cur.id); });
       }
       else if (act === 'view-floor') {
-        // Admin's key: back to the ORDER SCREEN — your table's if you have
-        // one, else the hub with no table (the table is asked at Send). Only
-        // a table someone else has locked meanwhile lands you on the floor,
-        // so you see the lock. The key wears the order screen's shape, so
-        // that is where it goes (owner, Sep '26).
+        // Admin's key: back to the till — onto the ORDER screen of the table
+        // you left (the key wears that table's number), or onto the floor
+        // when there is none (the key wears the map). The icon always says
+        // where it goes.
         if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
         state.view = 'order'; setOrderType('dine-in');
-        if (state.table != null && !tillReturnTable()) { if (!state.showTablePicker) openTablePicker(); else render(); return; }
-        state.showTablePicker = false; render();
+        if (tillReturnTable()) { state.showTablePicker = false; render(); return; }
+        if (!state.showTablePicker) openTablePicker(); else render();
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
         // Already on the order screen with the map open: the Order chip is
         // an EXIT from the picker (owner, Aug '26 — the Close can be off
-        // screen on a tall phone map). With no table the hub opens empty;
-        // Send asks for the table.
-        if (state.view === 'order' && state.showTablePicker) {
+        // screen on a tall phone map). Only when closing is legal — a
+        // table-less dine-in still has to pick.
+        if (state.view === 'order' && state.showTablePicker && (state.table || state.transferMode || state.moveItemsPicking)) {
           state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
           state.pickFlashId = null; state.moveItemsPicking = false; render(); return;
         }
@@ -37856,6 +37858,10 @@ function handleActClick(el, e) {
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }
       else if (act === 'view-admin') {
+        // Remember where the till WAS, so Admin's key walks back to it: the
+        // order screen on your table (owner, Sep '26: "from admin it should
+        // take you back to order"), or the floor when there was no table.
+        state._tillReturn = { onOrder: state.view === 'order' && !state.showTablePicker && !!state.table, table: state.table };
         state.view = 'admin';
         // Come back to where you WERE — page and exact scroll spot (owner,
         // Aug '26). First visit of the session starts on Service as before.

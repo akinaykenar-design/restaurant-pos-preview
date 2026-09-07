@@ -17,4 +17,56 @@
   // Fit the phone to the window, never larger than life.
   const fit = () => { const p = document.querySelector('.phone'); const s = Math.min(1, (innerHeight - 24) / (844 + 24), (innerWidth - 24) / (390 + 24)); p.style.setProperty('--s', s); };
   addEventListener('resize', fit); fit();
+
+  // THE MOUSE IS A FINGER (owner, Sep '26). The app's swipes, holds and
+  // presses listen for touch, and its pointer handlers read pointerType; a
+  // laptop mouse sends neither. So inside the frame a mouse-down becomes a
+  // finger landing (a touch-flavoured pointerdown, then touchstart), a move
+  // is the finger sliding, a release is the finger lifting — in the order a
+  // real finger fires them — and the mouse's own events are kept out so
+  // nothing runs twice. A drag is never a tap: the click the browser fires
+  // after a drag is swallowed. Typing in a field stays a keyboard job.
+  const finger = (doc) => {
+    const win = doc.defaultView;
+    let down = null; // { target, x0, y0, moved }
+    const touchAt = (x, y) => new win.Touch({ identifier: 1, target: down.target, clientX: x, clientY: y, pageX: x + win.scrollX, pageY: y + win.scrollY, screenX: x, screenY: y, radiusX: 8, radiusY: 8, force: 1 });
+    const fire = (type, x, y) => {
+      const ptr = { touchstart: 'pointerdown', touchmove: 'pointermove', touchend: 'pointerup' }[type];
+      down.target.dispatchEvent(new win.PointerEvent(ptr, { bubbles: true, cancelable: true, composed: true, view: win, clientX: x, clientY: y, screenX: x, screenY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: type === 'touchmove' ? -1 : 0, buttons: type === 'touchend' ? 0 : 1, width: 16, height: 16, pressure: type === 'touchend' ? 0 : 0.5 }));
+      const t = touchAt(x, y);
+      down.target.dispatchEvent(new win.TouchEvent(type, { bubbles: true, cancelable: true, composed: true, view: win,
+        touches: type === 'touchend' ? [] : [t], targetTouches: type === 'touchend' ? [] : [t], changedTouches: [t] }));
+    };
+    const stop = (e) => { e.stopImmediatePropagation(); };
+    const mine = (e) => e.pointerType === 'mouse' && e.isTrusted;
+    doc.addEventListener('pointerdown', (e) => {
+      if (!mine(e) || e.button !== 0 || !e.target || e.target.closest('input, textarea, select')) return;
+      down = { target: e.target, x0: e.clientX, y0: e.clientY, moved: false };
+      fire('touchstart', e.clientX, e.clientY);
+      stop(e);
+    }, true);
+    doc.addEventListener('pointermove', (e) => {
+      if (!mine(e) || !down) return;
+      if (Math.hypot(e.clientX - down.x0, e.clientY - down.y0) > 8) down.moved = true;
+      fire('touchmove', e.clientX, e.clientY);
+      stop(e);
+    }, true);
+    const lift = (e) => {
+      if (!mine(e) || !down) return;
+      fire('touchend', e.clientX, e.clientY);
+      const dragged = down.moved;
+      down = null;
+      stop(e);
+      if (dragged) doc.addEventListener('click', (c) => { c.preventDefault(); c.stopImmediatePropagation(); }, { capture: true, once: true });
+    };
+    doc.addEventListener('pointerup', lift, true);
+    doc.addEventListener('pointercancel', lift, true);
+    doc.addEventListener('pointerleave', (e) => { if (down && e.target === doc.documentElement) lift(e); }, true);
+    // The mouse's own events stay out while a finger is down.
+    for (const type of ['mousedown', 'mousemove', 'mouseup']) doc.addEventListener(type, (e) => { if (e.isTrusted && (down || type !== 'mousemove') && !(e.target && e.target.closest && e.target.closest('input, textarea, select'))) stop(e); }, true);
+    doc.__finger = true; // on the DOCUMENT: the frame's first blank page hands its window to the real one
+  };
+  const frame = document.querySelector('iframe');
+  const arm = () => { try { const d = frame.contentDocument; if (d && d.body && d.location.href !== 'about:blank' && !d.__finger) finger(d); } catch (e) {} };
+  frame.addEventListener('load', arm); arm();
 </script>

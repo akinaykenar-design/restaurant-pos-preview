@@ -3054,8 +3054,12 @@ body[data-fs-picker] .tp-actions{ flex:none; }
        which is why panning sideways worked. Up and down is the CROSS axis,
        and a centred item's end margin there is not reliably scrollable, so
        the bottom of a zoomed room could not be reached. The map already fills
-       the height exactly at 1x here, so centring was doing nothing anyway. */
-    align-items:flex-start; }
+       the height exactly at 1x here, so centring was doing nothing anyway.
+       SAFE centring (owner, Sep '26: "the zoom out should be centred instead
+       of on top"): a room smaller than the box sits in the middle; one taller
+       than the box falls back to the top, so its foot can still be reached.
+       Measured both ways by check-panels. */
+    align-items:safe center; }
   /* Phones: the map is taller than the screen by design, so Close floats
      above the app bar (a Close in the page flow scrolled out of reach). */
   /* No floating Close on a phone — the swipe off the map's end goes back.
@@ -3067,8 +3071,12 @@ body[data-fs-picker] .tp-actions{ flex:none; }
   /* Phone: the map is sized off the HEIGHT, and the same transform zoom rides
      on top of it. */
   .tp-canvas-wrap .floor-canvas{ --fc-base:100cqh; height:var(--fc-base); width:auto !important; max-width:none !important; /* exactly the box's height (it read 100dvh - 125px, 11 taller than the box it sat in) */
-    margin-bottom:calc(90px + var(--fc-base) * (var(--tp-zoom,1) - 1));
+    margin-bottom:calc(var(--fc-base) * (var(--tp-zoom,1) - 1));
     margin-right:calc(var(--fc-base) * (var(--tp-zoom,1) - 1) * var(--fc-arw, 1)); }
+  /* Room under the map for the floating Close — only while it is there (the
+     move flow). Always-on, it pushed a zoomed-out room 45px above centre
+     (owner, Sep '26: "centred instead of on top"). */
+  .middle-view:has(.tp-actions.tp-keep) .tp-canvas-wrap .floor-canvas{ margin-bottom:calc(90px + var(--fc-base) * (var(--tp-zoom,1) - 1)); }
 }
 
 /* Compact item label where a middle pane needs the item's name (no header row). */
@@ -29737,10 +29745,11 @@ function renderTablePickerMiddle() {
             height-fit can override it: an inline --fc-base beat the phone's
             rule and quietly made its map 955 tall in a 708 box. Only the
             room's shape is written here. */ ''}
-      <div class="floor-canvas" style="position:relative;--fc-ar:${(STD_FLOOR_H/900).toFixed(4)};--fc-arw:${(900/STD_FLOOR_H).toFixed(4)};width:var(--fc-base);aspect-ratio:900 / ${STD_FLOOR_H};border-radius:var(--r-control);">
-        ${fp.tables.filter(t => t.type === 'decor').map(t => `
+      ${(() => { const hug = floorHug(fp); const roomW = 900 * hug.w / 100, roomH = STD_FLOOR_H * hug.h / 100; return `
+      <div class="floor-canvas" style="position:relative;--fc-ar:${(roomH / roomW).toFixed(4)};--fc-arw:${(roomW / roomH).toFixed(4)};width:var(--fc-base);aspect-ratio:${roomW.toFixed(2)} / ${roomH.toFixed(2)};border-radius:var(--r-control);">
+        ${fp.tables.filter(t => t.type === 'decor').map(t => hugObject(t, hug)).map(t => `
           <div class="floor-marker" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
-        ${fp.tables.filter(t => t.type !== 'decor').map(t => {
+        ${fp.tables.filter(t => t.type !== 'decor').map(t => hugObject(t, hug)).map(t => {
           const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
           const cs = tableCourseStatus(t.label);
           // Status grammar: glow halo = needs a human, soft wash = ticking
@@ -29758,7 +29767,7 @@ function renderTablePickerMiddle() {
           </div>`;
         }).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').length === 0 ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--charcoal-soft);font-size:var(--fs-md);">No tables set up yet.</div>` : ''}
-      </div>
+      </div>`; })()}
       </div>` : `<div class="ts" style="margin-top:10px;">No floor plan layouts yet.</div>`}`}
       ${(() => {
         // One call-away spot for the whole room (bottom right) — the tables
@@ -29845,6 +29854,30 @@ function openTablePicker() {
 // A cover-fitted floor overflows its box, and a fresh open used to land on
 // the TOP-LEFT CORNER of the room (floor audit) — the middle is where the
 // room is. Only a fresh open: a remembered pan spot (SCROLL_KEEP) stays.
+// THE TILL'S FLOOR HUGS THE TABLES (owner, Sep '26: "I don't need to scroll
+// empty spaces"). The room is a fixed 900 × 560 box in the layout editor,
+// where empty floor is where you put the next table; on the till that empty
+// floor was map to pan across for nothing. So the till crops the room to the
+// box around everything on it, plus a small margin, and every object is
+// placed inside that box. Pixel sizes do not change — a table is exactly as
+// big as before — only the room ends where the last table ends.
+function floorHug(fp) {
+  const objs = (fp && fp.tables) || [];
+  if (!objs.length) return { x0: 0, y0: 0, w: 100, h: 100 };
+  const m = 3;
+  let x0 = 100, y0 = 100, x1 = 0, y1 = 0;
+  objs.forEach(t => {
+    // a turned table's corners poke past its box by a little — the margin covers it
+    const hw = (t.width || 0) / 2, hh = (t.height || 0) / 2;
+    x0 = Math.min(x0, t.x - hw); x1 = Math.max(x1, t.x + hw);
+    y0 = Math.min(y0, t.y - hh); y1 = Math.max(y1, t.y + hh);
+  });
+  x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(100, x1 + m); y1 = Math.min(100, y1 + m);
+  return { x0, y0, w: Math.max(10, x1 - x0), h: Math.max(10, y1 - y0) };
+}
+function hugObject(t, hug) {
+  return { ...t, x: (t.x - hug.x0) / hug.w * 100, y: (t.y - hug.y0) / hug.h * 100, width: (t.width || 0) / hug.w * 100, height: (t.height || 0) / hug.h * 100 };
+}
 function tpCentreOnOpen() {
   const w = document.querySelector('.middle-view .tp-canvas-wrap');
   if (!w || !state.showTablePicker) return;

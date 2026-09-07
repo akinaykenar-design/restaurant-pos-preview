@@ -1452,6 +1452,10 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   .modal-bg, .pop-scrim{ animation: none; }
   .modal-bg .modal{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .middle-view{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
+  /* Admin is a pane that appears, so it settles in like the others — it used
+     to just be there, while the floor slid in on the way back (owner, Sep
+     '26: one-sided). Once, on arrival: applyMotion holds it still after. */
+  .admin-shell{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   /* THE FLOOR IS NOT A POPUP (owner, Aug '26: "seems to be an animation or
      style when order is switched to floor layout"). It was borrowing the
      card's settle, so tapping the hub ZOOMED the whole floor plan in from
@@ -1462,9 +1466,13 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   /* ...and it comes in OVER the top, the way the phone already did it, rather
      than as a grid cell swapping places with the hub - that left a blank
      screen for the first 60ms, the menu gone and the floor not there yet. */
+  /* …and out the same way: the till's map slides back to the left on close,
+     like the phone's drawer (owner, Sep '26). The entrance animation is
+     switched off so it cannot restart under the exit. */
   .middle-view.tp-view{ animation: pane-in-left var(--t-move) cubic-bezier(.2,.8,.3,1); clip-path:inset(-40px -40px 0 -40px); /* a drawer's lift stops at its foot - it bled onto the bar (owner, Sep '26: the bar looked different on every page) */
     position:fixed; inset:var(--appbar-top-off,0px) 0 var(--appbar-off,0px) 0;
     width:auto; box-sizing:border-box; z-index:calc(var(--z-panel) - 1); box-shadow:var(--lift-right); }
+  .middle-view.tp-off{ animation:none; transform:translateX(-100%); transition:transform var(--t-move) ease; }
   .qty-pop{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .qty-pop.covers-pop, .io-pop{ animation: mo-pop var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .toast{ animation: mo-rise .18s cubic-bezier(.2,.8,.3,1); }
@@ -17533,9 +17541,7 @@ function confirmCoversPad() {
   if (isNaN(n) || n < 1) return;
   if (cp.buffer !== '') { state.covers = n; saveTableCovers(state.table, state.covers); }
   state.coversPad = null;
-  state.showTablePicker = false; // covers done — on to the order
-  state.pickFlashId = null; // the held pick sweep ends with the prompt
-  render();
+  closeTablePicker(() => { state.pickFlashId = null; }); // covers done — on to the order; the held pick sweep ends with it
 }
 function cancelCoversPad() {
   const cp = state.coversPad; if (!cp) return;
@@ -18562,7 +18568,11 @@ function _motionSurfaces() {
     io: !!document.querySelector('.io-pop'),
     scrim: !!document.querySelector('.pop-scrim'),
     toast: !!document.querySelector('.toast'),
-    middle: mv ? (mv.firstElementChild ? mv.firstElementChild.className : 'x') : '',
+    // The middle's own class AND its first child: the floor (tp-view) and the
+    // hub, the pay pane and the Discount page, used to read the same and
+    // lost their entrance (filmed, Sep '26).
+    middle: mv ? mv.className + '|' + (mv.firstElementChild ? mv.firstElementChild.className : 'x') : '',
+    admin: !!document.querySelector('.admin-shell'),
   };
 }
 // Lines are keyed by name + sent-state + OCCURRENCE (two seats can carry the
@@ -18603,7 +18613,13 @@ function applyMotion(prev) {
     if (cur[k] && prev.surfaces[k]) document.querySelectorAll(sel).forEach(el => { el.style.animation = 'none'; });
   }
   const mv = document.querySelector('.middle-view');
-  if (mv && prev.surfaces.middle === cur.middle) mv.style.animation = 'none';
+  // A middle that CHANGED gets its entrance back: render reuses the node, so
+  // the 'none' stamped while the hub sat still would otherwise ride into the
+  // floor and hold its slide (filmed on the till, Sep '26).
+  if (mv) mv.style.animation = prev.surfaces.middle === cur.middle ? 'none' : '';
+  // Admin settles in once, on arrival — not on every tab change inside it.
+  const ad = document.querySelector('.admin-shell');
+  if (ad && prev.surfaces.admin) ad.style.animation = 'none';
   if (state._moFlick && Date.now() - state._moFlick < 500) {
     state._moFlick = 0;
     const bb = document.querySelector('.icon-action.bill');
@@ -29868,15 +29884,18 @@ function tpDrawerOn() {
   return window.innerWidth <= 768
     && !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
 }
-function closeTablePicker() {
-  if (!state.showTablePicker) return;
+// THE ONE WAY OFF THE FLOOR — a pick, the covers tick, the Order chip, the
+// swipe back: the map slides out to the left on every device (owner, Sep
+// '26: "in from the left and out again, yes"), then the state changes and
+// the hub is simply there. 'then' runs the caller's own bookkeeping once
+// the map has gone. Reduced motion, or no map on screen: straight there.
+function closeTablePicker(then) {
+  const done = () => { state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; if (then) then(); render(); };
+  if (!state.showTablePicker) { done(); return; }
   const sheet = document.querySelector('.middle-view.tp-view');
-  if (sheet && tpDrawerOn()) {
-    sheet.classList.add('tp-off');
-    setTimeout(() => { state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; render(); }, 290);
-  } else {
-    state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; render();
-  }
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (sheet && !reduce) { sheet.classList.add('tp-off'); setTimeout(done, 290); }
+  else done();
 }
 // §§ The floor: opening, closing, transferring
 function openTablePicker() {
@@ -29907,9 +29926,12 @@ function openTablePicker() {
   state.vipModal = null;
   state.allergyModal = null;
   state.customNoteDraft = null;
+  // The till's floor slides too (pane-in-left), so the lock refresh above
+  // waits on BOTH devices — on the till it re-rendered at once and the replay
+  // guard held the floor still (filmed, Sep '26: "hub → floor: nothing").
+  state._tpAnimUntil = Date.now() + 320; // .28s slide plus a frame either side
   if (tpDrawerOn()) {
     state._tpEntering = true;
-    state._tpAnimUntil = Date.now() + 320; // .28s slide plus a frame either side
     render();
     requestAnimationFrame(() => requestAnimationFrame(() => {
       state._tpEntering = false;
@@ -30077,7 +30099,7 @@ function pickTable(id) {
       // The seat isn't real until ✓ — remember what to put back if ✕ bails.
       state.coversPad.fromPick = { prev: prevTable || null };
     }
-    else { state.showTablePicker = false; state.pickFlashId = null; }
+    else { closeTablePicker(() => { state.pickFlashId = null; }); return; }
     render();
   };
   // One till per table: a table open on another device is blocked — even if
@@ -37617,7 +37639,10 @@ function handleActClick(el, e) {
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
         state.view = 'order'; setOrderType('dine-in');
         if (tillReturnTable()) { state.showTablePicker = false; render(); return; }
-        if (!state.showTablePicker) openTablePicker(); else render();
+        // The floor comes in the way it always does — through openTablePicker,
+        // which marks it entering so the phone's drawer slides (filmed, Sep
+        // '26: from Admin it was built already open and just appeared).
+        state.showTablePicker = false; openTablePicker();
       }
       else if (act === 'view-order') { if (state.currentStaff && state.currentStaff.role === 'chef') return;
         if (state.view === 'admin') { const sc = document.querySelector('.admin-content'); state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 }; }
@@ -37626,8 +37651,7 @@ function handleActClick(el, e) {
         // screen on a tall phone map). Only when closing is legal — a
         // table-less dine-in still has to pick.
         if (state.view === 'order' && state.showTablePicker && (state.table || state.transferMode || state.moveItemsPicking)) {
-          state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
-          state.pickFlashId = null; state.moveItemsPicking = false; render(); return;
+          closeTablePicker(() => { state.pickFlashId = null; state.moveItemsPicking = false; }); return;
         }
         state.view = 'order'; if (state.orderType !== 'dine-in') setOrderType('dine-in'); render(); }
       else if (act === 'toggle-mobile-cart') {

@@ -5,20 +5,33 @@
 <style>
   /* A phone on the desk: the preview inside a 390×844 frame, scaled to fit
      the window so the owner can see the phone look from a laptop. */
-  html, body { margin:0; height:100%; background:#1c1c1e; }
-  body { display:flex; align-items:center; justify-content:center; }
+  html, body { margin:0; height:100%; background:#1c1c1e; font-family:-apple-system, "Segoe UI", sans-serif; }
+  body { display:flex; align-items:center; justify-content:center; gap:20px; }
   .phone { --w:390px; --h:844px; --s:1; width:calc(var(--w) + 24px); height:calc(var(--h) + 24px);
     transform:scale(var(--s)); transform-origin:center; background:#0a0a0a; border-radius:52px;
-    padding:12px; box-sizing:border-box; box-shadow:0 30px 60px rgba(0,0,0,.6), inset 0 0 0 2px #333; }
+    padding:12px; box-sizing:border-box; box-shadow:0 30px 60px rgba(0,0,0,.6), inset 0 0 0 2px #333; flex:none; }
   iframe { width:var(--w); height:var(--h); border:0; border-radius:40px; background:#fff; display:block; }
+  /* The hand: what the mouse is right now. One chip lit at a time. */
+  .hand { display:flex; flex-direction:column; gap:8px; flex:none; }
+  .hand button { width:120px; height:44px; border-radius:10px; border:1px solid #444; background:#2a2a2c; color:#ddd;
+    font:700 14px/1 inherit; cursor:pointer; display:flex; align-items:center; gap:10px; padding:0 12px; }
+  .hand button svg { width:20px; height:20px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+  .hand button.on { background:#e8f1ff; border-color:#2f7cf6; color:#1d5fd0; }
+  .hand .hint { color:#888; font-size:12px; line-height:1.4; width:120px; margin-top:4px; }
 </style>
 <div class="phone"><iframe src="index.html" allow="clipboard-write"></iframe></div>
+<div class="hand">
+  <button data-hand="finger" class="on" aria-label="Finger"><svg viewBox="0 0 24 24"><path d="M9 11V4a2 2 0 0 1 4 0v7"/><path d="M13 10a2 2 0 0 1 4 0v2"/><path d="M17 12a2 2 0 0 1 4 0v4a6 6 0 0 1-6 6h-2a6 6 0 0 1-5-2.6L4.5 14a2 2 0 0 1 3.2-2.4L9 13"/></svg>Finger</button>
+  <button data-hand="pinch" aria-label="Pinch"><svg viewBox="0 0 24 24"><path d="M4 4l6 6"/><path d="M4 4v5M4 4h5"/><path d="M20 20l-6-6"/><path d="M20 20v-5M20 20h-5"/></svg>Pinch</button>
+  <button data-hand="mouse" aria-label="Mouse"><svg viewBox="0 0 24 24"><path d="M5 3l14 9-7 1-4 6z"/></svg>Mouse</button>
+  <div class="hint">Finger: drag swipes and pans, hold opens pads. Pinch: drag right zooms in, left zooms out. Mouse: the plain mouse.</div>
+</div>
 <script>
   // Fit the phone to the window, never larger than life.
-  const fit = () => { const p = document.querySelector('.phone'); const s = Math.min(1, (innerHeight - 24) / (844 + 24), (innerWidth - 24) / (390 + 24)); p.style.setProperty('--s', s); };
+  const fit = () => { const p = document.querySelector('.phone'); const s = Math.min(1, (innerHeight - 24) / (844 + 24), (innerWidth - 200) / (390 + 24)); p.style.setProperty('--s', s); };
   addEventListener('resize', fit); fit();
 
-  // THE MOUSE IS A FINGER (owner, Sep '26). The app's swipes, holds and
+  // THE MOUSE IS A HAND (owner, Sep '26). The app's swipes, holds and
   // presses listen for touch, and its pointer handlers read pointerType; a
   // laptop mouse sends neither. So inside the frame a mouse-down becomes a
   // finger landing (a touch-flavoured pointerdown, then touchstart), a move
@@ -26,29 +39,49 @@
   // real finger fires them — and the mouse's own events are kept out so
   // nothing runs twice. A drag is never a tap: the click the browser fires
   // after a drag is swallowed. Typing in a field stays a keyboard job.
+  //
+  // A real finger PANS because the browser scrolls under it; it never does
+  // that for a pretend one. So when the app lets a move through, the shim
+  // scrolls the nearest scroller by the same distance, locked to the axis
+  // the drag started on, the way the phone does.
+  //
+  // PINCH: one mouse stands in for two fingers either side of where it
+  // landed — dragging right parts them (zoom in), left brings them together.
+  let hand = 'finger';
   const finger = (doc) => {
     const win = doc.defaultView;
-    let down = null; // { target, x0, y0, moved }
-    const touchAt = (x, y) => new win.Touch({ identifier: 1, target: down.target, clientX: x, clientY: y, pageX: x + win.scrollX, pageY: y + win.scrollY, screenX: x, screenY: y, radiusX: 8, radiusY: 8, force: 1 });
+    let down = null; // { target, x0, y0, moved, axis, lx, ly, scroller }
+    const scrollerOf = (el) => { for (let n = el; n && n !== doc.body; n = n.parentElement) { const cs = win.getComputedStyle(n); const x = /(auto|scroll)/.test(cs.overflowX) && n.scrollWidth > n.clientWidth + 1, y = /(auto|scroll)/.test(cs.overflowY) && n.scrollHeight > n.clientHeight + 1; if (x || y) return { el: n, x, y }; } return null; };
+    const touch = (id, x, y) => new win.Touch({ identifier: id, target: down.target, clientX: x, clientY: y, pageX: x + win.scrollX, pageY: y + win.scrollY, screenX: x, screenY: y, radiusX: 8, radiusY: 8, force: 1 });
+    const ptr = (type, x, y) => down.target.dispatchEvent(new win.PointerEvent(type, { bubbles: true, cancelable: true, composed: true, view: win, clientX: x, clientY: y, screenX: x, screenY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: type === 'pointermove' ? -1 : 0, buttons: type === 'pointerup' ? 0 : 1, width: 16, height: 16, pressure: type === 'pointerup' ? 0 : 0.5 }));
     const fire = (type, x, y) => {
-      const ptr = { touchstart: 'pointerdown', touchmove: 'pointermove', touchend: 'pointerup' }[type];
-      down.target.dispatchEvent(new win.PointerEvent(ptr, { bubbles: true, cancelable: true, composed: true, view: win, clientX: x, clientY: y, screenX: x, screenY: y, pointerId: 1, pointerType: 'touch', isPrimary: true, button: type === 'touchmove' ? -1 : 0, buttons: type === 'touchend' ? 0 : 1, width: 16, height: 16, pressure: type === 'touchend' ? 0 : 0.5 }));
-      const t = touchAt(x, y);
-      down.target.dispatchEvent(new win.TouchEvent(type, { bubbles: true, cancelable: true, composed: true, view: win,
-        touches: type === 'touchend' ? [] : [t], targetTouches: type === 'touchend' ? [] : [t], changedTouches: [t] }));
+      const fingers = hand === 'pinch' ? (() => { const d = Math.max(10, 60 + (x - down.x0)); return [touch(1, down.x0 - d, down.y0), touch(2, down.x0 + d, down.y0)]; })() : [touch(1, x, y)];
+      ptr({ touchstart: 'pointerdown', touchmove: 'pointermove', touchend: 'pointerup' }[type], x, y);
+      const ev = new win.TouchEvent(type, { bubbles: true, cancelable: true, composed: true, view: win,
+        touches: type === 'touchend' ? [] : fingers, targetTouches: type === 'touchend' ? [] : fingers, changedTouches: fingers });
+      down.target.dispatchEvent(ev);
+      return ev;
     };
     const stop = (e) => { e.stopImmediatePropagation(); };
-    const mine = (e) => e.pointerType === 'mouse' && e.isTrusted;
+    const mine = (e) => hand !== 'mouse' && e.pointerType === 'mouse' && e.isTrusted;
     doc.addEventListener('pointerdown', (e) => {
       if (!mine(e) || e.button !== 0 || !e.target || e.target.closest('input, textarea, select')) return;
-      down = { target: e.target, x0: e.clientX, y0: e.clientY, moved: false };
+      down = { target: e.target, x0: e.clientX, y0: e.clientY, lx: e.clientX, ly: e.clientY, moved: false, axis: null, scroller: scrollerOf(e.target) };
       fire('touchstart', e.clientX, e.clientY);
       stop(e);
     }, true);
     doc.addEventListener('pointermove', (e) => {
       if (!mine(e) || !down) return;
-      if (Math.hypot(e.clientX - down.x0, e.clientY - down.y0) > 8) down.moved = true;
-      fire('touchmove', e.clientX, e.clientY);
+      const dx = e.clientX - down.x0, dy = e.clientY - down.y0;
+      if (!down.moved && Math.hypot(dx, dy) > 8) { down.moved = true; down.axis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y'; }
+      const ev = fire('touchmove', e.clientX, e.clientY);
+      // The browser's pan, by hand: only when the app let the move through.
+      if (hand === 'finger' && down.moved && !ev.defaultPrevented && down.scroller) {
+        const s = down.scroller;
+        if (down.axis === 'x' && s.x) s.el.scrollLeft -= e.clientX - down.lx;
+        if (down.axis === 'y' && s.y) s.el.scrollTop -= e.clientY - down.ly;
+      }
+      down.lx = e.clientX; down.ly = e.clientY;
       stop(e);
     }, true);
     const lift = (e) => {
@@ -57,16 +90,19 @@
       const dragged = down.moved;
       down = null;
       stop(e);
-      if (dragged) doc.addEventListener('click', (c) => { c.preventDefault(); c.stopImmediatePropagation(); }, { capture: true, once: true });
+      // The browser only fires that click when the drag ended where it began;
+      // when it doesn't, the swallow must not lie in wait for the next tap.
+      if (dragged) { const eat = (c) => { c.preventDefault(); c.stopImmediatePropagation(); off(); }; const off = () => { doc.removeEventListener('click', eat, true); doc.removeEventListener('pointerdown', off, true); }; doc.addEventListener('click', eat, true); doc.addEventListener('pointerdown', off, true); setTimeout(off, 400); }
     };
     doc.addEventListener('pointerup', lift, true);
     doc.addEventListener('pointercancel', lift, true);
     doc.addEventListener('pointerleave', (e) => { if (down && e.target === doc.documentElement) lift(e); }, true);
     // The mouse's own events stay out while a finger is down.
-    for (const type of ['mousedown', 'mousemove', 'mouseup']) doc.addEventListener(type, (e) => { if (e.isTrusted && (down || type !== 'mousemove') && !(e.target && e.target.closest && e.target.closest('input, textarea, select'))) stop(e); }, true);
+    for (const type of ['mousedown', 'mousemove', 'mouseup']) doc.addEventListener(type, (e) => { if (hand !== 'mouse' && e.isTrusted && (down || type !== 'mousemove') && !(e.target && e.target.closest && e.target.closest('input, textarea, select'))) stop(e); }, true);
     doc.__finger = true; // on the DOCUMENT: the frame's first blank page hands its window to the real one
   };
   const frame = document.querySelector('iframe');
   const arm = () => { try { const d = frame.contentDocument; if (d && d.body && d.location.href !== 'about:blank' && !d.__finger) finger(d); } catch (e) {} };
   frame.addEventListener('load', arm); arm();
+  document.querySelectorAll('.hand button').forEach(b => b.addEventListener('click', () => { hand = b.dataset.hand; document.querySelectorAll('.hand button').forEach(x => x.classList.toggle('on', x === b)); }));
 </script>

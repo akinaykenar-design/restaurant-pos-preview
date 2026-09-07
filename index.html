@@ -27286,21 +27286,17 @@ function renderSimpleTablesAdmin() {
 // The timing / number-size settings for tables — shared between simple mode's
 // setup card and floor mode's ⚙ Options drawer (set once, then out of the way).
 function tableTimerControls() {
+  // ONE number: the sitting length. It scales the seated pill (green →
+  // yellow → red) and counts the sitting down on the docket. A second
+  // "table colour timer" fed the same scale until Sep '26 — two settings,
+  // one job — and is gone.
   return `
       <div style="display:flex;align-items:center;gap:8px;">
-        <label class="field-label" style="margin:0;">Sitting</label>
+        <label class="field-label" style="margin:0;">Sitting length</label>
         <button class="icon-sq" data-act="step-sitting" data-dir="-1">−</button>
         <span class="ts" style="min-width:44px;text-align:center;font-weight:700;">${state.settings.seatingMinutes ? state.settings.seatingMinutes + 'm' : 'Off'}</span>
         <button class="icon-sq" data-act="step-sitting" data-dir="1">＋</button>
-      </div>
-      ${(() => {
-        const cur = state.settings.burnMinutes === undefined ? 'booking' : state.settings.burnMinutes;
-        const chip = (val, label) => `<button class="${String(cur) === String(val) ? 'active' : ''}" data-act="set-burn-cap" data-val="${val}">${label}</button>`;
-        return `<div style="display:flex;align-items:center;gap:8px;">
-          <label class="field-label" style="margin:0;">Table colour timer</label>
-          <div class="seg">${chip(60, '60m')}${chip(90, '90m')}${chip(120, '120m')}${chip('booking', 'Seated')}${chip('null', 'Off')}</div>
-        </div>`;
-      })()}`;
+      </div>`;
 }
 
 // "Saved layouts": named snapshots of where everything sits on THIS floor —
@@ -28416,6 +28412,11 @@ function renderScreenAdmin() {
 // preview card with one table in every state on the left, the settings in
 // numbered cards down the right. Every change re-renders, so the preview
 // follows it at once.
+// The floor's lenses, in the order of a table's night: before they arrive,
+// how many sat, what's cooking, how long they've been, since the last order,
+// the bill (owner, Sep '26: "what about the sequence"). "Idle" counts minutes
+// since the last order — it was "Attention", which the word didn't say.
+const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Guests'], ['course', 'Course'], ['sitting', 'Seated'], ['attention', 'Idle'], ['spend', 'Spend']];
 const TABLE_STATUS_SAMPLES = [
   ['Free', {}], ['Open tab', { open: true }], ['Bill printed', { open: true, billPrinted: true }],
   ['In use — another till', { lock: true }], ['Running long', { open: true, called: 'warn' }], ['Over', { open: true, called: 'over' }],
@@ -28429,7 +28430,10 @@ function renderTableStatusPreview() {
   const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
   const now = Date.now();
   const keep = { orders: state.orders, locks: state.tableLocks };
-  const tables = TABLE_STATUS_SAMPLES.map(([, s], i) => ({ id: 'sample-' + i, type: 'table', label: 'ABCDEF'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4 }));
+  // The samples wear what the venue's own tables wear (paint or finish), so
+  // a free table in the preview looks like a free table on the floor.
+  const real = allTables().find(t => t.type !== 'decor') || {};
+  const tables = TABLE_STATUS_SAMPLES.map(([, s], i) => ({ id: 'sample-' + i, type: 'table', label: 'ABCDEF'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4, covers: s.open ? 2 : 0, color: real.color, finish: real.finish }));
   state.orders = TABLE_STATUS_SAMPLES.map(([, s], i) => s.open ? {
     id: 'sample-order-' + i, status: 'open', orderType: 'dine-in', table: 'ABCDEF'[i], covers: 2, billPrinted: !!s.billPrinted,
     items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: now - 30 * 60000 }], createdAt: now - 30 * 60000,
@@ -28459,13 +28463,18 @@ function renderTableStatusAdmin() {
   return `
   <div class="design-split tstatus-split">
     <div class="settings-card mock-card tstatus-stage">
+      ${/* The floor's own lens chips: the preview's pills follow the lens the
+            same way the floor's do, through the same handler. */ ''}
+      <div class="seg seg-scroll" style="width:fit-content;max-width:100%;">
+        ${FLOOR_LENSES.map(([v, l]) => `<button class="${(state.floorStatusView || 'sitting') === v ? 'active' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
+      </div>
       ${renderTableStatusPreview()}
       <div class="ts" style="text-align:center;margin-top:8px;">how the floor shows each table</div>
     </div>
     <div class="screen-ctl-scroll">
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">1 · Colours</div>
-        <div class="pay-options" style="margin-bottom:14px;">${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}</div>
+        <div class="pay-options" style="margin-bottom:14px;display:flex;align-items:center;gap:12px;">${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}<div style="font-weight:700;font-size:var(--fs-md);">Colours on the floor</div></div>
         ${row('occupied', '#34C759', 'Open tab — active')
         + row('billPrinted', 'var(--blue)', 'Bill printed')
         + row('locked', '#FF9500', 'In use — another till')
@@ -29289,12 +29298,6 @@ function tableCourseStatus(tableLabel) {
 // The occupied chip's whole body walks green→teal → gold → violet across the
 // sitting, solid violet past the cap. Violet is the app's only "over time"
 // colour; red is reserved for locked tables.
-function burnCapMinutes() {
-  const v = state.settings.burnMinutes === undefined ? 'booking' : state.settings.burnMinutes;
-  if (v === null) return null;
-  if (v === 'booking') return state.settings.seatingMinutes || 90;
-  return v;
-}
 // Status paints a TRANSLUCENT wash over the table so its finish or colour
 // still shows through — solid fills hid the wood. Sits between the marker's
 // background and its number (negative z inside the marker's stacking
@@ -29404,7 +29407,7 @@ function floorPillHtml(t, cs) {
   }
   if (lens === 'sitting') {
     if (!o) return '';
-    const cap = burnCapMinutes() || state.settings.seatingMinutes || 90;
+    const cap = state.settings.seatingMinutes || 90;
     const mins = Math.max(0, Math.floor((Date.now() - o.createdAt) / 60000));
     return pill(sev(mins / cap), `<b>⏱ ${pillDur(mins)}</b>`, 'Time seated');
   }
@@ -29889,7 +29892,7 @@ function renderTablePickerMiddle() {
         <button class="fp-chip icon-only${!state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="select" aria-label="Select">${FP_TICK_SVG}</button>
         <button class="fp-chip icon-only${state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="transfer" aria-label="Transfer">${SYS_SWAP_SVG}</button>`}
       ${state.settings.floorStatusEnabled !== false ? (() => {
-        const opts = [['sitting', 'Seated'], ['course', 'Course'], ['attention', 'Attention'], ['spend', 'Spend'], ['guests', 'Guests'], ['booked', 'Booked']];
+        const opts = FLOOR_LENSES;
         const cur = state.floorStatusView || 'sitting';
         const lbl = (opts.find(o => o[0] === cur) || opts[0])[1];
         return `
@@ -38656,7 +38659,6 @@ function handleActClick(el, e) {
           });
         }
       }
-      else if (act === 'set-burn-cap') { const v = el.dataset.val; saveTicketSetting({ burnMinutes: v === 'null' ? null : v === 'booking' ? 'booking' : parseInt(v) }); }
       else if (act === 'set-course-wait') { const v = el.dataset.val; saveTicketSetting({ courseWaitMinutes: v === 'null' ? null : parseInt(v) }); }
       else if (act === 'simple-table-toggle') {
         if (state.floorLinkMode === 'link') {

@@ -7321,6 +7321,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.catIconsOnly !== undefined) data.settings.catIconsOnly = !!req.body.catIconsOnly;
   if (req.body.tileColors !== undefined) data.settings.tileColors = !!req.body.tileColors;
   if (req.body.floorStatusEnabled !== undefined) data.settings.floorStatusEnabled = !!req.body.floorStatusEnabled;
+  if (req.body.askVoidReason !== undefined) data.settings.askVoidReason = !!req.body.askVoidReason; // off by default: a removal just goes (owner, Sep '26)
   if (req.body.washOpacity !== undefined) { const w = parseFloat(req.body.washOpacity); data.settings.washOpacity = (w > 0 && w <= 1) ? w : null; }
   if (req.body.askSeatOff !== undefined) {
     const o = req.body.askSeatOff || {};
@@ -10452,21 +10453,25 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const total = have.reduce((s, i) => s + i.qty, 0);
     let left = (qty === undefined || qty === null || qty <= 0) ? total : Math.min(total, parseInt(qty, 10) || 0);
     const removed = [];
-    const takeFrom = (list) => {
-      for (let k = list.length - 1; k >= 0 && left > 0; k--) {
-        const i = list[k]; if (!matches(i)) continue;
-        const n = Math.min(i.qty, left);
-        removed.push({ ...i, qty: n });
-        i.qty -= n; left -= n;
-        if (i.qty <= 0) list.splice(k, 1);
-      }
-    };
-    takeFrom(order.items);
+    // The store lives in memory between requests, and a line can be the SAME
+    // object in the ticket's items and in its round — so a line already
+    // counted down in one list must not be counted down again in the other
+    // (it came off twice: 3 → 1 for a removal of 1, caught Sep '26).
+    const taken = new Map(); // line object → how many already came off it
+    for (let k = order.items.length - 1; k >= 0 && left > 0; k--) {
+      const i = order.items[k]; if (!matches(i)) continue;
+      const n = Math.min(i.qty, left);
+      removed.push({ ...i, qty: n });
+      i.qty -= n; left -= n; taken.set(i, n);
+      if (i.qty <= 0) order.items.splice(k, 1);
+    }
     let leftRounds = removed.reduce((s, i) => s + i.qty, 0);
     (order.rounds || []).forEach(r => {
       for (let k = (r.items || []).length - 1; k >= 0 && leftRounds > 0; k--) {
         const i = r.items[k]; if (!matches(i)) continue;
-        const n = Math.min(i.qty, leftRounds); i.qty -= n; leftRounds -= n;
+        const n = taken.has(i) ? taken.get(i) : Math.min(i.qty, leftRounds); // a shared object is already down
+        if (!taken.has(i)) i.qty -= n;
+        leftRounds -= n;
         if (i.qty <= 0) r.items.splice(k, 1);
       }
     });
@@ -19633,7 +19638,7 @@ async function saveEditSent() {
     }
     state.editSent = null; state.voidItemPrompt = null; render();
   };
-  if (down > 0) { state.voidItemPrompt = { match: { ...m, draft: undefined }, qty: down, then: rest }; render(); return; }
+  if (down > 0) { doRemoveSent({ ...m, draft: undefined }, down, rest); return; }
   await rest();
 }
 // Live-derive the sent line (summed qty + full item fields) from the open order,
@@ -19882,9 +19887,15 @@ function renderPricePop() {
 // Removing a SAVED item is money leaving the till — a manager must say why,
 // so wastage/comps/staff meals land in the record instead of vanishing.
 // The reason pop asks first; the actual remove runs once a reason is picked.
-function doRemoveSent(match) {
+// THE ONE DOOR for taking a sent line off. "Why?" is asked only when the
+// venue switched it on (Settings → Voids, off by default — owner, Sep '26);
+// a manager then removes on the spot, and staff still put in a manager PIN.
+function doRemoveSent(match, qty, then) {
   if (!match) return;
-  state.voidItemPrompt = { match };
+  const ask = state.settings.askVoidReason === true;
+  const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
+  if (!ask && isMgr) { commitRemoveSent(match, null, qty, then); return; }
+  state.voidItemPrompt = { match, qty, then, needPin: !ask, reason: null, pin: '', pinError: '' };
   render();
 }
 // The venue's own void reasons (Settings → Voids) when they've set them, so
@@ -19902,7 +19913,7 @@ function renderVoidReasonPop() {
   return `
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop" style="width:340px;">
-        <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${m.qty ? m.qty + ' × ' : ''}${esc(it.name || 'item')} — why?</div>
+        <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Remove ${m.qty ? m.qty + ' × ' : ''}${esc(it.name || 'item')}${m.needPin ? '' : ' — why?'}</div>
         ${m.needPin ? `
         <label class="field-label">Manager PIN</label>
         <input id="void-item-pin" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);" oninput="state.voidItemPrompt.pin = this.value;">
@@ -25624,6 +25635,12 @@ function renderVoidReasonsSettingsAdmin() {
     <div class="th" style="margin-bottom:14px;">Manager approval to void</div>
     <div class="pay-options">
       ${togglePill(state.settings.managerApprovalForVoid, 'set-manager-approval-void')}
+    </div>
+  </div>
+  <div class="settings-card">
+    <div class="th" style="margin-bottom:14px;">Ask why on removal</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.askVoidReason === true, 'set-ask-void-reason')}
     </div>
   </div>
   <div class="settings-card">
@@ -38557,6 +38574,7 @@ function handleActClick(el, e) {
       else if (act === 'set-item-icons') { saveTicketSetting({ showItemIcons: el.dataset.val === 'true' }); }
       else if (act === 'set-cat-icons-only') { saveTicketSetting({ catIconsOnly: el.dataset.val === 'true' }); }
       else if (act === 'set-floor-status') { saveTicketSetting({ floorStatusEnabled: el.dataset.val === 'true' }); }
+      else if (act === 'set-ask-void-reason') { saveTicketSetting({ askVoidReason: el.dataset.val === 'true' }); }
       else if (act === 'set-wash-opacity') { saveTicketSetting({ washOpacity: parseFloat(el.dataset.val) }); }
       else if (act === 'set-spend-style') { saveTicketSetting({ spendPillStyle: el.dataset.val }); }
       else if (act === 'toggle-item-rowbreak') {

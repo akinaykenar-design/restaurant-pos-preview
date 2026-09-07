@@ -4303,7 +4303,7 @@ select.ie-field{font-weight:700;}
   /* The pane used to rest itself on a CARD TOP (Aug '26, to hide a card stub
      under the preview). That is a scroll that moves on its own, and it read
      as jitter on a phone — the owner hates snapping anywhere (Sep '26). */
-  .screen-ctl-scroll{ flex:1; min-height:0; overflow-y:auto; padding:8px 12px 24px; }
+  .screen-ctl-scroll{ flex:1; min-height:0; overflow-y:auto; margin-top:12px; padding:0 12px 24px; } /* the band of ground under the pinned preview — nothing scrolls under a card */
   /* Both phone frames stay side by side — never stacked (owner ask). */
   /* The admin rail follows the phone rail-position setting, same as the
      order rail and pay rail — all navs move together (owner ask). */
@@ -4726,7 +4726,7 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 .fp-wrap.fp-split{ display:grid; grid-template-columns:minmax(0,1fr) clamp(300px, var(--ticket-w, 360px), 460px);
   gap:16px; align-items:start; }
 .fp-split .fp-card{ grid-column:1; grid-row:1; }
-.fp-split .fp-main{ max-height:calc(100dvh - var(--floor-h-budget,215px)); } /* the zoomed room pans inside this frame */
+.fp-split .fp-main{ max-height:calc(100dvh - var(--floor-h-budget,215px)); height:var(--fp-h,auto); } /* the zoomed room pans inside this frame — the frame keeps the UNZOOMED room's height (published by the pinch), it grew with the zoom until Sep '26 (owner: "zooming in makes the layout box bigger") */
 .fp-split .fp-rail-side{ grid-column:2; grid-row:1; width:auto; order:0;
   flex-direction:column; align-items:stretch; gap:12px;
   max-height:calc(100dvh - 150px); overflow:auto; }
@@ -4777,13 +4777,13 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .admin-content:has(.fp-split) #admin-router{ flex:1; min-height:0; display:flex;
     flex-direction:column; padding:8px 12px 0; }
   .admin-content:has(.fp-split) #admin-router > *{ flex:none; }
-  .admin-content:has(.fp-split) #admin-router > .fp-wrap.fp-split{ flex:1; min-height:0; gap:0; margin-bottom:0; }
+  .admin-content:has(.fp-split) #admin-router > .fp-wrap.fp-split{ flex:1; min-height:0; gap:12px; margin-bottom:0; } /* NOTHING SCROLLS UNDER A CARD: the column clips on a straight line of ground 12 below the room's card (owner, Sep '26: "I hate these") */
   .admin-content:has(.fp-split) .fp-card{ flex:none; margin:12px 0 0; }
   .admin-content:has(.fp-split) .fp-main{ max-height:40vh; }
   /* No snap: the column rested itself on a card top, which is a scroll that
      moves on its own (owner, Sep '26: "I hate snapping reactions anywhere"). */
   .admin-content:has(.fp-split) .fp-rail-side{ flex:1; min-height:0; overflow-y:auto;
-    padding:8px 0 24px; }
+    padding:0 0 24px; }
 }
 
 /* §§ Knocking money off one line
@@ -31353,19 +31353,26 @@ function startFloorDrag(e, tableId) {
   floorDrag.pending = !!isTouch && window.innerWidth <= 768;
   floorDrag.startClientX = isTouch ? e.touches[0].clientX : e.clientX;
   floorDrag.startClientY = isTouch ? e.touches[0].clientY : e.clientY;
-  // HOLD a marker = toggle it into the multi-selection (touch ctrl+click).
+  // HOLD a marker = toggle it into the multi-selection (touch ctrl+click) —
+  // and the finger that held it goes on to MOVE it (owner, Sep '26: "hold
+  // selects and drag"; the gesture used to end at the hold, so you had to
+  // let go and press again). No render here: a rebuilt marker is a new node
+  // and the touch that started on the old one would never reach it. The
+  // live marker wears the ring now; the screen catches up when the finger lifts.
   floorDrag.holdTimer = setTimeout(() => {
-    if (floorDrag && !floorDrag.moved) { floorDrag.holdFired = true; toggleTableMultiSelect(tableId); floorDrag = null; }
+    if (!floorDrag || floorDrag.moved) return;
+    floorDrag.holdTimer = null; floorDrag.holdFired = true;
+    state.selectedAdminTableId = null;
+    const i = state.selectedAdminTableIds.indexOf(tableId);
+    if (i !== -1) { state.selectedAdminTableIds.splice(i, 1); floorDrag = null; render(); return; } // held OFF the selection: nothing to carry
+    state.selectedAdminTableIds.push(tableId);
+    markerEl.classList.add('mk-sel');
+    try { navigator.vibrate && navigator.vibrate(20); } catch (err) {}
+    floorDrag.pending = false; // picked up: it goes where the finger goes, on the phone too
+    floorDrag.group = floorDragGroup(canvasEl, tableId);
   }, 450);
   // Dragging a table that's PART of the multi-selection moves the whole group.
-  if (state.selectedAdminTableIds.length > 1 && state.selectedAdminTableIds.includes(tableId)) {
-    const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-    floorDrag.group = state.selectedAdminTableIds.map(id => {
-      const t = fp && fp.tables.find(x => x.id === id);
-      const el = canvasEl.querySelector(`.admin-floor-marker[data-id="${id}"]`);
-      return t && el ? { id, startX: t.x, startY: t.y, el } : null;
-    }).filter(Boolean);
-  }
+  floorDrag.group = floorDragGroup(canvasEl, tableId);
   // LINKED tables are physically one unit — dragging any member moves the
   // whole welded group rigidly. (Not while the Link tool is armed: there a
   // drag means linking, not moving.)
@@ -31389,6 +31396,16 @@ function startFloorDrag(e, tableId) {
   // smooth while still allowing a deliberate drag. Mouse keeps its
   // preventDefault (blocks text selection / native image drag).
   if (!floorDrag.pending) e.preventDefault();
+}
+// The members a drag carries when the held table is one of several picked.
+function floorDragGroup(canvasEl, tableId) {
+  if (!(state.selectedAdminTableIds.length > 1 && state.selectedAdminTableIds.includes(tableId))) return null;
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  return state.selectedAdminTableIds.map(id => {
+    const t = fp && fp.tables.find(x => x.id === id);
+    const el = canvasEl.querySelector(`.admin-floor-marker[data-id="${id}"]`);
+    return t && el ? { id, startX: t.x, startY: t.y, el } : null;
+  }).filter(Boolean);
 }
 function toggleTableMultiSelect(tableId) {
   state.selectedAdminTableId = null;
@@ -31647,6 +31664,8 @@ function endFloorDrag() {
     floorDrag = null;
     return;
   }
+  // A hold that never moved already did its picking; the screen catches up now.
+  if (!moved && floorDrag.holdFired) { floorDrag = null; render(); return; }
   if (moved && floorDrag.group) {
     // Group move: save every member's new spot (no overlap veto between
     // group members — they moved rigidly together).
@@ -32835,6 +32854,10 @@ document.addEventListener('touchstart', (e) => {
   _tpPinch = { wrap, canvas, baseW, baseH, rect: r, shown: zoom, editor,
     dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom,
     minZ: Math.min(1, inner / baseW) };
+  // The editor's frame is frozen at the room's UNZOOMED size before the zoom
+  // can grow it (the CSS reads --fp-h as the frame's height). Re-measured on
+  // every pinch, so a new floor or a turned device corrects itself.
+  if (editor) { document.documentElement.style.setProperty('--fp-w', baseW + 'px'); document.documentElement.style.setProperty('--fp-h', baseH + 'px'); }
   _tpWant = null;
   _tpPinchGuard = Date.now() + 600;
 }, { passive: true });

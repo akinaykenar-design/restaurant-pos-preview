@@ -18497,7 +18497,7 @@ function render() {
   // A finger still holding a button keeps its sunk look on the rebuilt node.
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
   if (state.view === 'admin' && state.adminTab === 'screen') attachPreviewHooks();
-  if (_pressState && _pressState.sel) {
+  if (_pressState && _pressState.sel && _pressState.sunk) {
     // Exactly one match, or nothing: an ambiguous selector used to light the
     // first tile in the family instead of the one under the finger.
     let held = null;
@@ -32958,6 +32958,7 @@ document.addEventListener('pointerup', (e) => {
 // (>8px) drops it, a real tap keeps it ~150ms so the flash is visible.
 // Every data-* the element carries, in one attribute selector — that is what
 // makes a tile itself and not its neighbour.
+const PRESS_WAIT = 150; // ms a still finger waits for its sink — see the pointerdown below
 function pressSelectorFor(el) {
   const d = el && el.dataset;
   if (!d || !d.act) return null;
@@ -32971,7 +32972,12 @@ document.addEventListener('pointerdown', (e) => {
   const el = e.target.closest && e.target.closest('button:not(:disabled), .pay-opt, .item-card, .simple-table-btn, .floor-marker');
   if (!el) return;
   const x0 = e.clientX, y0 = e.clientY;
-  el.classList.add('pressed');
+  // THE SINK WAITS 150ms (owner, Sep '26: "I don't want tiles to look pushed
+  // when I slide"). Filmed: an instant sink lit every tile a slow slide
+  // started on for ~100ms, and a 60ms wait still caught it — the browser
+  // only reports the first movement of a native scroll ~100ms in. 150 is
+  // what an iPad waits. A finger that has moved by then never sinks; a
+  // still finger sinks at 150ms; a quick tap shows its sink as it lifts.
   // Survive re-renders: polls rebuild the DOM mid-hold, and a class painted
   // only on this node vanished with it — the tile visibly popped back up
   // DURING a long-press, before the pad's qp-held state took over. render()
@@ -32987,9 +32993,17 @@ document.addEventListener('pointerdown', (e) => {
   // the same fault. Build it from ALL of the element's own data attributes,
   // and if that still matches more than one node, restore nothing — a press
   // on the wrong tile is worse than no press at all.
-  _pressState = { el, sel: pressSelectorFor(el) };
+  _pressState = { el, sel: pressSelectorFor(el), sunk: false };
   const mine = _pressState; // this press's claim on the shared state
+  let lx = x0, ly = y0; // where the finger is now — a slow slide has moved by then even if not yet 6px
+  // The browser can be scrolling the pane under the finger before it has
+  // reported a single move, so the pane's own scroll position is read too.
+  const pane = (() => { for (let n = el.parentElement; n && n !== document.body; n = n.parentElement) { const cs = getComputedStyle(n); if (/(auto|scroll)/.test(cs.overflowX + cs.overflowY)) return n; } return null; })();
+  const s0 = pane ? [pane.scrollLeft, pane.scrollTop] : null;
+  const still = () => Math.abs(lx - x0) <= 2 && Math.abs(ly - y0) <= 2 && (!pane || (pane.scrollLeft === s0[0] && pane.scrollTop === s0[1]));
+  const sinkTimer = setTimeout(() => { if (_pressState === mine && still()) { mine.sunk = true; el.classList.add('pressed'); } }, PRESS_WAIT);
   const stop = (immediate) => {
+    clearTimeout(sinkTimer);
     document.removeEventListener('pointermove', mv);
     document.removeEventListener('touchmove', tmv);
     document.removeEventListener('scroll', scrolled, true);
@@ -33022,6 +33036,7 @@ document.addEventListener('pointerdown', (e) => {
   // sinks the instant it lands. Six is under a still finger's own jitter and
   // inside the first two move events of anything that is actually travelling.
   const drift = (cx, cy) => {
+    lx = cx; ly = cy;
     if (Math.abs(cx - x0) > 6 || Math.abs(cy - y0) > 6) stop(true);
   };
   const mv = (ev) => drift(ev.clientX, ev.clientY);

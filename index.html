@@ -4800,17 +4800,21 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     padding-bottom:calc(var(--h-primary) + 32px + env(safe-area-inset-bottom, 0px)); }
   /* A part is too wide for a phone in one line: name and amount, then the
      method and the two buttons underneath. */
-  /* The bill rides at the top of the pay pane — the same bill the tablet
-     shows at the side, folded into a card. A long bill scrolls inside the
-     card so the tender controls stay in reach. */
-  .pay-bill{ border:1px solid var(--steel-200); border-radius:var(--radius);
-    background:var(--surface); margin:0 0 16px; display:flex; flex-direction:column; }
-  .pay-bill .bill-title{ padding:12px var(--hub-edge) 0; }
-  .pay-bill .bill-lines{ flex:none; max-height:none; overflow:visible; } /* the bill flows with the page — a scroller inside the scroller ate the thumb (sweep, Sep '26) */
-  /* The money block's top rule closes the list — the last line's own rule
-     would sit 8px under it, and two rules never ride that close. */
-  .pay-bill .bill-line:last-child{ border-bottom:0; }
 }
+/* The bill rides at the top of the pay pane on the phone, and on the
+   Discount page everywhere — the same bill the tablet shows at the side,
+   folded into a card. */
+.pay-bill{ border:1px solid var(--steel-200); border-radius:var(--radius);
+  background:var(--surface); margin:0 0 16px; display:flex; flex-direction:column; }
+.pay-bill .bill-title{ padding:12px var(--hub-edge) 0; }
+.pay-bill .bill-lines{ flex:none; max-height:none; overflow:visible; } /* the bill flows with the page — a scroller inside the scroller ate the thumb (sweep, Sep '26) */
+/* The money block's top rule closes the list — the last line's own rule
+   would sit 8px under it, and two rules never ride that close. */
+.pay-bill .bill-line:last-child{ border-bottom:0; }
+/* A pickable line (the Discount page) is a tap, and a picked one wears the
+   one band — edge + tint, like every picked chip. */
+.bill-line[data-act]{ cursor:pointer; min-height:var(--tap); align-items:center; padding:8px; } /* room inside the band for the count */
+.bill-line.picked{ background:var(--orange-dim); box-shadow:inset 0 0 0 var(--ring) var(--orange); border-radius:var(--btn-radius); }
 </style>
 <div id="app">Loading…</div>
 <div id="print-area"></div>
@@ -17079,7 +17083,7 @@ function updateLineNote(idx, value) {
 
 function openDiscountModal() {
   const d = state.discount;
-  state.discountModal = { type: d ? d.type : 'percent', value: d ? d.value : '', reason: d ? d.reason : '', kind: d ? (d.kind || 'discount') : 'discount' };
+  state.discountModal = { type: d ? d.type : 'percent', value: d ? d.value : '', reason: d ? d.reason : '', kind: d ? (d.kind || 'discount') : 'discount', lines: [] };
   state.adminError = '';
   render();
 }
@@ -17105,6 +17109,7 @@ function saveDiscountModal() {
     render();
     return;
   }
+  if ((m.lines || []).length) { applyLineDiscount(m, value); return; }
   state.discount = { type: m.type, value, reason: m.reason.trim(), kind: m.kind };
   state.discountModal = null;
   state.adminError = '';
@@ -17112,6 +17117,32 @@ function saveDiscountModal() {
   render();
 }
 function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); render(); }
+// MONEY OFF (or on) THE PICKED LINES ONLY. A percent works on each line's
+// price; a dollar amount comes off each picked line. Sent lines reprice on
+// the server (the same 'reprice' the line editor uses, so the old price and
+// the reason ride with the line); cart lines change in place.
+async function applyLineDiscount(m, value) {
+  const sign = m.kind === 'surcharge' ? 1 : -1;
+  const priceOf = (p) => Math.max(0, Math.round((p + sign * (m.type === 'percent' ? p * value / 100 : value)) * 100) / 100);
+  const reason = (m.reason || '').trim() || (m.type === 'percent' ? `${sign < 0 ? '−' : '+'}${value}%` : `${sign < 0 ? '−' : '+'}${money(value)}`);
+  const lines = billLines().filter(l => m.lines.includes(l.key));
+  const o = activeOpenOrder();
+  state.discountModal = null; state.adminError = '';
+  try {
+    for (const l of lines) {
+      const np = priceOf(l.price);
+      l.cart.forEach(i => { const c = state.cart[i]; if (!c) return; if (c.origPrice === undefined) c.origPrice = c.price; c.price = np; c.discountReason = reason; });
+      for (const match of l.sent) {
+        if (!o) break;
+        await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ match, action: 'reprice', newPrice: np, reason, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      }
+    }
+    if (o) await refreshOrders();
+    state.toast = `${lines.length === 1 ? '1 line' : lines.length + ' lines'} ${sign < 0 ? 'discounted' : 'surcharged'}`;
+  } catch (e) { state.toast = 'Could not change the lines'; }
+  render(); armToastTimer(2000);
+}
 // A discount or surcharge put on before anything is rung sticks to the
 // ACCOUNT — it lives on the table like covers do, comes back with the table,
 // and leaves with the sitting (owner, Sep '26: "add surcharges or discounts
@@ -20252,26 +20283,41 @@ function toggleDocketPin(key) {
 // contents change (owner-asked, Aug '26).
 // The bill's body — lines and money — shared by the side panel (tablet) and
 // the card at the top of the phone's pay pane. ONE bill, two homes.
-function billBodyHtml() {
+// Everything the table is being charged for, one line per name + seat +
+// price: what's been sent, plus anything still in the cart that will go on
+// the same bill. Each line remembers the sent items it stands for (a match
+// the server understands) and the cart lines, so a discount can land on it.
+function billLines() {
   const openOrder = activeOpenOrder();
+  const lines = [];
+  const add = (it, cartIdx) => {
+    const key = `${it.name}|${it.seat || ''}|${it.price}`;
+    let l = lines.find(x => x.key === key);
+    if (!l) { l = { key, name: it.name, seat: it.seat, price: it.price, qty: 0, sent: [], cart: [] }; lines.push(l); }
+    l.qty += it.qty;
+    if (cartIdx === undefined) {
+      const m = { name: it.name, seat: it.seat == null ? null : it.seat, note: it.note || '', price: it.price, course: it.course || 1 };
+      if (!l.sent.some(x => sentItemMatches(x, m))) l.sent.push(m);
+    } else l.cart.push(cartIdx);
+  };
+  if (openOrder && openOrder.rounds) openOrder.rounds.forEach(r => (r.items || []).forEach(it => add(it)));
+  state.cart.forEach((it, i) => add(it, i));
+  return lines;
+}
+// opts.pick: the lines are PICKABLE (the Discount page) — a picked line
+// wears the one band, and the discount goes on the picked lines only.
+function billBodyHtml(opts) {
+  const pick = !!(opts && opts.pick);
+  const picked = (state.discountModal && state.discountModal.lines) || [];
   const sub = cartSubtotal(), discountAmount = cartDiscountAmount(), tax = cartTax();
   const tip = cartTipAmount(), grand = cartGrandTotal();
   const t = taxCfg();
-  // Everything the table is being charged for: what's been sent, plus anything
-  // still in the cart that will go on the same bill.
-  const lines = [];
-  const add = (it) => {
-    const key = `${it.name}|${it.seat || ''}|${it.price}`;
-    const found = lines.find(l => l.key === key);
-    if (found) found.qty += it.qty; else lines.push({ key, name: it.name, seat: it.seat, price: it.price, qty: it.qty });
-  };
-  if (openOrder && openOrder.rounds) openOrder.rounds.forEach(r => (r.items || []).forEach(add));
-  state.cart.forEach(add);
+  const lines = billLines();
   const seatWord = (n) => `${state.settings.seatPrefix || 'Seat'} ${n}`;
   return `
     <div class="bill-lines">
       ${lines.length ? lines.map(l => `
-        <div class="bill-line">
+        <div class="bill-line${pick && picked.includes(l.key) ? ' picked' : ''}"${pick ? ` data-act="pick-bill-line" data-key="${esc(l.key)}"` : ''}>
           <span class="bl-q">${l.qty}</span>
           <span class="bl-n">${esc(l.name)}${typeof l.seat === 'number' ? `<span class="bl-s">${esc(seatWord(l.seat))}</span>` : ''}</span>
           <span class="bl-p">${money(l.price * l.qty)}</span>
@@ -20855,10 +20901,18 @@ function renderDiscountFields(hideApply) {
     </div>`}`;
 }
 function renderDiscountMiddle() {
+  const n = ((state.discountModal && state.discountModal.lines) || []).length;
   return `
   <div class="middle-view">
 
     <div class="pay-pane" style="padding:8px 20px 24px;">
+      ${/* The bill, with pickable lines (owner, Sep '26: "highlight one or more
+            items to be discounted"). Nothing picked = the whole bill, as before. */ ''}
+      <div class="pay-bill">
+        <div class="bill-title">${state.table ? `Table ${esc(String((findTableById(state.table) || {}).label || state.table))}` : 'The bill'}</div>
+        ${billBodyHtml({ pick: true })}
+      </div>
+      <div class="ts" style="margin:0 0 12px;font-weight:700;">${n ? `${n} line${n === 1 ? '' : 's'} picked` : 'Whole bill — tap a line to pick'}</div>
       ${renderDiscountFields(true)}
       <div class="pane-actions">
         <button class="icon-action neutral" data-act="close-discount-modal">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
@@ -39309,6 +39363,7 @@ function handleActClick(el, e) {
       else if (act === 'discount-type') { state.discountModal.type = el.dataset.val; render(); }
       else if (act === 'discount-kind') { state.discountModal.kind = el.dataset.val; render(); }
       else if (act === 'pick-discount-preset') { pickDiscountPreset(el.dataset.id); }
+      else if (act === 'pick-bill-line') { const m = state.discountModal; if (m) { m.lines = m.lines || []; const k = el.dataset.key; m.lines = m.lines.includes(k) ? m.lines.filter(x => x !== k) : m.lines.concat(k); render(); } }
       else if (act === 'save-discount-modal') { saveDiscountModal(); }
       else if (act === 'toggle-notes-panel') { toggleNotesPanel(); }
       else if (act === 'close-notes-panel') { closeNotesPanel(); }

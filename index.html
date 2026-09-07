@@ -4178,6 +4178,9 @@ body[data-theme="dark"] .qty-pop.num-pad .covers-pad-key, body[data-theme="dark"
      design and floor layout"): white, the tabs on top, the paper centred on
      its desk below. The desk is the part that scrolls when the paper is long. */
   .papers-split .paper-stage{ position:static; }
+  /* Table status: six sample tables, painted by the floor's own marker, in
+     their own little rooms (owner, Sep '26). */
+  .tstatus-split .tstatus-stage{ position:static; }
   .papers-split .paper-desk{ display:flex; justify-content:center; align-items:flex-start; overflow:auto; max-height:calc(100dvh - 150px); }
 }
 /* The preview stays pinned while the controls scroll beneath it, so every
@@ -4794,6 +4797,15 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .admin-content:has(.fp-split) .fp-rail-side{ flex:1; min-height:0; overflow-y:auto;
     margin-top:calc(-1 * var(--r-surface)); padding:calc(var(--r-surface) + 8px) 0 24px; }
 }
+
+/* §§ Table status: the preview
+   One table in every state, drawn by the floor's own marker in a little room
+   each, so a colour or wash change shows here the moment it is made. */
+.ts-samples{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; padding:12px 0 4px; }
+.ts-sample{ display:flex; flex-direction:column; align-items:center; gap:12px; }
+.ts-sample-floor{ position:relative; width:132px; height:132px; border-radius:var(--r-control); background:var(--steel-100); }
+.ts-sample-name{ font-weight:700; font-size:var(--fs-md); text-align:center; }
+@media (max-width:768px){ .ts-samples{ gap:8px; } .ts-sample-floor{ width:96px; height:96px; } }
 
 /* §§ Knocking money off one line
    The old price stays on the line, struck through; the discount itself is
@@ -28399,79 +28411,107 @@ function renderScreenAdmin() {
 // TABLE STATUS is its own page (owner, Sep '26: "should this belong in its
 // own category?" — yes: Floor layout builds the room, this is how tables
 // behave in service). It was a folded card at the foot of Floor layout.
+// The page wears the Design page's shape (owner, Sep '26: "apply this preview
+// window with options to other parts of admin, eg the table states"): a
+// preview card with one table in every state on the left, the settings in
+// numbered cards down the right. Every change re-renders, so the preview
+// follows it at once.
+const TABLE_STATUS_SAMPLES = [
+  ['Free', {}], ['Open tab', { open: true }], ['Bill printed', { open: true, billPrinted: true }],
+  ['In use — another till', { lock: true }], ['Running long', { open: true, called: 'warn' }], ['Over', { open: true, called: 'over' }],
+];
+// Six sample tables painted by the floor's own marker (floorTableMarker): the
+// live orders and locks are swapped for the samples' for the length of ONE
+// synchronous render and put straight back, so the preview can never leak
+// into the real floor and the floor's code is never copied.
+function renderTableStatusPreview() {
+  const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+  const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
+  const now = Date.now();
+  const keep = { orders: state.orders, locks: state.tableLocks };
+  const tables = TABLE_STATUS_SAMPLES.map(([, s], i) => ({ id: 'sample-' + i, type: 'table', label: 'ABCDEF'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4 }));
+  state.orders = TABLE_STATUS_SAMPLES.map(([, s], i) => s.open ? {
+    id: 'sample-order-' + i, status: 'open', orderType: 'dine-in', table: 'ABCDEF'[i], covers: 2, billPrinted: !!s.billPrinted,
+    items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: now - 30 * 60000 }], createdAt: now - 30 * 60000,
+    calledAwayAt: s.called === 'warn' ? now - Math.round((warn + over) / 2) * 60000 : s.called === 'over' ? now - (over + 5) * 60000 : undefined,
+  } : null).filter(Boolean);
+  state.tableLocks = { 'sample-3': { staff: 'Sam', device: 'another-till' } };
+  try {
+    return `<div class="ts-samples">${tables.map((t, i) => `
+      <div class="ts-sample"><div class="floor-canvas ts-sample-floor">${floorTableMarker(t, { height: STD_FLOOR_H })}</div><div class="ts-sample-name">${esc(TABLE_STATUS_SAMPLES[i][0])}</div></div>`).join('')}</div>`;
+  } finally { state.orders = keep.orders; state.tableLocks = keep.locks; }
+}
 function renderTableStatusAdmin() {
-  // An honest legend: what the floor ACTUALLY paints. Washes are
-  // translucent so the table's own finish shows through.
-  return `
-  <div class="settings-card">
-    <div class="th" style="margin:0 0 14px;">Status colours &amp; timers</div>
-    ${`
-    <div class="pay-options" style="margin-bottom:14px;">
-      ${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}
-    </div>
-    ${(() => {
-      const sc = state.settings.tableStatusColors || {};
-      // Show the colour the floor ACTUALLY paints: the custom one if set, else
-      // the fixed default for that status — never a blank dot.
-      const row = (key, fallback, label) => `
+  const sc = state.settings.tableStatusColors || {};
+  // Show the colour the floor ACTUALLY paints: the custom one if set, else
+  // the fixed default for that status — never a blank dot.
+  const row = (key, fallback, label) => `
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
         ${colorDotButton('table-status', key, sc[key] || null, { bg: sc[key] || fallback, title: 'Change colour' })}
         <div style="font-weight:700;font-size:var(--fs-md);">${label}</div>
       </div>`;
-      return row('occupied', '#34C759', 'Open tab — active')
+  const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
+  const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
+  const t2 = parseFloat(state.settings.spendBand2) > 0 ? parseFloat(state.settings.spendBand2) : 25;
+  const t3 = parseFloat(state.settings.spendBand3) > 0 ? parseFloat(state.settings.spendBand3) : 45;
+  const inp = (key, val) => `<input type="number" min="1" max="9999" step="1" value="${val}" class="num-field" onblur="saveTicketSetting({ ${key}: Math.max(1, parseInt(this.value,10)||0) })">`;
+  const spendStyle = ['total', 'perhead'].includes(state.settings.spendPillStyle) ? state.settings.spendPillStyle : 'bands';
+  return `
+  <div class="design-split tstatus-split">
+    <div class="settings-card mock-card tstatus-stage">
+      ${renderTableStatusPreview()}
+      <div class="ts" style="text-align:center;margin-top:8px;">how the floor shows each table</div>
+    </div>
+    <div class="screen-ctl-scroll">
+      <div class="settings-card">
+        <div class="th" style="margin-bottom:12px;">1 · Colours</div>
+        <div class="pay-options" style="margin-bottom:14px;">${togglePill(state.settings.floorStatusEnabled !== false, 'set-floor-status')}</div>
+        ${row('occupied', '#34C759', 'Open tab — active')
         + row('billPrinted', 'var(--blue)', 'Bill printed')
         + row('locked', '#FF9500', 'In use — another till')
         + row('pillWarn', '#FFCC00', 'Pill — running long')
-        + row('pillDanger', '#FF3B30', 'Pill — over')
-        + (() => {
-          const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-          const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
-          return `
-      <div style="display:flex;align-items:center;gap:12px;margin:6px 0 14px;flex-wrap:wrap;">
-        <div style="display:flex;align-items:center;gap:8px;">
-          <label class="field-label" style="margin:0;">Running long after</label>
-          <input type="number" min="0" max="180" step="1" value="${warn}" class="num-field" onblur="saveTicketSetting({ pillWarnMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+        + row('pillDanger', '#FF3B30', 'Pill — over')}
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+          <div style="font-weight:700;font-size:var(--fs-md);">Wash strength</div>
+          <div class="seg">
+            ${[['0.32', 'Soft'], ['0.5', 'Medium'], ['0.65', 'Strong'], ['0.78', 'Pop']].map(([v, l]) => `<button class="${String(washOpacity()) === v ? 'active' : ''}" data-act="set-wash-opacity" data-val="${v}">${l}</button>`).join('')}
+          </div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <label class="field-label" style="margin:0;">Over after</label>
-          <input type="number" min="0" max="240" step="1" value="${over}" class="num-field" onblur="saveTicketSetting({ courseWaitMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
-        </div>
-      </div>`;
-        })()
-        + `
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
-        <div style="font-weight:700;font-size:var(--fs-md);">Wash strength</div>
-        <div class="seg">
-          ${[['0.32', 'Soft'], ['0.5', 'Medium'], ['0.65', 'Strong'], ['0.78', 'Pop']].map(([v, l]) => `<button class="${String(washOpacity()) === v ? 'active' : ''}" data-act="set-wash-opacity" data-val="${v}">${l}</button>`).join('')}
-        </div>
-      </div>`;
-    })()}
-    <div class="th" style="margin:16px 0 10px;">Timers &amp; number</div>
-    <div style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px;">
-      ${tableTimerControls()}
-    </div>
-    <div class="th" style="margin:16px 0 10px;">Spend pill</div>
-    <div class="pay-options" style="margin-bottom:12px;">
-      ${[['bands', '$ bands'], ['total', 'Total'], ['perhead', 'Per head']].map(([v, l]) => `<div class="pay-opt ${(['total', 'perhead'].includes(state.settings.spendPillStyle) ? state.settings.spendPillStyle : 'bands') === v ? 'active' : ''}" data-act="set-spend-style" data-val="${v}">${l}</div>`).join('')}
-    </div>
-    ${['total', 'perhead'].includes(state.settings.spendPillStyle) ? '' : (() => {
-      const t2 = parseFloat(state.settings.spendBand2) > 0 ? parseFloat(state.settings.spendBand2) : 25;
-      const t3 = parseFloat(state.settings.spendBand3) > 0 ? parseFloat(state.settings.spendBand3) : 45;
-      const inp = (key, val) => `<input type="number" min="1" max="9999" step="1" value="${val}" class="num-field" onblur="saveTicketSetting({ ${key}: Math.max(1, parseInt(this.value,10)||0) })">`;
-      return `
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
-      <div style="display:flex;align-items:center;gap:8px;">
-        <label class="field-label" style="margin:0;">$ from</label>${inp('spendBand2', t2)}<span class="ts">per head</span>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;">
-        <label class="field-label" style="margin:0;">$$ from</label>${inp('spendBand3', t3)}<span class="ts">per head</span>
+      <div class="settings-card">
+        <div class="th" style="margin-bottom:12px;">2 · Timers</div>
+        <div style="display:flex;flex-direction:column;gap:12px;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label class="field-label" style="margin:0;">Running long after</label>
+            <input type="number" min="0" max="180" step="1" value="${warn}" class="num-field" onblur="saveTicketSetting({ pillWarnMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label class="field-label" style="margin:0;">Over after</label>
+            <input type="number" min="0" max="240" step="1" value="${over}" class="num-field" onblur="saveTicketSetting({ courseWaitMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+          </div>
+          ${tableTimerControls()}
+        </div>
       </div>
-    </div>`;
-    })()}
-    <div class="th" style="margin:16px 0 10px;">One till per table</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.tableLockEnabled !== false, 'set-table-lock')}
-    </div>`}
+      <div class="settings-card">
+        <div class="th" style="margin-bottom:12px;">3 · Spend pill</div>
+        <div class="pay-options" style="margin-bottom:12px;">
+          ${[['bands', '$ bands'], ['total', 'Total'], ['perhead', 'Per head']].map(([v, l]) => `<div class="pay-opt ${spendStyle === v ? 'active' : ''}" data-act="set-spend-style" data-val="${v}">${l}</div>`).join('')}
+        </div>
+        ${spendStyle === 'bands' ? `
+        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label class="field-label" style="margin:0;">$ from</label>${inp('spendBand2', t2)}<span class="ts">per head</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;">
+            <label class="field-label" style="margin:0;">$$ from</label>${inp('spendBand3', t3)}<span class="ts">per head</span>
+          </div>
+        </div>` : ''}
+      </div>
+      <div class="settings-card">
+        <div class="th" style="margin-bottom:12px;">4 · One till per table</div>
+        <div class="pay-options">${togglePill(state.settings.tableLockEnabled !== false, 'set-table-lock')}</div>
+      </div>
+    </div>
   </div>`;
 }
 // §§ Quantity and covers pads
@@ -29816,6 +29856,27 @@ async function doMoveItems(targetTableId) {
   armToastTimer(2500);
 }
 
+// ONE TABLE ON THE TILL'S FLOOR — its wash, lock, pill and ring, from the live
+// state. The Table status page draws its samples with this same function, so
+// what the preview shows is what the floor paints (owner, Sep '26).
+function floorTableMarker(t, fp) {
+  const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
+  const cs = tableCourseStatus(t.label);
+  // Status grammar: glow halo = needs a human, soft wash = ticking
+  // along (tableStatusFx). Bill's inset edge only without a glow.
+  const fx = tableStatusFx(t, cs, lock);
+  const billEdge = fx.ring || '';
+  return `
+  <div class="floor-marker${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
+    ${fx.wash}
+    ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
+    ${mvSrcBadge(t)}
+    ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
+    ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
+    ${transferFxHtml(t)}
+  </div>`;
+}
+
 function renderTablePickerMiddle() {
   const fp = state.floorPlans.find(f => f.id === state.pickerFloorPlanId) || state.floorPlans[0];
   return `
@@ -29891,23 +29952,7 @@ function renderTablePickerMiddle() {
       <div class="floor-canvas" style="position:relative;--fc-ar:${(roomH / roomW).toFixed(4)};--fc-arw:${(roomW / roomH).toFixed(4)};width:var(--fc-base);aspect-ratio:${roomW.toFixed(2)} / ${roomH.toFixed(2)};border-radius:var(--r-control);">
         ${fp.tables.filter(t => t.type === 'decor').map(t => hugObject(t, hug)).map(t => `
           <div class="floor-marker" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
-        ${fp.tables.filter(t => t.type !== 'decor').map(t => hugObject(t, hug)).map(t => {
-          const lock = tableLocksOn() ? tableLockedBy(t.id) : null;
-          const cs = tableCourseStatus(t.label);
-          // Status grammar: glow halo = needs a human, soft wash = ticking
-          // along (tableStatusFx). Bill's inset edge only without a glow.
-          const fx = tableStatusFx(t, cs, lock);
-          const billEdge = fx.ring || '';
-          return `
-          <div class="floor-marker${(state.transferMode ? state.transferFrom === t.id : state.table === t.id) ? ' mk-sel' : ''}${state.transferMode && state.transferFrom === t.id ? ' mv-src' : ''}${fx.glow ? ' tbl-glow' : ''}${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}" style="${shapeStyle(t, state.transferMode ? state.transferFrom === t.id : state.table === t.id)}${billEdge}${fx.glow}">
-            ${fx.wash}
-            ${lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(lock.staff)}</span>` : tableResChip(t)}
-            ${mvSrcBadge(t)}
-            ${state.floorStatusView === 'guests' ? tableMarksHtml(t) : ''}
-            ${floorMarkerInner(t, fp.height, { noPill: !!lock })}
-            ${transferFxHtml(t)}
-          </div>`;
-        }).join('')}
+        ${fp.tables.filter(t => t.type !== 'decor').map(t => hugObject(t, hug)).map(t => floorTableMarker(t, fp)).join('')}
         ${fp.tables.filter(t => t.type !== 'decor').length === 0 ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--charcoal-soft);font-size:var(--fs-md);">No tables set up yet.</div>` : ''}
       </div>`; })()}
       </div>` : `<div class="ts" style="margin-top:10px;">No floor plan layouts yet.</div>`}`}
@@ -32886,6 +32931,11 @@ document.addEventListener('touchstart', (e) => {
 // non-passive touchmove on the document made every scroll in the app wait
 // for the main thread (owner, Sep '26: "jitters and lags").
 function _tpPinchMove(e) {
+  // A table being carried takes the finger: the room must not scroll under
+  // it (owner, Sep '26: "hold and drag sometimes moves the floor with the
+  // table" — on the phone a table's own touch-action lets the map pan, and
+  // the browser only reads that at the touch's start, before the hold).
+  if (floorDrag && !floorDrag.pending && e.touches.length === 1) { e.preventDefault(); return; }
   if (!_tpPinch || e.touches.length !== 2) return;
   e.preventDefault(); // the browser must neither scroll nor page-zoom mid-pinch
   const [a, b] = e.touches;

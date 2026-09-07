@@ -7065,6 +7065,7 @@ const RULE_FIELDS = {
   weekday: { label: 'Day', kind: 'choice', ops: ['is', 'isnot'] },
   holiday: { label: 'Public holiday', kind: 'choice', ops: ['is'] },
   time: { label: 'Time of day', kind: 'time', ops: ['between'] },
+  date: { label: 'Date', kind: 'date', ops: ['is', 'between'] }, // one day, or a first-to-last run of days (owner, Sep '26)
   table: { label: 'Table', kind: 'choice', ops: ['is', 'isnot'] },
 };
 // Copies just the WHEN half of a preset off a request body.
@@ -7091,6 +7092,10 @@ function conditionError(r) {
   } else if (f.kind === 'time') {
     const ok = v => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || ''));
     if (!ok(r.value1) || !ok(r.value2)) return 'Enter both times as HH:MM';
+  } else if (f.kind === 'date') {
+    const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')) && !isNaN(new Date(v + 'T00:00:00').getTime());
+    if (!ok(r.value1)) return 'Pick a date';
+    if (r.op === 'between' && (!ok(r.value2) || r.value2 < r.value1)) return 'Pick a last date on or after the first';
   } else if (r.value1 === '' || r.value1 === null || r.value1 === undefined) {
     return 'Pick a value to match';
   }
@@ -17254,7 +17259,7 @@ function publicHolidayToday(now) {
 // nothing. The operators come from the server (state.ruleFields).
 const RULE_FIELD_LABELS = {
   covers: 'Guests', subtotal: 'Bill total', orderType: 'Order type',
-  weekday: 'Day', holiday: 'Public holiday', time: 'Time of day', table: 'Table',
+  weekday: 'Day', holiday: 'Public holiday', time: 'Time of day', date: 'Date', table: 'Table',
 };
 const RULE_OP_LABELS = {
   atleast: 'is at least', atmost: 'is at most', is: 'is', isnot: 'is not', between: 'is between',
@@ -17265,6 +17270,7 @@ function ruleFieldKind(field) {
   if (field === 'covers') return 'number';
   if (field === 'subtotal') return 'money';
   if (field === 'time') return 'time';
+  if (field === 'date') return 'date';
   return 'choice';
 }
 function ruleFieldOps(field) {
@@ -17273,6 +17279,7 @@ function ruleFieldOps(field) {
   const k = ruleFieldKind(field);
   if (k === 'number' || k === 'money') return ['atleast', 'atmost', 'is'];
   if (k === 'time') return ['between'];
+  if (k === 'date') return ['is', 'between'];
   if (field === 'holiday') return ['is'];
   return ['is', 'isnot'];
 }
@@ -17305,9 +17312,20 @@ function ruleWhenText(r) {
     case 'weekday': return `${on} ${choice()}s`;
     case 'holiday': return String(r.value1) === 'yes' ? 'On public holidays' : 'On normal days';
     case 'time': return `Between ${r.value1 || '--:--'} and ${r.value2 || '--:--'}`;
+    case 'date': return r.op === 'between' ? `From ${ruleDateText(r.value1)} to ${ruleDateText(r.value2)}` : `On ${ruleDateText(r.value1)}`;
     case 'table': return `${on} ${n}`;
     default: return '—';
   }
+}
+// A stored date (YYYY-MM-DD) read back the way a person says it.
+function ruleDateText(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(v || ''));
+  if (!m) return '—';
+  return new Date(+m[1], +m[2] - 1, +m[3]).toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+// Today as the rule stores it — the till's own calendar day, never UTC's.
+function ruleDateKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 // The money, signed: on goes up, off comes down.
 function presetAmountChip(r) {
@@ -17345,6 +17363,13 @@ function ruleMatches(r, now) {
     case 'weekday': return same(now.getDay(), r.value1, r.op);
     case 'holiday': return same(publicHolidayToday(now) ? 'yes' : 'no', r.value1, 'is');
     case 'table': return same(state.table || '', r.value1, r.op);
+    case 'date': {
+      const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+      const today = ruleDateKey(now);
+      if (!ok(r.value1)) return false;
+      if (r.op === 'between') return ok(r.value2) && today >= r.value1 && today <= r.value2;
+      return today === r.value1;
+    }
     case 'time': {
       const mins = now.getHours() * 60 + now.getMinutes();
       const parse = v => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
@@ -25971,6 +25996,11 @@ function renderDiscountPresetModal() {
         <input id="preset-when-value1-input" type="time" value="${esc(m.value1 || '')}" style="flex:1;">
         <span class="ts">and</span>
         <input id="preset-when-value2-input" type="time" value="${esc(m.value2 || '')}" style="flex:1;">
+      </div>` : ruleFieldKind(m.field) === 'date' ? `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <input id="preset-when-value1-input" type="date" value="${esc(m.value1 || '')}" style="flex:1;">
+        ${m.op === 'between' ? `<span class="ts">to</span>
+        <input id="preset-when-value2-input" type="date" value="${esc(m.value2 || '')}" style="flex:1;">` : ''}
       </div>` : ruleFieldKind(m.field) === 'choice' ? `
       <select class="pp-select" style="margin-top:8px;" data-act="preset-when-value1">
         ${ruleChoices(m.field).length === 0 ? `<option value="">Nothing to pick yet</option>` : ''}
@@ -34135,6 +34165,7 @@ function setPresetWhenField(field) {
   m.op = ruleFieldOps(field)[0];
   const kind = ruleFieldKind(field);
   if (kind === 'time') { m.value1 = '17:00'; m.value2 = '19:00'; }
+  else if (kind === 'date') { const t = new Date(); m.value1 = ruleDateKey(t); m.value2 = ruleDateKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 7)); }
   else if (kind === 'choice') { const c = ruleChoices(field); m.value1 = c.length ? String(c[0][0]) : ''; m.value2 = ''; }
   else { m.value1 = ''; m.value2 = ''; }
   render();

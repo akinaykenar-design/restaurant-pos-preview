@@ -4803,9 +4803,26 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    each, so a colour or wash change shows here the moment it is made. */
 .ts-samples{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; padding:12px 0 4px; }
 .ts-sample{ display:flex; flex-direction:column; align-items:center; gap:12px; }
-.ts-sample-floor{ position:relative; width:132px; height:132px; border-radius:var(--r-control); background:var(--steel-100); }
+.ts-sample-floor{ position:relative; width:116px; height:116px; border-radius:var(--r-control); background:var(--steel-100); } /* the sample table lands at ~70px — the size a table really is on the till's floor and the phone's (measured, Sep '26) */
 .ts-sample-name{ font-weight:700; font-size:var(--fs-md); text-align:center; }
-@media (max-width:768px){ .ts-samples{ gap:8px; } .ts-sample-floor{ width:96px; height:96px; } }
+/* The tables and the pills are two images: four table states, then every chip
+   a table can wear on its own (owner, Sep '26). */
+.ts-samples-4{ grid-template-columns:repeat(4,1fr); }
+.ts-group-name{ font-weight:700; font-size:var(--fs-md); color:var(--charcoal-soft); margin-top:12px; }
+.ts-group-name:first-child{ margin-top:0; }
+.ts-pill-box{ position:relative; min-height:44px; display:flex; align-items:center; justify-content:center; }
+.ts-pill-box .tbl-cpill, .ts-pill-box .tbl-res, .ts-pill-box .tbl-marks{ position:static; transform:none; }
+/* TRUE TO THE FLOOR: the map wears the picker's own pill rules (12 on the
+   number), so the preview wears them too — it read a size bigger otherwise
+   (owner, Sep '26: "are these size accurate previews"). */
+/* One block per pill clock: a hairline between them, never above the first. */
+.ts-clock{ border-top:1px solid var(--steel-200); padding-top:12px; margin-top:4px; }
+.ts-clock:first-of-type{ border-top:none; padding-top:0; }
+.ts-lens-row{ touch-action:pan-y; }
+.ts-lens-row .ts-lens-chip{ cursor:grab; }
+.ts-pill-box .tbl-cpill b{ font-size:12px; }
+.ts-pill-box .tbl-cpill i{ width:12px; height:12px; }
+@media (max-width:768px){ .ts-samples{ gap:6px; } .ts-samples-4{ grid-template-columns:repeat(2,1fr); } } /* four 116s do not fit a phone's width — two up */
 
 /* §§ Knocking money off one line
    The old price stays on the line, struck through; the discount itself is
@@ -7389,6 +7406,19 @@ app.put('/api/settings', (req, res) => {
   if (req.body.tileColors !== undefined) data.settings.tileColors = !!req.body.tileColors;
   if (req.body.floorStatusEnabled !== undefined) data.settings.floorStatusEnabled = !!req.body.floorStatusEnabled;
   if (req.body.floorPillEnabled !== undefined) data.settings.floorPillEnabled = !!req.body.floorPillEnabled;
+  // Each pill clock keeps its own two minutes.
+  for (const k of ['seatedWarnMinutes', 'idleWarnMinutes', 'idleOverMinutes']) {
+    if (req.body[k] !== undefined) { const n = parseInt(req.body[k], 10); if (!isNaN(n)) data.settings[k] = Math.max(0, Math.min(600, n)); }
+  }
+  // The floor's lens menu, in the venue's own order. Only the lenses the app
+  // knows, each once — a typo can never hide one.
+  if (req.body.floorLensOrder !== undefined) {
+    const known = ['booked', 'guests', 'course', 'sitting', 'attention', 'spend'];
+    const seen = new Set();
+    const order = (Array.isArray(req.body.floorLensOrder) ? req.body.floorLensOrder : [])
+      .map(String).filter(k => known.includes(k) && !seen.has(k) && seen.add(k));
+    data.settings.floorLensOrder = order.length ? order : undefined;
+  }
   if (req.body.askVoidReason !== undefined) data.settings.askVoidReason = !!req.body.askVoidReason; // off by default: a removal just goes (owner, Sep '26)
   if (req.body.washOpacity !== undefined) { const w = parseFloat(req.body.washOpacity); data.settings.washOpacity = (w > 0 && w <= 1) ? w : null; }
   if (req.body.askSeatOff !== undefined) {
@@ -27286,19 +27316,6 @@ function renderSimpleTablesAdmin() {
 
 // The timing / number-size settings for tables — shared between simple mode's
 // setup card and floor mode's ⚙ Options drawer (set once, then out of the way).
-function tableTimerControls() {
-  // ONE number: the sitting length. It scales the seated pill (green →
-  // yellow → red) and counts the sitting down on the docket. A second
-  // "table colour timer" fed the same scale until Sep '26 — two settings,
-  // one job — and is gone.
-  return `
-      <div style="display:flex;align-items:center;gap:8px;">
-        <label class="field-label" style="margin:0;">Sitting length</label>
-        <button class="icon-sq" data-act="step-sitting" data-dir="-1">−</button>
-        <span class="ts" style="min-width:44px;text-align:center;font-weight:700;">${state.settings.seatingMinutes ? state.settings.seatingMinutes + 'm' : 'Off'}</span>
-        <button class="icon-sq" data-act="step-sitting" data-dir="1">＋</button>
-      </div>`;
-}
 
 // "Saved layouts": named snapshots of where everything sits on THIS floor —
 // the floor editor's twin of the designers' "My designs" strip. Tap a card to
@@ -28418,33 +28435,87 @@ function renderScreenAdmin() {
 // the bill (owner, Sep '26: "what about the sequence"). "Idle" counts minutes
 // since the last order — it was "Attention", which the word didn't say.
 const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Guests'], ['course', 'Course'], ['sitting', 'Seated'], ['attention', 'Idle'], ['spend', 'Spend']];
-const TABLE_STATUS_SAMPLES = [
-  ['Free', {}], ['Open tab', { open: true }], ['Bill printed', { open: true, billPrinted: true }],
-  ['In use — another till', { lock: true }], ['Running long', { open: true, called: 'warn' }], ['Over', { open: true, called: 'over' }],
+// THE ORDER IS THE VENUE'S (owner, Sep '26: drag the chips, and the floor's
+// menu follows). A saved order is honoured, anything it doesn't name keeps
+// its place at the end — so a lens added later still appears.
+function floorLenses() {
+  const saved = state.settings.floorLensOrder;
+  if (!Array.isArray(saved) || !saved.length) return FLOOR_LENSES;
+  const by = new Map(FLOOR_LENSES.map(l => [l[0], l]));
+  const out = saved.map(k => by.get(k)).filter(Boolean);
+  FLOOR_LENSES.forEach(l => { if (!out.includes(l)) out.push(l); });
+  return out;
+}
+function commitFloorLensOrder(units) {
+  const order = units.map(u => u.dataset.val).filter(Boolean);
+  if (order.length !== FLOOR_LENSES.length) return;
+  state.settings.floorLensOrder = order;
+  saveTicketSetting({ floorLensOrder: order });
+}
+// TWO IMAGES, BECAUSE THEY ARE TWO THINGS (owner, Sep '26: "separate view for
+// tables from pills, separate image for just pills"). The tables show their
+// paint with no pill on them; the pills show every chip a table can wear,
+// the marks included — the VIP star and the allergy !.
+const TABLE_STATE_SAMPLES = [
+  ['Free', {}], ['Open tab', { open: true }], ['Bill printed', { open: true, billPrinted: true }], ['In use — another till', { lock: true }],
 ];
-// Six sample tables painted by the floor's own marker (floorTableMarker): the
-// live orders and locks are swapped for the samples' for the length of ONE
-// synchronous render and put straight back, so the preview can never leak
-// into the real floor and the floor's code is never copied.
+const TABLE_PILL_SAMPLES = [
+  ['Fine', { open: true }], ['Running long', { open: true, called: 'warn' }], ['Over', { open: true, called: 'over' }],
+  ['Booked soon', { res: true }], ['VIP', { vip: true }], ['Allergy', { allergy: true }],
+];
+// The samples are drawn by the floor's OWN code: the live orders, locks and
+// bookings are swapped for the samples' for the length of one synchronous
+// render and put straight back, so nothing can leak onto the real floor.
+function _withSampleFloor(orders, locks, reservations, fn) {
+  const keep = { o: state.orders, l: state.tableLocks, r: state.reservations, p: state.settings.floorPillEnabled };
+  state.orders = orders; state.tableLocks = locks; state.reservations = reservations;
+  try { return fn(); } finally { state.orders = keep.o; state.tableLocks = keep.l; state.reservations = keep.r; state.settings.floorPillEnabled = keep.p; }
+}
+function _sampleOrder(label, s, now, warn, over) {
+  if (!s.open) return null;
+  return {
+    id: 'sample-order-' + label, status: 'open', orderType: 'dine-in', table: label, covers: 2, billPrinted: !!s.billPrinted,
+    items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: now - 30 * 60000 }], createdAt: now - 30 * 60000,
+    calledAwayAt: s.called === 'warn' ? now - Math.round((warn + over) / 2) * 60000 : s.called === 'over' ? now - (over + 5) * 60000 : undefined,
+  };
+}
 function renderTableStatusPreview() {
   const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
   const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
   const now = Date.now();
-  const keep = { orders: state.orders, locks: state.tableLocks };
-  // The samples wear what the venue's own tables wear (paint or finish), so
-  // a free table in the preview looks like a free table on the floor.
+  // The samples wear what the venue's own tables wear (paint or finish), so a
+  // free table in the preview looks like a free table on the floor.
   const real = allTables().find(t => t.type !== 'decor') || {};
-  const tables = TABLE_STATUS_SAMPLES.map(([, s], i) => ({ id: 'sample-' + i, type: 'table', label: 'ABCDEF'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4, covers: s.open ? 2 : 0, color: real.color, finish: real.finish }));
-  state.orders = TABLE_STATUS_SAMPLES.map(([, s], i) => s.open ? {
-    id: 'sample-order-' + i, status: 'open', orderType: 'dine-in', table: 'ABCDEF'[i], covers: 2, billPrinted: !!s.billPrinted,
-    items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: now - 30 * 60000 }], createdAt: now - 30 * 60000,
-    calledAwayAt: s.called === 'warn' ? now - Math.round((warn + over) / 2) * 60000 : s.called === 'over' ? now - (over + 5) * 60000 : undefined,
-  } : null).filter(Boolean);
-  state.tableLocks = { 'sample-3': { staff: 'Sam', device: 'another-till' } };
-  try {
-    return `<div class="ts-samples">${tables.map((t, i) => `
-      <div class="ts-sample"><div class="floor-canvas ts-sample-floor">${floorTableMarker(t, { height: STD_FLOOR_H })}</div><div class="ts-sample-name">${esc(TABLE_STATUS_SAMPLES[i][0])}</div></div>`).join('')}</div>`;
-  } finally { state.orders = keep.orders; state.tableLocks = keep.locks; }
+  const cell = (inner, name) => `<div class="ts-sample"><div class="floor-canvas ts-sample-floor">${inner}</div><div class="ts-sample-name">${esc(name)}</div></div>`;
+
+  // 1 — THE TABLES: their paint, no pill on them.
+  const stateTables = TABLE_STATE_SAMPLES.map(([, s], i) => ({ id: 'sample-t' + i, type: 'table', label: 'ABCD'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4, covers: s.open ? 2 : 0, color: real.color, finish: real.finish }));
+  const tables = _withSampleFloor(
+    TABLE_STATE_SAMPLES.map(([, s], i) => _sampleOrder('ABCD'[i], s, now, warn, over)).filter(Boolean),
+    { 'sample-t3': { staff: 'Sam', device: 'another-till' } }, [],
+    () => { state.settings.floorPillEnabled = false; return stateTables.map((t, i) => cell(floorTableMarker(t, { height: STD_FLOOR_H }), TABLE_STATE_SAMPLES[i][0])).join(''); });
+
+  // 2 — THE PILLS: every chip a table can wear, on its own.
+  const pills = TABLE_PILL_SAMPLES.map(([name, s], i) => {
+    const label = 'PQRSTU'[i];
+    const t = { id: 'sample-p' + i, type: 'table', label, covers: 2, allergies: s.allergy ? [{ base: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
+    const inner = _withSampleFloor(
+      [_sampleOrder(label, s, now, warn, over)].filter(Boolean), {},
+      s.res ? [{ id: 'sample-res', tableId: t.id, time: new Date(now + 30 * 60000).toISOString(), status: 'booked' }] : [],
+      () => {
+        state.settings.floorPillEnabled = true;
+        if (s.res) return tableResChip(t);
+        if (s.vip || s.allergy) return tableMarksHtml(t);
+        return floorPillHtml(t, tableCourseStatus(label));
+      });
+    return `<div class="ts-sample"><div class="ts-pill-box">${inner}</div><div class="ts-sample-name">${esc(name)}</div></div>`;
+  }).join('');
+
+  return `
+    <div class="ts-group-name">Tables</div>
+    <div class="ts-samples ts-samples-4">${tables}</div>
+    <div class="ts-group-name">Pills and marks</div>
+    <div class="ts-samples">${pills}</div>`;
 }
 function renderTableStatusAdmin() {
   const sc = state.settings.tableStatusColors || {};
@@ -28466,11 +28537,12 @@ function renderTableStatusAdmin() {
     <div class="settings-card mock-card tstatus-stage">
       ${/* The floor's own lens chips: the preview's pills follow the lens the
             same way the floor's do, through the same handler. */ ''}
-      <div class="seg seg-scroll" style="width:fit-content;max-width:100%;">
-        ${FLOOR_LENSES.map(([v, l]) => `<button class="${(state.floorStatusView || 'sitting') === v ? 'active' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
+      <div class="seg seg-scroll ts-lens-row" style="width:fit-content;max-width:100%;">
+        ${floorLenses().map(([v, l]) => `<button class="ts-lens-chip${(state.floorStatusView || 'sitting') === v ? ' active' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
       </div>
+      <div class="ts" style="margin:-2px 0 6px;">Drag to reorder.</div>
       ${renderTableStatusPreview()}
-      <div class="ts" style="text-align:center;margin-top:8px;">how the floor shows each table</div>
+      <div class="ts" style="text-align:center;margin-top:8px;">what the floor shows on a table</div>
     </div>
     <div class="screen-ctl-scroll">
       ${/* The table's wash and the pill are different things, so they are
@@ -28489,22 +28561,24 @@ function renderTableStatusAdmin() {
           </div>
         </div>
       </div>
+      ${/* COLOUR AND TIME ON ONE ROW (owner, Sep '26), one block per clock:
+            the same yellow and red everywhere, each state's own minutes. */ ''}
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">2 · Pill</div>
-        <div class="pay-options" style="margin-bottom:14px;display:flex;align-items:center;gap:12px;">${togglePill(state.settings.floorPillEnabled !== false, 'set-floor-pill')}<div style="font-weight:700;font-size:var(--fs-md);">Pills on the tables</div></div>
-        ${row('pillWarn', '#FFCC00', 'Running long')
-        + row('pillDanger', '#FF3B30', 'Over')}
-        <div style="display:flex;flex-direction:column;gap:12px;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label class="field-label" style="margin:0;">Running long after</label>
-            <input type="number" min="0" max="180" step="1" value="${warn}" class="num-field" onblur="saveTicketSetting({ pillWarnMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label class="field-label" style="margin:0;">Over after</label>
-            <input type="number" min="0" max="240" step="1" value="${over}" class="num-field" onblur="saveTicketSetting({ courseWaitMinutes: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
-          </div>
-          ${tableTimerControls()}
-        </div>
+        <div class="pay-options" style="margin-bottom:6px;display:flex;align-items:center;gap:12px;">${togglePill(state.settings.floorPillEnabled !== false, 'set-floor-pill')}<div style="font-weight:700;font-size:var(--fs-md);">Pills on the tables</div></div>
+        ${PILL_CLOCKS.map(c => { const m = pillClockMins(c.key); const line = (key, dotKey, dotDef, label, val) => `
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+            ${colorDotButton('table-status', dotKey, sc[dotKey] || null, { bg: sc[dotKey] || dotDef, title: 'Change colour' })}
+            <label class="field-label" style="margin:0;flex:1;">${label}</label>
+            <input type="number" min="0" max="600" step="1" value="${val}" class="num-field" onblur="saveTicketSetting({ ${key}: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+          </div>`;
+          return `
+        <div class="ts-clock">
+          <div style="font-weight:700;font-size:var(--fs-md);">${c.name}</div>
+          <div class="ts" style="margin-bottom:10px;">${c.what}</div>
+          ${line(c.warn, 'pillWarn', '#FFCC00', 'Running long after', m.warn)}
+          ${line(c.over, 'pillDanger', '#FF3B30', 'Over after', m.over)}
+        </div>`; }).join('')}
       </div>
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">3 · Spend pill</div>
@@ -29382,6 +29456,21 @@ function tableMarksHtml(t) {
 function pillDur(mins) {
   return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
 }
+// EVERY CLOCK ITS OWN MINUTES (owner, Sep '26: "times should have different
+// settings depending on states"). Three states count three different things —
+// the kitchen firing, how long they have sat, since their last order — and
+// they shared one pair of numbers, with Idle's fixed at 15 in the code.
+const PILL_CLOCKS = [
+  { key: 'course', name: 'Course', what: 'Since the kitchen was told to fire.', warn: 'pillWarnMinutes', over: 'courseWaitMinutes', warnDef: 10, overDef: 15 },
+  { key: 'sitting', name: 'Seated', what: 'Since the party sat down.', warn: 'seatedWarnMinutes', over: 'seatingMinutes', warnDef: 60, overDef: 90 },
+  { key: 'attention', name: 'Idle', what: 'Since their last order.', warn: 'idleWarnMinutes', over: 'idleOverMinutes', warnDef: 10, overDef: 15 },
+];
+function pillClockMins(key) {
+  const c = PILL_CLOCKS.find(c => c.key === key);
+  const n = (v, d) => { const x = parseInt(v, 10); return isNaN(x) ? d : x; };
+  const over = n(state.settings[c.over], c.overDef);
+  return { warn: n(state.settings[c.warn], Math.min(c.warnDef, Math.round(over * 0.65))), over };
+}
 function floorPillHtml(t, cs) {
   if (state.settings.floorPillEnabled === false) return ''; // pills switched off (owner, Sep '26)
   // The pill follows the lens; its COLOUR is a danger scale — green fine,
@@ -29391,9 +29480,13 @@ function floorPillHtml(t, cs) {
   // Sep '26 mockups).
   const tint = (c) => `background:color-mix(in srgb, ${c} 18%, var(--surface));color:color-mix(in srgb, ${c} 64%, var(--text-primary));`;
   const solid = (c) => `background:${c};color:${contrastTextColor(c)};`;
-  const sev = (ratio) => {
-    if (ratio < 0.65) return ''; // fine — the quiet green chip
-    return ratio >= 1 ? solid(statusColor('pillDanger', '#FF3B30')) : tint(statusColor('pillWarn', '#FFCC00'));
+  // Yellow at "running long", red at "over" — the same two colours on every
+  // clock, each clock's own minutes.
+  const sevAt = (mins, key) => {
+    const { warn, over } = pillClockMins(key);
+    if (over && mins >= over) return solid(statusColor('pillDanger', '#FF3B30'));
+    if (warn && mins >= warn) return tint(statusColor('pillWarn', '#FFCC00'));
+    return '';
   };
   const pill = (style, inner, title) => `<span class="tbl-cpill" style="${style}">${inner}</span>`;
   const lens = state.settings.floorStatusEnabled === false ? 'course' : state.floorStatusView;
@@ -29401,26 +29494,20 @@ function floorPillHtml(t, cs) {
   // A called-away course outranks every lens: show how long the kitchen's
   // been firing it, danger-scaled against the course-wait cap.
   if (o && o.calledAwayAt && lens !== 'booked') {
-    // "Running long" (warn) and "over" thresholds are both editable in Table
-    // Layout → Status colours; the pill turns yellow then red on those minutes.
-    const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-    const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
     const mins = Math.max(0, Math.floor((Date.now() - o.calledAwayAt) / 60000));
-    const style = (over && mins >= over) ? solid(statusColor('pillDanger', '#FF3B30'))
-      : (warn && mins >= warn) ? tint(statusColor('pillWarn', '#FFCC00')) : '';
+    const style = sevAt(mins, 'course');
     const cn = cs && cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
     return pill(style, `<b>⏱ ${cn}${pillDur(mins)}</b>`, 'Called away — being fired');
   }
   if (lens === 'sitting') {
     if (!o) return '';
-    const cap = state.settings.seatingMinutes || 90;
     const mins = Math.max(0, Math.floor((Date.now() - o.createdAt) / 60000));
-    return pill(sev(mins / cap), `<b>⏱ ${pillDur(mins)}</b>`, 'Time seated');
+    return pill(sevAt(mins, 'sitting'), `<b>⏱ ${pillDur(mins)}</b>`, 'Time seated');
   }
   if (lens === 'attention') {
     if (!o) return '';
     const idle = tableIdleMins(o);
-    return pill(sev(idle / 15), `<b>⏱ ${pillDur(idle)}</b>`, 'Since last activity');
+    return pill(sevAt(idle, 'attention'), `<b>⏱ ${pillDur(idle)}</b>`, 'Since last activity');
   }
   if (lens === 'spend') {
     // What the table has rung up. Money is never a danger scale — every
@@ -29898,7 +29985,7 @@ function renderTablePickerMiddle() {
         <button class="fp-chip icon-only${!state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="select" aria-label="Select">${FP_TICK_SVG}</button>
         <button class="fp-chip icon-only${state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="transfer" aria-label="Transfer">${SYS_SWAP_SVG}</button>`}
       ${state.settings.floorStatusEnabled !== false ? (() => {
-        const opts = FLOOR_LENSES;
+        const opts = floorLenses();
         const cur = state.floorStatusView || 'sitting';
         const lbl = (opts.find(o => o[0] === cur) || opts[0])[1];
         return `
@@ -37561,6 +37648,7 @@ function bindEvents() {
   document.querySelectorAll('.void-reason-input').forEach(el => {
     el.addEventListener('change', (e) => { updateVoidReason(parseInt(el.dataset.idx), e.target.value); });
   });
+  document.querySelectorAll('.ts-lens-row').forEach(c => makePillSortable(c, '.ts-lens-chip', '.ts-lens-chip', commitFloorLensOrder));
   document.querySelectorAll('.item-mod-pills').forEach(c => makePillSortable(c, '.item-mod-pill', '.item-mod-pill', commitItemModifierOrder));
   document.querySelectorAll('.item-size-pills').forEach(c => makePillSortable(c, '.item-size-unit.on', '.item-size-pill', commitItemSizeOrder));
   // Inline editing right on the print sample (Printers → dockets/receipts):
@@ -38811,10 +38899,6 @@ function handleActClick(el, e) {
         const cur = state.simpleCountDraft != null ? state.simpleCountDraft : (state.settings.simpleTableCount || allTables().length || 12);
         state.simpleCountDraft = Math.max(1, Math.min(200, cur + parseInt(el.dataset.dir)));
         render();
-      }
-      else if (act === 'step-sitting') {
-        const v = Math.max(0, Math.min(600, (state.settings.seatingMinutes || 0) + parseInt(el.dataset.dir) * 15));
-        saveTicketSetting({ seatingMinutes: v || null });
       }
       else if (act === 'scale-selected-tables') { scaleSelectedTables(parseInt(el.dataset.dir)); }
       else if (act === 'delete-table') { deleteTableAction(el.dataset.id, el.dataset.fp); }

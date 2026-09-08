@@ -4844,6 +4844,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    have turned off and turn it back on. It is simply not on the floor's menu. */
 .ts-lens-chip.ts-lens-hidden{ opacity:.45; text-decoration:line-through; }
 .ts-lens-switch{ display:flex; align-items:center; gap:12px; margin:8px 0 2px; }
+/* The spend pill's readings, shown as they land on a table. */
+.ts-spend-demo{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+.ts-spend-demo .tbl-cpill{ position:static; transform:none; }
+.ts-spend-demo .tbl-cpill b{ font-size:12px; }
 .ts-lens-row::-webkit-scrollbar{ display:none; }
 /* The drag arms on a HOLD, so the finger is free to scroll the row until then
    — pan-y alone (the sortable's default) stopped it dead (owner, Sep '26). */
@@ -7917,7 +7921,7 @@ app.put('/api/settings', (req, res) => {
     // "in use" or either pill came back empty on the next settings save and
     // the change looked like it had reverted (owner, Sep '26).
     const keep = {};
-    for (const k of ['available', 'occupied', 'billPrinted', 'locked', 'pillWarn', 'pillDanger']) keep[k] = tableStatusColors[k] || null;
+    for (const k of ['available', 'occupied', 'billPrinted', 'locked', 'pillWarn', 'pillDanger', 'spend']) keep[k] = tableStatusColors[k] || null;
     data.settings.tableStatusColors = Object.assign({}, data.settings.tableStatusColors, keep);
   }
   if (Array.isArray(hiddenNoteTypes)) {
@@ -14127,7 +14131,7 @@ async function updateFloorPlanBgColor(id, color) {
   } catch (e) { state.toast = 'Could not update floor colour.'; render(); }
 }
 async function setTableStatusColor(key, color) {
-  const cur = Object.assign({ available: null, occupied: null, billPrinted: null, locked: null, pillWarn: null, pillDanger: null }, state.settings.tableStatusColors || {});
+  const cur = Object.assign({ available: null, occupied: null, billPrinted: null, locked: null, pillWarn: null, pillDanger: null, spend: null }, state.settings.tableStatusColors || {});
   cur[key] = color || null;
   state.settings.tableStatusColors = cur;
   render();
@@ -28710,19 +28714,24 @@ function renderTableStatusAdmin() {
       </div>
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">3 · Spend pill</div>
+        ${/* All three readings keep the same two numbers and the same colour
+              (owner, Sep '26: "per person should be a threshold option as
+              well, just like bands"). Nothing hides when the reading changes. */ ''}
         <div class="pay-options" style="margin-bottom:12px;">
           ${[['bands', '$ bands'], ['total', 'Total'], ['perhead', 'Per person']].map(([v, l]) => `<div class="pay-opt ${spendStyle === v ? 'active' : ''}" data-act="set-spend-style" data-val="${v}">${l}</div>`).join('')}
         </div>
-        ${spendStyle === 'bands' ? `
-        <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label class="field-label" style="margin:0;">$ from</label>${inp('spendBand2', t2)}<span class="ts">per person</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:8px;">
-            <label class="field-label" style="margin:0;">$$ from</label>${inp('spendBand3', t3)}<span class="ts">per person</span>
-          </div>
-
-        </div>` : ''}
+        ${row('spend', 'var(--blue)', 'Colour')}
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <label class="field-label" style="margin:0;flex:1;">Busy from</label>${inp('spendBand2', t2)}<span class="ts">per person</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px;">
+          <label class="field-label" style="margin:0;flex:1;">Big from</label>${inp('spendBand3', t3)}<span class="ts">per person</span>
+        </div>
+        <div class="ts" style="margin-bottom:8px;">How it reads on a table</div>
+        <div class="ts-spend-demo">
+          ${[Math.max(1, Math.round(t2 * 0.6)), Math.round((t2 + t3) / 2), Math.round(t3 * 1.4)].map(per =>
+            `<span class="tbl-cpill" style="${spendPillStyle(per)}"><b>${spendPillText(per * 2, per)}</b></span>`).join('')}
+        </div>
       </div>
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">4 · One till per table</div>
@@ -29600,6 +29609,30 @@ function pillClockMins(key) {
   const over = n(state.settings[c.over], c.overDef);
   return { warn: n(state.settings[c.warn], Math.min(c.warnDef, Math.round(over * 0.65))), over };
 }
+// The venue's spend numbers, and the one place that turns a bill into a chip.
+function spendBands() {
+  const n = (v, d) => { const x = parseFloat(v); return x > 0 ? x : d; };
+  return { busy: n(state.settings.spendBand2, 25), big: n(state.settings.spendBand3, 45) };
+}
+function spendPillMode() {
+  return ['total', 'perhead'].includes(state.settings.spendPillStyle) ? state.settings.spendPillStyle : 'bands';
+}
+function spendPillText(total, per) {
+  const mode = spendPillMode();
+  if (mode === 'total') return money(total);
+  if (mode === 'perhead') return '$' + Math.round(per) + '/pp';
+  const b = spendBands();
+  return per >= b.big ? '$$$' : per >= b.busy ? '$$' : '$';
+}
+// The same two numbers weigh every reading: quiet under "busy", tinted past
+// it, solid past "big". Money is not a danger scale, so it wears its own
+// colour rather than the pill's yellow and red.
+function spendPillStyle(per) {
+  const b = spendBands(), c = statusColor('spend', 'var(--blue)');
+  if (per >= b.big) return `background:${c};color:${contrastTextColor(c)};`;
+  if (per >= b.busy) return `background:color-mix(in srgb, ${c} 18%, var(--surface));color:color-mix(in srgb, ${c} 64%, var(--text-primary));`;
+  return '';
+}
 function floorPillHtml(t, cs) {
   if (state.settings.floorPillEnabled === false) return ''; // pills switched off (owner, Sep '26)
   // The pill follows the lens; its COLOUR is a danger scale — green fine,
@@ -29639,23 +29672,15 @@ function floorPillHtml(t, cs) {
     return pill(sevAt(idle, 'attention'), `<b>⏱ ${pillDur(idle)}</b>`, 'Since last activity');
   }
   if (lens === 'spend') {
-    // What the table has rung up. Money is never a danger scale — every
-    // spend pill stays the quiet chip. Two admin looks (owner, Sep '26):
-    // $ / $$ / $$$ banded on spend PER HEAD (default — a big table can't
-    // fake being a big spender), or the exact total. The peek always has
-    // the full figure either way.
+    // What the table has rung up, weighed against the venue's two numbers
+    // whichever reading it has picked (owner, Sep '26: "keep all three and
+    // let the user decide").
     if (!o) return '';
     const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
     if (!(total > 0)) return '';
-    const style = ['total', 'perhead'].includes(state.settings.spendPillStyle) ? state.settings.spendPillStyle : 'bands';
-    if (style === 'total') return pill('', `<b>${money(total)}</b>`, 'Spend so far');
     const heads = Math.max(1, parseInt(o.covers, 10) || 1);
     const per = total / heads;
-    if (style === 'perhead') return pill('', `<b>$${Math.round(per)}/pp</b>`, `${money(total)} · ${money(per)} a person`);
-    const t2 = parseFloat(state.settings.spendBand2) > 0 ? parseFloat(state.settings.spendBand2) : 25;
-    const t3 = parseFloat(state.settings.spendBand3) > 0 ? parseFloat(state.settings.spendBand3) : 45;
-    const band = per >= t3 ? '$$$' : per >= t2 ? '$$' : '$';
-    return pill('', `<b>${band}</b>`, `${money(total)} · ${money(per)} a person`);
+    return pill(spendPillStyle(per), `<b>${spendPillText(total, per)}</b>`, `${money(total)} · ${money(per)} a person`);
   }
   if (lens === 'guests') {
     // VIP already rides the corner star (tableMarksHtml) — echoing it here

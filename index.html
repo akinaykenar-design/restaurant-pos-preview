@@ -28446,9 +28446,10 @@ function floorLenses() {
   FLOOR_LENSES.forEach(l => { if (!out.includes(l)) out.push(l); });
   return out;
 }
-function commitFloorLensOrder(units) {
-  const order = units.map(u => u.dataset.val).filter(Boolean);
-  if (order.length !== FLOOR_LENSES.length) return;
+function reorderFloorLenses(fromIdx, toIdx) {
+  const order = floorLenses().map(l => l[0]);
+  const [moved] = order.splice(fromIdx, 1);
+  order.splice(toIdx, 0, moved);
   state.settings.floorLensOrder = order;
   saveTicketSetting({ floorLensOrder: order });
 }
@@ -28479,10 +28480,27 @@ function _sampleOrder(label, s, now, warn, over) {
     calledAwayAt: s.called === 'warn' ? now - Math.round((warn + over) / 2) * 60000 : s.called === 'over' ? now - (over + 5) * 60000 : undefined,
   };
 }
+// What the CHOSEN lens puts on a table. A lens with a clock shows its three
+// looks against its own minutes; the others show the one chip they draw
+// (owner, Sep '26: "why is there a selection option if it doesn't do
+// anything" — the pills used to ignore the lens entirely).
+function pillSamplesFor(lens) {
+  const clock = PILL_CLOCKS.find(c => c.key === lens);
+  if (clock) {
+    const { warn, over } = pillClockMins(lens);
+    const mid = Math.max(warn + 1, Math.round((warn + over) / 2));
+    return [['Fine', Math.max(1, Math.round(warn * 0.5))], ['Running long', mid], ['Over', over + 5]]
+      .map(([name, mins]) => ({ name, mins }));
+  }
+  if (lens === 'guests') return [{ name: 'Allergy on the table', allergy: true }];
+  if (lens === 'booked') return [{ name: 'Booked soon', res: true }];
+  return [{ name: 'Spend so far', spend: true }]; // the money lens
+}
 function renderTableStatusPreview() {
   const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
   const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
   const now = Date.now();
+  const lens = state.floorStatusView || 'sitting';
   // The samples wear what the venue's own tables wear (paint or finish), so a
   // free table in the preview looks like a free table on the floor.
   const real = allTables().find(t => t.type !== 'decor') || {};
@@ -28495,20 +28513,29 @@ function renderTableStatusPreview() {
     { 'sample-t3': { staff: 'Sam', device: 'another-till' } }, [],
     () => { state.settings.floorPillEnabled = false; return stateTables.map((t, i) => cell(floorTableMarker(t, { height: STD_FLOOR_H }), TABLE_STATE_SAMPLES[i][0])).join(''); });
 
-  // 2 — THE PILLS: every chip a table can wear, on its own.
-  const pills = TABLE_PILL_SAMPLES.map(([name, s], i) => {
-    const label = 'PQRSTU'[i];
-    const t = { id: 'sample-p' + i, type: 'table', label, covers: 2, allergies: s.allergy ? [{ base: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
+  // 2 — THE PILLS the chosen lens draws, plus the marks that ride every table.
+  const samples = pillSamplesFor(lens).concat([{ name: 'VIP', vip: true }, { name: 'Allergy', allergy: true, mark: true }]);
+  const pills = samples.map((s, i) => {
+    const label = 'PQRSTUV'[i] || 'P';
+    const t = { id: 'sample-p' + i, type: 'table', label, covers: 2,
+      allergies: s.allergy ? [{ base: 'Nuts', allergy: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
+    const ago = s.mins != null ? now - s.mins * 60000 : now - 30 * 60000;
+    const order = (s.mins != null || s.spend) ? {
+      id: 'sample-order-' + label, status: 'open', orderType: 'dine-in', table: label, covers: 2,
+      items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: ago, sentAt: ago }],
+      createdAt: ago, calledAwayAt: lens === 'course' && s.mins != null ? ago : undefined,
+    } : null;
     const inner = _withSampleFloor(
-      [_sampleOrder(label, s, now, warn, over)].filter(Boolean), {},
+      order ? [order] : [],
+      {},
       s.res ? [{ id: 'sample-res', tableId: t.id, time: new Date(now + 30 * 60000).toISOString(), status: 'booked' }] : [],
       () => {
         state.settings.floorPillEnabled = true;
         if (s.res) return tableResChip(t);
-        if (s.vip || s.allergy) return tableMarksHtml(t);
+        if (s.mark || s.vip) return tableMarksHtml(t);
         return floorPillHtml(t, tableCourseStatus(label));
       });
-    return `<div class="ts-sample"><div class="ts-pill-box">${inner}</div><div class="ts-sample-name">${esc(name)}</div></div>`;
+    return `<div class="ts-sample"><div class="ts-pill-box">${inner}</div><div class="ts-sample-name">${esc(s.name)}</div></div>`;
   }).join('');
 
   return `
@@ -28540,7 +28567,6 @@ function renderTableStatusAdmin() {
       <div class="seg seg-scroll ts-lens-row" style="width:fit-content;max-width:100%;">
         ${floorLenses().map(([v, l]) => `<button class="ts-lens-chip${(state.floorStatusView || 'sitting') === v ? ' active' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
       </div>
-      <div class="ts" style="margin:-2px 0 6px;">Drag to reorder.</div>
       ${renderTableStatusPreview()}
       <div class="ts" style="text-align:center;margin-top:8px;">what the floor shows on a table</div>
     </div>
@@ -37648,7 +37674,7 @@ function bindEvents() {
   document.querySelectorAll('.void-reason-input').forEach(el => {
     el.addEventListener('change', (e) => { updateVoidReason(parseInt(el.dataset.idx), e.target.value); });
   });
-  document.querySelectorAll('.ts-lens-row').forEach(c => makePillSortable(c, '.ts-lens-chip', '.ts-lens-chip', commitFloorLensOrder));
+  makeSortable('ts-lens-chip', reorderFloorLenses); // hold to drag, the admin lists' own — a swipe still scrolls the page
   document.querySelectorAll('.item-mod-pills').forEach(c => makePillSortable(c, '.item-mod-pill', '.item-mod-pill', commitItemModifierOrder));
   document.querySelectorAll('.item-size-pills').forEach(c => makePillSortable(c, '.item-size-unit.on', '.item-size-pill', commitItemSizeOrder));
   // Inline editing right on the print sample (Printers → dockets/receipts):

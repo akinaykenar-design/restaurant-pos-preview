@@ -1457,7 +1457,7 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   .modal-bg, .pop-scrim{ animation: none; }
   .modal-bg .modal{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .middle-view{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
-  :root{ --hub-in: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); --floor-in: pane-in-left var(--t-move) cubic-bezier(.2,.8,.3,1); }
+  :root{ --hub-in: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); --floor-in: pane-in-left var(--t-map) cubic-bezier(.2,.8,.3,1); }
   /* Admin is a pane that appears, so it settles in like the others — it used
      to just be there, while the floor slid in on the way back (owner, Sep
      '26: one-sided). Once, on arrival: applyMotion holds it still after. */
@@ -1491,7 +1491,15 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    positions during the close normally, 1 with Reduce Motion on. Wayfinding is
    not decoration; a panel that leaves has to be seen leaving. Reduce Motion
    gets a shorter one, not none. */
-.middle-view:is(.tp-off,.tp-entering){ animation:none; transform:translateX(-100%); transition:transform var(--t-move) ease; } /* parked left: on the way out, and on the first painted frame of the way in */
+/* THE MAP'S OWN DURATION (owner, Sep '26: "the phone version is so smooth
+   and beautiful"; "it's too fast or some shit" on the till). Both ran .28s —
+   but the phone's map crosses 390px and the till's 1024, nearly three times
+   the speed across the glass. One reads as a glide, the other as a flick.
+   The duration now follows the square root of the distance, so they read the
+   same: .28s over 390 puts 1024 at about .45s. */
+:root{ --t-map:var(--t-move); }
+@media (min-width:769px){ :root{ --t-map:.45s; } }
+.middle-view:is(.tp-off,.tp-entering){ animation:none; transform:translateX(-100%); transition:transform var(--t-map) ease; } /* parked left: on the way out, and on the first painted frame of the way in */
 .middle-view.tp-view{ animation:var(--floor-in,none); clip-path:inset(-40px -40px 0 -40px); /* a drawer's lift stops at its foot - it bled onto the bar (owner, Sep '26: the bar looked different on every page) */
   position:fixed; inset:var(--appbar-top-off,0px) 0 var(--appbar-off,0px) 0;
   width:auto; box-sizing:border-box; z-index:calc(var(--z-panel) - 1); box-shadow:var(--lift-right); }
@@ -2443,13 +2451,16 @@ button, input, select, textarea,
      directions, at .16s instead of .28s. The phone rolls its map in on a
      transform TRANSITION (.tp-entering), the till on the pane-in-left
      ANIMATION, so both need saying. */
-  .middle-view.tp-view{ transition:transform .16s ease !important; }
+  :root{ --t-map:.16s; }
+  .middle-view.tp-view{ transition:transform var(--t-map) ease !important; }
   /* The till borrows the phone's mechanism to come in — parked left on the
      first painted frame, then released — rather than the pane-in-left
      KEYFRAME. A keyframe here would replay on every background re-render and
      would have to out-shout applyMotion's inline animation:none to survive
      this block at all; a class the open/close code owns cannot fight it. */
 }
+/* Shorter under Reduce Motion, but still in proportion to the longer trip. */
+@media (prefers-reduced-motion: reduce) and (min-width:769px){ :root{ --t-map:.26s; } }
 
 /* Tactile press feedback — THE universal pressed look: the element darkens
    in place. No movement or shrink, so full-bleed coloured tiles (rail
@@ -30571,6 +30582,14 @@ function renderTablePickerMiddle() {
 // The phone's table map opens and closes exactly like the docket drawer:
 // mounted parked at the edge for one unpainted frame, then released so it
 // rolls in. Same .28s, same easing, opposite side.
+// How long the map's trip takes on this screen — the CSS owns the number, so
+// there is one place to change it and the code cannot drift from the look.
+function tpSlideMs() {
+  const v = getComputedStyle(document.documentElement).getPropertyValue('--t-map').trim();
+  const n = parseFloat(v);
+  if (!n) return 280;
+  return Math.round(/ms$/.test(v) ? n : n * 1000);
+}
 function tpDrawerOn() {
   return window.innerWidth <= 768
     && !(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -30607,7 +30626,7 @@ function closeTablePicker(then) {
   // never says so). A fixed 290 used to race the .28s slide and the render
   // cut its last frames (filmed, Sep '26).
   state._tpLeaving = true; state._tpAfter = [];
-  state._tpAnimUntil = Date.now() + 320;
+  state._tpAnimUntil = Date.now() + tpSlideMs() + 40;
   // The rail and the docket come back NOW, under the map, so what the slide
   // uncovers is the finished screen instead of a full-width sheet of tiles
   // that reflows a beat later (owner, Sep '26).
@@ -30642,7 +30661,7 @@ function closeTablePicker(then) {
   let fired = false;
   const finish = () => { if (!fired) { fired = true; done(); } };
   live.addEventListener('transitionend', (e) => { if (e.target === live && e.propertyName === 'transform') finish(); });
-  setTimeout(finish, 450); // the slide is .28s; this is the net if the browser never says it ended
+  setTimeout(finish, tpSlideMs() + 60); // the net, if the browser never says the slide ended
   if (tpDrawerOn()) {
     // The phone keeps the road it already had — it is smooth there, and a
     // drawer's own rules hang off data-fs-picker.
@@ -30670,7 +30689,10 @@ function openTablePicker() {
   // the floor must behave exactly like the docket).
   refreshTableLocks().then(() => {
     const wait = Math.max(0, (state._tpAnimUntil || 0) - Date.now());
-    setTimeout(() => { if (state.showTablePicker) render(); }, wait);
+    // ...and never while the map is on its way OFF: this deferred rebuild
+    // replaced the very node that was sliding, so the transition died in
+    // flight and its end never arrived.
+    setTimeout(() => { if (state.showTablePicker && !state._tpLeaving) render(); }, wait);
   });
   state.pickerFloorPlanId = owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
   state.showTablePicker = true;
@@ -30693,7 +30715,7 @@ function openTablePicker() {
   // The till's floor slides too (pane-in-left), so the lock refresh above
   // waits on BOTH devices — on the till it re-rendered at once and the replay
   // guard held the floor still (filmed, Sep '26: "hub → floor: nothing").
-  state._tpAnimUntil = Date.now() + 320; // .28s slide plus a frame either side
+  state._tpAnimUntil = Date.now() + tpSlideMs() + 40; // the slide plus a frame either side
   // Reduce Motion takes the phone's road on the till too: the keyframe is
   // switched off there, so the map comes in the way the drawer does — parked
   // left for one frame, then released — and it is seen arriving instead of

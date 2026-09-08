@@ -4836,6 +4836,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .ts-clock:first-of-type{ border-top:none; padding-top:0; }
 .ts-lens-row{ touch-action:pan-y; }
 .ts-lens-row{ overflow-x:auto; scrollbar-width:none; touch-action:pan-x pan-y; }
+/* A state switched off is still listed here — dimmed, so you can see what you
+   have turned off and turn it back on. It is simply not on the floor's menu. */
+.ts-lens-chip.ts-lens-hidden{ opacity:.45; text-decoration:line-through; }
+.ts-lens-switch{ display:flex; align-items:center; gap:12px; margin:8px 0 2px; }
 .ts-lens-row::-webkit-scrollbar{ display:none; }
 /* The drag arms on a HOLD, so the finger is free to scroll the row until then
    — pan-y alone (the sortable's default) stopped it dead (owner, Sep '26). */
@@ -7432,6 +7436,13 @@ app.put('/api/settings', (req, res) => {
   }
   // The floor's lens menu, in the venue's own order. Only the lenses the app
   // knows, each once — a typo can never hide one.
+  if (req.body.floorLensOff !== undefined) {
+    const known = ['booked', 'guests', 'course', 'sitting', 'attention', 'spend'];
+    const seen = new Set();
+    const off = (Array.isArray(req.body.floorLensOff) ? req.body.floorLensOff : [])
+      .map(String).filter(k => known.includes(k) && !seen.has(k) && seen.add(k));
+    data.settings.floorLensOff = off.length < known.length ? off : off.slice(0, known.length - 1); // never all of them
+  }
   if (req.body.floorLensOrder !== undefined) {
     const known = ['booked', 'guests', 'course', 'sitting', 'attention', 'spend'];
     const seen = new Set();
@@ -28466,6 +28477,25 @@ function floorLenses() {
   FLOOR_LENSES.forEach(l => { if (!out.includes(l)) out.push(l); });
   return out;
 }
+// A LENS A VENUE DOESN'T USE IS SWITCHED OFF (owner, Sep '26) — it leaves the
+// floor's menu entirely. The last one on cannot be switched off: the floor
+// would have nothing to show.
+function floorLensOff() { return state.settings.floorLensOff || []; }
+function floorLensesOn() {
+  const off = floorLensOff();
+  const on = floorLenses().filter(l => !off.includes(l[0]));
+  return on.length ? on : floorLenses();
+}
+function toggleFloorLens(key) {
+  const off = floorLensOff().slice();
+  const i = off.indexOf(key);
+  if (i === -1) {
+    if (floorLensesOn().length <= 1) { state.toast = 'Keep one state on'; render(); armToastTimer(2000); return; }
+    off.push(key);
+  } else off.splice(i, 1);
+  state.settings.floorLensOff = off;
+  saveTicketSetting({ floorLensOff: off });
+}
 function reorderFloorLenses(fromIdx, toIdx) {
   const order = floorLenses().map(l => l[0]);
   const [moved] = order.splice(fromIdx, 1);
@@ -28588,8 +28618,10 @@ function renderTableStatusAdmin() {
       ${/* The floor's own lens chips: the preview's pills follow the lens the
             same way the floor's do, through the same handler. */ ''}
       <div class="seg seg-scroll ts-lens-row" style="width:fit-content;max-width:100%;">
-        ${floorLenses().map(([v, l]) => `<button class="ts-lens-chip${(state.floorStatusView || 'sitting') === v ? ' active' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
+        ${floorLenses().map(([v, l]) => `<button class="ts-lens-chip${(state.floorStatusView || 'sitting') === v ? ' active' : ''}${floorLensOff().includes(v) ? ' ts-lens-hidden' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
       </div>
+      ${(() => { const cur = state.floorStatusView || 'sitting'; const l = floorLenses().find(l => l[0] === cur) || floorLenses()[0];
+        return `<div class="pay-options ts-lens-switch">${togglePill(!floorLensOff().includes(l[0]), 'set-floor-lens-on', `data-key="${l[0]}"`)}<div style="font-weight:700;font-size:var(--fs-md);">${esc(l[1])} on the floor</div></div>`; })()}
       ${renderTableStatusPreview()}
       <div class="ts" style="text-align:center;margin-top:8px;">what the floor shows on a table</div>
     </div>
@@ -30034,8 +30066,8 @@ function renderTablePickerMiddle() {
         <button class="fp-chip icon-only${!state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="select" aria-label="Select">${FP_TICK_SVG}</button>
         <button class="fp-chip icon-only${state.transferMode ? ' active' : ''}" data-act="picker-mode" data-mode="transfer" aria-label="Transfer">${SYS_SWAP_SVG}</button>`}
       ${state.settings.floorStatusEnabled !== false ? (() => {
-        const opts = floorLenses();
-        const cur = state.floorStatusView || 'sitting';
+        const opts = floorLensesOn();
+        const cur = opts.some(o => o[0] === (state.floorStatusView || 'sitting')) ? (state.floorStatusView || 'sitting') : opts[0][0];
         const lbl = (opts.find(o => o[0] === cur) || opts[0])[1];
         return `
       <div class="fp-dd fp-dd-end">
@@ -39041,6 +39073,7 @@ function handleActClick(el, e) {
       else if (act === 'set-cat-icons-only') { saveTicketSetting({ catIconsOnly: el.dataset.val === 'true' }); }
       else if (act === 'set-floor-status') { saveTicketSetting({ floorStatusEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-floor-pill') { saveTicketSetting({ floorPillEnabled: el.dataset.val === 'true' }); }
+      else if (act === 'set-floor-lens-on') { toggleFloorLens(el.dataset.key || state.floorStatusView || 'sitting'); }
       else if (act === 'set-ask-void-reason') { saveTicketSetting({ askVoidReason: el.dataset.val === 'true' }); }
       else if (act === 'set-wash-opacity') { saveTicketSetting({ washOpacity: parseFloat(el.dataset.val) }); }
       else if (act === 'set-spend-style') { saveTicketSetting({ spendPillStyle: el.dataset.val }); }

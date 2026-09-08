@@ -5564,12 +5564,23 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
         if (p.table) s.table = p.table;
         s.showTablePicker = !!p.picker;
         if (p.lens) s.floorStatusView = p.lens;
-        // Everything a login would have fetched.
-        try { if (typeof afterLogin === 'function') afterLogin(); } catch (e) {}
-        try { if (typeof refreshOrders === 'function') refreshOrders(); } catch (e) {}
-        try { if (typeof refreshTableLocks === 'function') refreshTableLocks(); } catch (e) {}
-        try { if (typeof loadAdminTabData === 'function' && s.view === 'admin' && s.adminTab) loadAdminTabData(s.adminTab); } catch (e) {}
-        appRender()();
+        // Everything a login would have fetched — and THEN a render. These are
+        // all async: drawing once, straight away, painted the screen before the
+        // floor plans had arrived, so Get latest on the floor came back to "No
+        // floor plan layouts yet" (owner, Sep '26). Draw now so nothing is
+        // blank, and again as each fetch lands.
+        var draw = function () { try { var r = appRender(); if (typeof r === 'function') r(); } catch (e) {} };
+        var waits = [];
+        var keep = function (out) { if (out && typeof out.then === 'function') waits.push(out.catch(function () {})); };
+        try { if (typeof afterLogin === 'function') keep(afterLogin()); } catch (e) {}
+        try { if (typeof refreshOrders === 'function') keep(refreshOrders()); } catch (e) {}
+        try { if (typeof refreshTableLocks === 'function') keep(refreshTableLocks()); } catch (e) {}
+        try { if (typeof loadAdminTabData === 'function' && s.view === 'admin' && s.adminTab) keep(loadAdminTabData(s.adminTab)); } catch (e) {}
+        draw();
+        if (waits.length) Promise.all(waits).then(draw);
+        // Belt and braces: some of that data lands through its own callbacks,
+        // so keep drawing for a couple of seconds until it is all in.
+        [250, 600, 1200, 2000].forEach(function (ms) { setTimeout(draw, ms); });
       })();
     }
     restorePlace();
@@ -38954,14 +38965,11 @@ function handleActClick(el, e) {
         else { const r = el.getBoundingClientRect(); state.fpViewOpen = { right: Math.round(window.innerWidth - r.right), top: Math.round(r.bottom + 4) }; }
         render();
       }
-      // THE CHOICE LIGHTS UP BEFORE THE MENU GOES (owner, Sep '26: "show that a
-      // button has been selected before removing the dropdown"). The tap used
-      // to close the menu in the same frame, so nothing ever confirmed it.
-      else if (act === 'fp-view-pick') {
-        state.floorStatusView = el.dataset.val;
-        if (state.fpViewOpen) { render(); setTimeout(() => { state.fpViewOpen = false; render(); }, 180); }
-        else { state.fpViewOpen = false; render(); }
-      }
+      // THE MENU STAYS UP UNTIL YOU CLICK AWAY (owner, Sep '26: "keep dropdown
+      // expanded until I click away so I can quickly navigate all the different
+      // table states"). The tap lights the choice and the floor behind changes
+      // at once; the way out is the scrim, the chip, or a pick on the map.
+      else if (act === 'fp-view-pick') { state.floorStatusView = el.dataset.val; render(); }
       else if (act === 'add-object') { addObject(el.dataset.fp); }
       else if (act === 'floor-undo') { floorUndo(); }
       else if (act === 'floor-redo') { floorRedo(); }

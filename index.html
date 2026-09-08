@@ -4537,7 +4537,10 @@ input.num-field{ width:76px; text-align:center; font-size:var(--fs-md); border:1
    the price once (in the head), no round number (a line is one line
    however many rounds it came in — the rounds live on the show-order screen). */
 .line-edit-pane .le-row{ display:flex; align-items:center; gap:12px; min-height:60px; padding:8px 0; border-bottom:1px solid var(--steel-200); }
-.line-edit-pane .le-row > label{ flex:0 0 88px; margin:0; }
+/* ONE SIZE IN EVERY ROW (owner, Sep '26: "make these all same font size").
+   The row labels were the only 10.5 on the pane, in small caps, beside 13.5
+   controls — so the word naming a row read smaller than everything it named. */
+.line-edit-pane .le-row > label{ flex:0 0 88px; margin:0; font-size:var(--fs-md); letter-spacing:0; text-transform:none; }
 .line-edit-pane .le-row > .le-ctl{ flex:1; min-width:0; display:flex; flex-wrap:wrap; align-items:center; gap:8px; }
 .line-edit-pane .le-row .grid{ width:100%; margin:0; }
 .line-edit-pane .le-dim{ color:var(--charcoal-soft); font-weight:600; text-transform:none; }
@@ -7537,6 +7540,15 @@ app.put('/api/settings', (req, res) => {
   if (req.body.pillWarnMinutes !== undefined) data.settings.pillWarnMinutes = req.body.pillWarnMinutes === null ? null : Math.max(0, Math.min(240, parseInt(req.body.pillWarnMinutes) || 0));
   if (req.body.spendPillStyle !== undefined) data.settings.spendPillStyle = req.body.spendPillStyle === 'total' ? 'total' : 'perhead';
   if (req.body.spendPillFormat !== undefined) data.settings.spendPillFormat = req.body.spendPillFormat === 'symbol' ? 'symbol' : 'number';
+  // The floor's own course options — colour and on/off per course, kept apart
+  // from settings.courses so the Courses screen's colours stay the dockets'.
+  if (req.body.coursePillLevels !== undefined) {
+    const arr = Array.isArray(req.body.coursePillLevels) ? req.body.coursePillLevels : [];
+    data.settings.coursePillLevels = arr.slice(0, 20).map(l => ({
+      color: /^#[0-9a-fA-F]{6}$/.test((l || {}).color || '') ? l.color : null,
+      off: !!(l || {}).off,
+    }));
+  }
   if (req.body.spendLevelOff !== undefined) {
     const known = ['spendLow', 'spendBusy', 'spendBig'];
     data.settings.spendLevelOff = (Array.isArray(req.body.spendLevelOff) ? req.body.spendLevelOff : []).filter(k => known.includes(k));
@@ -14099,6 +14111,7 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
   else if (kind === 'bulk-allergy') bulkSetAllergyColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
+  else if (kind === 'course-pill') setCoursePillLevel(parseInt(id, 10), { color: color || null });
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
   else if (kind === 'floor-table-new') { state.floorTableColor = color || null; render(); }
   else if (kind === 'table-color') updateTableColor(id, color);
@@ -14467,6 +14480,7 @@ function applyGridDims() {
       // mount replaces this estimate with the measured value.
       const avail = Math.max(300, (window.innerHeight || 800) - 90) - 18;
       rowH = Math.max(GRID_ROW_MIN_H, Math.floor((avail - (rows - 1) * 10) / rows));
+      state._rowHGuess = true; // a guess, not a measurement — see below
     }
     // NEVER MEASURE THE HUB WHILE SOMETHING IS OVER IT (owner, Aug '26:
     // "swiping on mobile to get to floor plan changes item tiles shapes in that
@@ -14477,11 +14491,21 @@ function applyGridDims() {
     // 85ms. While a panel is over the hub the last good height stands.
     const covered = state.showTablePicker || state.showCheckout || state.editLine
       || state.editSent || state.moveItems || state.mobileCartOpen;
-    if (grid && covered) rowH = parseFloat(getComputedStyle(root).getPropertyValue('--fixed-row-h')) || rowH;
+    // ...unless the last good height is not a good height at all. Logging in
+    // lands on the FLOOR with the hub mounted behind it, so the only number
+    // ever written was the login estimate — 90px of chrome and a 10 gap, when
+    // the real screen has 72 and 6. The tiles then sat 5px short until the
+    // floor left and the first real measurement landed: a lone jump on a
+    // screen that already looked finished (measured 57→62 at 1024, 91→96 at
+    // 834, 70→75 at 1440, at 450ms). On a phone the floor really does squash
+    // the hub, so there the Aug '26 rule still stands.
+    const guessing = state._rowHGuess && activeLayoutDevice() !== 'mobile';
+    if (grid && covered && !guessing) rowH = parseFloat(getComputedStyle(root).getPropertyValue('--fixed-row-h')) || rowH;
     else if (grid) {
       const gap = parseFloat(getComputedStyle(grid).rowGap) || 10;
       const avail = scroller.clientHeight - (grid.offsetTop - scroller.offsetTop) - 18;
       rowH = Math.max(GRID_ROW_MIN_H, Math.floor((avail - (rows - 1) * gap) / rows));
+      state._rowHGuess = false; // measured for real now
     }
   }
   document.body.setAttribute('data-fixed-rows', rows && rowH ? '1' : '0');
@@ -28602,10 +28626,6 @@ function reorderFloorLenses(fromIdx, toIdx) {
 const TABLE_STATE_SAMPLES = [
   ['Free', {}], ['Open tab', { open: true }], ['Bill printed', { open: true, billPrinted: true }], ['In use — another till', { lock: true }],
 ];
-const TABLE_PILL_SAMPLES = [
-  ['Fine', { open: true }], ['Running long', { open: true, called: 'warn' }], ['Over', { open: true, called: 'over' }],
-  ['Booked soon', { res: true }], ['VIP', { vip: true }], ['Allergy', { allergy: true }],
-];
 // The samples are drawn by the floor's OWN code: the live orders, locks and
 // bookings are swapped for the samples' for the length of one synchronous
 // render and put straight back, so nothing can leak onto the real floor.
@@ -28631,6 +28651,12 @@ function pillSamplesFor(lens) {
   // "if I select course it should just show what a course-away table pill
   // looks like" — three severities side by side read as three states). The
   // yellow and the red live in the Pill card's own rows.
+  // The COURSE lens is the exception: it draws a different pill per course, so
+  // it shows one per course that is on (owner, Sep '26).
+  if (lens === 'course') {
+    const mins = Math.max(1, Math.round(pillClockMins('course').warn * 0.5));
+    return coursePillLevels().filter(l => l.on).map(l => ({ name: l.name, mins, courseN: l.n }));
+  }
   const clock = PILL_CLOCKS.find(c => c.key === lens);
   if (clock) return [{ name: clock.name, mins: Math.max(1, Math.round(pillClockMins(lens).warn * 0.5)) }];
   // Guests is the lens that carries the marks: the VIP star and the allergy !
@@ -28666,18 +28692,20 @@ function renderTableStatusPreview() {
   // 2 — THE PILLS the chosen lens draws, plus the marks that ride every table.
   const samples = pillSamplesFor(lens);
   const pills = samples.map((s, i) => {
-    const label = 'PQRSTUV'[i] || 'P';
+    const label = String.fromCharCode(80 + (i % 20));
     const t = { id: 'sample-p' + i, type: 'table', label, covers: 2,
       allergies: s.allergy ? [{ base: 'Nuts', allergy: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
     const ago = s.mins != null ? now - s.mins * 60000 : now - 30 * 60000;
     // Two covers, so a per-person sample is half the bill: the money on the
     // sample ticket is whatever that spend level needs to read.
     const each = s.spendVal != null ? (spendPillMode() === 'total' ? s.spendVal / 2 : s.spendVal) : 30;
-    const line = [{ name: 'Sample', price: each, qty: 2 }];
+    // The course number rides the sample line, so the floor's own code finds
+    // the course and paints its colour.
+    const line = [{ name: 'Sample', price: each, qty: 2, course: s.courseN }];
     const order = (s.mins != null || s.spend) ? {
       id: 'sample-order-' + label, status: 'open', orderType: 'dine-in', table: label, covers: 2,
       items: line, rounds: [{ items: line, at: ago, sentAt: ago }],
-      createdAt: ago, calledAwayAt: lens === 'course' && s.mins != null ? ago : undefined,
+      createdAt: ago,
     } : null;
     const inner = _withSampleFloor(
       order ? [order] : [],
@@ -28761,6 +28789,20 @@ function renderTableStatusAdmin() {
           <div class="ts" style="margin-bottom:10px;">${c.what}</div>
           ${line(c.warn, 'pillWarn', '#FFCC00', 'Running long after', m.warn)}
           ${line(c.over, 'pillDanger', '#FF3B30', 'Over after', m.over)}
+          ${/* THE COURSES GET THEIR OWN ROWS HERE (owner, Sep '26: "add course
+                pills to table states as well — a separate set of options from
+                the courses section in admin"). Same shape as Spend: a colour
+                box and an On/Off chip per course. The colour paints the pill
+                on the floor only; the Courses screen still owns the ones on
+                the dockets. */ ''}
+          ${c.key !== 'course' ? '' : `
+          <div class="ts" style="margin:2px 0 8px;">Courses on the pill</div>
+          ${coursePillLevels().map(lv => `
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            ${colorDotButton('course-pill', lv.n, lv.color, { bg: lv.color || lv.def, title: 'Change colour' })}
+            <label class="field-label" style="margin:0;flex:1;">${esc(lv.name)}</label>
+            <button class="status-chip mi-onoff ${lv.on ? 'paid' : 'void'}" data-act="set-course-pill-on" data-key="${lv.n}">${lv.on ? 'On' : 'Off'}</button>
+          </div>`).join('')}`}
         </div>`; }).join('')}
         ${/* SPEND LIVES WITH THE PILLS (owner, Sep '26: "put spend pill under
               2 · Pill") — it is a pill like the rest, not a card of its own. */ ''}
@@ -29554,7 +29596,7 @@ function tableCourseStatus(tableLabel) {
   const last = order.rounds[order.rounds.length - 1];
   const courses = (last.items || []).map(i => i.course).filter(c => c != null);
   const courseN = courses.length ? Math.max(...courses) : null;
-  const color = (courseN && courseInfo(courseN).color) || last.color || null;
+  const color = (courseN && coursePillColor(courseN)) || last.color || null;
   // A call-away resets the timer; otherwise use the last round's sent time.
   const calledAway = (order.calledAwayAt || 0) > (last.sentAt || 0);
   const since = Math.max(last.sentAt || 0, order.calledAwayAt || 0);
@@ -29715,6 +29757,29 @@ function toggleSpendLevel(key) {
 // different from the colours selected, it inverts — keep it the same style").
 // Low and medium used to be a 18% wash while high went solid, so the pill
 // never matched the box you picked. The pill IS that box now, on all three.
+// THE FLOOR'S COURSE OPTIONS ARE ITS OWN (owner, Sep '26: "add course pills to
+// table states as well — a separate set of options from the courses section in
+// admin"). A colour picked here paints the pill on the floor and NOTHING else:
+// the Courses admin's own colours still paint dockets, round tabs and the
+// kitchen pages. No entry means "wear the course's own colour, and show".
+function coursePillOwn() { return state.settings.coursePillLevels || []; }
+function coursePillLevels() {
+  const own = coursePillOwn();
+  return (state.settings.courses || []).map((c, i) => ({
+    n: i + 1, name: c.name, def: c.color || 'var(--teal)',
+    color: (own[i] || {}).color || null, on: !(own[i] || {}).off,
+  })).filter(l => courseInfo(l.n).enabled !== false);
+}
+function coursePillOff(n) { return (coursePillOwn()[n - 1] || {}).off === true; }
+function coursePillColor(n) { return (coursePillOwn()[n - 1] || {}).color || courseInfo(n).color || null; }
+function setCoursePillLevel(n, patch) {
+  const own = coursePillOwn();
+  const list = (state.settings.courses || []).map((_, i) => Object.assign({ color: null, off: false }, own[i]));
+  list[n - 1] = Object.assign(list[n - 1] || { color: null, off: false }, patch);
+  state.settings.coursePillLevels = list;
+  saveTicketSetting({ coursePillLevels: list });
+  render();
+}
 function spendPillStyle(v) {
   const lv = SPEND_LEVELS.find(l => l.key === spendLevelKey(v)) || SPEND_LEVELS[0];
   const c = statusColor(lv.key, lv.def);
@@ -29743,6 +29808,7 @@ function floorPillHtml(t, cs) {
   // A called-away course outranks every lens: show how long the kitchen's
   // been firing it, danger-scaled against the course-wait cap.
   if (o && o.calledAwayAt && lens !== 'booked') {
+    if (cs && cs.courseN && coursePillOff(cs.courseN)) return ''; // this course switched off
     const mins = Math.max(0, Math.floor((Date.now() - o.calledAwayAt) / 60000));
     const style = sevAt(mins, 'course');
     const cn = cs && cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
@@ -29789,6 +29855,7 @@ function floorPillHtml(t, cs) {
   }
   // Course lens: the course's own dot + a danger-scaled wait.
   if (!cs) return '';
+  if (cs.courseN && coursePillOff(cs.courseN)) return ''; // this course switched off
   const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
   const mins = Math.max(0, Math.floor((Date.now() - cs.sentAt) / 60000));
   // The course rides the pill by NAME, not just its colour dot — a casual
@@ -29796,16 +29863,6 @@ function floorPillHtml(t, cs) {
   const cn = cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
   return pill(sevAt(mins, 'course'), `<i style="background:${cs.color || 'var(--teal)'};"></i><b>${cn}${pillDur(mins)}</b>`, 'Course wait');
 }
-// Course pill: dot in the course's colour + minutes since the call-away /
-// last round. Flips solid violet past the course-wait cap — never red.
-function coursePillHtml(cs) {
-  if (!cs) return '';
-  const mins = Math.max(0, Math.floor((Date.now() - cs.sentAt) / 60000));
-  const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
-  const over = cap && mins >= cap;
-  return `<span class="tbl-cpill${over ? ' over' : ''}" data-fired="${cs.sentAt}">${cs.color ? `<i style="background:${cs.color};"></i>` : ''}<b>${mins}m</b></span>`;
-}
-
 // Table-turn dwell: compact "42m" / "1h 25m" since the party was seated.
 // With a Sitting length set (Table setup), the chip counts DOWN instead:
 // "25m left" → gold inside the last 15 → red "10m over".
@@ -39293,6 +39350,7 @@ function handleActClick(el, e) {
       else if (act === 'set-spend-style') { saveTicketSetting({ spendPillStyle: el.dataset.val }); }
       else if (act === 'set-spend-format') { saveTicketSetting({ spendPillFormat: el.dataset.val }); }
       else if (act === 'set-spend-level-on') { toggleSpendLevel(el.dataset.key); }
+      else if (act === 'set-course-pill-on') { const n = parseInt(el.dataset.key, 10); setCoursePillLevel(n, { off: !coursePillOff(n) }); }
       else if (act === 'toggle-item-rowbreak') {
         const item = state.menu.find(m => m.id === el.dataset.id);
         if (item) {

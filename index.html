@@ -5850,6 +5850,7 @@ const DEFAULT_SETTINGS = {
   seatNumbersEnabled: false,
   seatPrefix: 'Seat',
   sharedSeatLabel: '', // blank = a shared item says nothing (owner, Sep '26)
+  warnOverSeats: true, // ask once when covers beat the table's seats (owner, Sep '26)
   roundColors: ['#3B82C4', '#E0A72E', '#9B59B6', '#E0574C'],
   tipsEnabled: true,
   tipPresets: [15, 18, 20, 25],
@@ -8050,6 +8051,7 @@ app.put('/api/settings', (req, res) => {
   if (seatPrefix !== undefined) data.settings.seatPrefix = String(seatPrefix).slice(0, 20);
   // Blank is a real choice: a shared item then says nothing (owner, Sep '26).
   if (sharedSeatLabel !== undefined) data.settings.sharedSeatLabel = String(sharedSeatLabel).trim().slice(0, 20);
+  if (req.body.warnOverSeats !== undefined) data.settings.warnOverSeats = !!req.body.warnOverSeats;
   if (Array.isArray(roundColors)) {
     data.settings.roundColors = roundColors.map(c => String(c || '').trim()).filter(Boolean).slice(0, 10);
   }
@@ -17848,6 +17850,20 @@ function confirmCoversPad() {
   // The ✓ is disabled below 1; this guard backs it up.
   const n = cp.buffer !== '' ? parseInt(cp.buffer, 10) : (cp.touched ? 0 : (state.covers || 0));
   if (isNaN(n) || n < 1) return;
+  // MORE PEOPLE THAN CHAIRS (owner, Sep '26). The floor knows what a table
+  // seats; nothing ever said a word. It asks once, and taking them is always
+  // allowed — a venue pulls up a chair every night.
+  const tbl = findTableById(state.table);
+  const seats = tbl && tbl.type !== 'decor' ? (tbl.seats || 0) : 0;
+  if (!cp.overOk && state.settings.warnOverSeats !== false && seats > 0 && n > seats) {
+    cp.overOk = true;
+    openConfirm({
+      message: `Table ${tbl.label} seats ${seats}. Seat ${n}?`,
+      confirmLabel: 'Seat them', cancelLabel: 'Change it', danger: false,
+    }, () => confirmCoversPad());
+    render();
+    return;
+  }
   if (cp.buffer !== '') { state.covers = n; saveTableCovers(state.table, state.covers); }
   state.coversPad = null;
   closeTablePicker(() => { state.pickFlashId = null; }); // covers done — on to the order; the held pick sweep ends with it
@@ -18999,6 +19015,19 @@ function applyMotion(prev) {
 }
 let _lastMenuGridGeom = null;
 // Biggest table in the whole venue — the seat pad is built to hold it.
+// Seats on the selected table (or every selected table). One number, 1..20.
+async function stepTableSeats(d) {
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  if (!fp) return;
+  const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : (state.selectedAdminTableIds || []);
+  for (const id of ids) {
+    const t = fp.tables.find(x => x.id === id);
+    if (!t || t.type === 'decor') continue;
+    const next = Math.max(1, Math.min(20, (t.seats || 0) + d));
+    if (next === t.seats) continue;
+    patchFloorObject(fp.id, id, { seats: next });
+  }
+}
 function venueMaxSeats() {
   let m = 0;
   (state.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
@@ -25798,6 +25827,14 @@ function renderCoversSettingsAdmin() {
     <div class="pay-options">
       ${togglePill(!!state.settings.coversEnabled, 'set-covers-enabled')}
     </div>
+    ${state.settings.coversEnabled ? `
+    <div style="border-top:1px solid var(--steel-200);margin:16px 0 0;padding-top:16px;">
+      <div class="th" style="margin-bottom:4px;">Warn if it beats the seats</div>
+      <div class="ts" style="margin:0 0 12px;">Asks once. You can always seat them.</div>
+      <div class="pay-options">
+        ${togglePill(state.settings.warnOverSeats !== false, 'set-warn-over-seats')}
+      </div>
+    </div>` : ''}
   </div>
   ${/* ONE CARD FOR SEATS (owner, Sep '26: "these two should be merged, the
         one below should just be options"). It was three cards deep — the
@@ -27784,6 +27821,20 @@ function renderFloorPlanAdmin() {
           <span class="fp-sub fp-sub-flat">Colour &amp; finish</span>
           ${colourDot}
         </div>
+        ${/* HOW MANY IT SEATS (owner, Sep '26). Every table was born with four
+              and there was nowhere to change it, so nothing could tell a
+              two-top from a ten-top — the seat pad and the too-many-covers
+              warning both need this number. Minus, the value, plus: the same
+              stepper the Design page uses. */ ''}
+        ${(selTable || multi) ? `
+        <div class="fp-inline-row">
+          <span class="fp-sub fp-sub-flat">Seats</span>
+          <div class="grid-stepper" style="margin:0;">
+            <button class="btn-secondary sm" data-act="table-seats" data-d="-1"${(selTable ? (selTable.seats || 0) <= 1 : false) ? ' disabled' : ''}>−</button>
+            <span class="grid-step-val">${selTable ? (selTable.seats || 0) : (same(selMany.map(t => t.seats || 0)) == null ? '·' : same(selMany.map(t => t.seats || 0)))}</span>
+            <button class="btn-secondary sm" data-act="table-seats" data-d="1"${(selTable ? (selTable.seats || 0) >= 20 : false) ? ' disabled' : ''}>+</button>
+          </div>
+        </div>` : ''}
         ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
         ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control,
               the number included. It was a 40-tall pill sitting beside 44
@@ -30725,7 +30776,11 @@ function pickTable(id) {
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
     // as "already entered", never ask twice (owner ask).
-    state.covers = (t && t.covers) || (oo && oo.covers) || 0; state.discount = (t && t.discount) || null; // the account's discount comes back with the table
+    // A NEW SITTING ASKS AGAIN (owner, Sep '26: "standard, without a switch").
+    // No open order means a new party, so the number the last party left on
+    // the table is not theirs — a two-top read as six all night.
+    state.covers = oo ? (oo.covers || (t && t.covers) || 0) : 0;
+    state.discount = (t && t.discount) || null; // the account's discount comes back with the table
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
     state.vipType = (t && t.vipType) || '';
@@ -39411,6 +39466,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'set-table-size') { sizeSelectedTables(parseFloat(el.dataset.step)); }
       // §§ router: floor editor tools
+      else if (act === 'table-seats') { stepTableSeats(parseInt(el.dataset.d, 10)); }
       else if (act === 'cycle-table-size') {
         const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
         const t = fp && fp.tables.find(x => x.id === el.dataset.id);
@@ -39436,6 +39492,7 @@ function handleActClick(el, e) {
       else if (act === 'set-object-color') { const fp = state.floorPlans.find(f => f.id === el.dataset.fp); const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id)); if (t) patchFloorObject(el.dataset.fp, t.id, { color: el.dataset.val || null }); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
+      else if (act === 'set-warn-over-seats') { saveTicketSetting({ warnOverSeats: el.dataset.val === 'true' }); }
       else if (act === 'set-covers-enabled') { saveTicketSetting({ coversEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-seatnumbers-enabled') { setSeatNumbersEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-qtypad-enabled') { setQtyPadEnabled(el.dataset.val === 'true'); }

@@ -3279,6 +3279,9 @@ body[data-fs-picker] .stb-seats{ font-size:var(--fs-md); }
 body[data-fs-picker] .tbl-cpill b{ font-size:12px; }
 body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 
+/* The call-away list's tick: the icon-action square, no label — one key per
+   course, the chosen one green until Send fires it. */
+.icon-action.ca-tick{ width:var(--sq-ctl); min-width:var(--sq-ctl); flex:none; padding:0; }
 /* Call away in the picker's action row — blue member of the icon-action family. */
 .icon-action.callaway{ background:var(--blue); border:1px solid var(--blue); color:#fff; }
 .icon-action.callaway.active{ box-shadow:inset 0 0 0 var(--ring) rgba(255,255,255,.5); }
@@ -15259,7 +15262,7 @@ function finishLogin(staff, warm) {
   // view or table. Chefs keep their kitchen screen (they have no till).
   if (staff.role === 'chef') state.view = 'kitchen';
   else {
-    state.view = 'order'; setOrderType('dine-in'); state.table = null; state.showTablePicker = true;
+    state.view = 'order'; setOrderType('dine-in'); state.table = null; state.showTablePicker = true; state._tpFromOrder = false;
     // Refresh armour, restore half: the SAME person's next PIN hands back the
     // unsent table order a reload interrupted (the snapshot writes on every
     // order-screen render). A different person, an empty cart, or a snapshot
@@ -16988,6 +16991,7 @@ function toggleCallAway() {
 // docket (normal) or the full-screen table picker (call-away mode).
 function closeCallAwayPane() {
   state.callAway = false;
+  state.callAwayPick = null;
   if (state._callAwayReturn) { state._callAwayReturn = false; openTablePicker(); return; }
   render();
 }
@@ -19404,12 +19408,14 @@ function resetFloorPicker() {
 // same as phone"): the phone walks floor · menu · docket; the tablet keeps
 // its docket on screen, so its dots are floor · order.
 function barPagerOn() {
-  // NOT WHILE THE FLOOR IS THE SCREEN (owner, Sep '26: "it shows two dots on
-  // the initial floor table select where there should be none — you cannot
-  // swipe until a table is selected"). The pager is how you move between the
-  // order's pages; on the floor the only move is a pick.
+  // ON THE FLOOR THE DOTS DEPEND ON HOW YOU GOT THERE (owner, Sep '26, both
+  // halves): at login there is nothing behind the floor to swipe back to, so
+  // no dots; but "if I'm already in a table and I swipe to the floor I should
+  // be able to see dots so I know I can swipe back" — so a floor opened from
+  // an order keeps them.
+  const floorIsTheOnlyScreen = state.showTablePicker && !state._tpFromOrder;
   return state.view === 'order' && state.orderType === 'dine-in' && !!state.table
-    && !state.showTablePicker && !state._tpLeaving
+    && !floorIsTheOnlyScreen
     && !(state.currentStaff && state.currentStaff.role === 'chef');
 }
 // The table Admin's key returns to: the one the till was ordering on when it
@@ -21217,15 +21223,20 @@ function renderCallAwayPop() {
                   ? `<span class="status-chip paid elapsed-timer" data-fired="${fired}">⏱ ${elapsedMinLabel(fired)}</span>
                      ${state.settings.printEnabled ? '' : `<button class="btn-secondary" style="width:auto;padding:8px 12px;" data-act="print-docket" data-val="${n}">${SYS_PRINTER_SVG}</button>`}`
                   : total
-                  ? `<button class="btn-confirm" style="width:auto;flex:none;" data-act="fire-course" data-val="${n}">Call away</button>`
+                  ? `<button class="icon-action ${state.callAwayPick === n ? 'send' : 'neutral'} ca-tick" data-act="pick-callaway" data-val="${n}" aria-label="Choose ${esc(info.name)}">${ACT_TICK_SVG}</button>`
                   : ''}
               </div>
             </div>`;
           }).join('')}
       </div>
+      ${/* TICK THE COURSE, THEN SEND (owner, Sep '26: "replace call away with a
+            tick same as course buttons, add send button to confirm") — the
+            green Call away button on every row fired the kitchen on one tap,
+            with nothing to change your mind against. */ ''}
       <div class="modal-actions">
         ${Object.keys(state.firedCourses || {}).length ? `<button class="icon-action neutral" data-act="clear-fired-all">${ACT_UNDO_SVG}<span class="ia-label">Clear</span></button>` : ''}
         <button class="icon-action neutral" data-act="close-callaway">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
+        <button class="icon-action send" data-act="fire-course" data-val="${state.callAwayPick || ''}"${state.callAwayPick ? '' : ' disabled'}>${ACT_TICK_SVG}<span class="ia-label">Send</span></button>
       </div>
     </div>
   </div>`;
@@ -30029,7 +30040,7 @@ function renderAccountMiddle() {
   const sentCount = (() => { const o = state.orders.find(o => o.id === state.openOrderId); return o ? (o.items || []).length : 0; })();
   const sc = [
     ['open-table-picker', DKT_TABLE_SVG, 'Table', t ? String(t.label) : 'none yet'],
-    ['open-covers-pad', DKT_USER_SVG, 'Covers', state.settings.coversEnabled ? (state.covers ? String(state.covers) : '—') : 'off'],
+    ...(state.settings.coversEnabled ? [['open-covers-pad', DKT_USER_SVG, 'Covers', state.covers ? String(state.covers) : '—']] : []),
     ['toggle-notes-panel', DKT_POSTIT_SVG, 'Notes', ''],
     ['toggle-quick-note', DKT_BOLT_SVG, 'Quick note', ''],
     ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
@@ -30331,7 +30342,7 @@ function closeTablePicker(then) {
   const done = () => {
     const after = state._tpAfter || []; state._tpAfter = []; state._tpLeaving = false;
     document.body.removeAttribute('data-tp-leaving');
-    state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
+    state.showTablePicker = false; state._tpFromOrder = false; state.transferMode = false; state.transferFrom = null;
     if (then) then(); after.forEach(f => f()); render();
   };
   if (!state.showTablePicker) { done(); return; }
@@ -30371,6 +30382,8 @@ function openTablePicker() {
   });
   state.pickerFloorPlanId = owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
   state.showTablePicker = true;
+  // Opened OVER something: there is a screen behind to swipe back to.
+  state._tpFromOrder = !!state.table;
   // THE FLOOR TAKES THE MIDDLE, SO THE ACCOUNT HUB STANDS DOWN. The hub is
   // checked before the floor when the pane is chosen, so anything opening the
   // floor from inside the hub drew the hub again — Move items ticked its lines
@@ -38799,7 +38812,8 @@ function handleActClick(el, e) {
       else if (act === 'toggle-all-courses') { state.allCourseTabs = !state.allCourseTabs; render(); }
       else if (act === 'auto-assign-courses') { autoAssignCourses(); }
       else if (act === 'toggle-auto-course-order') { toggleAutoCourseOrder(); }
-      else if (act === 'fire-course') { stageCourse(parseInt(el.dataset.val)); }
+      else if (act === 'pick-callaway') { const n = parseInt(el.dataset.val); state.callAwayPick = state.callAwayPick === n ? null : n; render(); }
+      else if (act === 'fire-course') { const n = parseInt(el.dataset.val); if (!n) return; state.callAwayPick = null; stageCourse(n); }
       else if (act === 'open-table-picker') { openTablePicker(); }
       else if (act === 'toggle-account-menu') { state.accountMenuOpen = !state.accountMenuOpen; render(); }
       else if (act === 'acct-go') {

@@ -3260,12 +3260,18 @@ body{ --num-key-w:84px; --num-key-h:74px; --num-key-r:var(--r-surface); --num-ke
    everything already — so nothing underneath moves, and sliding the floor away
    REVEALS the hub exactly as it was instead of reflowing it (owner, Aug '26:
    "should the floor slide over the hub just the same"). */
+/* ...and they come BACK the moment the map starts leaving, while the sheet
+   still covers them (owner, Sep '26: "no animation... it shows middle tiles
+   then loads order rail and docket panel after" — filmed at 1024: a full-width
+   sheet of tiles for the whole slide, then rail and docket snapping in at
+   360ms). The reflow now happens behind the map, so the slide reveals a
+   finished screen. */
 @media (min-width:769px){
-  body[data-fs-picker] .catrail,
-  body[data-fs-picker] .ticket-panel{ display:none !important; }
+  body[data-fs-picker]:not([data-tp-leaving]) .catrail,
+  body[data-fs-picker]:not([data-tp-leaving]) .ticket-panel{ display:none !important; }
 }
 body[data-fs-picker] .main{ display:flex !important; }
-body[data-fs-picker] .middle-view{ max-width:100%; }
+body[data-fs-picker]:not([data-tp-leaving]) .middle-view{ max-width:100%; }
 body[data-fs-picker] .simple-table-grid{ grid-template-columns:repeat(auto-fill, minmax(168px, 1fr)); gap:12px; max-width:100%; }
 body[data-fs-picker] .simple-table-btn{ min-height:118px; }
 body[data-fs-picker] .stb-num{ font-size:calc(var(--stb-fs,34px)*1.3); }
@@ -4822,7 +4828,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    each, so a colour or wash change shows here the moment it is made. */
 .ts-samples{ display:grid; grid-template-columns:repeat(3,1fr); gap:16px; padding:12px 0 4px; }
 .ts-sample{ display:flex; flex-direction:column; align-items:center; gap:12px; }
-.ts-sample-floor{ position:relative; width:116px; height:116px; border-radius:var(--r-control); background:var(--steel-100); } /* the sample table lands at ~70px — the size a table really is on the till's floor and the phone's (measured, Sep '26) */
+.ts-sample-floor{ position:relative; width:116px; height:116px; border-radius:var(--r-control); background:var(--steel-100); pointer-events:none; } /* the sample table lands at ~70px — the size a table really is on the till's floor and the phone's (measured, Sep '26) */
 .ts-sample-name{ font-weight:700; font-size:var(--fs-md); text-align:center; }
 /* The tables and the pills are two images: four table states, then every chip
    a table can wear on its own (owner, Sep '26). */
@@ -4830,7 +4836,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .ts-group-name{ font-weight:700; font-size:var(--fs-md); color:var(--charcoal-soft); margin-top:12px; }
 .ts-group-name:first-child{ margin-top:0; }
 .ts-samples-4{ grid-template-columns:repeat(4,1fr); }
-.ts-pill-box{ position:relative; min-height:44px; display:flex; align-items:center; justify-content:center; }
+/* THE PREVIEW IS A PICTURE, NOT A FLOOR (owner, Sep '26: a tap on a sample
+   table opened the covers pad). It is drawn by the floor's own code, so it
+   carries the floor's own handlers — the taps stop here. */
+.ts-pill-box{ position:relative; min-height:44px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
 .ts-pill-box .tbl-cpill, .ts-pill-box .tbl-res, .ts-pill-box .tbl-marks{ position:static; transform:none; }
 /* TRUE TO THE FLOOR: the map wears the picker's own pill rules (12 on the
    number), so the preview wears them too — it read a size bigger otherwise
@@ -19384,7 +19393,12 @@ function resetFloorPicker() {
 // same as phone"): the phone walks floor · menu · docket; the tablet keeps
 // its docket on screen, so its dots are floor · order.
 function barPagerOn() {
+  // NOT WHILE THE FLOOR IS THE SCREEN (owner, Sep '26: "it shows two dots on
+  // the initial floor table select where there should be none — you cannot
+  // swipe until a table is selected"). The pager is how you move between the
+  // order's pages; on the floor the only move is a pick.
   return state.view === 'order' && state.orderType === 'dine-in' && !!state.table
+    && !state.showTablePicker && !state._tpLeaving
     && !(state.currentStaff && state.currentStaff.role === 'chef');
 }
 // The table Admin's key returns to: the one the till was ordering on when it
@@ -28603,7 +28617,12 @@ function pillSamplesFor(lens) {
   // allergy alerts").
   if (lens === 'guests') return [{ name: 'VIP', vip: true }, { name: 'Allergy', allergy: true, mark: true }, { name: 'Which allergy', allergy: true }];
   if (lens === 'booked') return [{ name: 'Booked soon', res: true }];
-  return [{ name: 'Spend so far', spend: true }]; // the money lens
+  // THE MONEY LENS SHOWS EVERY AMOUNT IT CAN DRAW (owner, Sep '26: "preview
+  // does not show all amount types") — one sample per level that is on.
+  const b = spendBands();
+  return [[Math.max(1, Math.round(b.busy * 0.6)), 'Low'], [Math.round((b.busy + b.big) / 2), 'Medium'], [Math.round(b.big * 1.4), 'High']]
+    .filter(([v]) => !spendLevelOff().includes(spendLevelKey(v)))
+    .map(([v, name]) => ({ name, spend: true, spendVal: v }));
 }
 function renderTableStatusPreview() {
   const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
@@ -28629,9 +28648,13 @@ function renderTableStatusPreview() {
     const t = { id: 'sample-p' + i, type: 'table', label, covers: 2,
       allergies: s.allergy ? [{ base: 'Nuts', allergy: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
     const ago = s.mins != null ? now - s.mins * 60000 : now - 30 * 60000;
+    // Two covers, so a per-person sample is half the bill: the money on the
+    // sample ticket is whatever that spend level needs to read.
+    const each = s.spendVal != null ? (spendPillMode() === 'total' ? s.spendVal / 2 : s.spendVal) : 30;
+    const line = [{ name: 'Sample', price: each, qty: 2 }];
     const order = (s.mins != null || s.spend) ? {
       id: 'sample-order-' + label, status: 'open', orderType: 'dine-in', table: label, covers: 2,
-      items: [{ name: 'Sample', price: 30, qty: 2 }], rounds: [{ items: [{ name: 'Sample', price: 30, qty: 2 }], at: ago, sentAt: ago }],
+      items: line, rounds: [{ items: line, at: ago, sentAt: ago }],
       createdAt: ago, calledAwayAt: lens === 'course' && s.mins != null ? ago : undefined,
     } : null;
     const inner = _withSampleFloor(
@@ -28717,11 +28740,10 @@ function renderTableStatusAdmin() {
           ${line(c.warn, 'pillWarn', '#FFCC00', 'Running long after', m.warn)}
           ${line(c.over, 'pillDanger', '#FF3B30', 'Over after', m.over)}
         </div>`; }).join('')}
-      </div>
-      <div class="settings-card">
-        <div class="th" style="margin-bottom:12px;">3 · Spend pill</div>
-        ${/* All three readings keep the same rows (owner, Sep '26): nothing
-              hides when the reading changes. */ ''}
+        ${/* SPEND LIVES WITH THE PILLS (owner, Sep '26: "put spend pill under
+              2 · Pill") — it is a pill like the rest, not a card of its own. */ ''}
+        <div class="ts-clock">
+        <div style="font-weight:700;font-size:var(--fs-md);margin-bottom:10px;">Spend</div>
         <div class="pay-options" style="margin-bottom:8px;">
           ${[['total', 'Total'], ['perhead', 'Per person']].map(([v, l]) => `<div class="pay-opt ${spendMode === v ? 'active' : ''}" data-act="set-spend-style" data-val="${v}">${l}</div>`).join('')}
         </div>
@@ -28736,15 +28758,10 @@ function renderTableStatusAdmin() {
           ${lv.amount ? inp(lv.amount, lv.amount === 'spendBand2' ? t2 : t3) : ''}
           <button class="status-chip mi-onoff ${on ? 'paid' : 'void'}" data-act="set-spend-level-on" data-key="${lv.key}">${on ? 'On' : 'Off'}</button>
         </div>`; }).join('')}
-        <div class="ts" style="margin:4px 0 8px;">How it reads on a table</div>
-        <div class="ts-spend-demo">
-          ${[Math.max(1, Math.round(t2 * 0.6)), Math.round((t2 + t3) / 2), Math.round(t3 * 1.4)].map(v =>
-            spendLevelOff().includes(spendLevelKey(v)) ? '<span class="ts">no pill</span>'
-              : `<span class="tbl-cpill" style="${spendPillStyle(v)}"><b>${spendPillText(spendMode === 'total' ? v : v * 2, spendMode === 'total' ? v / 2 : v)}</b></span>`).join('')}
         </div>
       </div>
       <div class="settings-card">
-        <div class="th" style="margin-bottom:12px;">4 · One till per table</div>
+        <div class="th" style="margin-bottom:12px;">3 · One till per table</div>
         <div class="pay-options">${togglePill(state.settings.tableLockEnabled !== false, 'set-table-lock')}</div>
       </div>
     </div>
@@ -29655,9 +29672,9 @@ function spendPillText(total, per) {
 // amount change just like other pill options"). Money is not a danger scale,
 // so these are the venue's own colours, never the warning yellow and red.
 const SPEND_LEVELS = [
-  { key: 'spendLow', name: 'Under', def: '#8E8E93' },
-  { key: 'spendBusy', name: 'Busy from', amount: 'spendBand2', def: 'var(--blue)' },
-  { key: 'spendBig', name: 'Big from', amount: 'spendBand3', def: 'var(--blue)' },
+  { key: 'spendLow', name: 'Low', def: '#8E8E93' },
+  { key: 'spendBusy', name: 'Medium', amount: 'spendBand2', def: 'var(--blue)' },
+  { key: 'spendBig', name: 'High', amount: 'spendBand3', def: 'var(--blue)' },
 ];
 // A LEVEL CAN BE SWITCHED OFF (owner, Sep '26: "the on off from items ... low
 // spend mid spend"). A table in a level that is off wears no spend pill at all
@@ -29672,13 +29689,14 @@ function toggleSpendLevel(key) {
   saveTicketSetting({ spendLevelOff: off });
   render();
 }
+// EVERY LEVEL WEARS ITS COLOUR THE SAME WAY (owner, Sep '26: "this is
+// different from the colours selected, it inverts — keep it the same style").
+// Low and medium used to be a 18% wash while high went solid, so the pill
+// never matched the box you picked. The pill IS that box now, on all three.
 function spendPillStyle(v) {
-  const b = spendBands();
-  const tint = (c) => `background:color-mix(in srgb, ${c} 18%, var(--surface));color:color-mix(in srgb, ${c} 64%, var(--text-primary));`;
-  if (v >= b.big) { const c = statusColor('spendBig', 'var(--blue)'); return `background:${c};color:${contrastTextColor(c)};`; }
-  if (v >= b.busy) return tint(statusColor('spendBusy', 'var(--blue)'));
-  const low = (state.settings.tableStatusColors || {}).spendLow;
-  return low ? tint(low) : ''; // no colour picked: the quiet chip it has always been
+  const lv = SPEND_LEVELS.find(l => l.key === spendLevelKey(v)) || SPEND_LEVELS[0];
+  const c = statusColor(lv.key, lv.def);
+  return `background:${c};color:${contrastTextColor(c)};`;
 }
 function floorPillHtml(t, cs) {
   if (state.settings.floorPillEnabled === false) return ''; // pills switched off (owner, Sep '26)
@@ -29754,7 +29772,7 @@ function floorPillHtml(t, cs) {
   // The course rides the pill by NAME, not just its colour dot — a casual
   // shouldn't need the colour code memorised (owner, from OrderMate).
   const cn = cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
-  return pill(sev(cap ? mins / cap : 0), `<i style="background:${cs.color || 'var(--teal)'};"></i><b>${cn}${pillDur(mins)}</b>`, 'Course wait');
+  return pill(sevAt(mins, 'course'), `<i style="background:${cs.color || 'var(--teal)'};"></i><b>${cn}${pillDur(mins)}</b>`, 'Course wait');
 }
 // Course pill: dot in the course's colour + minutes since the call-away /
 // last round. Flips solid violet past the course-wait cap — never red.
@@ -30301,6 +30319,7 @@ function closeTablePicker(then) {
   if (state._tpLeaving) { if (then) state._tpAfter.push(then); return; } // already on its way off: the caller's bookkeeping joins the queue
   const done = () => {
     const after = state._tpAfter || []; state._tpAfter = []; state._tpLeaving = false;
+    document.body.removeAttribute('data-tp-leaving');
     state.showTablePicker = false; state.transferMode = false; state.transferFrom = null;
     if (then) then(); after.forEach(f => f()); render();
   };
@@ -30313,6 +30332,10 @@ function closeTablePicker(then) {
   // cut its last frames (filmed, Sep '26).
   state._tpLeaving = true; state._tpAfter = [];
   state._tpAnimUntil = Date.now() + 320;
+  // The rail and the docket come back NOW, under the map, so what the slide
+  // uncovers is the finished screen instead of a full-width sheet of tiles
+  // that reflows a beat later (owner, Sep '26).
+  document.body.setAttribute('data-tp-leaving', '');
   render();
   const live = document.querySelector('.middle-view.tp-view');
   if (!live) { done(); return; }
@@ -33666,6 +33689,37 @@ function markAdminKeyboardFocusable() {
     el.setAttribute('role', 'button');
   });
 }
+// TAB WALKS THE FIELDS (owner, Sep '26: "tab should work as shortcut for next
+// field to edit if keyboard attached"). Leaving a field saves it, and a save
+// rebuilds the whole screen — so the browser's own Tab landed on a control
+// that no longer existed and focus fell to the page. We take the key, let the
+// save and its rebuild happen, then put the caret in the field that now sits
+// where the next one was.
+function _adminFields(scope) {
+  if (!scope) return [];
+  return [...scope.querySelectorAll('input:not([type="hidden"]):not([disabled]):not([tabindex="-1"]), select:not([disabled]), textarea:not([disabled])')]
+    .filter(el => el.offsetWidth || el.offsetHeight);
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Tab' || e.altKey || e.ctrlKey || e.metaKey) return;
+  const el = document.activeElement;
+  if (!el || !el.matches) return;
+  const scope = el.closest('.modal, .admin-content');
+  if (!scope) return;
+  const list = _adminFields(scope);
+  const i = list.indexOf(el);
+  const next = i < 0 ? -1 : (e.shiftKey ? i - 1 : i + 1);
+  if (next < 0 || next >= list.length) return; // the ends stay the browser's
+  e.preventDefault();
+  el.blur(); // this is what saves, and what rebuilds the screen
+  requestAnimationFrame(() => {
+    const again = _adminFields(document.querySelector('.modal') || document.querySelector('.admin-content'));
+    const t = again[next];
+    if (!t) return;
+    t.focus();
+    if (t.select) { try { t.select(); } catch (err) {} }
+  });
+});
 // Enter / Space fires a focused div-control (the ones marked above), so the
 // keyboard activates them just like a tap. Native controls handle their own
 // keys; typing in a field is never hijacked.
@@ -36659,7 +36713,16 @@ function beginSortDrag(container, itemSel, item, onReorder, downEvt, opts) {
   };
   const update = () => {
     if (!started) return;
-    const dx = lastX - startX, dy = lastY - startY;
+    let dx = lastX - startX, dy = lastY - startY;
+    // A STRIP DRAGS ALONG ITS STRIP (owner, Sep '26: "I can drag these under
+    // the bar — don't allow that"). On a row, up and down mean nothing, and
+    // following the finger there let a chip wander off the strip and under the
+    // top bar. It stays on its line, and stops at the two ends.
+    if (horizontal) {
+      dy = 0;
+      const a = slots[0], z = slots[slots.length - 1], me = slots[fromIdx];
+      dx = Math.max(a.left - me.left, Math.min((z.left + z.w) - (me.left + me.w), dx));
+    }
     // dragged card follows the pointer (no transition → instant), keeps the lift scale
     item.style.transform = `translate(${dx / vscale}px, ${dy / vscale}px) scale(1.03)`;
     const centre = horizontal ? (slots[fromIdx].cx + dx) : (slots[fromIdx].cy + dy);
@@ -38891,7 +38954,14 @@ function handleActClick(el, e) {
         else { const r = el.getBoundingClientRect(); state.fpViewOpen = { right: Math.round(window.innerWidth - r.right), top: Math.round(r.bottom + 4) }; }
         render();
       }
-      else if (act === 'fp-view-pick') { state.floorStatusView = el.dataset.val; state.fpViewOpen = false; render(); }
+      // THE CHOICE LIGHTS UP BEFORE THE MENU GOES (owner, Sep '26: "show that a
+      // button has been selected before removing the dropdown"). The tap used
+      // to close the menu in the same frame, so nothing ever confirmed it.
+      else if (act === 'fp-view-pick') {
+        state.floorStatusView = el.dataset.val;
+        if (state.fpViewOpen) { render(); setTimeout(() => { state.fpViewOpen = false; render(); }, 180); }
+        else { state.fpViewOpen = false; render(); }
+      }
       else if (act === 'add-object') { addObject(el.dataset.fp); }
       else if (act === 'floor-undo') { floorUndo(); }
       else if (act === 'floor-redo') { floorRedo(); }

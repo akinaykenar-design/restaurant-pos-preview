@@ -7694,6 +7694,13 @@ app.put('/api/settings', (req, res) => {
     const known = ['spendLow', 'spendBusy', 'spendBig'];
     data.settings.spendLevelOff = (Array.isArray(req.body.spendLevelOff) ? req.body.spendLevelOff : []).filter(k => known.includes(k));
   }
+  // Which of the three waits a venue has switched off, per clock — "seated:long",
+  // "attention:late" and so on. Anything not of that shape is dropped.
+  if (req.body.pillLevelOff !== undefined) {
+    const clocks = ['course', 'sitting', 'attention'], levels = ['short', 'long', 'late'];
+    data.settings.pillLevelOff = (Array.isArray(req.body.pillLevelOff) ? req.body.pillLevelOff : [])
+      .filter(k => { const p = String(k).split(':'); return p.length === 2 && clocks.includes(p[0]) && levels.includes(p[1]); });
+  }
   if (req.body.spendBand2 !== undefined) data.settings.spendBand2 = Math.max(1, Math.min(9999, parseInt(req.body.spendBand2) || 25));
   if (req.body.spendBand3 !== undefined) data.settings.spendBand3 = Math.max(1, Math.min(9999, parseInt(req.body.spendBand3) || 45));
   if (req.body.seatingMinutes !== undefined) data.settings.seatingMinutes = req.body.seatingMinutes ? Math.max(0, parseInt(req.body.seatingMinutes) || 0) || null : null;
@@ -28947,12 +28954,30 @@ function pillSamplesFor(lens) {
   // yellow and the red live in the Pill card's own rows.
   // The COURSE lens is the exception: it draws a different pill per course, so
   // it shows one per course that is on (owner, Sep '26).
+  // ALL THREE WAITS, NOT JUST THE FIRST (owner, Sep '26: "should show what
+  // long and late look like"). Every sample used to sit at half the first
+  // threshold, so the legend only ever drew the short one and the two colours
+  // a venue is most likely to change were the two it could not see. Off
+  // levels drop out, the same as they do on the floor.
+  const waits = (key) => {
+    const { warn, over } = pillClockMins(key);
+    return [['short', Math.max(1, Math.round(warn * 0.5))], ['long', warn], ['late', over]]
+      .filter(([lv]) => !pillLevelIsOff(key, lv));
+  };
   if (lens === 'course') {
+    const on = coursePillLevels().filter(l => l.on);
     const mins = Math.max(1, Math.round(pillClockMins('course').warn * 0.5));
-    return coursePillLevels().filter(l => l.on).map(l => ({ name: l.name, mins, courseN: l.n }));
+    const per = on.map(l => ({ name: l.name, mins, courseN: l.n }));
+    // ...and one course carried through the waits, so the three colours show
+    // without drawing every course three times over.
+    const first = on[0];
+    const rest = first ? waits('course').filter(([lv]) => lv !== 'short')
+      .map(([lv, m]) => ({ name: lv === 'long' ? 'Long' : 'Late', mins: m, courseN: first.n })) : [];
+    return per.concat(rest);
   }
   const clock = PILL_CLOCKS.find(c => c.key === lens);
-  if (clock) return [{ name: clock.name, mins: Math.max(1, Math.round(pillClockMins(lens).warn * 0.5)) }];
+  if (clock) return waits(lens).map(([lv, m]) => ({
+    name: lv === 'short' ? 'Short' : lv === 'long' ? 'Long' : 'Late', mins: m }));
   // Guests is the lens that carries the marks: the VIP star and the allergy !
   // ride the corners there, and the pill names the allergy (owner, Sep '26:
   // "booked should only show booked pills, guests should show VIPs and
@@ -29071,11 +29096,14 @@ function renderTableStatusAdmin() {
       <div class="settings-card">
         <div class="th" style="margin-bottom:12px;">2 · Pill</div>
         <div class="pay-options" style="margin-bottom:6px;display:flex;align-items:center;gap:12px;">${togglePill(state.settings.floorPillEnabled !== false, 'set-floor-pill')}<div style="font-weight:700;font-size:var(--fs-md);">Pills on the tables</div></div>
-        ${PILL_CLOCKS.map(c => { const m = pillClockMins(c.key); const line = (key, dotKey, dotDef, label, val) => `
+        ${PILL_CLOCKS.map(c => { const m = pillClockMins(c.key);
+          const onoff = (level) => { const on = !pillLevelIsOff(c.key, level); return `<button class="status-chip mi-onoff ${on ? 'paid' : 'void'}" data-act="set-pill-level-on" data-key="${c.key}" data-level="${level}">${on ? 'On' : 'Off'}</button>`; };
+          const line = (key, dotKey, dotDef, label, val, level) => `
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
             ${colorDotButton('table-status', dotKey, sc[dotKey] || null, { bg: sc[dotKey] || dotDef, title: 'Change colour' })}
             <label class="field-label" style="margin:0;flex:1;">${label}</label>
             <input type="number" min="0" max="600" step="1" value="${val}" class="num-field" onblur="saveTicketSetting({ ${key}: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+            ${onoff(level)}
           </div>`;
           return `
         <div class="ts-clock">
@@ -29088,9 +29116,10 @@ function renderTableStatusAdmin() {
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
             ${colorDotButton('table-status', 'pillShort', sc.pillShort || null, { bg: sc.pillShort || 'var(--green)', title: 'Change colour' })}
             <label class="field-label" style="margin:0;flex:1;">Short</label>
+            ${onoff('short')}
           </div>
-          ${line(c.warn, 'pillWarn', '#FFCC00', 'Long after', m.warn)}
-          ${line(c.over, 'pillDanger', '#FF3B30', 'Late after', m.over)}
+          ${line(c.warn, 'pillWarn', '#FFCC00', 'Long', m.warn, 'long')}
+          ${line(c.over, 'pillDanger', '#FF3B30', 'Late', m.over, 'late')}
           ${/* THE COURSES GET THEIR OWN ROWS HERE (owner, Sep '26: "add course
                 pills to table states as well — a separate set of options from
                 the courses section in admin"). Same shape as Spend: a colour
@@ -30047,6 +30076,28 @@ const SPEND_LEVELS = [
 // — the venue that only wants to see the big ones sees only the big ones.
 function spendLevelOff() { return state.settings.spendLevelOff || []; }
 function spendLevelKey(v) { const b = spendBands(); return v >= b.big ? 'spendBig' : v >= b.busy ? 'spendBusy' : 'spendLow'; }
+// WHICH OF THE THREE a wait falls in — the one place that decides, so the
+// colour on the floor and the On/Off in admin can never disagree.
+function pillClockLevel(mins, key) {
+  const { warn, over } = pillClockMins(key);
+  if (over && mins >= over) return 'late';
+  if (warn && mins >= warn) return 'long';
+  return 'short';
+}
+// A LEVEL A VENUE DOESN'T WANT IS SWITCHED OFF (owner, Sep '26: "add on off
+// buttons"), the same shape as Spend and the courses. Held per clock, so
+// Seated and Idle answer for themselves.
+function pillLevelOff() { return state.settings.pillLevelOff || []; }
+function pillLevelIsOff(clock, level) { return pillLevelOff().includes(clock + ':' + level); }
+function togglePillLevel(clock, level) {
+  const k = clock + ':' + level;
+  const off = pillLevelOff().slice();
+  const i = off.indexOf(k);
+  if (i >= 0) off.splice(i, 1); else off.push(k);
+  state.settings.pillLevelOff = off;
+  saveTicketSetting({ pillLevelOff: off });
+  render();
+}
 function toggleSpendLevel(key) {
   const off = spendLevelOff().slice();
   const i = off.indexOf(key);
@@ -30118,6 +30169,7 @@ function floorPillHtml(t, cs) {
   if (o && o.calledAwayAt && lens !== 'booked') {
     if (cs && cs.courseN && coursePillOff(cs.courseN)) return ''; // this course switched off
     const mins = Math.max(0, Math.floor((Date.now() - o.calledAwayAt) / 60000));
+    if (pillLevelIsOff('course', pillClockLevel(mins, 'course'))) return ''; // this level switched off
     const style = sevAt(mins, 'course');
     const cn = cs && cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
     return pill(style, `<b>⏱ ${cn}${pillDur(mins)}</b>`, 'Called away — being fired');
@@ -30125,11 +30177,13 @@ function floorPillHtml(t, cs) {
   if (lens === 'sitting') {
     if (!o) return '';
     const mins = Math.max(0, Math.floor((Date.now() - o.createdAt) / 60000));
+    if (pillLevelIsOff('sitting', pillClockLevel(mins, 'sitting'))) return ''; // this level switched off
     return pill(sevAt(mins, 'sitting'), `<b>⏱ ${pillDur(mins)}</b>`, 'Time seated');
   }
   if (lens === 'attention') {
     if (!o) return '';
     const idle = tableIdleMins(o);
+    if (pillLevelIsOff('attention', pillClockLevel(idle, 'attention'))) return ''; // this level switched off
     return pill(sevAt(idle, 'attention'), `<b>⏱ ${pillDur(idle)}</b>`, 'Since last activity');
   }
   if (lens === 'spend') {
@@ -39750,6 +39804,7 @@ function handleActClick(el, e) {
       else if (act === 'set-spend-style') { saveTicketSetting({ spendPillStyle: el.dataset.val }); }
       else if (act === 'set-spend-format') { saveTicketSetting({ spendPillFormat: el.dataset.val }); }
       else if (act === 'set-spend-level-on') { toggleSpendLevel(el.dataset.key); }
+      else if (act === 'set-pill-level-on') { togglePillLevel(el.dataset.key, el.dataset.level); }
       else if (act === 'set-course-pill-on') { const n = parseInt(el.dataset.key, 10); setCoursePillLevel(n, { off: !coursePillOff(n) }); }
       else if (act === 'toggle-item-rowbreak') {
         const item = state.menu.find(m => m.id === el.dataset.id);

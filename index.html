@@ -17403,19 +17403,17 @@ function seatWordLower() {
   const w = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
   return (w || 'seat').toLowerCase();
 }
-function noteTypeMulti(id) {
-  const m = (state.settings || {}).noteTypeMulti || {};
-  return m[id] === undefined ? true : !!m[id];
-}
 function noteTypeStation(id) {
   const st = (state.settings || {}).noteTypeStation || {};
   return st[id] || null;
 }
-function noteCatMulti(categoryId) {
-  if (categoryId === 'vip' || categoryId === 'allergy') return noteTypeMulti(categoryId);
-  const c = (state.noteCategories || []).find(x => x.id === categoryId);
-  return !!(c && c.multi);
-}
+// EVERY TYPE GATHERS, THE TICK SAVES (owner, Sep '26, spelling out the whole
+// rule: "by default it should be able to select as many as you want, and then
+// you press the tick, and then it should bring up a popup — if it applies to a
+// seat the popup pops up, if it applies to a table it doesn't"). So there is
+// no per-type "how many" any more, and nothing on the floor decides it either:
+// picking gathers, the tick saves, and the ONLY thing that decides whether the
+// cover pad opens is whether the type is about a seat.
 function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', note: '', picks: [], seats: [], wholeTable: false }; }
 
 function toggleQuickNotePad() {
@@ -17555,11 +17553,9 @@ async function saveTableAllergies(tableId, allergies) {
 function saveCustomNoteDraft() {
   const m = state.customNoteDraft;
   const text = m.text.trim();
-  // A gathering type saves EVERY pick, each as its own note — one chip each
-  // on the docket, one line each on the print, the way allergies read.
-  const texts = noteCatMulti(m.categoryId)
-    ? [...new Set([...(m.picks || []), text].filter(t => t && t.trim()))]
-    : (text ? [text] : []);
+  // EVERY pick is saved, each as its own note — one chip each on the docket,
+  // one line each on the print, the way allergies have always read.
+  const texts = [...new Set([...(m.picks || []), text].filter(t => t && t.trim()))];
   if (!texts.length) { state.adminError = 'Type a note.'; render(); return; }
   if (!m.wholeTable && m.seats.length === 0) {
     // Same grammar as adding an item: the centred seat pop asks which
@@ -21588,11 +21584,10 @@ function renderCustomNoteTabContent(categoryId) {
   const m = state.customNoteDraft;
   if (!m) return '';
   const cat = state.noteCategories.find(c => c.id === categoryId);
-  const multi = noteCatMulti(categoryId);
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(multi ? (m.picks || []).includes(p.name) : m.text === p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
+      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(m.picks || []).includes(p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
       <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
   </div>
   ${/* ONE LINE OF WORDS THAT RIDES WITH THE PICKS (owner, Sep '26: "one setup
@@ -21601,7 +21596,7 @@ function renderCustomNoteTabContent(categoryId) {
         one instruction that goes with them; typing in the cell above made yet
         another note instead. A single-pick type needs none: the cell above IS
         the words. */ ''}
-  ${multi ? `<input id="custom-note-extra-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">` : ''}
+  <input id="custom-note-extra-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">
   ${noteSeatChip(m, 'open-note-seat-pop', m.categoryId)}
   ${npReserveRow()}
 `;
@@ -34209,39 +34204,11 @@ document.addEventListener('contextmenu', (e) => { if (e.target.closest && e.targ
 // Works on hub tiles and single-page rail groups (Service). The hold both
 // fires the toggle and arms _adminPinFired so the release's click doesn't
 // also navigate.
-// HOLD a note/allergy preset tile when the table has several covers
-// (owner, Aug '26): the hold picks the preset AND opens the seat pop in
-// one gesture — the same hold language as tiles everywhere else. A tap on a
-// note preset saves by itself after a beat (the seat pop asks when needed);
-// allergy presets stay multi-pick, so their taps toggle and Save finishes.
-let _npHoldFired = false, _npHoldTimer = 0;
-document.addEventListener('pointerdown', (e) => {
-  const el = e.target.closest && e.target.closest('[data-act="pick-note-preset"], [data-act="toggle-allergy-preset"]');
-  if (!el) return;
-  if (!(state.settings.seatNumbersEnabled && state.covers > 1)) return;
-  _npHoldFired = false;
-  clearTimeout(_npHoldTimer);
-  _npHoldTimer = setTimeout(() => {
-    _npHoldFired = true;
-    if (el.dataset.act === 'pick-note-preset') {
-      if (!state.customNoteDraft) return;
-      // Holding for a seat picks ONE note — a gathering type asks for the
-      // seat once, on the tick, for everything picked.
-      if (noteCatMulti(state.customNoteDraft.categoryId)) return;
-      state.customNoteDraft.text = el.dataset.val;
-      state.noteSeatPop = true;
-    } else {
-      const m = state.allergyModal; if (!m) return;
-      if (!m.selectedAllergies.includes(el.dataset.allergy)) m.selectedAllergies.push(el.dataset.allergy);
-      state.allergySeatPop = true;
-    }
-    state.adminError = '';
-    render();
-  }, 450);
-  const npCancel = () => clearTimeout(_npHoldTimer);
-  document.addEventListener('pointerup', npCancel, { once: true });
-  document.addEventListener('pointercancel', npCancel, { once: true });
-});
+// HOLDING A PRESET FOR A SEAT IS GONE (owner, Sep '26). It existed because a
+// note used to save on the tap, so a hold was the only way to say "this one,
+// for that cover". Now every type gathers and the TICK saves, and whether the
+// cover pad opens is the type's own answer — so a hold that forced the pad
+// would be a second door onto a decision that is no longer the waiter's.
 // Swipe left/right anywhere on the notes popup slides between its sections —
 // VIP → allergies → each note tab, the same order as the chips (owner, Aug
 // '26). A mostly-vertical drag still scrolls; typing fields are left alone.
@@ -40903,15 +40870,8 @@ function handleActClick(el, e) {
       else if (act === 'clear-fired-all') { state.firedCourses = {}; state.toast = 'Call-away cleared'; render(); armToastTimer(1800); }
       else if (act === 'switch-notes-tab') { switchNotesTab(el.dataset.val); }
       else if (act === 'toggle-allergy-preset') {
-        if (_npHoldFired) { _npHoldFired = false; return; }
         const name = el.dataset.allergy;
         const m = state.allergyModal;
-        if (!noteCatMulti('allergy')) {
-          if (m._done) return;
-          m.selectedAllergies = [name]; m.subTypeChoices = {}; m._done = true; render();
-          setTimeout(() => { m._done = false; if (state.allergyModal === m && state.notesPanel) saveAllergyModal(); }, IO_PICK_BEAT);
-          return;
-        }
         const idx = m.selectedAllergies.indexOf(name);
         if (idx === -1) m.selectedAllergies.push(name); else { m.selectedAllergies.splice(idx, 1); delete m.subTypeChoices[name]; }
         render();
@@ -40970,20 +40930,12 @@ function handleActClick(el, e) {
         // beat, then saves itself — the seat pop still asks when covers > 1.
         // A type set to take SEVERAL gathers instead: tap to add, tap again to
         // take it off, and the tick saves the lot (owner, Aug '26).
-        if (_npHoldFired) { _npHoldFired = false; return; }
         const m = state.customNoteDraft;
-        if (m._done) return; // the pick is being SHOWN — pop is on its way out
-        if (noteCatMulti(m.categoryId)) {
-          const v = el.dataset.val;
-          m.picks = m.picks || [];
-          const at = m.picks.indexOf(v);
-          if (at === -1) m.picks.push(v); else m.picks.splice(at, 1);
-          render();
-          return;
-        }
-        m.text = el.dataset.val;
-        m._done = true; render();
-        setTimeout(() => { m._done = false; if (state.customNoteDraft === m && state.notesPanel) saveCustomNoteDraft(); }, IO_PICK_BEAT);
+        const v = el.dataset.val;
+        m.picks = m.picks || [];
+        const at = m.picks.indexOf(v);
+        if (at === -1) m.picks.push(v); else m.picks.splice(at, 1);
+        render();
       }
       else if (act === 'pick-note-whole-table') { state.customNoteDraft.wholeTable = !state.customNoteDraft.wholeTable; if (state.customNoteDraft.wholeTable) state.customNoteDraft.seats = []; render(); }
       else if (act === 'toggle-note-seat') {
@@ -41019,17 +40971,8 @@ function handleActClick(el, e) {
       else if (act === 'pick-vip-preset') {
         const cur = (state.vipModal.type || '').split(',').map(s => s.trim()).filter(Boolean);
         const v = el.dataset.val, i = cur.indexOf(v);
-        const m = state.vipModal;
-        if (!noteCatMulti('vip')) {
-          // One tap = the whole job, the same beat a one-pick note has: the
-          // preset lights, then it saves itself and the cover pad asks.
-          if (m._done) return;
-          m.type = v; m._done = true; render();
-          setTimeout(() => { m._done = false; if (state.vipModal === m && state.notesPanel) saveVipModal(); }, IO_PICK_BEAT);
-          return;
-        }
         if (i === -1) cur.push(v); else cur.splice(i, 1);
-        m.type = cur.join(', ');
+        state.vipModal.type = cur.join(', ');
         render();
       }
       else if (act === 'clear-vip') { clearVip(); }

@@ -8805,9 +8805,19 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
         seat: (n.seat === null || n.seat === undefined || n.seat === '') ? null : parseInt(n.seat),
         categoryId: n.categoryId ? String(n.categoryId).slice(0, 60) : null,
         text: String(n.text).trim().slice(0, 200),
+        // The one line of words that rides with the picks — an allergy entry
+        // has carried one for months; every note type has one now.
+        note: String((n && n.note) || '').trim().slice(0, 200),
       }));
   }
   if (vipType !== undefined) table.vipType = String(vipType || '').trim().slice(0, 60);
+  // The VIP's cover, like every other note's (owner, Sep '26). null = the
+  // whole table, which is what every VIP saved before this reads as.
+  if (req.body.vipSeat !== undefined) {
+    const n = parseInt(req.body.vipSeat, 10);
+    table.vipSeat = (n > 0 && n <= 99) ? n : null;
+  }
+  if (req.body.vipNote !== undefined) table.vipNote = String(req.body.vipNote || '').trim().slice(0, 200);
   if (mergedInto !== undefined) table.mergedInto = mergedInto || null;
   writeData(data);
   res.json(table);
@@ -8831,12 +8841,17 @@ app.post('/api/tables/move-sitting', (req, res) => {
     .map(a => ({ seat: (a.seat === null || a.seat === undefined || a.seat === '') ? null : parseInt(a.seat),
       allergy: String(a.allergy).trim().slice(0, 60), notes: String((a && a.notes) || '').trim().slice(0, 200) }));
   const vipType = String(req.body.vipType || '').trim().slice(0, 60);
+  const vipSeatN = parseInt(req.body.vipSeat, 10);
+  const vipSeat = (vipSeatN > 0 && vipSeatN <= 99) ? vipSeatN : null;
+  const vipNote = String(req.body.vipNote || '').trim().slice(0, 200);
   const notes = Array.isArray(req.body.notes) ? req.body.notes.slice(0, 50) : (from ? (from.notes || []) : []);
   to.covers = combine ? (to.covers || 0) + covers : covers;
   to.allergies = combine ? [...(to.allergies || []), ...allergies].slice(0, 50) : allergies;
   to.vipType = combine ? (to.vipType || vipType) : vipType;
+  to.vipSeat = combine ? (to.vipSeat != null ? to.vipSeat : vipSeat) : vipSeat;
+  to.vipNote = combine ? (to.vipNote || vipNote) : vipNote;
   to.notes = combine ? [...(to.notes || []), ...notes].slice(0, 50) : notes; // the notes go with the party (Sep '26)
-  if (from && from !== to) { from.covers = 0; from.allergies = []; from.vipType = ''; from.notes = []; }
+  if (from && from !== to) { from.covers = 0; from.allergies = []; from.vipType = ''; from.vipSeat = null; from.vipNote = ''; from.notes = []; }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -12259,6 +12274,9 @@ let state = {
   selectedAllergyNames: [], // admin: allergy presets ticked for bulk edit
   allergyModal: null, // { allergy, customAllergy, seat }
   vipType: '',
+  vipSeat: null,   // which cover the VIP is — null = the whole table
+  vipNote: '',     // the words that ride with the picks, like an allergy's
+  vipSeatPop: false,
   vipModal: null, // { type }
   vipPresets: [],
   quickNotePresets: [], // standing one-shot messages for the ⚡ pad, each may name its station
@@ -15536,7 +15554,7 @@ function finishLogin(staff, warm) {
       const t = findTableById(state.table);
       if (t) {
         const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
-        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || ''; state.discount = t.discount || null;
+        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t); state.discount = t.discount || null;
         if (oo) state.openOrderId = oo.id;
         state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
         claimTableLock(state.table, false, true);
@@ -17159,6 +17177,7 @@ function clearCart() {
   state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
   state.vipType = (findTableById(state.table) || {}).vipType || '';
+  state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
   state.discount = null;
   state.activeCourse = firstEnabledCourseNumber();
   state.courseCount = state.settings.courses.length || 1;
@@ -17176,7 +17195,7 @@ function discardCartUndoable() {
   const snap = {
     cart: state.cart.map(c => ({ ...c, modSelections: c.modSelections ? { ...c.modSelections } : c.modSelections, removed: c.removed ? [...c.removed] : c.removed })),
     activeSeat: state.activeSeat, covers: state.covers, allergies: state.allergies,
-    notes: state.notes, vipType: state.vipType, discount: state.discount,
+    notes: state.notes, vipType: state.vipType, vipSeat: state.vipSeat, vipNote: state.vipNote, discount: state.discount,
     activeCourse: state.activeCourse, courseCount: state.courseCount, firedCourses: state.firedCourses,
     callAway: state.callAway,
   };
@@ -17185,7 +17204,7 @@ function discardCartUndoable() {
     state.cart = snap.cart;
     state.activeSeat = snap.activeSeat; state.covers = snap.covers;
     state.allergies = snap.allergies; state.notes = snap.notes;
-    state.vipType = snap.vipType; state.discount = snap.discount;
+    state.vipType = snap.vipType; state.vipSeat = snap.vipSeat != null ? snap.vipSeat : null; state.vipNote = snap.vipNote || ''; state.discount = snap.discount;
     state.activeCourse = snap.activeCourse; state.courseCount = snap.courseCount;
     state.firedCourses = snap.firedCourses; state.callAway = snap.callAway;
   });
@@ -17352,7 +17371,7 @@ function noteCatMulti(categoryId) {
   const c = (state.noteCategories || []).find(x => x.id === categoryId);
   return !!(c && c.multi);
 }
-function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', picks: [], seats: [], wholeTable: false }; }
+function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', note: '', picks: [], seats: [], wholeTable: false }; }
 
 function toggleQuickNotePad() {
   if (state.quickNotePad) { state.quickNotePad = false; render(); return; }
@@ -17371,7 +17390,10 @@ function toggleQuickNotePad() {
 function paneSaveEnabled() {
   if (state.notesPanel) {
     const tab = state.notesPanel.tab;
-    if (tab === 'vip') { const m = state.vipModal; return !!m && (m.type || '').trim() !== (state.vipType || '').trim(); }
+    if (tab === 'vip') { const m = state.vipModal; if (!m) return false;
+      const seat = m.wholeTable ? null : ((m.seats || [])[0] || null);
+      return (m.type || '').trim() !== (state.vipType || '').trim() || seat !== state.vipSeat
+        || String(m.note || '').trim() !== (state.vipNote || '').trim(); }
     if (tab === 'allergy') { const m = state.allergyModal; return !!m && (m.selectedAllergies.length > 0 || (m.customAllergy || '').trim().length > 0); }
     const m = state.customNoteDraft; return !!m && ((m.text || '').trim().length > 0 || (m.picks || []).length > 0);
   }
@@ -17414,7 +17436,7 @@ function toggleNotesPanel() {
   state.quickNotePad = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   state.notesPanel = { tab: 'vip' };
-  state.vipModal = { type: state.vipType || '' };
+  state.vipModal = freshVipDraft();
   state.allergyModal = freshAllergyDraft();
   state.customNoteDraft = freshCustomNoteDraft();
   state.adminError = '';
@@ -17425,6 +17447,7 @@ function closeNotesPanel() {
   state.vipModal = null;
   state.allergyModal = null;
   state.customNoteDraft = null;
+  state.noteSeatPop = false; state.allergySeatPop = false; state.vipSeatPop = false;
   state.adminError = '';
   render();
 }
@@ -17432,7 +17455,7 @@ function switchNotesTab(tab) {
   state.notesPanel.tab = tab;
   state.adminError = '';
   if (tab !== 'allergy') state.allergyModal = freshAllergyDraft();
-  if (tab !== 'vip') state.vipModal = { type: state.vipType || '' };
+  if (tab !== 'vip') state.vipModal = freshVipDraft();
   if (tab !== 'allergy' && tab !== 'vip') state.customNoteDraft = freshCustomNoteDraft(tab);
   render();
 }
@@ -17501,7 +17524,8 @@ function saveCustomNoteDraft() {
     m.wholeTable = true;
   }
   const targets = m.wholeTable ? [null] : m.seats;
-  const newEntries = targets.flatMap(seat => texts.map(t => ({ seat, categoryId: m.categoryId || null, text: t })));
+  const extra = String(m.note || '').trim();
+  const newEntries = targets.flatMap(seat => texts.map(t => ({ seat, categoryId: m.categoryId || null, text: t, note: extra })));
   // Editing an existing chip replaces it instead of appending a duplicate.
   const kept = m.editIdx !== undefined ? state.notes.filter((_, i) => i !== m.editIdx) : state.notes;
   const updated = [...kept, ...newEntries];
@@ -17528,27 +17552,74 @@ async function saveTableNotes(tableId, notes) {
   } catch (e) {}
 }
 
+// The VIP draft is shaped like the note draft, so ONE cover chip and ONE seat
+// pop serve all three editors instead of each growing its own.
+function freshVipDraft() {
+  const seat = state.vipSeat;
+  return { type: state.vipType || '', note: state.vipNote || '', seats: seat ? [seat] : [], wholeTable: !!state.vipType && !seat };
+}
 function saveVipModal() {
-  const type = state.vipModal.type.trim();
+  const m = state.vipModal;
+  const type = m.type.trim();
+  if (type && !m.wholeTable && !(m.seats || []).length) {
+    // Same grammar as a note and an item: the pop asks which cover.
+    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); return; }
+    m.wholeTable = true;
+  }
+  const seat = type && !m.wholeTable ? (m.seats[0] || null) : null;
   state.vipType = type;
+  state.vipSeat = type ? seat : null;
+  state.vipNote = type ? String(m.note || '').trim() : '';
   // Saved = done: the popup closes itself (owner, Aug '26).
   closeNotesPanel();
-  saveTableVip(state.table, type);
+  saveTableVip(state.table, type, state.vipSeat, state.vipNote);
 }
 function clearVip() {
   state.vipType = '';
+  state.vipSeat = null;
+  state.vipNote = '';
   render();
-  saveTableVip(state.table, '');
+  saveTableVip(state.table, '', null, '');
 }
-async function saveTableVip(tableId, vipType) {
+async function saveTableVip(tableId, vipType, vipSeat, vipNote) {
   if (!tableId) return;
   const fp = findFloorPlanForTable(tableId);
   if (!fp) return;
   const t = fp.tables.find(x => x.id === tableId);
-  if (t) t.vipType = vipType;
+  if (t) { t.vipType = vipType; t.vipSeat = vipSeat == null ? null : vipSeat; t.vipNote = vipNote || ''; }
   try {
-    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vipType }) });
+    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vipType, vipSeat: vipSeat == null ? null : vipSeat, vipNote: vipNote || '' }) });
   } catch (e) {}
+}
+function pickVipSeat(seat) {
+  const m = state.vipModal;
+  if (!m) { state.vipSeatPop = false; render(); return; }
+  if (m._seatDone) return;
+  m._seatDone = true; m._pickedSeat = seat; render();
+  setTimeout(() => {
+    m._seatDone = false;
+    const picked = m._pickedSeat; m._pickedSeat = null;
+    if (state.vipModal !== m || !state.vipSeatPop) return;
+    if (picked === 'all') { m.wholeTable = true; m.seats = []; }
+    else { m.wholeTable = false; m.seats = [picked]; }
+    state.vipSeatPop = false;
+    saveVipModal();
+  }, IO_PICK_BEAT);
+}
+function renderVipSeatPop() {
+  const m = state.vipModal;
+  if (!m) return '';
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop seat-pop">
+        <div class="covers-pad-grid qp-grid seat-grid">
+          <button class="covers-pad-key util${m._pickedSeat === 'all' ? ' assigned' : ''}" data-act="vip-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
+          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${m._pickedSeat === n ? ' assigned' : ''}" data-act="vip-pick-seat" data-seat="${n}">${n}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action neutral" data-act="close-vip-seat-pop">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
 }
 function updateLineNote(idx, value) {
   const line = state.cart[idx];
@@ -18075,7 +18146,7 @@ function cancelCoversPad() {
     state.covers = (pt && pt.covers) || (po && po.covers) || 0;
     state.allergies = (pt && pt.allergies) || [];
     state.notes = (pt && pt.notes) || [];
-    state.vipType = (pt && pt.vipType) || '';
+    state.vipType = (pt && pt.vipType) || ''; state.vipSeat = vipSeatOf(pt); state.vipNote = vipNoteOf(pt);
     state.discount = (pt && pt.discount) || null;
     state.openOrderId = (po && po.id) || null;
     if (fp.prev) claimTableLock(fp.prev);
@@ -18639,6 +18710,7 @@ async function confirmPaymentInner() {
       state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
       state.vipType = (findTableById(state.table) || {}).vipType || '';
+      state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
       state.discount = null;
       state.activeCourse = firstEnabledCourseNumber();
       state.courseCount = state.settings.courses.length || 1;
@@ -18660,7 +18732,7 @@ async function confirmPaymentInner() {
           clearTableSitting(state.table);
           releaseTableLock(state.table);
           state.table = null;
-          state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
+          state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
           state.showTablePicker = true;
           render();
         });
@@ -18703,6 +18775,7 @@ async function confirmPaymentInner() {
     state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
     state.vipType = (findTableById(state.table) || {}).vipType || '';
+    state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
     state.discount = null;
     state.activeCourse = firstEnabledCourseNumber();
     state.courseCount = state.settings.courses.length || 1;
@@ -18720,7 +18793,7 @@ async function confirmPaymentInner() {
         clearTableSitting(state.table);
         releaseTableLock(state.table);
         state.table = null;
-        state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
+        state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
         state.showTablePicker = true;
         render();
       });
@@ -18930,6 +19003,7 @@ function render() {
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
     ${state.itemOptions && !state.itemOptions.seatOnly && !state.allergenWarnModal ? renderItemOptionsPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
+    ${state.vipSeatPop && state.vipModal ? renderVipSeatPop() : ''}
     ${state.allergySeatPop && state.allergyModal ? renderAllergySeatPop() : ''}
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
@@ -19968,9 +20042,9 @@ function setOrderType(v) {
     state.covers = (t && t.covers) || 0; state.discount = (t && t.discount) || null;
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
-    state.vipType = (t && t.vipType) || '';
+    state.vipType = (t && t.vipType) || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t);
   } else {
-    state.covers = 0; state.allergies = []; state.notes = []; state.vipType = '';
+    state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
   }
 }
 
@@ -21036,7 +21110,11 @@ function renderTicketPanel() {
             // still that preset, so it keeps the preset's colour (owner, Sep '26).
             const vp = state.vipPresets.find(p => p.color && picks.some(x => x === p.name || x.startsWith(p.name + '.') || x.startsWith(p.name + ' ')));
             const style = vp ? `background:${vp.color};color:${contrastTextColor(vp.color)};border-color:${vp.color};` : 'background:var(--orange-dim);color:var(--orange);border-color:var(--orange);';
-            return `<span class="seat-chip" style="${style}">VIP — ${esc(state.vipType)} <button data-act="clear-vip" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
+            // Tap to edit, ✕ to clear, and it names its cover — the same chip
+            // the allergies and the note types wear.
+            const held = state.notesPanel && state.notesPanel.tab === 'vip' ? ' chip-held' : '';
+            const where = state.vipSeat ? esc(seatText(state.vipSeat)).toUpperCase() : 'ALL';
+            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-vip-entry">${esc(vipLabel())} — ${esc(state.vipType)}${state.vipNote ? ' (' + esc(state.vipNote) + ')' : ''}, (${where}) <button data-act="clear-vip" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
           })() : ''}
           ${(() => {
             // ONE chip per cover — "Seat 1 — Eggs, Gluten" — tap to edit that
@@ -21058,7 +21136,7 @@ function renderTicketPanel() {
             const preset0 = cat && (cat.presets || []).find(p => p.name === n.text && p.color);
             const style = preset0 ? `background:${preset0.color};color:${contrastTextColor(preset0.color)};border-color:${preset0.color};` : '';
             const held = state.notesPanel && state.customNoteDraft && state.customNoteDraft.editIdx === idx ? ' chip-held' : '';
-            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}">${cat ? esc(cat.name) + ', ' : ''}${esc(n.text)}, (${n.seat ? esc(seatText(n.seat)).toUpperCase() : 'ALL'}) <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
+            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}">${cat ? esc(cat.name) + ', ' : ''}${esc(n.text)}${n.note ? ' (' + esc(n.note) + ')' : ''}, (${n.seat ? esc(seatText(n.seat)).toUpperCase() : 'ALL'}) <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
           }).join('')}
         </div>` : ''}
       ` : ''}
@@ -21316,6 +21394,8 @@ function renderVipTabContent() {
       ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join(''); })()}
       <div class="item-card allergy-item-card note-add-cell"><input id="vip-type-input" type="text" value="${m.type}" placeholder="+ ${esc(vipLabel())}"></div>
   </div>
+  <input id="vip-note-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">
+  ${noteSeatChip(m, 'open-vip-seat-pop')}
   ${npReserveRow()}
 `;
 }
@@ -21468,6 +21548,13 @@ function renderCustomNoteTabContent(categoryId) {
       ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(multi ? (m.picks || []).includes(p.name) : m.text === p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
       <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
   </div>
+  ${/* ONE LINE OF WORDS THAT RIDES WITH THE PICKS (owner, Sep '26: "one setup
+        and every order note to follow it"). Allergies had it and nothing else
+        did — so on a type where you pick SEVERAL, there was nowhere to put the
+        one instruction that goes with them; typing in the cell above made yet
+        another note instead. A single-pick type needs none: the cell above IS
+        the words. */ ''}
+  ${multi ? `<input id="custom-note-extra-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">` : ''}
   ${noteSeatChip(m, 'open-note-seat-pop')}
   ${npReserveRow()}
 `;
@@ -30185,6 +30272,13 @@ function setMarkSymbol(key, sym) {
   saveTicketSetting({ markSymbols: m });
   render();
 }
+// A VIP BELONGS TO A COVER, LIKE EVERY OTHER NOTE (owner, Sep '26: "I want
+// there to be one setup and every order note to follow it"). It was the only
+// note type stored table-wide, so a party with one celebrity marked the whole
+// table. null still means the whole table, which is what every VIP saved
+// before this reads as.
+function vipSeatOf(t) { const n = t && t.vipSeat; return (typeof n === 'number' && n > 0) ? n : null; }
+function vipNoteOf(t) { return String((t && t.vipNote) || ''); }
 function guestMarkOff() { return state.settings.guestMarkOff || []; }
 function guestMarkIsOff(key) { return guestMarkOff().includes(key); }
 function toggleGuestMark(key) {
@@ -31199,7 +31293,7 @@ function offerCloseEmptyTable(next) {
       await saveTableVip(t.id, '');
       releaseTableLock(t.id);
     } catch (e) {}
-    state.covers = 0; state.allergies = []; state.vipType = '';
+    state.covers = 0; state.allergies = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
     state.openOrderId = null;
     await refreshOrders();
     next();
@@ -31261,7 +31355,7 @@ function pickTable(id) {
     state.discount = (t && t.discount) || null; // the account's discount comes back with the table
     state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
-    state.vipType = (t && t.vipType) || '';
+    state.vipType = (t && t.vipType) || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t);
     state.openOrderId = (oo && oo.id) || null;
     // The called-away courses come back with the table (Sep '26: leaving and
     // returning forgot the call-away, so mains were called twice).
@@ -31380,6 +31474,7 @@ async function doTransferToTable(newTableId) {
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
   const allergies = movingOwn ? state.allergies : (oldTable && oldTable.allergies) || [];
   const vipType = movingOwn ? state.vipType : (oldTable && oldTable.vipType) || '';
+  const vipSeat = movingOwn ? state.vipSeat : vipSeatOf(oldTable);
   const notes = movingOwn ? (state.notes || []) : (oldTable && oldTable.notes) || [];
   // Combining into a live table: sitting details ADD to what's there.
   const combined = !!srcOrder && state.orders.some(o => o.id !== srcOrder.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
@@ -31387,14 +31482,15 @@ async function doTransferToTable(newTableId) {
   // used to be written a field at a time to each table - six requests, six
   // whole-store rewrites - for a single tap.
   const oldT2 = findTableById(oldTableId);
-  const sit = (t) => t ? { covers: t.covers || 0, allergies: t.allergies || [], vipType: t.vipType || '' } : null;
+  const sit = (t) => t ? { covers: t.covers || 0, allergies: t.allergies || [], vipType: t.vipType || '', vipSeat: vipSeatOf(t) } : null;
   const wasOld = sit(oldT2), wasNew = sit(newTable); // to put back if the tab's move fails
-  if (oldT2) { oldT2.covers = 0; oldT2.allergies = []; oldT2.vipType = ''; }
+  if (oldT2) { oldT2.covers = 0; oldT2.allergies = []; oldT2.vipType = ''; oldT2.vipSeat = null; }
   newTable.covers = combined ? ((newTable.covers || 0) + covers) : covers;
   newTable.allergies = combined ? [...(newTable.allergies || []), ...allergies] : allergies;
   newTable.vipType = combined ? (newTable.vipType || vipType) : vipType;
+  newTable.vipSeat = combined ? (vipSeatOf(newTable) != null ? vipSeatOf(newTable) : vipSeat) : vipSeat;
   const sittingMove = api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, allergies, vipType, notes, combine: combined }) }).catch(() => {});
+    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, allergies, vipType, vipSeat, notes, combine: combined }) }).catch(() => {});
   if (tabMove) {
     let moved;
     try { moved = await tabMove; } catch (e) {
@@ -31404,7 +31500,7 @@ async function doTransferToTable(newTableId) {
       if (oldT2) Object.assign(oldT2, wasOld);
       Object.assign(newTable, wasNew);
       api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromId: newTableId, toId: oldTableId, covers: wasOld ? wasOld.covers : 0, allergies: wasOld ? wasOld.allergies : [], vipType: wasOld ? wasOld.vipType : '', combine: false }) })
+        body: JSON.stringify({ fromId: newTableId, toId: oldTableId, covers: wasOld ? wasOld.covers : 0, allergies: wasOld ? wasOld.allergies : [], vipType: wasOld ? wasOld.vipType : '', vipSeat: wasOld ? wasOld.vipSeat : null, combine: false }) })
         .then(() => wasNew && api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ fromId: null, toId: newTableId, covers: wasNew.covers, allergies: wasNew.allergies, vipType: wasNew.vipType, combine: false }) }))
         .catch(() => {});
@@ -31430,7 +31526,7 @@ async function doTransferToTable(newTableId) {
     state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
     state.covers = newTable.covers || 0; state.discount = newTable.discount || null;
     state.allergies = newTable.allergies || [];
-    state.vipType = newTable.vipType || '';
+    state.vipType = newTable.vipType || ''; state.vipSeat = vipSeatOf(newTable); state.vipNote = vipNoteOf(newTable);
   }
   state.transferMode = false; state.transferFrom = null;
   // A transfer ALWAYS lands back on the floor — that's where the ⇄ lives and
@@ -37938,8 +38034,12 @@ function bindEvents() {
   if (allergyNotesInput) allergyNotesInput.addEventListener('input', (e) => { state.allergyModal.notes = e.target.value; });
   const vipTypeInput = document.getElementById('vip-type-input');
   if (vipTypeInput) vipTypeInput.addEventListener('input', (e) => { state.vipModal.type = e.target.value; refreshPaneTick(); });
+  const vipNoteInput = document.getElementById('vip-note-input');
+  if (vipNoteInput) vipNoteInput.addEventListener('input', (e) => { state.vipModal.note = e.target.value; refreshPaneTick(); });
   const customNoteTextInput = document.getElementById('custom-note-text-input');
   if (customNoteTextInput) customNoteTextInput.addEventListener('input', (e) => { state.customNoteDraft.text = e.target.value; refreshPaneTick(); });
+  const customNoteExtraInput = document.getElementById('custom-note-extra-input');
+  if (customNoteExtraInput) customNoteExtraInput.addEventListener('input', (e) => { state.customNoteDraft.note = e.target.value; });
   document.querySelectorAll('.size-label-input').forEach(el => {
     el.addEventListener('input', (e) => { updateSizeRowField(el.dataset.id, parseInt(el.dataset.idx), 'label', e.target.value); });
     el.addEventListener('blur', () => { commitItemSizes(el.dataset.id); });
@@ -40800,6 +40900,10 @@ function handleActClick(el, e) {
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
+      else if (act === 'close-vip-seat-pop') { state.vipSeatPop = false; render(); }
+      else if (act === 'vip-pick-seat') { const v = el.dataset.seat; pickVipSeat(v === 'all' ? 'all' : parseInt(v, 10)); }
+      else if (act === 'open-vip-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); } }
+      else if (act === 'edit-vip-entry') { if (!state.notesPanel) toggleNotesPanel(); switchNotesTab('vip'); state.notesPanel.tab = 'vip'; state.vipModal = freshVipDraft(); render(); }
       else if (act === 'open-note-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); } }
       else if (act === 'allergy-pick-seat') { pickAllergySeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-allergy-seat-pop') { state.allergySeatPop = false; render(); }
@@ -40810,7 +40914,7 @@ function handleActClick(el, e) {
         const idx = parseInt(el.dataset.idx);
         const n = state.notes[idx];
         if (n) {
-          state.customNoteDraft = { ...freshCustomNoteDraft(n.categoryId), text: n.text, wholeTable: n.seat == null, seats: n.seat == null ? [] : [n.seat], editIdx: idx };
+          state.customNoteDraft = { ...freshCustomNoteDraft(n.categoryId), text: n.text, note: n.note || '', wholeTable: n.seat == null, seats: n.seat == null ? [] : [n.seat], editIdx: idx };
           state.notesPanel = { tab: n.categoryId || (state.noteCategories[0] && state.noteCategories[0].id) };
           render();
         }

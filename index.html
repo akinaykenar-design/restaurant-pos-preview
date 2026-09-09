@@ -7709,6 +7709,17 @@ app.put('/api/settings', (req, res) => {
   if (req.body.spendPillStyle !== undefined) data.settings.spendPillStyle = req.body.spendPillStyle === 'total' ? 'total' : 'perhead';
   if (req.body.spendPillFormat !== undefined) data.settings.spendPillFormat = req.body.spendPillFormat === 'symbol' ? 'symbol' : 'number';
   if (req.body.guestPillFormat !== undefined) data.settings.guestPillFormat = req.body.guestPillFormat === 'symbol' ? 'symbol' : 'text';
+  // One or several, and where it prints — the same two for every note type.
+  if (req.body.noteTypeMulti && typeof req.body.noteTypeMulti === 'object') {
+    const m = {};
+    for (const k of ['vip', 'allergy']) if (req.body.noteTypeMulti[k] !== undefined) m[k] = !!req.body.noteTypeMulti[k];
+    data.settings.noteTypeMulti = Object.assign({}, data.settings.noteTypeMulti, m);
+  }
+  if (req.body.noteTypeStation && typeof req.body.noteTypeStation === 'object') {
+    const st = {};
+    for (const k of ['vip', 'allergy']) if (req.body.noteTypeStation[k] !== undefined) st[k] = req.body.noteTypeStation[k] ? String(req.body.noteTypeStation[k]).slice(0, 60) : null;
+    data.settings.noteTypeStation = Object.assign({}, data.settings.noteTypeStation, st);
+  }
   if (req.body.markSymbols && typeof req.body.markSymbols === 'object') {
     const m = {};
     for (const k of Object.keys(req.body.markSymbols)) {
@@ -17367,7 +17378,21 @@ function toggleItemFlagCategory(id) {
 function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
 // A note type that takes SEVERAL picks gathers them and saves on the tick;
 // a single-pick one still saves itself the moment a preset is tapped.
+// ONE OR SEVERAL, AND WHERE IT PRINTS — SET THE SAME WAY FOR EVERY TYPE
+// (owner, Sep '26). VIP and allergies were hardwired to several and to every
+// station, so a venue could not have rebuilt either of them from nothing —
+// which is the whole point of the rule. Both are true by default, which is
+// exactly how they have always behaved.
+function noteTypeMulti(id) {
+  const m = (state.settings || {}).noteTypeMulti || {};
+  return m[id] === undefined ? true : !!m[id];
+}
+function noteTypeStation(id) {
+  const st = (state.settings || {}).noteTypeStation || {};
+  return st[id] || null;
+}
 function noteCatMulti(categoryId) {
+  if (categoryId === 'vip' || categoryId === 'allergy') return noteTypeMulti(categoryId);
   const c = (state.noteCategories || []).find(x => x.id === categoryId);
   return !!(c && c.multi);
 }
@@ -26334,6 +26359,11 @@ function renderOrderNotesAdmin() {
       ${open ? `<div style="padding:0 12px 12px;">${
         builtin ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-builtin-name-input" data-id="${id}" type="text" value="${esc(name)}" placeholder="${id === 'vip' ? 'VIP' : 'Allergies'}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>` : ''
       }${
+        // THE SAME CARD FOR EVERY TYPE (owner, Sep '26): name, where it
+        // prints, one or several — then its own presets.
+        builtin ? (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${id}', this.value)"><option value="">All stations</option>${state.printerStations.map(st => `<option value="${st.id}" ${noteTypeStation(id) === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></div>` : '')
+          + `<div style="display:flex;align-items:center;gap:8px;margin:0 0 12px;"><label class="field-label" style="margin:0;">More than one</label>${togglePill(noteTypeMulti(id), 'toggle-note-multi', `data-id="${id}"`)}</div>` : ''
+      }${
         id === 'vip' ? renderVipSettingsAdmin()
         : id === 'allergy' ? renderAllergySettingsAdmin()
         : `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === catId)}" type="text" value="${esc(name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>`
@@ -35207,9 +35237,23 @@ function reorderVipPresets(fromIdx, toIdx) {
 // moment it is tapped; on, taps gather and the tick saves the lot — each
 // pick becoming its own note, the way allergies already work.
 function saveNoteCategoryMulti(catId, on) {
+  if (catId === 'vip' || catId === 'allergy') {
+    const m = Object.assign({}, state.settings.noteTypeMulti || {}, { [catId]: !!on });
+    state.settings.noteTypeMulti = m;
+    saveTicketSetting({ noteTypeMulti: m });
+    render();
+    return;
+  }
   saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, multi: !!on } : c));
 }
 function saveNoteCategoryStation(catId, val) {
+  if (catId === 'vip' || catId === 'allergy') {
+    const st = Object.assign({}, state.settings.noteTypeStation || {}, { [catId]: val || null });
+    state.settings.noteTypeStation = st;
+    saveTicketSetting({ noteTypeStation: st });
+    render();
+    return;
+  }
   saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, station: val || null } : c));
 }
 // A single preset can out-route its type ("Birthday" → Pastry).
@@ -40816,8 +40860,15 @@ function handleActClick(el, e) {
       else if (act === 'toggle-allergy-preset') {
         if (_npHoldFired) { _npHoldFired = false; return; }
         const name = el.dataset.allergy;
-        const idx = state.allergyModal.selectedAllergies.indexOf(name);
-        if (idx === -1) state.allergyModal.selectedAllergies.push(name); else { state.allergyModal.selectedAllergies.splice(idx, 1); delete state.allergyModal.subTypeChoices[name]; }
+        const m = state.allergyModal;
+        if (!noteCatMulti('allergy')) {
+          if (m._done) return;
+          m.selectedAllergies = [name]; m.subTypeChoices = {}; m._done = true; render();
+          setTimeout(() => { m._done = false; if (state.allergyModal === m && state.notesPanel) saveAllergyModal(); }, IO_PICK_BEAT);
+          return;
+        }
+        const idx = m.selectedAllergies.indexOf(name);
+        if (idx === -1) m.selectedAllergies.push(name); else { m.selectedAllergies.splice(idx, 1); delete m.subTypeChoices[name]; }
         render();
       }
       else if (act === 'pick-allergy-subtype') {
@@ -40923,8 +40974,17 @@ function handleActClick(el, e) {
       else if (act === 'pick-vip-preset') {
         const cur = (state.vipModal.type || '').split(',').map(s => s.trim()).filter(Boolean);
         const v = el.dataset.val, i = cur.indexOf(v);
+        const m = state.vipModal;
+        if (!noteCatMulti('vip')) {
+          // One tap = the whole job, the same beat a one-pick note has: the
+          // preset lights, then it saves itself and the cover pad asks.
+          if (m._done) return;
+          m.type = v; m._done = true; render();
+          setTimeout(() => { m._done = false; if (state.vipModal === m && state.notesPanel) saveVipModal(); }, IO_PICK_BEAT);
+          return;
+        }
         if (i === -1) cur.push(v); else cur.splice(i, 1);
-        state.vipModal.type = cur.join(', ');
+        m.type = cur.join(', ');
         render();
       }
       else if (act === 'clear-vip') { clearVip(); }

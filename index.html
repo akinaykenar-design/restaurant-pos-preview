@@ -3402,6 +3402,8 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    they had to be listed one by one and why anything new was forgotten. */
 .tbl-mark-allergy{ background:var(--red-btn); color:#fff; }
 .tbl-mark-vip{ background:#2b2b33; color:var(--gold); }
+/* A note type's mark is the colour itself — no glyph to invent per category. */
+.tbl-mark-note{ background:var(--charcoal-soft); }
 
 /* Larger + active variants of the square icon button (docket discount/clear) */
 .icon-sq.lg{ width:44px; height:44px; font-size:var(--fs-lg); }
@@ -7682,6 +7684,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.pillWarnMinutes !== undefined) data.settings.pillWarnMinutes = req.body.pillWarnMinutes === null ? null : Math.max(0, Math.min(240, parseInt(req.body.pillWarnMinutes) || 0));
   if (req.body.spendPillStyle !== undefined) data.settings.spendPillStyle = req.body.spendPillStyle === 'total' ? 'total' : 'perhead';
   if (req.body.spendPillFormat !== undefined) data.settings.spendPillFormat = req.body.spendPillFormat === 'symbol' ? 'symbol' : 'number';
+  if (req.body.guestPillFormat !== undefined) data.settings.guestPillFormat = req.body.guestPillFormat === 'symbol' ? 'symbol' : 'text';
   // The floor's own course options — colour and on/off per course, kept apart
   // from settings.courses so the Courses screen's colours stay the dockets'.
   if (req.body.coursePillLevels !== undefined) {
@@ -8114,8 +8117,16 @@ app.put('/api/settings', (req, res) => {
     // EVERY status the floor paints. It kept three of six, so a colour set on
     // "in use" or either pill came back empty on the next settings save and
     // the change looked like it had reverted (owner, Sep '26).
+    // EVERY KEY, NOT A LIST OF NINE (owner, Sep '26: "i want to be able to
+    // change colours"). Short, the note marks and anything added later were
+    // dropped on the way in, so their colour box did nothing at all. A key is
+    // kept if its value is a colour; the list stopped being the gate.
     const keep = {};
-    for (const k of ['available', 'occupied', 'billPrinted', 'locked', 'pillWarn', 'pillDanger', 'spendLow', 'spendBusy', 'spendBig']) keep[k] = tableStatusColors[k] || null;
+    for (const k of Object.keys(tableStatusColors)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      const v = tableStatusColors[k];
+      keep[k] = (typeof v === 'string' && /^#[0-9A-Fa-f]{3,8}$/.test(v)) ? v : null;
+    }
     data.settings.tableStatusColors = Object.assign({}, data.settings.tableStatusColors, keep);
   }
   if (Array.isArray(hiddenNoteTypes)) {
@@ -14335,7 +14346,10 @@ async function updateFloorPlanBgColor(id, color) {
   } catch (e) { state.toast = 'Could not update floor colour.'; render(); }
 }
 async function setTableStatusColor(key, color) {
-  const cur = Object.assign({ available: null, occupied: null, billPrinted: null, locked: null, pillWarn: null, pillDanger: null, spendLow: null, spendBusy: null, spendBig: null }, state.settings.tableStatusColors || {});
+  // Whatever the floor already paints, plus this one. It used to seed a fixed
+  // list of nine names, which is how the newer boxes ended up sending a colour
+  // the server then threw away.
+  const cur = Object.assign({}, state.settings.tableStatusColors || {});
   cur[key] = color || null;
   state.settings.tableStatusColors = cur;
   render();
@@ -29008,7 +29022,11 @@ function pillSamplesFor(lens) {
   // ride the corners there, and the pill names the allergy (owner, Sep '26:
   // "booked should only show booked pills, guests should show VIPs and
   // allergy alerts").
-  if (lens === 'guests') return [{ name: 'VIP', vip: true }, { name: 'Allergy', allergy: true, mark: true }, { name: 'Which allergy', allergy: true }];
+  // ONE SAMPLE PER MARK (owner, Sep '26: "allergy and which allergy should be
+  // same"). It listed the allergy twice — once as the corner !, once as the
+  // pill — as if they were two things a table could wear. They are one thing
+  // in two readings, and the reading is now a switch.
+  if (lens === 'guests') return guestMarks().filter(g => !guestMarkIsOff(g.key)).map(g => ({ name: g.name, markKey: g.key }));
   if (lens === 'booked') return [{ name: 'Booked soon', res: true }];
   // THE MONEY LENS SHOWS EVERY AMOUNT IT CAN DRAW (owner, Sep '26: "preview
   // does not show all amount types") — one sample per level that is on.
@@ -29039,7 +29057,9 @@ function renderTableStatusPreview() {
   const pills = samples.map((s, i) => {
     const label = String.fromCharCode(80 + (i % 20));
     const t = { id: 'sample-p' + i, type: 'table', label, covers: 2,
-      allergies: s.allergy ? [{ base: 'Nuts', allergy: 'Nuts' }] : [], vipType: s.vip ? 'Regular' : '' };
+      allergies: s.markKey === 'allergy' ? [{ base: 'Nuts', allergy: 'Nuts' }] : [],
+      vipType: s.markKey === 'vip' ? 'Regular' : '',
+      notes: s.markKey && s.markKey.startsWith('note:') ? [{ categoryId: s.markKey.slice(5), text: s.name }] : [] };
     const ago = s.mins != null ? now - s.mins * 60000 : now - 30 * 60000;
     // Two covers, so a per-person sample is half the bill: the money on the
     // sample ticket is whatever that spend level needs to read.
@@ -29059,7 +29079,9 @@ function renderTableStatusPreview() {
       () => {
         state.settings.floorPillEnabled = true;
         if (s.res) return tableResChip(t);
-        if (s.mark || s.vip) return tableMarksHtml(t);
+        // A mark draws itself: the pill when the reading spells it out, the
+        // corner glyph when it does not (symbols, and VIP either way).
+        if (s.markKey) return floorPillHtml(t, null) || tableMarksHtml(t);
         return floorPillHtml(t, tableCourseStatus(label));
       });
     return `<div class="ts-sample"><div class="ts-pill-box">${inner}</div><div class="ts-sample-name">${esc(s.name)}</div></div>`;
@@ -29085,7 +29107,7 @@ function renderTableStatusAdmin() {
   const t2 = parseFloat(state.settings.spendBand2) > 0 ? parseFloat(state.settings.spendBand2) : 25;
   const t3 = parseFloat(state.settings.spendBand3) > 0 ? parseFloat(state.settings.spendBand3) : 45;
   const inp = (key, val) => `<input type="number" min="1" max="9999" step="1" value="${val}" class="num-field" onblur="saveTicketSetting({ ${key}: Math.max(1, parseInt(this.value,10)||0) })">`;
-  const spendMode = spendPillMode(), spendFmt = spendPillFormat();
+  const spendMode = spendPillMode(), spendFmt = spendPillFormat(), guestFmt = guestPillFormat();
   const spendUnit = spendMode === 'total' ? 'on the bill' : 'per person';
   return `
   <div class="design-split tstatus-split">
@@ -29167,11 +29189,13 @@ function renderTableStatusAdmin() {
         <div class="ts-clock">
           <div style="font-weight:700;font-size:var(--fs-md);">Notes</div>
           <div class="ts" style="margin-bottom:10px;">What a table's notes show.</div>
+          <div class="pay-options" style="margin-bottom:12px;">
+            ${[['text', 'Words'], ['symbol', 'Symbols']].map(([v, l]) => `<div class="pay-opt ${guestFmt === v ? 'active' : ''}" data-act="set-guest-format" data-val="${v}">${l}</div>`).join('')}
+          </div>
           ${guestMarks().map(g => { const on = !guestMarkIsOff(g.key); return `
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
-            ${colorDotButton('table-status', g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key, sc[g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key] || null, { bg: sc[g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key] || g.colour, title: 'Change colour' })}
+            ${colorDotButton('table-status', 'mark:' + g.key, markPaint(g.key), { bg: guestMarkColor(g), title: 'Change colour' })}
             <label class="field-label" style="margin:0;flex:1;">${esc(g.name)}</label>
-            <span class="ts" style="margin-right:4px;">${g.corner ? 'Corner' : 'Pill'}</span>
             <button class="status-chip mi-onoff ${on ? 'paid' : 'void'}" data-act="set-guest-mark-on" data-key="${esc(g.key)}">${on ? 'On' : 'Off'}</button>
           </div>`; }).join('')}
         </div>
@@ -30049,9 +30073,24 @@ function tableStatusFx(t, cs, lock) {
 // Persistent safety/service marks: allergy "!" and VIP star ride the
 // table's top-right corner, every lens, service pickers only.
 function tableMarksHtml(t) {
-  const allergy = (t.allergies || []).length && !guestMarkIsOff('allergy') ? `<span class="tbl-mark tbl-mark-allergy">!</span>` : '';
-  const vip = t.vipType && !guestMarkIsOff('vip') ? `<span class="tbl-mark tbl-mark-vip">★</span>` : '';
-  return allergy || vip ? `<span class="tbl-marks">${allergy}${vip}</span>` : '';
+  // A mark keeps its built-in look until the venue paints it; only then does
+  // an inline colour go on, with ink that can be read over it.
+  const paint = (key) => {
+    const c = markPaint(key);
+    return c ? ` style="background:${c};color:${contrastTextColor(c)};"` : '';
+  };
+  const marks = [];
+  for (const g of guestMarks()) {
+    if (guestMarkIsOff(g.key)) continue;
+    if (g.key === 'allergy') { if ((t.allergies || []).length) marks.push(`<span class="tbl-mark tbl-mark-allergy"${paint('allergy')}>!</span>`); continue; }
+    if (g.key === 'vip') { if (t.vipType) marks.push(`<span class="tbl-mark tbl-mark-vip"${paint('vip')}>★</span>`); continue; }
+    // A note type only rides the corner in the SYMBOL reading — in the written
+    // one it spells itself out in the pill instead.
+    if (guestPillFormat() !== 'symbol') continue;
+    const n = (t.notes || []).find(x => String(x.categoryId) === g.key.slice(5) && String(x.text || '').trim());
+    if (n) marks.push(`<span class="tbl-mark tbl-mark-note" style="background:${guestMarkColor(g)};"></span>`);
+  }
+  return marks.length ? `<span class="tbl-marks">${marks.join('')}</span>` : '';
 }
 // WHAT A TABLE'S NOTES SHOW ON THE FLOOR (owner, Sep '26: "add guests
 // options... these are derived from order notes, then have the ability to
@@ -30064,10 +30103,22 @@ function tableMarksHtml(t) {
 // lens's one line.
 function guestMarks() {
   return [
-    { key: 'vip', name: 'VIP', colour: 'var(--charcoal-soft)', corner: true },
-    { key: 'allergy', name: 'Allergies', colour: 'var(--red)', corner: true },
-  ].concat((state.noteCategories || []).map(c => ({ key: 'note:' + c.id, name: c.name, colour: c.color || 'var(--charcoal-soft)' })));
+    { key: 'vip', name: 'VIP', colour: '#2B2B33' },
+    { key: 'allergy', name: 'Allergies', colour: '#FF3B30' },
+  ].concat((state.noteCategories || []).map(c => ({ key: 'note:' + c.id, name: c.name, colour: c.color || '#8A8A8E' })));
 }
+// EVERY MARK ITS OWN COLOUR (owner, Sep '26: "i want to be able to change
+// colours"). VIP and Allergies used to borrow the pill's warn/danger keys —
+// so painting Allergies repainted the Late pill as well, two things on one
+// number — and a note type's box wrote a key nothing ever read.
+function markPaint(key) { return (state.settings.tableStatusColors || {})['mark:' + key] || null; }
+function guestMarkColor(g) { return markPaint(g.key) || g.colour; }
+// WRITTEN OR SYMBOL, one switch for the lens (owner, Sep '26: "maybe have
+// written and symbol option like spend"). Written spells the note out on the
+// pill; symbol lets the corner marks carry it and shows no pill at all —
+// which is why Allergy is ONE row now, not a mark and a pill pretending to be
+// two things (owner: "allergy and which allergy should be same").
+function guestPillFormat() { return state.settings.guestPillFormat === 'symbol' ? 'symbol' : 'text'; }
 function guestMarkOff() { return state.settings.guestMarkOff || []; }
 function guestMarkIsOff(key) { return guestMarkOff().includes(key); }
 function toggleGuestMark(key) {
@@ -30271,20 +30322,21 @@ function floorPillHtml(t, cs) {
     return pill(spendPillStyle(v), `<b>${spendPillText(total, per)}</b>`, `${money(total)} · ${money(per)} a person`);
   }
   if (lens === 'guests') {
-    // VIP already rides the corner star (tableMarksHtml) — echoing it here
-    // put two stars on the table, so it never takes the pill.
+    // On SYMBOLS the corner marks say it all — no pill (tableMarksHtml).
+    if (guestPillFormat() === 'symbol') return '';
+    // VIP already rides the corner star — echoing it here put two stars on the
+    // table, so it never takes the pill.
     // The pill takes the FIRST switched-on thing the table carries, in the
     // order the card lists them: the pill can only say one thing.
     for (const g of guestMarks()) {
       if (g.key === 'vip' || guestMarkIsOff(g.key)) continue;
       if (g.key === 'allergy') {
         const al = t.allergies || [];
-        if (al.length) return pill(tint(statusColor('pillDanger', '#FF3B30')), `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
+        if (al.length) return pill(tint(guestMarkColor(g)), `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
         continue;
       }
-      const catId = g.key.slice(5);
-      const n = (t.notes || []).find(x => String(x.categoryId) === catId && String(x.text || '').trim());
-      if (n) return pill(tint(g.colour), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
+      const n = (t.notes || []).find(x => String(x.categoryId) === g.key.slice(5) && String(x.text || '').trim());
+      if (n) return pill(tint(guestMarkColor(g)), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
     }
     return '';
   }
@@ -39887,6 +39939,7 @@ function handleActClick(el, e) {
       else if (act === 'set-spend-level-on') { toggleSpendLevel(el.dataset.key); }
       else if (act === 'set-pill-level-on') { togglePillLevel(el.dataset.key, el.dataset.level); }
       else if (act === 'set-guest-mark-on') { toggleGuestMark(el.dataset.key); }
+      else if (act === 'set-guest-format') { state.settings.guestPillFormat = el.dataset.val; saveTicketSetting({ guestPillFormat: el.dataset.val }); render(); }
       else if (act === 'set-course-pill-on') { const n = parseInt(el.dataset.key, 10); setCoursePillLevel(n, { off: !coursePillOff(n) }); }
       else if (act === 'toggle-item-rowbreak') {
         const item = state.menu.find(m => m.id === el.dataset.id);

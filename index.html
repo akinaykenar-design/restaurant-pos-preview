@@ -7696,6 +7696,11 @@ app.put('/api/settings', (req, res) => {
   }
   // Which of the three waits a venue has switched off, per clock — "seated:long",
   // "attention:late" and so on. Anything not of that shape is dropped.
+  // Which note types a venue has taken off the floor's Guests view.
+  if (req.body.guestMarkOff !== undefined) {
+    data.settings.guestMarkOff = (Array.isArray(req.body.guestMarkOff) ? req.body.guestMarkOff : [])
+      .filter(k => typeof k === 'string' && k.length < 64).slice(0, 60);
+  }
   if (req.body.pillLevelOff !== undefined) {
     const clocks = ['course', 'sitting', 'attention'], levels = ['short', 'long', 'late'];
     data.settings.pillLevelOff = (Array.isArray(req.body.pillLevelOff) ? req.body.pillLevelOff : [])
@@ -29135,6 +29140,20 @@ function renderTableStatusAdmin() {
             <button class="status-chip mi-onoff ${lv.on ? 'paid' : 'void'}" data-act="set-course-pill-on" data-key="${lv.n}">${lv.on ? 'On' : 'Off'}</button>
           </div>`).join('')}`}
         </div>`; }).join('')}
+        ${/* GUESTS SITS WITH THEM (owner, Sep '26: "guests go on the options
+              panel, simple, just make it similar to the others"). One row per
+              note type, the same row as Spend and the courses. */ ''}
+        <div class="ts-clock">
+          <div style="font-weight:700;font-size:var(--fs-md);">Guests</div>
+          <div class="ts" style="margin-bottom:10px;">What a table's notes show.</div>
+          ${guestMarks().map(g => { const on = !guestMarkIsOff(g.key); return `
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+            ${colorDotButton('table-status', g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key, sc[g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key] || null, { bg: sc[g.key === 'vip' ? 'pillVip' : g.key === 'allergy' ? 'pillDanger' : g.key] || g.colour, title: 'Change colour' })}
+            <label class="field-label" style="margin:0;flex:1;">${esc(g.name)}</label>
+            <span class="ts" style="margin-right:4px;">${g.corner ? 'Corner' : 'Pill'}</span>
+            <button class="status-chip mi-onoff ${on ? 'paid' : 'void'}" data-act="set-guest-mark-on" data-key="${esc(g.key)}">${on ? 'On' : 'Off'}</button>
+          </div>`; }).join('')}
+        </div>
         ${/* SPEND LIVES WITH THE PILLS (owner, Sep '26: "put spend pill under
               2 · Pill") — it is a pill like the rest, not a card of its own. */ ''}
         <div class="ts-clock">
@@ -30009,9 +30028,34 @@ function tableStatusFx(t, cs, lock) {
 // Persistent safety/service marks: allergy "!" and VIP star ride the
 // table's top-right corner, every lens, service pickers only.
 function tableMarksHtml(t) {
-  const allergy = (t.allergies || []).length ? `<span class="tbl-mark tbl-mark-allergy">!</span>` : '';
-  const vip = t.vipType ? `<span class="tbl-mark tbl-mark-vip">★</span>` : '';
+  const allergy = (t.allergies || []).length && !guestMarkIsOff('allergy') ? `<span class="tbl-mark tbl-mark-allergy">!</span>` : '';
+  const vip = t.vipType && !guestMarkIsOff('vip') ? `<span class="tbl-mark tbl-mark-vip">★</span>` : '';
   return allergy || vip ? `<span class="tbl-marks">${allergy}${vip}</span>` : '';
+}
+// WHAT A TABLE'S NOTES SHOW ON THE FLOOR (owner, Sep '26: "add guests
+// options... these are derived from order notes, then have the ability to
+// select which order notes"). Guests was hardwired to two things and the
+// venue's own note types could never reach a table — a birthday is exactly
+// what a waiter should clock walking past. Every type is a row now, wearing
+// the colour the venue already gave it.
+// The MARK is a rule, not another setting: safety rides the corner so it
+// shows under every lens, everything else uses the pill, which is this
+// lens's one line.
+function guestMarks() {
+  return [
+    { key: 'vip', name: 'VIP', colour: 'var(--charcoal-soft)', corner: true },
+    { key: 'allergy', name: 'Allergies', colour: 'var(--red)', corner: true },
+  ].concat((state.noteCategories || []).map(c => ({ key: 'note:' + c.id, name: c.name, colour: c.color || 'var(--charcoal-soft)' })));
+}
+function guestMarkOff() { return state.settings.guestMarkOff || []; }
+function guestMarkIsOff(key) { return guestMarkOff().includes(key); }
+function toggleGuestMark(key) {
+  const off = guestMarkOff().slice();
+  const i = off.indexOf(key);
+  if (i >= 0) off.splice(i, 1); else off.push(key);
+  state.settings.guestMarkOff = off;
+  saveTicketSetting({ guestMarkOff: off });
+  render();
 }
 function pillDur(mins) {
   return mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h ' + (mins % 60) + 'm';
@@ -30207,11 +30251,21 @@ function floorPillHtml(t, cs) {
   }
   if (lens === 'guests') {
     // VIP already rides the corner star (tableMarksHtml) — echoing it here
-    // put two stars on the table. The pill only carries what the corner
-    // can't: which allergy.
-    const al = t.allergies || [];
-    if (!al.length) return '';
-    return pill(`background:var(--red);color:#fff;`, `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
+    // put two stars on the table, so it never takes the pill.
+    // The pill takes the FIRST switched-on thing the table carries, in the
+    // order the card lists them: the pill can only say one thing.
+    for (const g of guestMarks()) {
+      if (g.key === 'vip' || guestMarkIsOff(g.key)) continue;
+      if (g.key === 'allergy') {
+        const al = t.allergies || [];
+        if (al.length) return pill(tint(statusColor('pillDanger', '#FF3B30')), `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
+        continue;
+      }
+      const catId = g.key.slice(5);
+      const n = (t.notes || []).find(x => String(x.categoryId) === catId && String(x.text || '').trim());
+      if (n) return pill(tint(g.colour), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
+    }
+    return '';
   }
   if (lens === 'booked') {
     const r = upcomingBookingFor(t.id, 180);
@@ -39811,6 +39865,7 @@ function handleActClick(el, e) {
       else if (act === 'set-spend-format') { saveTicketSetting({ spendPillFormat: el.dataset.val }); }
       else if (act === 'set-spend-level-on') { toggleSpendLevel(el.dataset.key); }
       else if (act === 'set-pill-level-on') { togglePillLevel(el.dataset.key, el.dataset.level); }
+      else if (act === 'set-guest-mark-on') { toggleGuestMark(el.dataset.key); }
       else if (act === 'set-course-pill-on') { const n = parseInt(el.dataset.key, 10); setCoursePillLevel(n, { off: !coursePillOff(n) }); }
       else if (act === 'toggle-item-rowbreak') {
         const item = state.menu.find(m => m.id === el.dataset.id);

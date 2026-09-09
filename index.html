@@ -7709,11 +7709,15 @@ app.put('/api/settings', (req, res) => {
   if (req.body.spendPillStyle !== undefined) data.settings.spendPillStyle = req.body.spendPillStyle === 'total' ? 'total' : 'perhead';
   if (req.body.spendPillFormat !== undefined) data.settings.spendPillFormat = req.body.spendPillFormat === 'symbol' ? 'symbol' : 'number';
   if (req.body.guestPillFormat !== undefined) data.settings.guestPillFormat = req.body.guestPillFormat === 'symbol' ? 'symbol' : 'text';
-  // One or several, and where it prints — the same two for every note type.
-  if (req.body.noteTypeMulti && typeof req.body.noteTypeMulti === 'object') {
-    const m = {};
-    for (const k of ['vip', 'allergy']) if (req.body.noteTypeMulti[k] !== undefined) m[k] = !!req.body.noteTypeMulti[k];
-    data.settings.noteTypeMulti = Object.assign({}, data.settings.noteTypeMulti, m);
+  // Where a note type prints, and whether it is about the table or a seat.
+  // A note type is about the table or about a seat.
+  if (req.body.noteTypeScope && typeof req.body.noteTypeScope === 'object') {
+    const sc = {};
+    for (const k of Object.keys(req.body.noteTypeScope)) {
+      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      sc[k] = req.body.noteTypeScope[k] === 'table' ? 'table' : 'seat';
+    }
+    data.settings.noteTypeScope = Object.assign({}, data.settings.noteTypeScope, sc);
   }
   if (req.body.noteTypeStation && typeof req.body.noteTypeStation === 'object') {
     const st = {};
@@ -17383,6 +17387,22 @@ function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {
 // station, so a venue could not have rebuilt either of them from nothing —
 // which is the whole point of the rule. Both are true by default, which is
 // exactly how they have always behaved.
+// A NOTE IS ABOUT THE TABLE OR ABOUT A SEAT (owner, Sep '26, his words:
+// "note about the table or note about the seat"). It is a property of the
+// TYPE, not a question to re-answer every time: a VIP is about the table, an
+// allergy is about the person. Set it to the table and the cover pad never
+// opens for that type again — one tap saved on every note the venue writes.
+// Default 'seat', which is exactly how every type behaved before this.
+function noteTypeScope(id) {
+  const sc = (state.settings || {}).noteTypeScope || {};
+  return sc[id] === 'table' ? 'table' : 'seat';
+}
+function noteIsTableWide(id) { return noteTypeScope(id) === 'table'; }
+// The venue's own word for a seat, so a house that says "Guest" reads "A guest".
+function seatWordLower() {
+  const w = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
+  return (w || 'seat').toLowerCase();
+}
 function noteTypeMulti(id) {
   const m = (state.settings || {}).noteTypeMulti || {};
   return m[id] === undefined ? true : !!m[id];
@@ -17497,7 +17517,7 @@ function saveAllergyModal() {
   if (!m.wholeTable && m.seats.length === 0) {
     // One cover has no seat to choose — "All" and "Seat 1" mean the same
     // thing, so skip the pop and save it whole-table.
-    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
+    if (!noteIsTableWide('allergy') && state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
     m.wholeTable = true;
   }
   const notes = m.notes.trim();
@@ -17544,8 +17564,9 @@ function saveCustomNoteDraft() {
   if (!m.wholeTable && m.seats.length === 0) {
     // Same grammar as adding an item: the centred seat pop asks which
     // cover the note applies to (All = whole table). No seats set up →
-    // it's simply a whole-table note.
-    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); return; }
+    // it's simply a whole-table note. A type that is ABOUT THE TABLE never
+    // asks at all.
+    if (!noteIsTableWide(m.categoryId) && state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); return; }
     m.wholeTable = true;
   }
   const targets = m.wholeTable ? [null] : m.seats;
@@ -17588,7 +17609,7 @@ function saveVipModal() {
   const type = m.type.trim();
   if (type && !m.wholeTable && !(m.seats || []).length) {
     // Same grammar as a note and an item: the pop asks which cover.
-    if (state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); return; }
+    if (!noteIsTableWide('vip') && state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); return; }
     m.wholeTable = true;
   }
   const seat = type && !m.wholeTable ? (m.seats[0] || null) : null;
@@ -21420,7 +21441,7 @@ function renderVipTabContent() {
       <div class="item-card allergy-item-card note-add-cell"><input id="vip-type-input" type="text" value="${m.type}" placeholder="+ ${esc(vipLabel())}"></div>
   </div>
   <input id="vip-note-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">
-  ${noteSeatChip(m, 'open-vip-seat-pop')}
+  ${noteSeatChip(m, 'open-vip-seat-pop', 'vip')}
   ${npReserveRow()}
 `;
 }
@@ -21475,7 +21496,7 @@ function renderAllergyTabContent() {
     </select>`;
   }).join('')}
   <input id="allergy-notes-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.notes)}" style="margin-top:8px;">
-  ${noteSeatChip(m, 'open-allergy-seat-pop')}
+  ${noteSeatChip(m, 'open-allergy-seat-pop', 'allergy')}
 `;
 }
 
@@ -21487,7 +21508,8 @@ function renderAllergyTabContent() {
 // it was born with and the only way to move it was delete and retype.
 // VIP stays table-level, so it gets no chip; the chip only shows when covers
 // are in play. Tapping a cover commits, the same grammar as adding an item.
-function noteSeatChip(m, act) {
+function noteSeatChip(m, act, typeId) {
+  if (typeId && noteIsTableWide(typeId)) return ''; // this type is about the table
   if (!(state.settings.seatNumbersEnabled && state.covers > 1)) return '';
   const label = m.wholeTable ? (state.settings.sharedSeatLabel || 'All')
     : (m.seats && m.seats.length) ? esc(seatText(m.seats[0]))
@@ -21580,7 +21602,7 @@ function renderCustomNoteTabContent(categoryId) {
         another note instead. A single-pick type needs none: the cell above IS
         the words. */ ''}
   ${multi ? `<input id="custom-note-extra-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">` : ''}
-  ${noteSeatChip(m, 'open-note-seat-pop')}
+  ${noteSeatChip(m, 'open-note-seat-pop', m.categoryId)}
   ${npReserveRow()}
 `;
 }
@@ -26336,11 +26358,24 @@ function renderQuickNoteSettingsAdmin() {
 // Naming the unit is the whole fix; the line under it says what OFF does,
 // which is the half a switch label can never show. Three wording panels
 // landed on the same point independently.
-function noteMultiRow(id, on) {
-  return `<div style="margin:0 0 12px;">
-    <div style="display:flex;align-items:center;gap:8px;"><label class="field-label" style="margin:0;">Pick several at once</label>${togglePill(on, 'toggle-note-multi', `data-id="${id}"`)}</div>
-    <div class="ts" style="margin-top:4px;">Off, the first pick saves.</div>
-  </div>`;
+// TWO QUESTIONS, TWO ROWS, ONE SHAPE. A switch that needed a sentence under it
+// to be understood was the wrong control (owner, Sep '26) — a pair of buttons
+// puts both answers on the screen and needs no sentence at all. It is the same
+// control the app already uses for Words/Symbols and Total/Per person.
+function noteSegRow(label, act, id, opts, val) {
+  return `<div style="margin:0 0 12px;"><label class="field-label">${esc(label)}</label>
+    <div class="pay-options" style="max-width:280px;">${opts.map(([v, l]) =>
+      `<div class="pay-opt ${val === v ? 'active' : ''}" data-act="${act}" data-id="${id}" data-val="${v}">${esc(l)}</div>`).join('')}</div></div>`;
+}
+// ONE QUESTION ON THE CARD (owner, Sep '26: "it just needs the applies to").
+// "More than one" shipped, then "Pick several at once" with a line under it,
+// and both came back. The answer was not better words: it was that the card
+// was asking two things when the venue only cares about one. How many presets
+// a type gathers stays exactly as each type already behaves — it is no longer
+// a question put to the venue.
+function noteSetupRows(id) {
+  return noteSegRow('Note about', 'set-note-scope', id,
+    [['table', 'The table'], ['seat', 'A ' + seatWordLower()]], noteTypeScope(id));
 }
 function renderOrderNotesAdmin() {
   const cats = state.noteCategories;
@@ -26374,13 +26409,13 @@ function renderOrderNotesAdmin() {
         // THE SAME CARD FOR EVERY TYPE (owner, Sep '26): name, where it
         // prints, one or several — then its own presets.
         builtin ? (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${id}', this.value)"><option value="">All stations</option>${state.printerStations.map(st => `<option value="${st.id}" ${noteTypeStation(id) === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></div>` : '')
-          + noteMultiRow(id, noteTypeMulti(id)) : ''
+          + noteSetupRows(id) : ''
       }${
         id === 'vip' ? renderVipSettingsAdmin()
         : id === 'allergy' ? renderAllergySettingsAdmin()
         : `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === catId)}" type="text" value="${esc(name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>`
           + (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${catId}', this.value)"><option value="">All stations</option>${state.printerStations.map(s => `<option value="${s.id}" ${(cats.find(c => c.id === catId) || {}).station === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>` : '')
-          + noteMultiRow(catId, !!(cats.find(c => c.id === catId) || {}).multi)
+          + noteSetupRows(catId)
           + renderNotePresetList(cats.find(c => c.id === catId), selP)
       }</div>` : ''}
     </div>`;
@@ -35246,17 +35281,15 @@ function reorderVipPresets(fromIdx, toIdx) {
 
 // Route a note type's docket line to one printer station ('' = every docket).
 // ONE PICK OR SEVERAL (owner, Aug '26). Off, a preset saves itself the
-// moment it is tapped; on, taps gather and the tick saves the lot — each
-// pick becoming its own note, the way allergies already work.
-function saveNoteCategoryMulti(catId, on) {
-  if (catId === 'vip' || catId === 'allergy') {
-    const m = Object.assign({}, state.settings.noteTypeMulti || {}, { [catId]: !!on });
-    state.settings.noteTypeMulti = m;
-    saveTicketSetting({ noteTypeMulti: m });
-    render();
-    return;
-  }
-  saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, multi: !!on } : c));
+// HOW MANY PRESETS A TYPE GATHERS is no longer a question put to the venue
+// (owner, Sep '26: "it just needs the applies to"). Each type keeps how it
+// already behaves — allergies and VIP gather, a venue's own type takes one —
+// and the card asks the one thing the venue actually cares about instead.
+function saveNoteCategoryScope(catId, val) {
+  const sc = Object.assign({}, state.settings.noteTypeScope || {}, { [catId]: val === 'table' ? 'table' : 'seat' });
+  state.settings.noteTypeScope = sc;
+  saveTicketSetting({ noteTypeScope: sc });
+  render();
 }
 function saveNoteCategoryStation(catId, val) {
   if (catId === 'vip' || catId === 'allergy') {
@@ -40311,7 +40344,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'add-quicknote-preset') { addQuickNotePreset(); }
       else if (act === 'delete-quicknote-preset') { deleteQuickNotePreset(parseInt(el.dataset.idx, 10)); }
-      else if (act === 'toggle-note-multi') { saveNoteCategoryMulti(el.dataset.id, el.dataset.val === 'true'); }
+      else if (act === 'set-note-scope') { saveNoteCategoryScope(el.dataset.id, el.dataset.val); }
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }

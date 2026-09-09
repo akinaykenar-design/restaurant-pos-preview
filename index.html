@@ -10404,7 +10404,14 @@ function adjustStockForItems(data, items, sign, ref) {
     const menuItem = data.menu.find(m => m.id === i.menuItemId);
     if (!menuItem) return;
     if (menuItem.trackStock) {
-      menuItem.stockCount = Math.max(0, menuItem.stockCount + sign * i.qty);
+      // A SALE MAY TAKE THE COUNT BELOW ZERO (owner, Sep '26: "go negative for
+      // the count"). Clamping at zero threw the oversell away: sell three past
+      // the last one and the count read 0, so nobody could see by how much —
+      // and a void then CREDITED three back that were never taken off, which
+      // walked the count up every time a mistake was undone. Negative is the
+      // truth, and it undoes cleanly. A person typing a count in admin is
+      // still held at zero or above; this is only what selling does.
+      menuItem.stockCount = Math.round((menuItem.stockCount + sign * i.qty) * 100) / 100;
       menuItem.out = menuItem.stockCount <= 0;
     }
     const off = Array.isArray(i.removed) ? i.removed : [];
@@ -12012,6 +12019,7 @@ let state = {
   auditLog: [],
   houseLog: [],
   houseDraft: null,
+  stockAddWarn: null, // "more than there is" — the tap that crosses the stock line
   stockCountSearch: '', // House account → Stock count "add" search box
   registerCurrent: null,
   registerCloses: [],
@@ -16692,6 +16700,26 @@ function addToCart(item, variant, modifiers, seat) {
     if (hits.length) { state.allergenWarnModal = { itemId: item.id, variant, modifiers, seat, hits, resume: 'add' }; render(); return; }
   }
   state._allergenAck = false;
+  // PAST WHAT IS LEFT (owner, Sep '26: "warn when adding an item exceeding the
+  // stock count"). Soft, like every stock warning in here — it says so and
+  // adds anyway, because only a person 86s a dish. It fires on the tap that
+  // CROSSES the line, not on every one after it: once you are over you know,
+  // and a pop on every tap would be nagging. The send-time warning still has
+  // the last word before the kitchen hears about it.
+  if (!willPrompt && !state._stockAddAck) {
+    const tracked = item.trackStock || itemServingsLeft(item) !== null;
+    if (tracked) {
+      const left = itemStockLeft(item);
+      const already = state.cart.filter(c => c.menuItemId === item.id).reduce((n, c) => n + c.qty, 0);
+      const q0 = parseFloat(state.qtyPadBuffer);
+      const adding = (q0 && q0 > 0) ? q0 : 1;
+      if (already <= left && already + adding > left) {
+        state.stockAddWarn = { itemId: item.id, variant, modifiers, seat, left, already, adding };
+        render(); return;
+      }
+    }
+  }
+  state._stockAddAck = false;
   // Sold-out is a soft warning now, not a block — you can still add and send.
   if (item.out) { state.toast = `${item.name} is marked sold out — added anyway`; armToastTimer(3000); }
   if (willPrompt) {
@@ -17837,6 +17865,27 @@ function renderAllergenWarnModal() {
     </div>
   </div>`;
 }
+// The same box the send-time warning uses, one tap earlier: what is left,
+// what the docket would be asking for, and Add anyway.
+function renderStockAddWarn() {
+  const m = state.stockAddWarn;
+  const item = m && state.menu.find(x => x.id === m.itemId);
+  if (!item) return '';
+  const asking = m.already + m.adding;
+  return `
+  <div class="modal-bg" data-act="close-stock-add-warn">
+    <div class="modal" data-stop="1" style="max-width:400px;">
+      <h2>More than there is</h2>
+      <div class="stock-warn-list">
+        <div class="stock-warn-row"><span class="sw-name">${esc(item.name)}</span><span class="sw-nums">\u00d7${asking} \u00b7 ${m.left} left</span></div>
+      </div>
+      <div class="pane-actions">
+        <button class="icon-action neutral" data-act="close-stock-add-warn">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action send" data-act="stock-add-warn-add">${ACT_TICK_SVG}<span class="ia-label">Add anyway</span></button>
+      </div>
+    </div>
+  </div>`;
+}
 function renderStockWarnModal() {
   const mis = state.stockWarnModal || [];
   return `
@@ -18806,6 +18855,7 @@ function render() {
     ${state.supplierModal ? renderSupplierModal() : ''}
     ${state.recipeEditor ? renderRecipeEditorModal() : ''}
     ${state.stockWarnModal ? renderStockWarnModal() : ''}
+    ${state.stockAddWarn ? renderStockAddWarn() : ''}
     ${state.allergenWarnModal && !state.coversPad ? renderAllergenWarnModal() : ''}
     ${state.coversPad && !state.confirmDialog ? renderCoversPop() : ''}
     ${state.tableNumPad ? renderTableNumPop() : ''}
@@ -38771,6 +38821,15 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'stock-warn-send') { state.stockWarnModal = null; state._stockWarnAck = true; sendToKitchen(); }
+      else if (act === 'close-stock-add-warn') { if (e.target !== el) { state.stockAddWarn = null; render(); } }
+      else if (act === 'stock-add-warn-add') {
+        const m = state.stockAddWarn; state.stockAddWarn = null;
+        if (m) {
+          state._stockAddAck = true;
+          const it = state.menu.find(x => x.id === m.itemId);
+          if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._stockAddAck = false;
+        }
+      }
       // Shared with the backdrop, so ignore the tap that lands ON the dark —
       // only the Cancel button closes it.
       else if (act === 'close-order-detail') { state.detailOrder = null; render(); }

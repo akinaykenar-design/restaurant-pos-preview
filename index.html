@@ -6013,8 +6013,7 @@ const DEFAULT_DATA = {
   ticketCounter: 1,
   taxRate: 0.085,
   auditLog: [],
-  allergyPresets: DEFAULT_ALLERGY_PRESETS,
-  vipPresets: DEFAULT_VIP_PRESETS,
+
   discountPresets: DEFAULT_DISCOUNT_PRESETS,
   voidReasons: DEFAULT_VOID_REASONS,
   registerCloses: [],
@@ -6277,10 +6276,7 @@ function loadAndMigrate() {
     data.salesCategories = DEFAULT_SALES_CATEGORIES;
     writeData(data);
   }
-  if (!data.vipPresets) {
-    data.vipPresets = DEFAULT_VIP_PRESETS;
-    writeData(data);
-  }
+
   if (!data.discountPresets) {
     data.discountPresets = DEFAULT_DISCOUNT_PRESETS;
     writeData(data);
@@ -6474,16 +6470,14 @@ function loadAndMigrate() {
     });
     writeData(data);
   }
-  if (!data.allergyPresets) {
-    data.allergyPresets = DEFAULT_ALLERGY_PRESETS;
-    writeData(data);
-  }
-  // Migration: allergy presets used to be plain strings.
-  if (data.allergyPresets.some(p => typeof p === 'string')) {
+
+  // Migration: allergy presets used to be plain strings. Only a store that has
+  // not been folded into note types yet still has them.
+  if (Array.isArray(data.allergyPresets) && data.allergyPresets.some(p => typeof p === 'string')) {
     data.allergyPresets = data.allergyPresets.map(p => typeof p === 'string' ? { name: p, color: null, sequence: null } : p);
     writeData(data);
   }
-  if (data.allergyPresets.some(p => p.sequence === undefined || p.color === undefined || p.notes !== undefined || p.subTypes === undefined)) {
+  if (Array.isArray(data.allergyPresets) && data.allergyPresets.some(p => p.sequence === undefined || p.color === undefined || p.notes !== undefined || p.subTypes === undefined)) {
     data.allergyPresets.forEach(p => {
       if (p.color === undefined) p.color = null;
       if (p.sequence === undefined) p.sequence = null;
@@ -6601,6 +6595,7 @@ function loadAndMigrate() {
     data.noteCategories.push({ id: 'instructions', name: 'Instructions', color: null, presets: ['Rush', 'No substitutions', 'Birthday'] });
     writeData(data);
   }
+
   if (data.settings.allergyCustomEnabled === undefined) {
     data.settings.allergyCustomEnabled = true;
     writeData(data);
@@ -6702,6 +6697,89 @@ function loadAndMigrate() {
       if (c.icon === undefined) c.icon = null;
       if (c.iconEnabled === undefined) c.iconEnabled = true;
     });
+    writeData(data);
+  }
+  // ---------------------------------------------------------------------
+  // VIP AND ALLERGIES BECOME ORDINARY NOTE TYPES (owner, Sep '26: "I want std
+  // format... if I were to delete everything I should be able to recreate each
+  // order note present now. They should not have individual identities.")
+  //
+  // They were two features that merely LOOKED like note types: their own
+  // stores, their own editors, their own admin pages. Every time one moved the
+  // others did not, which is why a missing sort button and a drag that moved
+  // the wrong rows lived here for months. One shape means there is nothing
+  // left to drift.
+  //
+  // Runs once and is idempotent: the presets move into noteCategories under
+  // the ids 'vip' and 'allergy' (kept so every saved setting — the floor's
+  // marks, a docket's note-type list, an item's flag — still resolves), and
+  // every table's vipType/allergies become ordinary note entries. The old
+  // fields are cleared, never read again.
+  // ---------------------------------------------------------------------
+  if (!Array.isArray(data.noteCategories)) data.noteCategories = [];
+  const hidden = (data.settings && data.settings.hiddenNoteTypes) || [];
+  const asPreset = (p) => (typeof p === 'string')
+    ? { name: p, color: null, image: null, station: null }
+    : { name: String(p.name || ''), color: p.color || null, image: p.image || null,
+        station: p.station || null, ...(Array.isArray(p.subTypes) && p.subTypes.length ? { subTypes: p.subTypes } : {}) };
+  let folded = false;
+  const fold = (id, name, presets) => {
+    if (data.noteCategories.some(c => c.id === id)) return;
+    if (hidden.includes(id)) return; // the venue had already hidden it — stays gone
+    const label = (data.settings && data.settings.noteTypeNames && data.settings.noteTypeNames[id]) || name;
+    const station = (data.settings && data.settings.noteTypeStation && data.settings.noteTypeStation[id]) || null;
+    data.noteCategories.unshift({
+      id, name: label, color: null, station,
+      presets: (presets || []).map(asPreset).filter(p => p.name),
+    });
+    folded = true;
+  };
+  // Unshifted, so the LAST folded sits first: allergies then VIP puts VIP at
+  // the top, where the pane has always opened.
+  // A BRAND-NEW STORE gets the same two as ordinary types — they can be
+  // renamed, reordered or deleted like any other, and rebuilt with "+ Note
+  // type" if they are.
+  const firstRun = !data.settings.__noteTypesFolded;
+  fold('allergy', 'Allergies', data.allergyPresets || (firstRun ? DEFAULT_ALLERGY_PRESETS : null));
+  fold('vip', 'VIP', data.vipPresets || (firstRun ? DEFAULT_VIP_PRESETS : null));
+  if (firstRun) { data.settings.__noteTypesFolded = true; folded = true; }
+  if (data.vipPresets !== undefined || data.allergyPresets !== undefined) {
+    delete data.vipPresets; delete data.allergyPresets; folded = true;
+  }
+  // Every table's own marks move across with their cover and their words.
+  let movedTables = false;
+  for (const fp of (data.floorPlans || [])) {
+    for (const t of (fp.tables || [])) {
+      if (t.type === 'decor') continue;
+      const notes = Array.isArray(t.notes) ? t.notes.slice() : [];
+      if (t.vipType) {
+        const seat = (typeof t.vipSeat === 'number' && t.vipSeat > 0) ? t.vipSeat : null;
+        String(t.vipType).split(',').map(x => x.trim()).filter(Boolean)
+          .forEach(text => notes.push({ seat, categoryId: 'vip', text, note: String(t.vipNote || '') }));
+        movedTables = true;
+      }
+      if (Array.isArray(t.allergies) && t.allergies.length) {
+        t.allergies.forEach(a => {
+          if (!a || !a.allergy) return;
+          notes.push({ seat: (a.seat === null || a.seat === undefined) ? null : a.seat,
+            categoryId: 'allergy', text: String(a.allergy), note: String(a.notes || '') });
+        });
+        movedTables = true;
+      }
+      if (t.vipType !== undefined || t.allergies !== undefined || t.vipSeat !== undefined || t.vipNote !== undefined) {
+        delete t.vipType; delete t.vipSeat; delete t.vipNote; delete t.allergies;
+        movedTables = true;
+      }
+      if (notes.length || t.notes !== undefined) t.notes = notes;
+    }
+  }
+  if (folded || movedTables) writeData(data);
+  // A note entry always carries its own line of words, so nothing downstream
+  // has to test for it.
+  if ((data.floorPlans || []).some(fp => (fp.tables || []).some(t => Array.isArray(t.notes) && t.notes.some(n => n && n.note === undefined)))) {
+    data.floorPlans.forEach(fp => (fp.tables || []).forEach(t => {
+      if (Array.isArray(t.notes)) t.notes.forEach(n => { if (n && n.note === undefined) n.note = ''; });
+    }));
     writeData(data);
   }
   return data;
@@ -6865,7 +6943,7 @@ app.use((req, res, next) => {
 // at 11pm rolled gift cards, points, stock, paid-outs, the float and the
 // time clock back to a delete at 10am). Menu rows come back WITHOUT their
 // stock fields, and a snapshot older than ten minutes is gone.
-const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
+const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
 const UNDO_TTL = 10 * 60 * 1000;
 let _undoSnap = null, _undoSnapAt = 0;
 app.use((req, res, next) => {
@@ -7058,44 +7136,6 @@ app.post('/api/house-log', (req, res) => {
 });
 
 // ---------- Allergy presets (admin-editable list offered when tagging a cover) ----------
-app.get('/api/allergy-presets', (req, res) => {
-  const data = readData();
-  res.json(data.allergyPresets || []);
-});
-
-app.put('/api/allergy-presets', (req, res) => {
-  const data = readData();
-  const { presets } = req.body;
-  if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
-  const cleaned = presets
-    .map(p => ({
-      name: String((p && p.name) || '').trim().slice(0, 40),
-      color: (p && p.color) || null,
-      image: (p && typeof p.image === 'string' && p.image) || null,
-      sequence: (p && p.sequence !== undefined && p.sequence !== null && p.sequence !== '') ? parseInt(p.sequence) : null,
-      station: (p && p.station) ? String(p.station).slice(0, 60) : null,
-      subTypes: Array.isArray(p && p.subTypes) ? p.subTypes.map(st => String(st).trim().slice(0, 40)).filter(Boolean).slice(0, 15) : [],
-    }))
-    .filter(p => p.name)
-    .slice(0, 30);
-  {
-    const oldNames = (data.allergyPresets || []).map(p => p.name);
-    const newNames = cleaned.map(p => p.name);
-    const gone = oldNames.filter(nm => !newNames.includes(nm));
-    const came = newNames.filter(nm => !oldNames.includes(nm));
-    if (gone.length === 1 && came.length === 1) sweepPresetRename(data, gone[0], came[0], null);
-  }
-  data.allergyPresets = cleaned;
-  logAudit(data, staffFromReq(req), 'Updated allergy presets');
-  writeData(data);
-  res.json(data.allergyPresets);
-});
-
-// ONE preset renamed (exactly one old name vanished, one new appeared):
-// sweep every item Alert tag - and standing table notes - to the new name,
-// so the name-based tie can never silently break (owner ask, Aug '26).
-// A reorder or add/delete is never mistaken for a rename: the 1-in/1-out
-// shape is required.
 function sweepPresetRename(data, from, to, noteCategoryId) {
   for (const m of data.menu || []) {
     if (!Array.isArray(m.allergens)) continue;
@@ -7106,18 +7146,10 @@ function sweepPresetRename(data, from, to, noteCategoryId) {
     });
   }
   for (const fp of data.floorPlans || []) for (const t of fp.tables || []) {
-    if (!noteCategoryId) {
-      for (const al of t.allergies || []) {
-        if (typeof al.allergy !== 'string') continue;
-        if (al.allergy === from) al.allergy = to;
-        else if (al.allergy.indexOf(from + ' (') === 0) al.allergy = to + al.allergy.slice(from.length);
-      }
-    } else {
-      for (const nt of t.notes || []) {
-        if (nt.categoryId !== noteCategoryId || typeof nt.text !== 'string') continue;
-        if (nt.text === from) nt.text = to;
-        else if (nt.text.indexOf(from + ' (') === 0) nt.text = to + nt.text.slice(from.length);
-      }
+    for (const nt of t.notes || []) {
+      if (nt.categoryId !== noteCategoryId || typeof nt.text !== 'string') continue;
+      if (nt.text === from) nt.text = to;
+      else if (nt.text.indexOf(from + ' (') === 0) nt.text = to + nt.text.slice(from.length);
     }
   }
 }
@@ -7151,7 +7183,7 @@ app.post('/api/saved-colors', (req, res) => {
   res.json(data.savedColors);
 });
 
-// ---------- VIP presets ----------
+// ---------- One preset shape, for every note type ----------
 // Presets are { name, color } so each waiter-facing button can carry a
 // colour; legacy stores hold plain strings, normalized on the way out.
 function normPresetObj(p, maxLen) {
@@ -7163,22 +7195,6 @@ function normPresetObj(p, maxLen) {
   const station = (p && typeof p === 'object' && p.station) ? String(p.station).slice(0, 60) : null;
   return name ? { name, color, image, station } : null;
 }
-
-app.get('/api/vip-presets', (req, res) => {
-  const data = readData();
-  res.json((data.vipPresets || []).map(p => normPresetObj(p, 40)).filter(Boolean));
-});
-
-app.put('/api/vip-presets', (req, res) => {
-  const data = readData();
-  const { presets } = req.body;
-  if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
-  const cleaned = presets.map(p => normPresetObj(p, 40)).filter(Boolean).slice(0, 20);
-  data.vipPresets = cleaned;
-  logAudit(data, staffFromReq(req), 'Updated VIP presets');
-  writeData(data);
-  res.json(data.vipPresets);
-});
 
 // ---------- Quick note presets ----------
 // A quick note is a ONE-SHOT message to a station — it rides the next docket
@@ -7723,11 +7739,6 @@ app.put('/api/settings', (req, res) => {
     }
     data.settings.noteTypeScope = Object.assign({}, data.settings.noteTypeScope, sc);
   }
-  if (req.body.noteTypeStation && typeof req.body.noteTypeStation === 'object') {
-    const st = {};
-    for (const k of ['vip', 'allergy']) if (req.body.noteTypeStation[k] !== undefined) st[k] = req.body.noteTypeStation[k] ? String(req.body.noteTypeStation[k]).slice(0, 60) : null;
-    data.settings.noteTypeStation = Object.assign({}, data.settings.noteTypeStation, st);
-  }
   if (req.body.markSymbols && typeof req.body.markSymbols === 'object') {
     const m = {};
     for (const k of Object.keys(req.body.markSymbols)) {
@@ -8180,9 +8191,6 @@ app.put('/api/settings', (req, res) => {
     }
     data.settings.tableStatusColors = Object.assign({}, data.settings.tableStatusColors, keep);
   }
-  if (Array.isArray(hiddenNoteTypes)) {
-    data.settings.hiddenNoteTypes = hiddenNoteTypes.filter(t => t === 'vip' || t === 'allergy');
-  }
   if (req.body.noteTypeColors && typeof req.body.noteTypeColors === 'object') {
     const ok = v => (typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v)) ? v : null;
     data.settings.noteTypeColors = Object.assign({}, data.settings.noteTypeColors, {
@@ -8291,8 +8299,6 @@ app.put('/api/settings', (req, res) => {
     data.settings.docketShortcuts = next;
   }
   // The built-in VIP / Allergies note sections can be renamed (empty = default).
-  if (typeof req.body.vipLabel === 'string') data.settings.vipLabel = req.body.vipLabel.trim().slice(0, 40) || null;
-  if (typeof req.body.allergyLabel === 'string') data.settings.allergyLabel = req.body.allergyLabel.trim().slice(0, 40) || null;
   // Which order-note category the ITEM flag picker ties to ('' = the built-in
   // Allergies). The item editor's chip renames and repopulates from this
   // category (owner, Aug '26: "an option inside that ties to an ordernote").
@@ -8778,7 +8784,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
-  const { label, x, y, shape, width, height, seats, rotation, covers, allergies, notes, vipType, mergedInto, finish, color, decorType, icon, prevX, prevY, discount } = req.body;
+  const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, finish, color, decorType, icon, prevX, prevY, discount } = req.body;
   if (label !== undefined) {
     if (table.type === 'table' && tableLabelTaken(data, label, table.id)) {
       return res.status(400).json({ error: 'That table number is already used in another layout' });
@@ -8808,15 +8814,6 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
     table.discount = d && ['percent', 'fixed'].includes(d.type) && parseFloat(d.value) > 0
       ? { type: d.type, value: parseFloat(d.value), reason: String(d.reason || '').slice(0, 80), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount' } : null;
   }
-  if (Array.isArray(allergies)) {
-    table.allergies = allergies.slice(0, 50)
-      .filter(a => a && a.allergy && String(a.allergy).trim())
-      .map(a => ({
-        seat: (a.seat === null || a.seat === undefined || a.seat === '') ? null : parseInt(a.seat),
-        allergy: String(a.allergy).trim().slice(0, 60),
-        notes: String((a && a.notes) || '').trim().slice(0, 200),
-      }));
-  }
   if (Array.isArray(notes)) {
     table.notes = notes.slice(0, 50)
       .filter(n => n && n.text && String(n.text).trim())
@@ -8829,21 +8826,13 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
         note: String((n && n.note) || '').trim().slice(0, 200),
       }));
   }
-  if (vipType !== undefined) table.vipType = String(vipType || '').trim().slice(0, 60);
-  // The VIP's cover, like every other note's (owner, Sep '26). null = the
-  // whole table, which is what every VIP saved before this reads as.
-  if (req.body.vipSeat !== undefined) {
-    const n = parseInt(req.body.vipSeat, 10);
-    table.vipSeat = (n > 0 && n <= 99) ? n : null;
-  }
-  if (req.body.vipNote !== undefined) table.vipNote = String(req.body.vipNote || '').trim().slice(0, 200);
   if (mergedInto !== undefined) table.mergedInto = mergedInto || null;
   writeData(data);
   res.json(table);
 });
 
 // MOVING A SITTING IS ONE CALL (owner, Aug '26: "table transfer is slow").
-// It used to be six: covers, allergies and VIP written one at a time to the
+// It used to be six: covers and every mark written one at a time to the
 // destination and then to the source, each a separate request that re-read and
 // rewrote the whole store. Six writes of half a megabyte for one tap, and the
 // tab transfer on top of that. Now one read, one write.
@@ -8855,22 +8844,10 @@ app.post('/api/tables/move-sitting', (req, res) => {
   const from = find(fromId), to = find(toId);
   if (!to) return res.status(404).json({ error: 'Table not found' });
   const covers = Math.max(0, parseInt(req.body.covers) || 0);
-  const allergies = (Array.isArray(req.body.allergies) ? req.body.allergies : []).slice(0, 50)
-    .filter(a => a && a.allergy && String(a.allergy).trim())
-    .map(a => ({ seat: (a.seat === null || a.seat === undefined || a.seat === '') ? null : parseInt(a.seat),
-      allergy: String(a.allergy).trim().slice(0, 60), notes: String((a && a.notes) || '').trim().slice(0, 200) }));
-  const vipType = String(req.body.vipType || '').trim().slice(0, 60);
-  const vipSeatN = parseInt(req.body.vipSeat, 10);
-  const vipSeat = (vipSeatN > 0 && vipSeatN <= 99) ? vipSeatN : null;
-  const vipNote = String(req.body.vipNote || '').trim().slice(0, 200);
   const notes = Array.isArray(req.body.notes) ? req.body.notes.slice(0, 50) : (from ? (from.notes || []) : []);
   to.covers = combine ? (to.covers || 0) + covers : covers;
-  to.allergies = combine ? [...(to.allergies || []), ...allergies].slice(0, 50) : allergies;
-  to.vipType = combine ? (to.vipType || vipType) : vipType;
-  to.vipSeat = combine ? (to.vipSeat != null ? to.vipSeat : vipSeat) : vipSeat;
-  to.vipNote = combine ? (to.vipNote || vipNote) : vipNote;
   to.notes = combine ? [...(to.notes || []), ...notes].slice(0, 50) : notes; // the notes go with the party (Sep '26)
-  if (from && from !== to) { from.covers = 0; from.allergies = []; from.vipType = ''; from.vipSeat = null; from.vipNote = ''; from.notes = []; }
+  if (from && from !== to) { from.covers = 0; from.notes = []; }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -10380,7 +10357,7 @@ app.post('/api/import', (req, res) => {
 // (GET /api/staff strips them), so restoring staff would wipe every PIN.
 // 'floorPlans' is deliberately excluded — the table-layout editor saves live
 // (every place/move/delete persists immediately), so it must survive Discard.
-const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'allergyPresets', 'vipPresets', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
+const RESTORABLE_CONFIG = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'combos'];
 app.post('/api/restore-config', (req, res) => {
   const data = readData();
   const snap = req.body || {};
@@ -12211,7 +12188,6 @@ let state = {
   salesCatOpenId: null, // Categories row expanded to show/edit its items ('__uncat__' = the virtual Uncategorised bucket)
   selectedSizeIdxs: [], // bulk-select on the Sizes admin (index-based)
   expandedSizeIdxs: [], // Sizes rows open for renaming
-  expandedVipIdxs: [],
   expandedVoidIdxs: [],
   expandedCourseIdxs: [],
   expandedNotePresetIdxs: [],
@@ -12221,7 +12197,6 @@ let state = {
   expandedHappyHourIds: [], selectedHappyHourIds: [],       // Promotions tiles
   expandedCustomerIds: [], selectedCustomerIds: [],         // Customers tiles
   expandedInventoryItemIds: [], selectedInventoryItemIds: [], // Stock tiles
-  selectedVipIdxs: [], // bulk-select on the VIP types list
   selectedTimeoffIds: [], // bulk-select: time off list
   selectedExpenseIds: [], // bulk-select: expenses list
   selectedVoucherIds: [], // bulk-select: vouchers list (unused vouchers only)
@@ -12287,17 +12262,9 @@ let state = {
     showStaffOnTicket: true, showCoversOnTicket: true,
     printEnabled: false, autoPrintReceipt: false, autoPrintKitchenDocket: false,
   },
-  allergies: [], // [{ seat, allergy }]
-  allergyPresets: [],
-  expandedAllergyName: null, // admin: which allergy preset card is expanded
-  selectedAllergyNames: [], // admin: allergy presets ticked for bulk edit
-  allergyModal: null, // { allergy, customAllergy, seat }
-  vipType: '',
-  vipSeat: null,   // which cover the VIP is — null = the whole table
-  vipNote: '',     // the words that ride with the picks, like an allergy's
-  vipSeatPop: false,
-  vipModal: null, // { type }
-  vipPresets: [],
+
+
+
   quickNotePresets: [], // standing one-shot messages for the ⚡ pad, each may name its station
   sizePresets: [],
   notes: [], // [{ seat, categoryId, text }]
@@ -13548,8 +13515,9 @@ function printKitchenDocket(courseNumber) {
     covers: state.settings.coversEnabled && state.covers ? state.covers : null,
     timeLabel: fmtTime(Date.now()),
     orderNo: null,
-    vip: table && table.vipType ? table.vipType : null,
-    allergies: table && table.allergies ? table.allergies : [],
+    vip: (notesOfType('vip', table && table.notes)[0] || {}).text || null,
+    allergies: notesOfType('allergy', table && table.notes)
+      .map(n => ({ seat: n.seat, allergy: n.text, notes: n.note || '' })),
     courses: firedNumbers.map(n => {
       const info = courseInfo(n);
       return {
@@ -13825,8 +13793,8 @@ function sampleDocketCtx() {
     dateLabel: (() => { const x = new Date(); return `${x.getDate()}/${x.getMonth() + 1}/${x.getFullYear()}`; })(),
     itemCount: `${nItems} item${nItems === 1 ? '' : 's'}`,
     phone: '0412 345 678',
-    vip: (((state.vipPresets || [])[0] || {}).name || 'Food Critic'),
-    allergies: [{ seat: 2, allergy: (((state.allergyPresets || [])[0] || {}).name || 'Shellfish'), notes: 'severe' }],
+    vip: ((presetsOfType('vip')[0] || {}).name || 'Food Critic'),
+    allergies: [{ seat: 2, allergy: ((presetsOfType('allergy')[0] || {}).name || 'Shellfish'), notes: 'severe' }],
     courses,
   };
 }
@@ -14232,9 +14200,7 @@ function applyImageForKind(kind, id, image) {
   if (kind === 'menu-item') quickUpdateMenuItemImage(id, image);
   // Preset buttons (VIP / allergy / note) can carry a photo like item tiles;
   // setting one clears the colour so the card shows the photo.
-  else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, image: image || null, ...(image ? { color: null } : {}) } : p));
   else if (kind === 'quicknote-preset') saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === parseInt(id) ? { ...p, image: image || null, ...(image ? { color: null } : {}) } : p));
-  else if (kind === 'allergy-preset') updateAllergyPreset(parseInt(id), image ? { image, color: null } : { image: null });
   else if (kind === 'note-preset') {
     const [catId, idx] = String(id).split(':');
     saveNoteCategories(state.noteCategories.map(c => c.id !== catId ? c : {
@@ -14340,19 +14306,15 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'sales-category') quickUpdateSalesCategoryColor(id, color);
   else if (kind === 'course') updateCourseTemplate(parseInt(id), { color });
   else if (kind === 'menu-item') quickUpdateMenuItemColor(id, color);
-  else if (kind === 'allergy-preset') updateAllergyPreset(parseInt(id), { color });
   else if (kind === 'bulk-edit-modal') { state.bulkEditModal.color = color; render(); }
   else if (kind === 'bulk-category-modal') { state.bulkCategoryModal.color = color; render(); }
   else if (kind === 'bulk-color-modal') { state.bulkColorModal.color = color; render(); }
   else if (kind === 'menu-modal') { state.menuModal.color = color; render(); }
-  else if (kind === 'vip-preset') saveVipPresets(state.vipPresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
   else if (kind === 'quicknote-preset') saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
-  else if (kind === 'bulk-vip') bulkSetVipColor(color);
   else if (kind === 'discount-preset') updateDiscountPresetField(id, { color: color || null });
   else if (kind === 'bulk-discount-preset') bulkSetDiscountPresetColor(color);
   else if (kind === 'note-preset') setNotePresetColor(id, color);
   else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
-  else if (kind === 'bulk-allergy') bulkSetAllergyColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
   else if (kind === 'course-pill') setCoursePillLevel(parseInt(id, 10), { color: color || null });
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
@@ -14370,11 +14332,6 @@ function setNotePresetColor(ref, color) {
     ...c, presets: (c.presets || []).map((p, i) => i === parseInt(idx) ? { ...p, color: color || null } : p),
   });
   saveNoteCategories(cats);
-}
-function bulkSetVipColor(color) {
-  const sel = new Set(state.selectedVipIdxs || []);
-  if (!sel.size) return;
-  saveVipPresets(state.vipPresets.map((p, i) => sel.has(i) ? { ...p, color: color || null } : p));
 }
 function bulkSetNotePresetColor(color) {
   const sel = new Set(state.selectedNotePresetIdxs || []);
@@ -14606,17 +14563,17 @@ function firstEnabledCourseNumber() {
 }
 
 // Default alphabetical order, unless a preset has an explicit sequence set.
-function sortAllergyPresets(presets) {
-  return presets.slice().sort((a, b) => {
-    const aSeq = a.sequence === null || a.sequence === undefined ? Infinity : a.sequence;
-    const bSeq = b.sequence === null || b.sequence === undefined ? Infinity : b.sequence;
-    if (aSeq !== bSeq) return aSeq - bSeq;
-    // The same vintage-blind key the admin's A–Z uses (owner, Sep '26: "sort
-    // wines by name, ignoring the vintage in front") — one rule, both lists.
-    return smartNameKey(a.name).localeCompare(smartNameKey(b.name));
-  });
+// A preset by name, in any type. The floor's pill and the item warning both
+// read through it — there is no allergy-only lookup any more.
+function presetsOfType(typeId) {
+  const c = (state.noteCategories || []).find(x => x.id === typeId);
+  return (c && c.presets) || [];
 }
-function findAllergyPreset(name) { return state.allergyPresets.find(p => p.name === name); }
+function presetOfType(typeId, name) {
+  const c = (state.noteCategories || []).find(x => x.id === typeId);
+  return c && (c.presets || []).find(p => p && p.name === name);
+}
+function findAllergyPreset(name) { return presetOfType('allergy', name); }
 
 // Size scales run XS→XL; each theme size field holds either one value for
 // every device (legacy string) or a per-device map {pc, tablet, mobile} —
@@ -15436,14 +15393,14 @@ async function loadInitial() {
     // they all fire together — but nobody is looking at a blank screen for it.
     _menuReady = (async () => {
       const [menu, categories, subcategories, salesCategories, modifierGroups,
-        allergyPresets, savedColors, vipPresets, sizePresets, noteCategories,
+        savedColors, sizePresets, noteCategories,
         quickNotePresets,
         discountPresets, voidReasons, happyHours, printerStations, customers, combos,
         ruleFields] = await Promise.all([
           api('/api/menu'), api('/api/categories'), api('/api/subcategories'),
           api('/api/sales-categories'), api('/api/modifier-groups'),
-          api('/api/allergy-presets'), api('/api/saved-colors').catch(() => []),
-          api('/api/vip-presets'), api('/api/size-presets'), api('/api/note-categories'),
+          api('/api/saved-colors').catch(() => []),
+          api('/api/size-presets'), api('/api/note-categories'),
           api('/api/quicknote-presets').catch(() => []),
           api('/api/discount-presets'), api('/api/void-reasons'), api('/api/happy-hours'),
           api('/api/printer-stations'), api('/api/customers'), api('/api/combos'),
@@ -15454,9 +15411,7 @@ async function loadInitial() {
       state.subcategories = subcategories;
       state.salesCategories = salesCategories;
       state.modifierGroups = modifierGroups;
-      state.allergyPresets = allergyPresets;
       state.savedColors = savedColors || [];
-      state.vipPresets = normPresetList(vipPresets);
       state.sizePresets = sizePresets;
       state.noteCategories = normNoteCategories(noteCategories);
       state.quickNotePresets = normPresetList(quickNotePresets);
@@ -15573,7 +15528,7 @@ function finishLogin(staff, warm) {
       const t = findTableById(state.table);
       if (t) {
         const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
-        state.covers = (t.covers) || (oo && oo.covers) || 0; state.allergies = t.allergies || []; state.notes = t.notes || []; state.vipType = t.vipType || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t); state.discount = t.discount || null;
+        state.covers = (t.covers) || (oo && oo.covers) || 0; state.notes = t.notes || []; state.discount = t.discount || null;
         if (oo) state.openOrderId = oo.id;
         state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
         claimTableLock(state.table, false, true);
@@ -15792,7 +15747,7 @@ function logOut() {
   state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null;
   state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0;
   state.editLine = null; state.editSent = null; state.itemOptions = null;
-  state.notesPanel = null; state.noteSeatPop = null; state.allergySeatPop = null;
+  state.notesPanel = null; state.noteSeatPop = null;
   state.quickNotePad = false; state.coversPad = null; state.callAway = false;
   state.moveItems = null; state.mobileCartOpen = false; state.comboBuilder = null;
   state.discountModal = null; state.accountMenuOpen = false;
@@ -16730,10 +16685,10 @@ function allergenMatches(item, seat) {
   const names = tags.map(t => t.name.toLowerCase());
   const hits = [];
   const seatOk = (s) => !(seat !== undefined && s != null && !(seat == null || seat === 'all' || s === seat));
-  for (const a of (state.allergies || [])) {
-    if (!seatOk(a.seat)) continue;
-    const base = String(a.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
-    if (names.includes(base)) hits.push(a);
+  for (const n of notesOfType('allergy')) {
+    if (!seatOk(n.seat)) continue;
+    const base = String(n.text || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
+    if (names.includes(base)) hits.push({ seat: n.seat, allergy: n.text, notes: n.note || '' });
   }
   // Seat notes from ANY category feeding the Alerts chip warn exactly like
   // allergies (owner, Aug '26: multi-pick sources).
@@ -17193,10 +17148,7 @@ function clearCart() {
   state.cart = []; clearSendState();
   state.activeSeat = null;
   state.covers = (findTableById(state.table) || {}).covers || 0;
-  state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
-  state.vipType = (findTableById(state.table) || {}).vipType || '';
-  state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
   state.discount = null;
   state.activeCourse = firstEnabledCourseNumber();
   state.courseCount = state.settings.courses.length || 1;
@@ -17213,8 +17165,8 @@ function clearCart() {
 function discardCartUndoable() {
   const snap = {
     cart: state.cart.map(c => ({ ...c, modSelections: c.modSelections ? { ...c.modSelections } : c.modSelections, removed: c.removed ? [...c.removed] : c.removed })),
-    activeSeat: state.activeSeat, covers: state.covers, allergies: state.allergies,
-    notes: state.notes, vipType: state.vipType, vipSeat: state.vipSeat, vipNote: state.vipNote, discount: state.discount,
+    activeSeat: state.activeSeat, covers: state.covers,
+    notes: state.notes, discount: state.discount,
     activeCourse: state.activeCourse, courseCount: state.courseCount, firedCourses: state.firedCourses,
     callAway: state.callAway,
   };
@@ -17222,8 +17174,8 @@ function discardCartUndoable() {
   offerUndo('Discarded', () => {
     state.cart = snap.cart;
     state.activeSeat = snap.activeSeat; state.covers = snap.covers;
-    state.allergies = snap.allergies; state.notes = snap.notes;
-    state.vipType = snap.vipType; state.vipSeat = snap.vipSeat != null ? snap.vipSeat : null; state.vipNote = snap.vipNote || ''; state.discount = snap.discount;
+    state.notes = snap.notes;
+    state.discount = snap.discount;
     state.activeCourse = snap.activeCourse; state.courseCount = snap.courseCount;
     state.firedCourses = snap.firedCourses; state.callAway = snap.callAway;
   });
@@ -17350,8 +17302,6 @@ function presetCardStyle(p) {
   return p.color ? `style="background:${p.color};color:${contrastTextColor(p.color)};"` : '';
 }
 // The built-in VIP / Allergies note sections can be renamed in admin.
-function vipLabel() { return (state.settings && state.settings.vipLabel) || 'VIP'; }
-function allergyLabel() { return (state.settings && state.settings.allergyLabel) || 'Allergies'; }
 // The item flag picker's tie: '' = the Allergies builtin, else a custom note
 // category id. Chip label + tile set follow the tied category, so renaming the
 // note category renames the picker with it. Deleted category = fall back.
@@ -17368,7 +17318,7 @@ function itemFlagCatIds() {
 function itemFlagPresets() {
   const out = []; const seen = new Set();
   for (const id of itemFlagCatIds()) {
-    const list = id === 'allergy' ? (state.allergyPresets || [])
+    const list = id === 'allergy' ? ((((state.noteCategories || []).find(c => c.id === 'allergy')) || {}).presets || [])
       : (((state.noteCategories || []).find(c => c.id === id) || {}).presets || [])
           .filter(p => p && p.name).map(p => ({ name: p.name, color: p.color || null, subTypes: [] }));
     for (const p of list) { const k = p.name.toLowerCase(); if (!seen.has(k)) { seen.add(k); out.push(p); } }
@@ -17383,7 +17333,7 @@ function toggleItemFlagCategory(id) {
   if (pk) renderItemRow(pk.split(':')[0]); else render();
   saveSettingsPart({ itemFlagCategoryIds: next }, 'Could not save.');
 }
-function freshAllergyDraft() { return { selectedAllergies: [], subTypeChoices: {}, customAllergy: '', seats: [], wholeTable: false, notes: '' }; }
+
 // A note type that takes SEVERAL picks gathers them and saves on the tick;
 // a single-pick one still saves itself the moment a preset is tapped.
 // ONE OR SEVERAL, AND WHERE IT PRINTS — SET THE SAME WAY FOR EVERY TYPE
@@ -17406,10 +17356,6 @@ function noteIsTableWide(id) { return noteTypeScope(id) === 'table'; }
 function seatWordLower() {
   const w = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
   return (w || 'seat').toLowerCase();
-}
-function noteTypeStation(id) {
-  const st = (state.settings || {}).noteTypeStation || {};
-  return st[id] || null;
 }
 // EVERY TYPE GATHERS, THE TICK SAVES (owner, Sep '26, spelling out the whole
 // rule: "by default it should be able to select as many as you want, and then
@@ -17437,11 +17383,6 @@ function toggleQuickNotePad() {
 function paneSaveEnabled() {
   if (state.notesPanel) {
     const tab = state.notesPanel.tab;
-    if (tab === 'vip') { const m = state.vipModal; if (!m) return false;
-      const seat = m.wholeTable ? null : ((m.seats || [])[0] || null);
-      return (m.type || '').trim() !== (state.vipType || '').trim() || seat !== state.vipSeat
-        || String(m.note || '').trim() !== (state.vipNote || '').trim(); }
-    if (tab === 'allergy') { const m = state.allergyModal; return !!m && (m.selectedAllergies.length > 0 || (m.customAllergy || '').trim().length > 0); }
     const m = state.customNoteDraft; return !!m && ((m.text || '').trim().length > 0 || (m.picks || []).length > 0);
   }
   if (state.discountModal) return parseFloat(state.discountModal.value) > 0;
@@ -17461,7 +17402,7 @@ function middlePaneDirty() {
 // dropdown, and the table picker's approved doors.
 function escapeMiddlePane() {
   const close =
-    (state.tablePeek || state.orderHistoryPop || state.noteSeatPop || state.allergySeatPop
+    (state.tablePeek || state.orderHistoryPop || state.noteSeatPop
       || state.coversPad || state.showCheckout || state.billSplit || state.callAway
       || state.quickNotePad || state.notesPanel || state.itemOptions || state.priceEntry
       || state.editLine || state.editSent || state.customerPane || state.moveItems) ? null
@@ -17483,75 +17424,22 @@ function toggleNotesPanel() {
   state.quickNotePad = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   state.notesPanel = { tab: 'vip' };
-  state.vipModal = freshVipDraft();
-  state.allergyModal = freshAllergyDraft();
   state.customNoteDraft = freshCustomNoteDraft();
   state.adminError = '';
   render();
 }
 function closeNotesPanel() {
   state.notesPanel = null;
-  state.vipModal = null;
-  state.allergyModal = null;
   state.customNoteDraft = null;
-  state.noteSeatPop = false; state.allergySeatPop = false; state.vipSeatPop = false;
+  state.noteSeatPop = false;
   state.adminError = '';
   render();
 }
 function switchNotesTab(tab) {
   state.notesPanel.tab = tab;
   state.adminError = '';
-  if (tab !== 'allergy') state.allergyModal = freshAllergyDraft();
-  if (tab !== 'vip') state.vipModal = freshVipDraft();
-  if (tab !== 'allergy' && tab !== 'vip') state.customNoteDraft = freshCustomNoteDraft(tab);
+  state.customNoteDraft = freshCustomNoteDraft(tab);
   render();
-}
-
-function saveAllergyModal() {
-  const m = state.allergyModal;
-  const custom = m.customAllergy.trim();
-  const allergies = m.selectedAllergies.map(name => m.subTypeChoices[name] ? `${name} (${m.subTypeChoices[name]})` : name);
-  if (custom && !allergies.includes(custom)) allergies.push(custom);
-  if (allergies.length === 0) { state.adminError = 'Pick or type at least one allergy.'; render(); return; }
-  // No cover picked yet: the centred seat pop asks (same grammar as items
-  // and notes). An enabled tick still never no-ops — with seat numbers off
-  // it saves for the whole table straight away.
-  if (!m.wholeTable && m.seats.length === 0) {
-    // One cover has no seat to choose — "All" and "Seat 1" mean the same
-    // thing, so skip the pop and save it whole-table.
-    if (!noteIsTableWide('allergy') && state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); return; }
-    m.wholeTable = true;
-  }
-  const notes = m.notes.trim();
-  const targets = m.wholeTable ? [null] : m.seats;
-  const newEntries = targets.flatMap(seat => allergies.map(allergy => ({ seat, allergy, notes })));
-  // Editing a cover's combined chip replaces that cover's entries wholesale.
-  const kept = m.editSeat !== undefined
-    ? state.allergies.filter(a => (a.seat == null ? 'all' : String(a.seat)) !== m.editSeat)
-    : state.allergies;
-  const updated = [...kept, ...newEntries];
-  state.allergies = updated;
-  // Saved = done: the popup closes itself (owner, Aug '26 — no Close tap
-  // after the job's finished).
-  closeNotesPanel();
-  saveTableAllergies(state.table, updated);
-}
-function removeAllergyEntry(idx) {
-  const updated = state.allergies.filter((_, i) => i !== idx);
-  state.allergies = updated;
-  render();
-  saveTableAllergies(state.table, updated);
-}
-
-async function saveTableAllergies(tableId, allergies) {
-  if (!tableId) return;
-  const fp = findFloorPlanForTable(tableId);
-  if (!fp) return;
-  const t = fp.tables.find(x => x.id === tableId);
-  if (t) t.allergies = allergies;
-  try {
-    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ allergies }) });
-  } catch (e) {}
 }
 
 function saveCustomNoteDraft() {
@@ -17598,75 +17486,6 @@ async function saveTableNotes(tableId, notes) {
   } catch (e) {}
 }
 
-// The VIP draft is shaped like the note draft, so ONE cover chip and ONE seat
-// pop serve all three editors instead of each growing its own.
-function freshVipDraft() {
-  const seat = state.vipSeat;
-  return { type: state.vipType || '', note: state.vipNote || '', seats: seat ? [seat] : [], wholeTable: !!state.vipType && !seat };
-}
-function saveVipModal() {
-  const m = state.vipModal;
-  const type = m.type.trim();
-  if (type && !m.wholeTable && !(m.seats || []).length) {
-    // Same grammar as a note and an item: the pop asks which cover.
-    if (!noteIsTableWide('vip') && state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); return; }
-    m.wholeTable = true;
-  }
-  const seat = type && !m.wholeTable ? (m.seats[0] || null) : null;
-  state.vipType = type;
-  state.vipSeat = type ? seat : null;
-  state.vipNote = type ? String(m.note || '').trim() : '';
-  // Saved = done: the popup closes itself (owner, Aug '26).
-  closeNotesPanel();
-  saveTableVip(state.table, type, state.vipSeat, state.vipNote);
-}
-function clearVip() {
-  state.vipType = '';
-  state.vipSeat = null;
-  state.vipNote = '';
-  render();
-  saveTableVip(state.table, '', null, '');
-}
-async function saveTableVip(tableId, vipType, vipSeat, vipNote) {
-  if (!tableId) return;
-  const fp = findFloorPlanForTable(tableId);
-  if (!fp) return;
-  const t = fp.tables.find(x => x.id === tableId);
-  if (t) { t.vipType = vipType; t.vipSeat = vipSeat == null ? null : vipSeat; t.vipNote = vipNote || ''; }
-  try {
-    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ vipType, vipSeat: vipSeat == null ? null : vipSeat, vipNote: vipNote || '' }) });
-  } catch (e) {}
-}
-function pickVipSeat(seat) {
-  const m = state.vipModal;
-  if (!m) { state.vipSeatPop = false; render(); return; }
-  if (m._seatDone) return;
-  m._seatDone = true; m._pickedSeat = seat; render();
-  setTimeout(() => {
-    m._seatDone = false;
-    const picked = m._pickedSeat; m._pickedSeat = null;
-    if (state.vipModal !== m || !state.vipSeatPop) return;
-    if (picked === 'all') { m.wholeTable = true; m.seats = []; }
-    else { m.wholeTable = false; m.seats = [picked]; }
-    state.vipSeatPop = false;
-    saveVipModal();
-  }, IO_PICK_BEAT);
-}
-function renderVipSeatPop() {
-  const m = state.vipModal;
-  if (!m) return '';
-  return `
-      <div class="pop-scrim"></div>
-      <div class="qty-pop covers-pop seat-pop">
-        <div class="covers-pad-grid qp-grid seat-grid">
-          <button class="covers-pad-key util${m._pickedSeat === 'all' ? ' assigned' : ''}" data-act="vip-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${m._pickedSeat === n ? ' assigned' : ''}" data-act="vip-pick-seat" data-seat="${n}">${n}</button>`).join('')}
-        </div>
-        <div class="qp-row qp-actions">
-          <button class="icon-action neutral" data-act="close-vip-seat-pop">${ACT_CROSS_SVG}</button>
-        </div>
-      </div>`;
-}
 function updateLineNote(idx, value) {
   const line = state.cart[idx];
   if (!line) return;
@@ -18190,9 +18009,7 @@ function cancelCoversPad() {
     const pt = fp.prev ? findTableById(fp.prev) : null;
     const po = pt ? state.orders.find(o => o.status === 'open' && o.table === pt.label) : null;
     state.covers = (pt && pt.covers) || (po && po.covers) || 0;
-    state.allergies = (pt && pt.allergies) || [];
     state.notes = (pt && pt.notes) || [];
-    state.vipType = (pt && pt.vipType) || ''; state.vipSeat = vipSeatOf(pt); state.vipNote = vipNoteOf(pt);
     state.discount = (pt && pt.discount) || null;
     state.openOrderId = (po && po.id) || null;
     if (fp.prev) claimTableLock(fp.prev);
@@ -18440,7 +18257,7 @@ function renderTablePeekPop() {
             </button>`).join('')}
           </div>`;
         })()}
-        ${(t.allergies || []).length ? `<div class="peek-chips">${t.allergies.map(a => `<span class="algn-chip contains">${esc(a.allergy)}${a.seat ? ` · ${esc(prefix).toLowerCase()} ${a.seat}` : ''}</span>`).join('')}</div>` : ''}
+        ${(() => { const al = notesOfType('allergy', t.notes); return al.length ? `<div class="peek-chips">${al.map(a => `<span class="algn-chip contains">${esc(a.text)}${a.seat ? ` · ${esc(prefix).toLowerCase()} ${a.seat}` : ''}</span>`).join('')}</div>` : ''; })()}
         <div class="peek-list">
           ${(() => {
             // The docket's own course grammar, verbatim (owner, Sep '26): the
@@ -18478,7 +18295,7 @@ function cartSendable() {
   if (state.cart.length) return true;
   if (state.stagedCallAway) return true; // a staged call-away rides the Send
   if ((state.quickNote || '').trim()) return true;
-  return state.orderType === 'dine-in' && !!state.table && (state.notes.length > 0 || state.allergies.length > 0);
+  return state.orderType === 'dine-in' && !!state.table && (state.notes.length > 0);
 }
 function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
 // A failed send is spent the moment the cart is dropped or the person leaves:
@@ -18495,7 +18312,7 @@ async function sendToKitchen() {
   if (!cartSendable()) { state.toast = 'Nothing to send'; render(); armToastTimer(2200); return; }
   // ONLY a staged call-away to send: fire it without minting an empty round.
   if (!state.cart.length && !(state.quickNote || '').trim() && state.stagedCallAway
-      && !(state.orderType === 'dine-in' && state.table && (state.notes.length > 0 || state.allergies.length > 0))) {
+      && !(state.orderType === 'dine-in' && state.table && (state.notes.length > 0))) {
     const n0 = state.stagedCallAway; state.stagedCallAway = null;
     fireCourse(n0);
     return;
@@ -18753,10 +18570,7 @@ async function confirmPaymentInner() {
       state.cardTip = 0;
       state.cardType = null;
       state.covers = (findTableById(state.table) || {}).covers || 0;
-      state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
-      state.vipType = (findTableById(state.table) || {}).vipType || '';
-      state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
       state.discount = null;
       state.activeCourse = firstEnabledCourseNumber();
       state.courseCount = state.settings.courses.length || 1;
@@ -18778,7 +18592,7 @@ async function confirmPaymentInner() {
           clearTableSitting(state.table);
           releaseTableLock(state.table);
           state.table = null;
-          state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
+          state.covers = 0; state.notes = [];
           state.showTablePicker = true;
           render();
         });
@@ -18818,10 +18632,7 @@ async function confirmPaymentInner() {
     });
     state.cart = [];
     state.covers = (findTableById(state.table) || {}).covers || 0;
-    state.allergies = (findTableById(state.table) || {}).allergies || [];
   state.notes = (findTableById(state.table) || {}).notes || [];
-    state.vipType = (findTableById(state.table) || {}).vipType || '';
-    state.vipSeat = vipSeatOf(findTableById(state.table)); state.vipNote = vipNoteOf(findTableById(state.table));
     state.discount = null;
     state.activeCourse = firstEnabledCourseNumber();
     state.courseCount = state.settings.courses.length || 1;
@@ -18839,7 +18650,7 @@ async function confirmPaymentInner() {
         clearTableSitting(state.table);
         releaseTableLock(state.table);
         state.table = null;
-        state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
+        state.covers = 0; state.notes = [];
         state.showTablePicker = true;
         render();
       });
@@ -19049,8 +18860,6 @@ function render() {
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
     ${state.itemOptions && !state.itemOptions.seatOnly && !state.allergenWarnModal ? renderItemOptionsPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
-    ${state.vipSeatPop && state.vipModal ? renderVipSeatPop() : ''}
-    ${state.allergySeatPop && state.allergyModal ? renderAllergySeatPop() : ''}
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
     ${state.reprintPick ? renderReprintPop() : ''}
@@ -20086,11 +19895,9 @@ function setOrderType(v) {
   if (v === 'dine-in') {
     const t = findTableById(state.table);
     state.covers = (t && t.covers) || 0; state.discount = (t && t.discount) || null;
-    state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
-    state.vipType = (t && t.vipType) || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t);
   } else {
-    state.covers = 0; state.allergies = []; state.notes = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
+    state.covers = 0; state.notes = [];
   }
 }
 
@@ -21144,39 +20951,12 @@ function renderTicketPanel() {
         return row.includes('<button') ? row : '';
       })() : ''}
       ${state.orderType === 'dine-in' ? `
-        ${(state.vipType || state.allergies.length || state.notes.length || state.quickNote) ? `
+        ${(state.notes.length || state.quickNote) ? `
         <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
           ${state.quickNote ? (() => {
             const qs = (state.printerStations || []).find(s => s.id === state.quickNoteStation);
             return `<span class="seat-chip" style="background:var(--orange-dim);color:var(--orange);border:1.5px dashed var(--orange);">${SYS_BOLT_SVG} ${qs ? esc(qs.name) + ' — ' : ''}${esc(state.quickNote)} <button data-act="clear-quick-note" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
           })() : ''}
-          ${state.vipType ? (() => {
-            const picks = state.vipType.split(',').map(s => s.trim());
-            // A preset with a custom note behind it ("Regular. Alan Ha") is
-            // still that preset, so it keeps the preset's colour (owner, Sep '26).
-            const vp = state.vipPresets.find(p => p.color && picks.some(x => x === p.name || x.startsWith(p.name + '.') || x.startsWith(p.name + ' ')));
-            const style = vp ? `background:${vp.color};color:${contrastTextColor(vp.color)};border-color:${vp.color};` : 'background:var(--orange-dim);color:var(--orange);border-color:var(--orange);';
-            // Tap to edit, ✕ to clear, and it names its cover — the same chip
-            // the allergies and the note types wear.
-            const held = state.notesPanel && state.notesPanel.tab === 'vip' ? ' chip-held' : '';
-            const where = state.vipSeat ? esc(seatText(state.vipSeat)).toUpperCase() : 'ALL';
-            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-vip-entry">${esc(vipLabel())} — ${esc(state.vipType)}${state.vipNote ? ' (' + esc(state.vipNote) + ')' : ''}, (${where}) <button data-act="clear-vip" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
-          })() : ''}
-          ${(() => {
-            // ONE chip per cover — "Seat 1 — Eggs, Gluten" — tap to edit that
-            // cover's allergies, ✕ clears them all.
-            const bySeat = new Map();
-            state.allergies.forEach(a => { const k = a.seat == null ? 'all' : a.seat; if (!bySeat.has(k)) bySeat.set(k, []); bySeat.get(k).push(a); });
-            return [...bySeat.entries()].map(([k, list]) => {
-              const preset = findAllergyPreset(list[0].allergy);
-              const style = preset && preset.color ? `background:${preset.color};color:${contrastTextColor(preset.color)};border-color:${preset.color};` : '';
-              const names = list.map(a => esc(a.allergy) + (a.notes ? ' (' + esc(a.notes) + ')' : '')).join(', ');
-              // While this chip's edit popup is open the chip stays HELD, so
-              // it's obvious which cover the pane is acting on.
-              const held = state.notesPanel && state.allergyModal && state.allergyModal.editSeat === k ? ' chip-held' : '';
-              return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-seat-allergies" data-seat="${k}">${esc(allergyLabel())}, ${names}, (${k === 'all' ? 'ALL' : esc(seatText(k)).toUpperCase()}) <button data-act="remove-seat-allergies" data-seat="${k}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
-            }).join('');
-          })()}
           ${state.notes.map((n, idx) => {
             const cat = state.noteCategories.find(c => c.id === n.categoryId);
             const preset0 = cat && (cat.presets || []).find(p => p.name === n.text && p.color);
@@ -21389,13 +21169,13 @@ function renderQuickNoteMiddle() {
   </div>`;
 }
 
+// ONE PANE, ONE TAB RENDERER, ONE DRAFT (owner, Sep '26: "they should not
+// have individual identities"). VIP and allergies used to have a tab renderer,
+// a draft and a save path each, beside the one every other type shared — three
+// of everything for one job.
 function renderNotesMiddle() {
   const tab = state.notesPanel.tab;
-  const tabs = [
-    { key: 'vip', label: vipLabel() },
-    { key: 'allergy', label: allergyLabel() },
-    ...state.noteCategories.map(c => ({ key: c.id, label: c.name })),
-  ];
+  const tabs = state.noteCategories.map(c => ({ key: c.id, label: c.name }));
   // Worked out BEFORE the first paint, so the box never lands one size and
   // grows when you look at another tab (owner, Aug '26).
   const g = popupTileGrid();
@@ -21406,11 +21186,11 @@ function renderNotesMiddle() {
         ${tabs.map(t => `<button data-act="switch-notes-tab" data-val="${t.key}" class="${tab === t.key ? 'active' : ''}">${esc(t.label)}</button>`).join('')}
       </div>
       <div class="np-scroll">
-        ${tab === 'vip' ? renderVipTabContent() : tab === 'allergy' ? renderAllergyTabContent() : renderCustomNoteTabContent(tab)}
+        ${renderCustomNoteTabContent(tab)}
       </div>
       <div class="modal-actions">
         <button class="icon-action neutral" data-act="close-notes-panel">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
-        <button class="icon-action send" data-act="${tab === 'vip' ? 'save-vip-modal' : tab === 'allergy' ? 'save-allergy-modal' : 'save-custom-note'}" ${paneSaveEnabled() ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
+        <button class="icon-action send" data-act="save-custom-note" ${paneSaveEnabled() ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
     </div>
   </div>`;
@@ -21431,82 +21211,6 @@ function renderNotesMiddle() {
 function npReserveRow() {
   return `<input type="text" class="np-reserve" tabindex="-1" aria-hidden="true" disabled>`;
 }
-function renderVipTabContent() {
-  const m = state.vipModal;
-  if (!m) return '';
-  return `
-  ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-  <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-      ${(() => { const sel = (m.type || '').split(',').map(s => s.trim()); return state.vipPresets.map(p => `<button type="button" class="item-card allergy-item-card ${sel.includes(p.name) ? 'selected' : ''}" data-act="pick-vip-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join(''); })()}
-      <div class="item-card allergy-item-card note-add-cell"><input id="vip-type-input" type="text" value="${m.type}" placeholder="+ ${esc(vipLabel())}"></div>
-  </div>
-  <input id="vip-note-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.note || '')}" style="margin-top:8px;">
-  ${noteSeatChip(m, 'open-vip-seat-pop', 'vip')}
-  ${npReserveRow()}
-`;
-}
-
-function renderVoidModal() {
-  const m = state.voidModal;
-  return `
-  <div class="modal-bg">
-    <div class="modal" data-stop="1">
-      <h2>Void ticket #${m.orderId}</h2>
-      <label>Reason</label>
-      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">
-        ${state.voidReasons.map(r => `<button type="button" class="pay-opt sm ${m.reason === r ? 'active' : ''}" data-act="pick-void-reason" data-val="${r}">${r}</button>`).join('')}
-      </div>
-      <label>Note (optional)</label>
-      <input id="void-note-input" type="text" value="${esc(m.note)}">
-      ${m.needsApproval ? `
-        <label>Manager PIN required</label>
-        <input id="void-manager-pin-input" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" value="${m.managerPin}">
-        ${m.pinError ? `<div class="login-error">${m.pinError}</div>` : ''}
-      ` : ''}
-      <div class="modal-actions">
-        <button class="icon-action neutral" data-act="close-void-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action discard" data-act="confirm-void-modal" ${m.reason && (!m.needsApproval || m.managerPin) ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Void ticket</span></button>
-      </div>
-    </div>
-  </div>`;
-}
-
-// §§ Allergies and order notes on the floor
-function renderAllergyTabContent() {
-  const m = state.allergyModal;
-  if (!m) return '';
-  return `
-  ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-  <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-    ${sortAllergyPresets(state.allergyPresets).map(p => {
-      const selected = m.selectedAllergies.includes(p.name);
-      return `<button type="button" class="item-card allergy-item-card ${selected ? 'selected' : ''}" data-act="toggle-allergy-preset" data-allergy="${esc(p.name)}" ${presetCardStyle(p)}>
-        <div class="item-name">${esc(p.name)}</div>
-      </button>`;
-    }).join('')}${state.settings.allergyCustomEnabled ? `<div class="item-card allergy-item-card note-add-cell"><input id="allergy-custom-input" type="text" placeholder="+ ${esc(allergyLabel())}" value="${m.customAllergy}"></div>` : ''}  </div>
-  ${m.selectedAllergies.filter(name => {
-    const preset = findAllergyPreset(name);
-    return preset && preset.subTypes && preset.subTypes.length > 0;
-  }).map(name => {
-    const preset = findAllergyPreset(name);
-    return `
-    <select class="allergy-subtype-select" data-allergy="${esc(name)}" style="width:100%;padding:8px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);margin-bottom:8px;">
-      <option value="">— none —</option>
-      ${preset.subTypes.map(st => `<option value="${esc(st)}" ${m.subTypeChoices[name] === st ? 'selected' : ''}>${esc(st)}</option>`).join('')}
-    </select>`;
-  }).join('')}
-  <input id="allergy-notes-input" type="text" placeholder="Notes for the kitchen…" value="${esc(m.notes)}" style="margin-top:8px;">
-  ${noteSeatChip(m, 'open-allergy-seat-pop', 'allergy')}
-`;
-}
-
-// WHICH COVER A NOTE IS FOR, CHANGEABLE AFTER IT IS PUT THROUGH (owner,
-// Sep '26: "ability to edit order notes already put through — changing and
-// editing the position, cover number"). This chip was written months ago and
-// never called, and both its handlers sat unreachable: the seat pop only ever
-// appeared while SAVING A NEW note, so an existing one was stuck on the cover
-// it was born with and the only way to move it was delete and retype.
-// VIP stays table-level, so it gets no chip; the chip only shows when covers
 // are in play. Tapping a cover commits, the same grammar as adding an item.
 function noteSeatChip(m, act, typeId) {
   if (typeId && noteIsTableWide(typeId)) return ''; // this type is about the table
@@ -21550,39 +21254,6 @@ function pickNoteSeat(seat) {
   }, IO_PICK_BEAT);
 }
 
-function renderAllergySeatPop() {
-  const m = state.allergyModal;
-  if (!m) return '';
-  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
-  const what = [...m.selectedAllergies, m.customAllergy.trim()].filter(Boolean).join(', ');
-  return `
-      <div class="pop-scrim"></div>
-      <div class="qty-pop covers-pop seat-pop">
-        <div class="covers-pad-grid qp-grid seat-grid">
-          <button class="covers-pad-key util${m._pickedSeat === 'all' ? ' assigned' : ''}" data-act="allergy-pick-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}</button>
-          ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<button class="covers-pad-key${m._pickedSeat === n ? ' assigned' : ''}" data-act="allergy-pick-seat" data-seat="${n}">${n}</button>`).join('')}
-        </div>
-        <div class="qp-row qp-actions">
-          <button class="icon-action neutral" data-act="close-allergy-seat-pop">${ACT_CROSS_SVG}</button>
-        </div>
-      </div>`;
-}
-function pickAllergySeat(seat) {
-  const m = state.allergyModal;
-  if (!m) { state.allergySeatPop = false; render(); return; }
-  if (m._seatDone) return; // the pick is being SHOWN — pop is on its way out
-  // Same rule as notes: the seat lands on the draft only when the beat commits.
-  m._seatDone = true; m._pickedSeat = seat; render();
-  setTimeout(() => {
-    m._seatDone = false;
-    const picked = m._pickedSeat; m._pickedSeat = null;
-    if (state.allergyModal !== m || !state.allergySeatPop) return;
-    if (picked === 'all') { m.wholeTable = true; m.seats = []; }
-    else { m.wholeTable = false; m.seats = [picked]; }
-    state.allergySeatPop = false;
-    saveAllergyModal();
-  }, IO_PICK_BEAT);
-}
 
 function renderCustomNoteTabContent(categoryId) {
   const m = state.customNoteDraft;
@@ -22390,7 +22061,7 @@ function renderBriefingAdmin() {
   const onToday = (state.roster || []).filter(r => r.date === todayKey)
     .sort((a, b) => String(a.start).localeCompare(String(b.start)));
   const staffName = (id) => { const s = (state.staffList || []).find(x => x.id === id); return s ? s.name : '?'; };
-  const liveNotes = allTables().filter(t => (t.allergies || []).length);
+  const liveNotes = allTables().filter(t => notesOfType('allergy', t.notes).length);
   return `
   <div class="settings-card">
     <div class="th" style="margin-bottom:14px;">Bookings — ${bookings.length ? `${bookings.length} (${covers} covers)` : 'none today'}</div>
@@ -22407,7 +22078,7 @@ function renderBriefingAdmin() {
   <div class="settings-card">
     <div class="th" style="margin-bottom:14px;">Allergies on open tables</div>
     <div style="display:flex;flex-wrap:wrap;gap:8px;">
-      ${liveNotes.map(t => (t.allergies || []).map(a => `<span class="algn-chip contains">T${esc(t.label)}${a.seat ? ' · seat ' + a.seat : ''}<small>${esc(a.allergy)}</small></span>`).join('')).join('')}
+      ${liveNotes.map(t => notesOfType('allergy', t.notes).map(a => `<span class="algn-chip contains">T${esc(t.label)}${a.seat ? ' · seat ' + a.seat : ''}<small>${esc(a.text)}</small></span>`).join('')).join('')}
     </div>
   </div>` : ''}
   <div class="settings-card">
@@ -26050,8 +25721,6 @@ function renderAdminView() {
         : state.adminTab === 'briefing' ? renderBriefingAdmin()
         : state.adminTab === 'settings-covers' ? renderCoversSettingsAdmin()
         : state.adminTab === 'settings-courses' ? renderCoursesSettingsAdmin()
-        : state.adminTab === 'settings-allergies' ? renderAllergySettingsAdmin()
-        : state.adminTab === 'settings-vip' ? renderVipSettingsAdmin()
         : state.adminTab === 'settings-notes' ? renderOrderNotesAdmin()
         : state.adminTab === 'settings-quicknotes' ? renderQuickNoteSettingsAdmin()
         : state.adminTab === 'settings-discounts' ? renderDiscountsSettingsAdmin()
@@ -26071,55 +25740,6 @@ function renderAdminView() {
       </div>
     </div>
   </div>`;
-}
-
-function renderAllergySettingsAdmin() {
-  return `
-  <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-allergies" ${state.selectedAllergyNames.length > 0 && state.allergyPresets.every(p => state.selectedAllergyNames.includes(p.name)) ? 'checked' : ''}></label>${state.allergyPresets.length > 1 ? sortControl('allergy-preset') : ''}${state.selectedAllergyNames.length > 0 ? `
-        
-        <span style="display:inline-flex;align-items:center;gap:4px;" data-stop="1">${colorDotButton('bulk-allergy', 'x', null, { pencil: true, allowClear: true })}</span>
-        <button class="icon-sq" data-act="duplicate-selected-allergies">${ACT_COPY_SVG}</button>
-      <button class="icon-sq" data-act="bulk-delete-allergies">${ACT_TRASH_SVG}</button>
-        <button class="icon-sq" data-act="clear-allergy-selection">${ACT_X_SVG}</button>
-      ` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-allergy-preset">+ Note</button></div>
-    <div class="menu-items-list" style="max-width:var(--admin-list-w,560px);display:flex;flex-direction:column;gap:8px;">
-      ${state.allergyPresets.length === 0 ? `<div class="empty-hist">No allergies yet.</div>` : ''}
-      ${applyListSort('allergy-preset', sortAllergyPresets(state.allergyPresets)).map((p) => {
-        const idx = state.allergyPresets.indexOf(p);
-        const expanded = state.expandedAllergyName === p.name;
-        const subCount = (p.subTypes || []).length;
-        return `
-        <div class="menu-item-expandable allergy-preset-row${state.selectedAllergyNames.includes(p.name) ? ' selected' : ''}${expanded ? ' open' : ''}" data-idx="${idx}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;">
-          <div class="menu-item-header sel-head" data-sellist="allergy" data-selkey="${esc(p.name)}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
-            <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="allergy" data-key="${esc(p.name)}" ${state.selectedAllergyNames.includes(p.name) ? 'checked' : ''}>
-            ${colorDotButton('allergy-preset', idx, p.color, { size: 20, photo: true, image: p.image })}
-            <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
-            <span style="flex:1;"></span>
-            ${subCount ? `<span style="font-size:var(--fs-md);color:var(--charcoal-soft);flex-shrink:0;">${subCount} sub${subCount > 1 ? 's' : ''}</span>` : ''}
-          </div>
-          ${expanded ? `
-          <div style="padding:0 12px 12px 40px;">
-            <div style="display:flex;flex-direction:column;max-width:280px;margin-bottom:12px;">
-              <label class="field-label">Name</label>
-              <input class="allergy-preset-name-input" data-idx="${idx}" type="text" value="${esc(p.name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-              ${presetStationRow(p, `saveAllergyPresetStation(${idx}, this.value)`)}
-            </div>
-            <label class="field-label">Subcategories</label>
-            ${(p.subTypes || []).map((st, stIdx) => `
-              <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
-                <input class="allergy-subtype-input" data-idx="${idx}" data-stidx="${stIdx}" type="text" value="${esc(st)}" style="flex:1;font-size:var(--fs-md);padding:4px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:inherit;">
-                <button class="delete-icon-btn" data-act="remove-allergy-subtype" data-idx="${idx}" data-stidx="${stIdx}" style="padding:4px 8px;">${ACT_TRASH_SVG}</button>
-              </div>`).join('')}
-            <select class="allergy-subtype-preset" data-idx="${idx}" style="margin-top:6px;font-size:var(--fs-md);padding:4px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--charcoal-soft);cursor:pointer;">
-              <option value="">+ New subsection…</option>
-              ${SUBCATEGORY_PRESETS.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('')}
-              <option value="__custom__">+ Custom…</option>
-            </select>
-          </div>` : ''}
-        </div>`;
-      }).join('')}
-    </div>
-  `;
 }
 
 // Covers & positions live on their own page (owner, Aug '26: "we have a
@@ -26279,42 +25899,6 @@ function renderCoursesSettingsAdmin() {
   `;
 }
 
-function renderVipSettingsAdmin() {
-  const vips = state.vipPresets;
-  const sel = state.selectedVipIdxs || [];
-  const rows = applyListSort('vip-preset', vips.map((p, idx) => ({ p, idx })));
-  return `
-  <div class="select-all-row"><label class="sar-cb"><input type="checkbox" aria-label="Select all" id="select-all-vips" ${vips.length > 0 && vips.every((_, i) => sel.includes(i)) ? 'checked' : ''}></label>${vips.length > 1 ? sortControl('vip-preset') : ''}${sel.length > 0 ? `
-      <span style="display:inline-flex;align-items:center;gap:4px;" data-stop="1">${colorDotButton('bulk-vip', 'x', null, { pencil: true, allowClear: true })}</span>
-      <button class="icon-sq" data-act="duplicate-selected-vips">${ACT_COPY_SVG}</button>
-      <button class="icon-sq" data-act="delete-selected-vips">${ACT_TRASH_SVG}</button>
-      <button class="icon-sq" data-act="clear-vip-selection">${ACT_X_SVG}</button>` : ''}<span style="flex:1;min-width:8px;"></span><button class="btn-add inline" data-act="add-vip-preset">+ Note</button></div>
-  <div class="menu-items-list" style="max-width:var(--admin-list-w,560px);display:flex;flex-direction:column;gap:8px;">
-    ${vips.length === 0 ? `<div class="empty-hist">No VIP types yet.</div>` : ''}
-    ${rows.map(({ p, idx }) => {
-      const selected = sel.includes(idx);
-      return `
-      <div class="menu-item-expandable vip-preset-drag${selected ? ' selected' : ''}${(state.expandedVipIdxs || []).includes(idx) ? ' open' : ''}" data-idx="${idx}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;margin-bottom:var(--list-gap);">
-        <div class="menu-item-header sel-head" data-act="vip-toggle-open" data-idx="${idx}" data-sellist="vip" data-selkey="${idx}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
-          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="vip" data-key="${idx}" ${selected ? 'checked' : ''}>
-          ${colorDotButton('vip-preset', idx, p.color, { size: 20, photo: true, image: p.image })}
-          <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
-          <span style="flex:1;"></span>
-        </div>
-        ${(state.expandedVipIdxs || []).includes(idx) ? `
-        <div style="padding:0 12px 12px 40px;">
-          <div style="display:flex;flex-direction:column;max-width:280px;">
-            <label class="field-label">Name</label>
-            <input class="vip-preset-name-input" data-idx="${idx}" type="text" value="${esc(p.name)}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-            ${presetStationRow(p, `saveVipPresetStation(${idx}, this.value)`)}
-          </div>
-        </div>` : ''}
-      </div>`;
-    }).join('')}
-  </div>
-  `;
-}
-
 // QUICK NOTES: the standing one-shot messages. Its OWN admin page, not a
 // section inside Order Notes — the floor keeps two separate doors (the ⚡ on
 // the docket and the notes pane), so admin keeps two separate homes (owner,
@@ -26387,46 +25971,36 @@ function renderOrderNotesAdmin() {
   const selT = state.selectedNoteTypeIds || [];
 
   // The full list of visible note types (built-ins first), used for select-all.
-  const allTypeIds = [
-    ...(!hidden.includes('vip') ? ['vip'] : []),
-    ...(!hidden.includes('allergy') ? ['allergy'] : []),
-    ...cats.map(c => c.id),
-  ];
+  const allTypeIds = cats.map(c => c.id);
 
   // Type rows carry NO colour — colour lives on the preset buttons inside,
   // where the waiter actually sees it.
-  const typeRow = (id, name, count, builtin, catId) => {
+  const typeRow = (cat) => {
+    const id = cat.id, name = cat.name;
     const open = openId === id;
     const selected = selT.includes(id);
     return `
-    <div class="menu-item-expandable${builtin ? '' : ' note-type-row'}${selected ? ' selected' : ''}" data-typeid="${id}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;">
+    <div class="menu-item-expandable note-type-row${selected ? ' selected' : ''}" data-typeid="${id}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;">
       <div class="menu-item-header sel-head" data-act="notes-toggle-open" data-id="${id}" data-sellist="note-type" data-selkey="${id}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
         <span style="font-weight:700;font-size:var(--fs-md);">${esc(name)}</span>
         <span style="flex:1;"></span>
       </div>
       ${open ? `<div style="padding:0 12px 12px;">${
-        builtin ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-builtin-name-input" data-id="${id}" type="text" value="${esc(name)}" placeholder="${id === 'vip' ? 'VIP' : 'Allergies'}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>` : ''
-      }${
-        // THE SAME CARD FOR EVERY TYPE (owner, Sep '26): name, where it
-        // prints, one or several — then its own presets.
-        builtin ? (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${id}', this.value)"><option value="">All stations</option>${state.printerStations.map(st => `<option value="${st.id}" ${noteTypeStation(id) === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}</select></div>` : '')
-          + noteSetupRows(id) : ''
-      }${
-        id === 'vip' ? renderVipSettingsAdmin()
-        : id === 'allergy' ? renderAllergySettingsAdmin()
-        : `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === catId)}" type="text" value="${esc(name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>`
-          + (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${catId}', this.value)"><option value="">All stations</option>${state.printerStations.map(s => `<option value="${s.id}" ${(cats.find(c => c.id === catId) || {}).station === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>` : '')
-          + noteSetupRows(catId)
-          + renderNotePresetList(cats.find(c => c.id === catId), selP)
+        // THE SAME CARD FOR EVERY TYPE (owner, Sep '26): a name, where it
+        // prints, who the note is about — then its own presets. There is no
+        // second shape: VIP and Allergies used to get a card of their own,
+        // which is exactly why neither could be built from nothing.
+        `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Name</label><input class="note-section-name-input" data-idx="${cats.findIndex(c => c.id === id)}" type="text" value="${esc(name)}" placeholder="Name" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);"></div>`
+          + (state.printerStations.length ? `<div style="display:flex;flex-direction:column;max-width:280px;margin:0 0 12px;"><label class="field-label">Prints at</label><select class="pp-select" onchange="saveNoteCategoryStation('${id}', this.value)"><option value="">All stations</option>${state.printerStations.map(s => `<option value="${s.id}" ${cat.station === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></div>` : '')
+          + noteSetupRows(id)
+          + renderNotePresetList(cat, selP)
       }</div>` : ''}
     </div>`;
   };
 
   const rows = [
-    ...(!hidden.includes('vip') ? [typeRow('vip', vipLabel(), state.vipPresets.length, true)] : []),
-    ...(!hidden.includes('allergy') ? [typeRow('allergy', allergyLabel(), state.allergyPresets.length, true)] : []),
-    ...cats.map(c => typeRow(c.id, c.name, (c.presets || []).length, false, c.id)),
+    ...cats.map(c => typeRow(c)),
   ];
 
   return `
@@ -26466,6 +26040,7 @@ function renderNotePresetList(cat, selP) {
           ${colorDotButton('note-preset', `${cat.id}:${pIdx}`, p.color, { size: 20, photo: true, image: p.image })}
           <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
           <span style="flex:1;"></span>
+          ${(p.subTypes || []).length ? `<span class="ts" style="flex-shrink:0;">${(p.subTypes || []).length} sub${(p.subTypes || []).length > 1 ? 's' : ''}</span>` : ''}
         </div>
         ${(state.expandedNotePresetIdxs || []).includes(pIdx) ? `
         <div style="padding:0 12px 12px 40px;">
@@ -26474,6 +26049,17 @@ function renderNotePresetList(cat, selP) {
             <input class="note-preset-input" data-id="${cat.id}" data-idx="${pIdx}" type="text" value="${esc(p.name)}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
             ${presetStationRow(p, `saveNotePresetStation('${cat.id}', ${pIdx}, this.value)`)}
           </div>
+          <label class="field-label">Subsections</label>
+          ${(p.subTypes || []).map((st, stIdx) => `
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;max-width:280px;">
+              <input class="note-subtype-input" data-id="${cat.id}" data-idx="${pIdx}" data-stidx="${stIdx}" type="text" value="${esc(st)}" style="flex:1;font-size:var(--fs-md);padding:4px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:inherit;">
+              <button class="delete-icon-btn" data-act="remove-note-subtype" data-id="${cat.id}" data-idx="${pIdx}" data-stidx="${stIdx}" style="padding:4px 8px;">${ACT_TRASH_SVG}</button>
+            </div>`).join('')}
+          <select class="note-subtype-preset" data-id="${cat.id}" data-idx="${pIdx}" style="margin-top:6px;max-width:280px;font-size:var(--fs-md);padding:4px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--charcoal-soft);cursor:pointer;">
+            <option value="">+ New subsection…</option>
+            ${SUBCATEGORY_PRESETS.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('')}
+            <option value="__custom__">+ Custom…</option>
+          </select>
         </div>` : ''}
       </div>`;
     }).join('')}
@@ -27826,7 +27412,7 @@ function menuItemRowHtml(m) {
               <div style="margin:0 0 10px;">
                 <div class="field-label" style="margin:0 0 6px;">Order notes</div>
                 <div class="ie-pills" style="grid-template-columns:repeat(auto-fill,minmax(120px,1fr));">
-                  ${[{ id: 'allergy', name: allergyLabel() }, ...(state.noteCategories || [])].map(c => `<button type="button" class="pay-opt xs ${itemFlagCatIds().includes(c.id) ? 'active' : ''}" data-act="item-flag-cat-toggle" data-val="${c.id}">${esc(c.name)}</button>`).join('')}
+                  ${(state.noteCategories || []).map(c => `<button type="button" class="pay-opt xs ${itemFlagCatIds().includes(c.id) ? 'active' : ''}" data-act="item-flag-cat-toggle" data-val="${c.id}">${esc(c.name)}</button>`).join('')}
                 </div>
               </div>
               <div class="item-allergen-pills ie-pills">
@@ -29277,10 +28863,9 @@ function renderTableStatusPreview() {
   const samples = pillSamplesFor(lens);
   const pills = samples.map((s, i) => {
     const label = String.fromCharCode(80 + (i % 20));
+    const sampleCat = s.markKey ? (String(s.markKey).indexOf('note:') === 0 ? String(s.markKey).slice(5) : String(s.markKey)) : null;
     const t = { id: 'sample-p' + i, type: 'table', label, covers: 2,
-      allergies: s.markKey === 'allergy' ? [{ base: 'Nuts', allergy: 'Nuts' }] : [],
-      vipType: s.markKey === 'vip' ? 'Regular' : '',
-      notes: s.markKey && s.markKey.startsWith('note:') ? [{ categoryId: s.markKey.slice(5), text: s.name }] : [] };
+      notes: sampleCat ? [{ categoryId: sampleCat, text: s.name }] : [] };
     const ago = s.mins != null ? now - s.mins * 60000 : now - 30 * 60000;
     // Two covers, so a per-person sample is half the bill: the money on the
     // sample ticket is whatever that spend level needs to read.
@@ -30305,12 +29890,16 @@ function tableMarksHtml(t) {
   const marks = [];
   for (const g of guestMarks()) {
     if (guestMarkIsOff(g.key)) continue;
-    if (g.key === 'allergy') { if ((t.allergies || []).length) marks.push(`<span class="tbl-mark tbl-mark-allergy"${paint('allergy')}>${esc(markSymbol('allergy'))}</span>`); continue; }
-    if (g.key === 'vip') { if (t.vipType) marks.push(`<span class="tbl-mark tbl-mark-vip"${paint('vip')}>${esc(markSymbol('vip'))}</span>`); continue; }
+    if (CORNER_MARKS.includes(g.id)) {
+      if (notesOfType(g.id, t.notes).some(n => String(n.text || '').trim())) {
+        marks.push(`<span class="tbl-mark tbl-mark-${esc(g.id)}"${paint(g.key)}>${esc(markSymbol(g.key))}</span>`);
+      }
+      continue;
+    }
     // A note type only rides the corner in the SYMBOL reading — in the written
     // one it spells itself out in the pill instead.
     if (guestPillFormat() !== 'symbol') continue;
-    const n = (t.notes || []).find(x => String(x.categoryId) === g.key.slice(5) && String(x.text || '').trim());
+    const n = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
     if (n) { const c = guestMarkColor(g), sym = markSymbol(g.key);
       marks.push(`<span class="tbl-mark tbl-mark-note" style="background:${c};color:${contrastTextColor(c)};">${esc(sym)}</span>`); }
   }
@@ -30325,11 +29914,20 @@ function tableMarksHtml(t) {
 // The MARK is a rule, not another setting: safety rides the corner so it
 // shows under every lens, everything else uses the pill, which is this
 // lens's one line.
+// VIP and Allergies are ordinary types in the same list now, so they are
+// listed ONCE, from that list, wearing whatever the venue renamed them to.
+// What is still theirs alone is where they DRAW: those two ride the corner
+// under both readings, everything else takes the pill. That is the last
+// difference between one type and another and it is the owner's to settle.
+const CORNER_MARKS = ['vip', 'allergy'];
+const MARK_COLOUR_DEF = { vip: '#2B2B33', allergy: '#FF3B30' };
 function guestMarks() {
-  return [
-    { key: 'vip', name: 'VIP', colour: '#2B2B33' },
-    { key: 'allergy', name: 'Allergies', colour: '#FF3B30' },
-  ].concat((state.noteCategories || []).map(c => ({ key: 'note:' + c.id, name: c.name, colour: c.color || '#8A8A8E' })));
+  return (state.noteCategories || []).map(c => ({
+    key: CORNER_MARKS.includes(c.id) ? c.id : 'note:' + c.id,
+    id: c.id,
+    name: c.name,
+    colour: c.color || MARK_COLOUR_DEF[c.id] || '#8A8A8E',
+  }));
 }
 // EVERY MARK ITS OWN COLOUR (owner, Sep '26: "i want to be able to change
 // colours"). VIP and Allergies used to borrow the pill's warn/danger keys —
@@ -30346,10 +29944,16 @@ function guestPillFormat() { return state.settings.guestPillFormat === 'symbol' 
 // PICK YOUR OWN SYMBOL (owner, Sep '26: "symbols should have ability to select
 // our own — so if symbol is selected the colour box is changed to symbol
 // box"). Same box, same 24, same row: on Words it paints, on Symbols it draws.
+// A type the venue built had no default here, so its corner drew an empty
+// box. Every type falls back the same way now: the first letter of its name.
 const MARK_SYMBOL_DEF = { vip: '★', allergy: '!' };
 function markSymbol(key) {
   const m = state.settings.markSymbols || {};
-  return m[key] || MARK_SYMBOL_DEF[key] || '';
+  if (m[key]) return m[key];
+  if (MARK_SYMBOL_DEF[key]) return MARK_SYMBOL_DEF[key];
+  const id = String(key).indexOf('note:') === 0 ? String(key).slice(5) : String(key);
+  const c = (state.noteCategories || []).find(x => String(x.id) === id);
+  return c ? String(c.name || '').trim().charAt(0).toUpperCase() : '';
 }
 function setMarkSymbol(key, sym) {
   const m = Object.assign({}, state.settings.markSymbols || {});
@@ -30358,13 +29962,13 @@ function setMarkSymbol(key, sym) {
   saveTicketSetting({ markSymbols: m });
   render();
 }
-// A VIP BELONGS TO A COVER, LIKE EVERY OTHER NOTE (owner, Sep '26: "I want
-// there to be one setup and every order note to follow it"). It was the only
-// note type stored table-wide, so a party with one celebrity marked the whole
-// table. null still means the whole table, which is what every VIP saved
-// before this reads as.
-function vipSeatOf(t) { const n = t && t.vipSeat; return (typeof n === 'number' && n > 0) ? n : null; }
-function vipNoteOf(t) { return String((t && t.vipNote) || ''); }
+// Every note of one type on the table in hand. The allergy warning, the
+// floor's marks and the paper all read through here — there is no second
+// store to keep in step (owner, Sep '26: "they should not have individual
+// identities").
+function notesOfType(id, notes) {
+  return ((notes !== undefined ? notes : state.notes) || []).filter(n => n && n.categoryId === id);
+}
 function guestMarkOff() { return state.settings.guestMarkOff || []; }
 function guestMarkIsOff(key) { return guestMarkOff().includes(key); }
 function toggleGuestMark(key) {
@@ -30575,13 +30179,13 @@ function floorPillHtml(t, cs) {
     // The pill takes the FIRST switched-on thing the table carries, in the
     // order the card lists them: the pill can only say one thing.
     for (const g of guestMarks()) {
-      if (g.key === 'vip' || guestMarkIsOff(g.key)) continue;
-      if (g.key === 'allergy') {
-        const al = t.allergies || [];
-        if (al.length) return pill(tint(guestMarkColor(g)), `<b>! ${esc(al[0].allergy)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, 'Allergies');
+      if (g.id === 'vip' || guestMarkIsOff(g.key)) continue;
+      if (g.id === 'allergy') {
+        const al = notesOfType('allergy', t.notes).filter(n => String(n.text || '').trim());
+        if (al.length) return pill(tint(guestMarkColor(g)), `<b>! ${esc(al[0].text)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, g.name);
         continue;
       }
-      const n = (t.notes || []).find(x => String(x.categoryId) === g.key.slice(5) && String(x.text || '').trim());
+      const n = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
       if (n) return pill(tint(guestMarkColor(g)), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
     }
     return '';
@@ -31263,8 +30867,6 @@ function openTablePicker() {
   state.callAway = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   state.notesPanel = null;
-  state.vipModal = null;
-  state.allergyModal = null;
   state.customNoteDraft = null;
   // The till's floor slides too (pane-in-left), so the lock refresh above
   // waits on BOTH devices — on the till it re-rendered at once and the replay
@@ -31340,7 +30942,7 @@ function tpCentreOnOpen() {
 // seated and locked. Caught Sep '26.)
 function clearTableSitting(tableId) {
   if (tableId == null) return;
-  saveTableCovers(tableId, 0); saveTableAllergies(tableId, []); saveTableNotes(tableId, []); saveTableVip(tableId, ''); saveTableDiscount(tableId, null);
+  saveTableCovers(tableId, 0); saveTableNotes(tableId, []); saveTableDiscount(tableId, null);
   state.discount = null;
 }
 function offerCloseEmptyTable(next) {
@@ -31357,7 +30959,7 @@ function offerCloseEmptyTable(next) {
   // without orders, prompt to close or leave open"). Cancel = leave it
   // seated and carry on — the prompt never traps the floor: it fires once,
   // on exit, and both answers move on.
-  const seatedOnly = !!(t && !order && ((t.covers || 0) > 0 || (t.allergies || []).length || t.vipType) && (state.covers || 0) >= 0);
+  const seatedOnly = !!(t && !order && ((t.covers || 0) > 0 || (t.notes || []).length) && (state.covers || 0) >= 0);
   if (!t || liveOrder || (state.cart || []).length || (!emptyTicket && !seatedOnly)) { next(); return; }
   openConfirm({
     message: emptyTicket
@@ -31374,12 +30976,10 @@ function offerCloseEmptyTable(next) {
       if (emptyTicket) await api(`/api/orders/${order.id}/void`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: 'Nothing ordered', note: 'Closed with the table', staffName: (state.currentStaff || {}).name || '' }) });
       await saveTableCovers(t.id, 0);
-      await saveTableAllergies(t.id, []);
       await saveTableNotes(t.id, []);
-      await saveTableVip(t.id, '');
       releaseTableLock(t.id);
     } catch (e) {}
-    state.covers = 0; state.allergies = []; state.vipType = ''; state.vipSeat = null; state.vipNote = '';
+    state.covers = 0; state.notes = [];
     state.openOrderId = null;
     await refreshOrders();
     next();
@@ -31439,9 +31039,7 @@ function pickTable(id) {
     // the table is not theirs — a two-top read as six all night.
     state.covers = oo ? (oo.covers || (t && t.covers) || 0) : 0;
     state.discount = (t && t.discount) || null; // the account's discount comes back with the table
-    state.allergies = (t && t.allergies) || [];
     state.notes = (t && t.notes) || [];
-    state.vipType = (t && t.vipType) || ''; state.vipSeat = vipSeatOf(t); state.vipNote = vipNoteOf(t);
     state.openOrderId = (oo && oo.id) || null;
     // The called-away courses come back with the table (Sep '26: leaving and
     // returning forgot the call-away, so mains were called twice).
@@ -31558,9 +31156,6 @@ async function doTransferToTable(newTableId) {
   // Sitting details ride along. Moving this till's own table uses the live
   // till state; any other table's details come off the table object itself.
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
-  const allergies = movingOwn ? state.allergies : (oldTable && oldTable.allergies) || [];
-  const vipType = movingOwn ? state.vipType : (oldTable && oldTable.vipType) || '';
-  const vipSeat = movingOwn ? state.vipSeat : vipSeatOf(oldTable);
   const notes = movingOwn ? (state.notes || []) : (oldTable && oldTable.notes) || [];
   // Combining into a live table: sitting details ADD to what's there.
   const combined = !!srcOrder && state.orders.some(o => o.id !== srcOrder.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
@@ -31568,15 +31163,13 @@ async function doTransferToTable(newTableId) {
   // used to be written a field at a time to each table - six requests, six
   // whole-store rewrites - for a single tap.
   const oldT2 = findTableById(oldTableId);
-  const sit = (t) => t ? { covers: t.covers || 0, allergies: t.allergies || [], vipType: t.vipType || '', vipSeat: vipSeatOf(t) } : null;
+  const sit = (t) => t ? { covers: t.covers || 0, notes: (t.notes || []).slice() } : null;
   const wasOld = sit(oldT2), wasNew = sit(newTable); // to put back if the tab's move fails
-  if (oldT2) { oldT2.covers = 0; oldT2.allergies = []; oldT2.vipType = ''; oldT2.vipSeat = null; }
+  if (oldT2) { oldT2.covers = 0; oldT2.notes = []; }
   newTable.covers = combined ? ((newTable.covers || 0) + covers) : covers;
-  newTable.allergies = combined ? [...(newTable.allergies || []), ...allergies] : allergies;
-  newTable.vipType = combined ? (newTable.vipType || vipType) : vipType;
-  newTable.vipSeat = combined ? (vipSeatOf(newTable) != null ? vipSeatOf(newTable) : vipSeat) : vipSeat;
+  newTable.notes = combined ? [...(newTable.notes || []), ...notes] : notes;
   const sittingMove = api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, allergies, vipType, vipSeat, notes, combine: combined }) }).catch(() => {});
+    body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, notes, combine: combined }) }).catch(() => {});
   if (tabMove) {
     let moved;
     try { moved = await tabMove; } catch (e) {
@@ -31586,9 +31179,9 @@ async function doTransferToTable(newTableId) {
       if (oldT2) Object.assign(oldT2, wasOld);
       Object.assign(newTable, wasNew);
       api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromId: newTableId, toId: oldTableId, covers: wasOld ? wasOld.covers : 0, allergies: wasOld ? wasOld.allergies : [], vipType: wasOld ? wasOld.vipType : '', vipSeat: wasOld ? wasOld.vipSeat : null, combine: false }) })
+        body: JSON.stringify({ fromId: newTableId, toId: oldTableId, covers: wasOld ? wasOld.covers : 0, notes: wasOld ? wasOld.notes : [], combine: false }) })
         .then(() => wasNew && api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ fromId: null, toId: newTableId, covers: wasNew.covers, allergies: wasNew.allergies, vipType: wasNew.vipType, combine: false }) }))
+          body: JSON.stringify({ fromId: null, toId: newTableId, covers: wasNew.covers, notes: wasNew.notes, combine: false }) }))
         .catch(() => {});
       state.toast = 'Could not transfer the tab.';
       render();
@@ -31611,8 +31204,6 @@ async function doTransferToTable(newTableId) {
     // After a combine the live tab is the DESTINATION's order — re-point.
     state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
     state.covers = newTable.covers || 0; state.discount = newTable.discount || null;
-    state.allergies = newTable.allergies || [];
-    state.vipType = newTable.vipType || ''; state.vipSeat = vipSeatOf(newTable); state.vipNote = vipNoteOf(newTable);
   }
   state.transferMode = false; state.transferFrom = null;
   // A transfer ALWAYS lands back on the floor — that's where the ⇄ lives and
@@ -34230,14 +33821,14 @@ let _npSwipe = null;
 document.addEventListener('touchstart', (e) => {
   _npSwipe = null;
   if (state.frozen) return; // locked screen: no gestures
-  if (!state.notesPanel || state.noteSeatPop || state.allergySeatPop) return;
+  if (!state.notesPanel || state.noteSeatPop) return;
   if (e.touches.length !== 1) return;
   if (!(e.target.closest && e.target.closest('.modal-pane')) || e.target.closest('input, select, textarea')) return;
   _npSwipe = { x: e.touches[0].clientX, y: e.touches[0].clientY };
 }, { passive: true });
 document.addEventListener('touchend', (e) => {
   const s = _npSwipe; _npSwipe = null;
-  if (!s || !state.notesPanel || state.noteSeatPop || state.allergySeatPop) return;
+  if (!s || !state.notesPanel || state.noteSeatPop) return;
   const t = e.changedTouches && e.changedTouches[0];
   if (!t) return;
   const dx = t.clientX - s.x, dy = t.clientY - s.y;
@@ -34953,166 +34544,10 @@ function reorderCourseTemplates(fromIdx, toIdx) {
   remapCourseRefs(n => order.indexOf(n - 1) + 1);
 }
 
-async function saveAllergyPresets(presets) {
-  state.allergyPresets = presets;
-  render();
-  try {
-    state.allergyPresets = await api('/api/allergy-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
-    // A rename sweeps item tags and table notes server-side - pull them in.
-    try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); } catch (e2) {}
-    render();
-  } catch (e) {}
-}
-function toggleAllergyExpand(idx) {
-  const p = state.allergyPresets[idx];
-  if (!p) return;
-  state.expandedAllergyName = state.expandedAllergyName === p.name ? null : p.name;
-  render();
-}
-function toggleAllergySelect(name) {
-  const i = state.selectedAllergyNames.indexOf(name);
-  if (i === -1) state.selectedAllergyNames.push(name); else state.selectedAllergyNames.splice(i, 1);
-  render();
-}
-function toggleSelectAllAllergies() {
-  const all = state.allergyPresets.map(p => p.name);
-  const allSelected = all.length > 0 && all.every(n => state.selectedAllergyNames.includes(n));
-  state.selectedAllergyNames = allSelected ? [] : all;
-  render();
-}
-function clearAllergySelection() { state.selectedAllergyNames = []; render(); }
-function bulkDeleteAllergies() {
-  const sel = new Set(state.selectedAllergyNames);
-  if (sel.size === 0) return;
-  const remaining = state.allergyPresets.filter(p => !sel.has(p.name));
-  state.selectedAllergyNames = [];
-  saveAllergyPresets(remaining);
-}
-function bulkSetAllergyColor(color) {
-  const sel = new Set(state.selectedAllergyNames);
-  if (sel.size === 0) return;
-  saveAllergyPresets(state.allergyPresets.map(p => sel.has(p.name) ? { ...p, color: color || null } : p));
-}
-function updateAllergyPreset(idx, patch) {
-  // Keep the expanded card open across a rename (expand is keyed by name).
-  if (patch.name !== undefined && state.allergyPresets[idx] && state.expandedAllergyName === state.allergyPresets[idx].name) {
-    state.expandedAllergyName = patch.name;
-  }
-  const presets = state.allergyPresets.map((p, i) => i === idx ? { ...p, ...patch } : p);
-  saveAllergyPresets(presets);
-}
-function addAllergyPreset() {
-  // New rows land at the TOP of their list, everywhere (DESIGN.md rule) —
-  // a sequence below the current minimum beats the alphabetical fallback.
-  const seqs = state.allergyPresets.map(p => p.sequence).filter(s => s !== null && s !== undefined);
-  const seq = (seqs.length ? Math.min(...seqs) : 0) - 1;
-  saveAllergyPresets([{ name: 'New allergy', color: null, sequence: seq, subTypes: [] }, ...state.allergyPresets]);
-}
-function removeAllergyPreset(idx) {
-  if (state.allergyPresets.length <= 1) return;
-  saveAllergyPresets(state.allergyPresets.filter((_, i) => i !== idx));
-}
-const SUBCATEGORY_PRESETS = ['Trace OK', 'Severe', 'Anaphylaxis', 'Avoid completely', 'Intolerance', 'May contain', 'Contains'];
-function addAllergySubType(idx) {
-  const presets = state.allergyPresets.map((p, i) => i === idx ? { ...p, subTypes: [...(p.subTypes || []), 'New type'] } : p);
-  saveAllergyPresets(presets);
-}
-function addAllergySubTypeValue(idx, val) {
-  if (val === '__custom__') return addAllergySubType(idx);
-  if (!val) return;
-  const presets = state.allergyPresets.map((p, i) => i === idx ? { ...p, subTypes: [...(p.subTypes || []), val] } : p);
-  saveAllergyPresets(presets);
-}
-function updateAllergySubType(idx, stIdx, value) {
-  const presets = state.allergyPresets.map((p, i) => {
-    if (i !== idx) return p;
-    const subTypes = (p.subTypes || []).map((st, j) => j === stIdx ? value : st);
-    return { ...p, subTypes };
-  });
-  saveAllergyPresets(presets);
-}
-function removeAllergySubType(idx, stIdx) {
-  const presets = state.allergyPresets.map((p, i) => {
-    if (i !== idx) return p;
-    return { ...p, subTypes: (p.subTypes || []).filter((_, j) => j !== stIdx) };
-  });
-  saveAllergyPresets(presets);
-}
-// Drag-reorder for the open note type's preset list (array order IS the order).
-function reorderNotePresets(from, to) {
-  const catId = state.notesOpenId;
-  if (!catId) return;
-  const cats = state.noteCategories.map(c => {
-    if (c.id !== catId) return c;
-    const presets = (c.presets || []).slice();
-    const [m] = presets.splice(from, 1);
-    presets.splice(to, 0, m);
-    return { ...c, presets };
-  });
-  saveNoteCategories(cats);
-}
-// DRAGGING AN ALLERGY DID NOTHING (measured, Sep '26: dragged the top allergy
-// down three, the list did not move — VIP and a venue's own type both did).
-// The drag hands over POSITIONS IN THE LIST YOU SEE, and this reached into the
-// unsorted array with them, so it always moved the wrong rows. It works in the
-// shown order now, like every other list does.
-function reorderAllergyPresets(fromPos, toPos) {
-  const ordered = sortAllergyPresets(state.allergyPresets);
-  if (fromPos < 0 || toPos < 0 || fromPos >= ordered.length || toPos >= ordered.length) return;
-  const [dragged] = ordered.splice(fromPos, 1);
-  ordered.splice(toPos, 0, dragged);
-  saveAllergyPresets(ordered.map((p, i) => ({ ...p, sequence: i + 1 })));
-}
-
-async function saveVipPresets(presets) {
-  state.vipPresets = presets;
-  render();
-  try {
-    state.vipPresets = normPresetList(await api('/api/vip-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) }));
-    render();
-  } catch (e) {}
-}
-// QUICK NOTE PRESETS — the standing one-shot messages. Same shape as the VIP
-// presets, plus a station of their own: a quick note already picks where it
-// prints, so the preset carries that too and "86 the lamb → kitchen" is one
-// tap instead of typing and then choosing (owner, Aug '26).
-async function saveQuickNotePresets(presets) {
-  state.quickNotePresets = presets;
-  render();
-  try {
-    state.quickNotePresets = normPresetList(await api('/api/quicknote-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) }));
-    render();
-  } catch (e) {}
-}
-function addQuickNotePreset() { saveQuickNotePresets([...state.quickNotePresets, { name: 'New note', color: null }]); }
-function updateQuickNotePreset(idx, value) {
-  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, name: value } : p));
-}
-function saveQuickNotePresetStation(idx, val) {
-  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, station: val || null } : p));
-}
-function deleteQuickNotePreset(idx) {
-  saveQuickNotePresets(state.quickNotePresets.filter((_, i) => i !== idx));
-}
-function addVipPreset() { saveVipPresets([{ name: 'New type', color: null }, ...state.vipPresets]); }
-function updateVipPreset(idx, value) {
-  saveVipPresets(state.vipPresets.map((p, i) => i === idx ? { ...p, name: value } : p));
-}
-function removeVipPreset(idx) {
-  saveVipPresets(state.vipPresets.filter((_, i) => i !== idx));
-}
-// Duplicate-the-selection for every list where a copy makes sense. Server
-// ids stamp with Date.now(), so creations run sequentially.
-function dupName(n) { return n + ' (copy)'; }
 function duplicateSelectedSizes() {
   const sel = (state.selectedSizeIdxs || []).slice().sort((a, b) => a - b);
   if (!sel.length) return;
   saveSizePresets([...state.sizePresets, ...sel.map(i => dupName(state.sizePresets[i]))]); // originals stay selected
-}
-function duplicateSelectedVips() {
-  const sel = (state.selectedVipIdxs || []).slice().sort((a, b) => a - b);
-  if (!sel.length) return;
-  saveVipPresets([...state.vipPresets, ...sel.map(i => ({ ...state.vipPresets[i], name: dupName(state.vipPresets[i].name) }))]);
 }
 function duplicateSelectedVoidReasons() {
   const sel = (state.selectedVoidReasonIdxs || []).slice().sort((a, b) => a - b);
@@ -35124,12 +34559,6 @@ function duplicateSelectedCourses() {
   if (!sel.length) return;
   const copies = sel.map(i => ({ ...state.settings.courses[i], name: dupName(state.settings.courses[i].name), color: null }));
   saveTicketSetting({ courses: [...state.settings.courses, ...copies] });
-}
-function duplicateSelectedAllergies() {
-  const sel = state.selectedAllergyNames || [];
-  if (!sel.length) return;
-  const copies = state.allergyPresets.filter(pr => sel.includes(pr.name)).map(pr => ({ ...pr, name: dupName(pr.name), subTypes: [...(pr.subTypes || [])] }));
-  saveAllergyPresets([...state.allergyPresets, ...copies]);
 }
 function duplicateSelectedNotePresets() {
   const sel = (state.selectedNotePresetIdxs || []).slice().sort((a, b) => a - b);
@@ -35191,12 +34620,6 @@ async function duplicateSelectedCombos() {
   } catch (e) { state.toast = 'Could not duplicate some set menus.'; }
   render();
 }
-function deleteSelectedVips() {
-  const sel = new Set(state.selectedVipIdxs || []);
-  if (!sel.size) return;
-  state.selectedVipIdxs = [];
-  saveVipPresets(state.vipPresets.filter((_, i) => !sel.has(i)));
-}
 // A dish's default course is a POSITION in this list, so removing a course
 // re-files every default that pointed past it (dropping "1st" moved the
 // dessert dishes to "3rd" until Sep '26). The dishes filed on a removed course
@@ -35254,12 +34677,6 @@ async function deleteSelectedVouchers() {
   state.selectedVoucherIds = [];
   for (const id of ids) await deleteVoucherAction(id);
 }
-function reorderVipPresets(fromIdx, toIdx) {
-  const presets = state.vipPresets.slice();
-  const [dragged] = presets.splice(fromIdx, 1);
-  presets.splice(toIdx, 0, dragged);
-  saveVipPresets(presets);
-}
 
 // Route a note type's docket line to one printer station ('' = every docket).
 // ONE PICK OR SEVERAL (owner, Aug '26). Off, a preset saves itself the
@@ -35273,14 +34690,12 @@ function saveNoteCategoryScope(catId, val) {
   saveTicketSetting({ noteTypeScope: sc });
   render();
 }
+// ONE PLACE FOR A TYPE'S STATION. VIP and allergies kept theirs in the
+// settings and every other type kept it on the type — two stores doing one
+// job, so the same dropdown wrote to different places depending on the row.
+// It lives on the type now, for all of them; an old store's copy is folded in
+// when it is read.
 function saveNoteCategoryStation(catId, val) {
-  if (catId === 'vip' || catId === 'allergy') {
-    const st = Object.assign({}, state.settings.noteTypeStation || {}, { [catId]: val || null });
-    state.settings.noteTypeStation = st;
-    saveTicketSetting({ noteTypeStation: st });
-    render();
-    return;
-  }
   saveNoteCategories(state.noteCategories.map(c => c.id === catId ? { ...c, station: val || null } : c));
 }
 // A single preset can out-route its type ("Birthday" → Pastry).
@@ -35296,11 +34711,70 @@ function presetStationRow(p, onchange) {
       ${state.printerStations.map(st => `<option value="${st.id}" ${p.station === st.id ? 'selected' : ''}>${esc(st.name)}</option>`).join('')}
     </select>`;
 }
-function saveVipPresetStation(idx, val) {
-  saveVipPresets(state.vipPresets.map((p, i) => i === idx ? { ...p, station: val || null } : p));
+// The kinds a preset can be split into, offered as ready-made words. They were
+// written for allergens ("Nuts — Severe"), and any type may use them now.
+const SUBCATEGORY_PRESETS = ['Trace OK', 'Severe', 'Anaphylaxis', 'Avoid completely', 'Intolerance', 'May contain', 'Contains'];
+// Recovered whole from git after the note-type merge swept them up with the
+// two stores they happened to sit beside.
+function dupName(n) { return n + ' (copy)'; }
+function duplicateSelectedSizes() {
+  const sel = (state.selectedSizeIdxs || []).slice().sort((a, b) => a - b);
+  if (!sel.length) return;
+  saveSizePresets([...state.sizePresets, ...sel.map(i => dupName(state.sizePresets[i]))]); // originals stay selected
 }
-function saveAllergyPresetStation(idx, val) {
-  saveAllergyPresets(state.allergyPresets.map((p, i) => i === idx ? { ...p, station: val || null } : p));
+
+function renderVoidModal() {
+  const m = state.voidModal;
+  return `
+  <div class="modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>Void ticket #${m.orderId}</h2>
+      <label>Reason</label>
+      <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">
+        ${state.voidReasons.map(r => `<button type="button" class="pay-opt sm ${m.reason === r ? 'active' : ''}" data-act="pick-void-reason" data-val="${r}">${r}</button>`).join('')}
+      </div>
+      <label>Note (optional)</label>
+      <input id="void-note-input" type="text" value="${esc(m.note)}">
+      ${m.needsApproval ? `
+        <label>Manager PIN required</label>
+        <input id="void-manager-pin-input" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" value="${m.managerPin}">
+        ${m.pinError ? `<div class="login-error">${m.pinError}</div>` : ''}
+      ` : ''}
+      <div class="modal-actions">
+        <button class="icon-action neutral" data-act="close-void-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action discard" data-act="confirm-void-modal" ${m.reason && (!m.needsApproval || m.managerPin) ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Void ticket</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function addQuickNotePreset() { saveQuickNotePresets([...state.quickNotePresets, { name: 'New note', color: null }]); }
+function updateQuickNotePreset(idx, value) {
+  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, name: value } : p));
+}
+
+function deleteQuickNotePreset(idx) {
+  saveQuickNotePresets(state.quickNotePresets.filter((_, i) => i !== idx));
+}
+
+function updateQuickNotePreset(idx, value) {
+  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, name: value } : p));
+}
+
+function saveQuickNotePresetStation(idx, val) {
+  saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === idx ? { ...p, station: val || null } : p));
+}
+
+function reorderNotePresets(fromIdx, toIdx) {
+  const catId = state.notesOpenId;
+  const cats = state.noteCategories.map(c => {
+    if (c.id !== catId) return c;
+    const presets = (c.presets || []).slice();
+    const [moved] = presets.splice(fromIdx, 1);
+    presets.splice(toIdx, 0, moved);
+    return { ...c, presets };
+  });
+  saveNoteCategories(cats);
 }
 function saveNotePresetStation(catId, pIdx, val) {
   saveNoteCategories(state.noteCategories.map(c => c.id === catId
@@ -35344,6 +34818,35 @@ function addNotePreset(catId) {
   // (same pattern as "New section" / "New category").
   const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: [{ name: 'New note', color: null }, ...(c.presets || [])] } : c);
   saveNoteCategories(cats);
+}
+// A PRESET'S KINDS, ON EVERY TYPE. These were allergy-only ("Nuts" -> Severe);
+// they are an ordinary part of a preset now, so any type can use them.
+function patchNotePreset(catId, idx, patch) {
+  saveNoteCategories(state.noteCategories.map(c => c.id !== catId ? c : {
+    ...c, presets: (c.presets || []).map((p, i) => i === idx ? { ...p, ...patch } : p),
+  }));
+}
+function subTypesOf(catId, idx) {
+  const c = (state.noteCategories || []).find(x => x.id === catId);
+  return ((c && (c.presets || [])[idx] || {}).subTypes || []).slice();
+}
+function addNoteSubTypeValue(catId, idx, value) {
+  const v = value === '__custom__' ? (prompt('New subsection') || '').trim() : String(value || '').trim();
+  if (!v) { render(); return; }
+  const list = subTypesOf(catId, idx);
+  if (!list.includes(v)) list.push(v);
+  patchNotePreset(catId, idx, { subTypes: list.slice(0, 15) });
+}
+function updateNoteSubType(catId, idx, stIdx, value) {
+  const list = subTypesOf(catId, idx);
+  const v = String(value || '').trim();
+  if (!v) list.splice(stIdx, 1); else list[stIdx] = v;
+  patchNotePreset(catId, idx, { subTypes: list });
+}
+function removeNoteSubType(catId, idx, stIdx) {
+  const list = subTypesOf(catId, idx);
+  list.splice(stIdx, 1);
+  patchNotePreset(catId, idx, { subTypes: list });
 }
 function updateNotePreset(catId, idx, text) {
   const cats = state.noteCategories.map(c => {
@@ -37865,11 +37368,9 @@ const SEL_LISTS = {
   modifier: { arr: 'selectedModifierIds' },
   combo: { arr: 'selectedComboIds' },
   size: { arr: 'selectedSizeIdxs', numeric: true },
-  allergy: { arr: 'selectedAllergyNames' },
   staff: { arr: 'selectedStaffIds' },
   'note-preset': { arr: 'selectedNotePresetIdxs', numeric: true },
   'note-type': { arr: 'selectedNoteTypeIds' },
-  vip: { arr: 'selectedVipIdxs', numeric: true },
   timeoff: { arr: 'selectedTimeoffIds' },
   expense: { arr: 'selectedExpenseIds' },
   voucher: { arr: 'selectedVoucherIds' },
@@ -37894,7 +37395,6 @@ function toggleSelAllList(list, keys) {
 // Rows with a hidden editor open on plain click (ctrl/cmd-click selects);
 // rows that are fully inline-editable keep plain click = select.
 const SEL_OPENERS = {
-  allergy: (head) => { const r = head.closest('[data-idx]'); if (r) toggleAllergyExpand(parseInt(r.dataset.idx)); },
   modifier: (head) => toggleModifierExpand(head.dataset.selkey),
   combo: (head) => toggleComboExpand(head.dataset.selkey),
   category: (head) => {
@@ -38117,14 +37617,6 @@ function bindEvents() {
   });
   const custName = document.getElementById('customer-name');
   if (custName) custName.addEventListener('input', (e) => { state.customerName = e.target.value; });
-  const allergyCustomInput = document.getElementById('allergy-custom-input');
-  if (allergyCustomInput) allergyCustomInput.addEventListener('input', (e) => { state.allergyModal.customAllergy = e.target.value; refreshPaneTick(); });
-  const allergyNotesInput = document.getElementById('allergy-notes-input');
-  if (allergyNotesInput) allergyNotesInput.addEventListener('input', (e) => { state.allergyModal.notes = e.target.value; });
-  const vipTypeInput = document.getElementById('vip-type-input');
-  if (vipTypeInput) vipTypeInput.addEventListener('input', (e) => { state.vipModal.type = e.target.value; refreshPaneTick(); });
-  const vipNoteInput = document.getElementById('vip-note-input');
-  if (vipNoteInput) vipNoteInput.addEventListener('input', (e) => { state.vipModal.note = e.target.value; refreshPaneTick(); });
   const customNoteTextInput = document.getElementById('custom-note-text-input');
   if (customNoteTextInput) customNoteTextInput.addEventListener('input', (e) => { state.customNoteDraft.text = e.target.value; refreshPaneTick(); });
   const customNoteExtraInput = document.getElementById('custom-note-extra-input');
@@ -38280,12 +37772,6 @@ function bindEvents() {
   if (selectAllModifiers) selectAllModifiers.addEventListener('change', () => toggleSelectAllModifiers());
   const selectAllCombos = document.getElementById('select-all-combos');
   if (selectAllCombos) selectAllCombos.addEventListener('change', () => toggleSelectAllCombos());
-  const selectAllVips = document.getElementById('select-all-vips');
-  if (selectAllVips) selectAllVips.addEventListener('change', () => {
-    const all = (state.selectedVipIdxs || []).length === state.vipPresets.length;
-    state.selectedVipIdxs = all ? [] : state.vipPresets.map((_, i) => i);
-    render();
-  });
   const selectAllNoteTypes = document.getElementById('select-all-note-types');
   if (selectAllNoteTypes) selectAllNoteTypes.addEventListener('change', () => {
     const hidden = state.settings.hiddenNoteTypes || [];
@@ -38450,11 +37936,6 @@ function bindEvents() {
       adminCanvas.addEventListener('click', (e) => { if (e.target === adminCanvas) deselectOnEmptyCanvas(); });
     }
   }
-  document.querySelectorAll('.allergy-preset-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateAllergyPreset(parseInt(el.dataset.idx), { name: e.target.value }); });
-  });
-  const selectAllAllergies = document.getElementById('select-all-allergies');
-  if (selectAllAllergies) selectAllAllergies.addEventListener('change', () => toggleSelectAllAllergies());
   const popoverCustomIconInput = document.getElementById('icon-popover-custom-input');
   if (popoverCustomIconInput) popoverCustomIconInput.addEventListener('change', (e) => { pickPopoverIcon(e.target.value.trim()); });
   document.querySelectorAll('.tip-preset-input').forEach(el => {
@@ -38489,11 +37970,11 @@ function bindEvents() {
   if (sentPriceInput) sentPriceInput.addEventListener('change', () => { const d = state.editSent && state.editSent.draft; const v = parseFloat(sentPriceInput.value); if (!d) return; if (isNaN(v) || v < 0) { state.toast = 'Enter a valid price'; render(); return; } d.price = Math.round(v * 100) / 100; d.off = lineOffKey(d.orig, d.price, ''); render(); });
   const sentNoteInput = document.getElementById('sent-note-input');
   if (sentNoteInput) sentNoteInput.addEventListener('input', (e) => { const d = state.editSent && state.editSent.draft; if (d) d.note = e.target.value; });
-  document.querySelectorAll('.allergy-subtype-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
+  document.querySelectorAll('.note-subtype-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateNoteSubType(el.dataset.id, parseInt(el.dataset.idx), parseInt(el.dataset.stidx), e.target.value); });
   });
-  document.querySelectorAll('.allergy-subtype-preset').forEach(el => {
-    el.addEventListener('change', () => { addAllergySubTypeValue(parseInt(el.dataset.idx), el.value); });
+  document.querySelectorAll('.note-subtype-preset').forEach(el => {
+    el.addEventListener('change', () => { addNoteSubTypeValue(el.dataset.id, parseInt(el.dataset.idx), el.value); });
   });
   document.querySelectorAll('.menu-item-price-quick-edit').forEach(el => {
     el.addEventListener('keydown', (e) => { if (e.key === 'Enter') el.blur(); });
@@ -38548,9 +38029,7 @@ function bindEvents() {
   });
   // Pointer-drag sortable for the admin reorder lists.
   makeSortable('size-preset-row', reorderSizePresets, { canStart: () => !isListSorted('sizes') });
-  makeSortable('vip-preset-drag', reorderVipPresets, { canStart: () => !isListSorted('vip-preset') });
   makeSortable('void-reason-row', reorderVoidReasons);
-  makeSortable('allergy-preset-row', reorderAllergyPresets, { canStart: () => !isListSorted('allergy-preset') });
   makeSortable('note-preset-drag', reorderNotePresets, { canStart: () => !isListSorted('note-preset:' + state.notesOpenId) });
   makeSortable('course-template-row', reorderCourseTemplates);
   // The Design mockup IS the layout editor: drag a panel of the carbon copy
@@ -38793,9 +38272,6 @@ function bindEvents() {
   document.querySelectorAll('.menu-item-name-edit, .menu-item-category-edit, .menu-item-price-edit').forEach(el => {
     el.addEventListener('input', (e) => { /* inputs auto-save on blur in save handler */ });
   });
-  document.querySelectorAll('.vip-preset-name-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateVipPreset(parseInt(el.dataset.idx), e.target.value); });
-  });
   document.querySelectorAll('.quicknote-preset-name-input').forEach(el => {
     el.addEventListener('change', (e) => { updateQuickNotePreset(parseInt(el.dataset.idx), e.target.value); });
   });
@@ -38804,18 +38280,6 @@ function bindEvents() {
   });
   document.querySelectorAll('.note-preset-input').forEach(el => {
     el.addEventListener('change', (e) => { updateNotePreset(el.dataset.id, parseInt(el.dataset.idx), e.target.value); });
-  });
-  document.querySelectorAll('.note-builtin-name-input').forEach(el => {
-    el.addEventListener('change', async (e) => {
-      const key = el.dataset.id === 'vip' ? 'vipLabel' : 'allergyLabel';
-      const val = e.target.value.trim();
-      state.settings[key] = val || null;
-      try { state.settings = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: val }) }); } catch (err) {}
-      render();
-    });
-  });
-  document.querySelectorAll('.allergy-subtype-select').forEach(el => {
-    el.addEventListener('change', () => { if (state.allergyModal) state.allergyModal.subTypeChoices[el.dataset.allergy] = el.value; });
   });
   document.querySelectorAll('.size-preset-name-input').forEach(el => {
     el.addEventListener('change', (e) => { updateSizePreset(parseInt(el.dataset.idx), e.target.value); });
@@ -39113,7 +38577,7 @@ function handleActClick(el, e) {
         const switchCat = () => {
           state.activeCat = el.dataset.val; state.activeSubcat = null; state.search = '';
           state.showTablePicker = false; state.transferMode = false; state.transferFrom = null; state.pickFlashId = null;
-          state.notesPanel = null; state.vipModal = null; state.allergyModal = null; state.customNoteDraft = null;
+          state.notesPanel = null; state.customNoteDraft = null;
           state.comboBuilder = null; // tapping any category just leaves the set-menu builder
           state.callAway = false; state.quickNotePad = false; state.coversPad = null; // same for call-away / quick-note / covers panes
           state.itemOptions = null; state.editLine = null; state.editSent = null; // …and the item panes
@@ -40322,14 +39786,7 @@ function handleActClick(el, e) {
         sections = sections.includes(catId) ? sections.filter(x => x !== catId) : [...sections, catId];
         updateCourseTemplate(idx, { sections: all.every(id => sections.includes(id)) ? null : sections });
       }
-      else if (act === 'add-allergy-preset') { addAllergyPreset(); }
-      else if (act === 'bulk-delete-allergies') { bulkDeleteAllergies(); }
-      else if (act === 'clear-allergy-selection') { clearAllergySelection(); }
-      else if (act === 'remove-allergy-preset') { removeAllergyPreset(parseInt(el.dataset.idx)); }
-      else if (act === 'add-allergy-subtype') { addAllergySubType(parseInt(el.dataset.idx)); }
-      else if (act === 'remove-allergy-subtype') { removeAllergySubType(parseInt(el.dataset.idx), parseInt(el.dataset.stidx)); }
-      else if (act === 'add-vip-preset') { addVipPreset(); }
-      else if (act === 'remove-vip-preset') { removeVipPreset(parseInt(el.dataset.id)); }
+      else if (act === 'remove-note-subtype') { removeNoteSubType(el.dataset.id, parseInt(el.dataset.idx), parseInt(el.dataset.stidx)); }
       else if (act === 'add-size-preset') { addSizePreset(); }
       else if (act === 'delete-selected-sizes') { deleteSelectedSizes(); }
       else if (act === 'clear-size-selection') { clearSizeSelection(); }
@@ -40350,20 +39807,15 @@ function handleActClick(el, e) {
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-preset-selection') { state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'clear-note-type-selection') { state.selectedNoteTypeIds = []; render(); }
-      else if (act === 'clear-vip-selection') { state.selectedVipIdxs = []; render(); }
-      else if (act === 'delete-selected-vips') { deleteSelectedVips(); }
       else if (act === 'duplicate-selected-note-types') { duplicateSelectedNoteTypes(); }
       else if (act === 'size-toggle-open') { toggleSizeExpand(parseInt(el.dataset.idx)); }
-      else if (act === 'vip-toggle-open') { toggleIdxExpand('expandedVipIdxs', parseInt(el.dataset.idx)); }
       else if (act === 'void-toggle-open') { toggleIdxExpand('expandedVoidIdxs', parseInt(el.dataset.idx)); }
       else if (act === 'course-toggle-open') { toggleIdxExpand('expandedCourseIdxs', parseInt(el.dataset.idx)); }
       else if (act === 'notepreset-toggle-open') { toggleIdxExpand('expandedNotePresetIdxs', parseInt(el.dataset.idx)); }
       else if (act === 'tip-toggle-open') { toggleIdxExpand('expandedTipIdxs', parseInt(el.dataset.idx)); }
       else if (act === 'duplicate-selected-sizes') { duplicateSelectedSizes(); }
-      else if (act === 'duplicate-selected-vips') { duplicateSelectedVips(); }
       else if (act === 'duplicate-selected-void-reasons') { duplicateSelectedVoidReasons(); }
       else if (act === 'duplicate-selected-courses') { duplicateSelectedCourses(); }
-      else if (act === 'duplicate-selected-allergies') { duplicateSelectedAllergies(); }
       else if (act === 'duplicate-selected-note-presets') { duplicateSelectedNotePresets(); }
       else if (act === 'duplicate-selected-sections') { duplicateSelectedSections(); }
       else if (act === 'duplicate-selected-sales-categories') { duplicateSelectedSalesCategories(); }
@@ -40903,62 +40355,6 @@ function handleActClick(el, e) {
       else if (act === 'coach-ok') { coachDismiss(el.dataset.val); }
       else if (act === 'clear-fired-all') { state.firedCourses = {}; state.toast = 'Call-away cleared'; render(); armToastTimer(1800); }
       else if (act === 'switch-notes-tab') { switchNotesTab(el.dataset.val); }
-      else if (act === 'toggle-allergy-preset') {
-        const name = el.dataset.allergy;
-        const m = state.allergyModal;
-        const idx = m.selectedAllergies.indexOf(name);
-        if (idx === -1) m.selectedAllergies.push(name); else { m.selectedAllergies.splice(idx, 1); delete m.subTypeChoices[name]; }
-        render();
-      }
-      else if (act === 'pick-allergy-subtype') {
-        const name = el.dataset.allergy;
-        const subtype = el.dataset.subtype;
-        state.allergyModal.subTypeChoices[name] = state.allergyModal.subTypeChoices[name] === subtype ? null : subtype;
-        render();
-      }
-      else if (act === 'pick-allergy-whole-table') { state.allergyModal.wholeTable = !state.allergyModal.wholeTable; if (state.allergyModal.wholeTable) state.allergyModal.seats = []; render(); }
-      else if (act === 'toggle-allergy-seat') {
-        const seat = parseInt(el.dataset.seat);
-        state.allergyModal.wholeTable = false;
-        const idx = state.allergyModal.seats.indexOf(seat);
-        if (idx === -1) state.allergyModal.seats.push(seat); else state.allergyModal.seats.splice(idx, 1);
-        render();
-      }
-      else if (act === 'save-allergy-modal') { saveAllergyModal(); }
-      else if (act === 'remove-allergy') { removeAllergyEntry(parseInt(el.dataset.idx)); }
-      else if (act === 'remove-seat-allergies') {
-        const k = el.dataset.seat;
-        const updated = state.allergies.filter(a => (a.seat == null ? 'all' : String(a.seat)) !== k);
-        state.allergies = updated; render(); saveTableAllergies(state.table, updated);
-      }
-      else if (act === 'edit-seat-allergies') {
-        // Tap the combined chip -> the allergy pane opens prefilled for that
-        // cover; saving REPLACES the cover's allergies instead of appending.
-        const k = el.dataset.seat;
-        const mine = state.allergies.filter(a => (a.seat == null ? 'all' : String(a.seat)) === k);
-        const selected = [], subTypeChoices = {}, custom = [];
-        mine.forEach(a => {
-          const mm = String(a.allergy).match(/^(.*?)\s*\((.*)\)$/);
-          const base = mm ? mm[1] : a.allergy;
-          if (state.allergyPresets.some(p => p.name === base)) {
-            if (!selected.includes(base)) selected.push(base);
-            if (mm) subTypeChoices[base] = mm[2];
-          } else custom.push(a.allergy);
-        });
-        state.allergyModal = { ...freshAllergyDraft(), selectedAllergies: selected, subTypeChoices, customAllergy: custom.join(', '), notes: (mine[0] && mine[0].notes) || '', wholeTable: k === 'all', seats: k === 'all' ? [] : [parseInt(k)], editSeat: k };
-        state.notesPanel = { tab: 'allergy' };
-        render();
-      }
-      else if (act === 'pick-quick-note') {
-        // One tap = the whole job, the same beat the note presets use: the
-        // tile lights, the note (and its station) is attached, the pad shuts.
-        const p = (state.quickNotePresets || [])[parseInt(el.dataset.idx, 10)];
-        if (!p) return;
-        state.quickNote = p.name;
-        state.quickNoteStation = p.station || null;
-        render();
-        setTimeout(() => { if (state.quickNotePad) { state.quickNotePad = false; render(); } }, IO_PICK_BEAT);
-      }
       else if (act === 'pick-note-preset') {
         // One tap = the whole job (owner, Aug '26): the preset lights up for a
         // beat, then saves itself — the seat pop still asks when covers > 1.
@@ -40982,14 +40378,7 @@ function handleActClick(el, e) {
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
-      else if (act === 'close-vip-seat-pop') { state.vipSeatPop = false; render(); }
-      else if (act === 'vip-pick-seat') { const v = el.dataset.seat; pickVipSeat(v === 'all' ? 'all' : parseInt(v, 10)); }
-      else if (act === 'open-vip-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.vipSeatPop = true; state.adminError = ''; render(); } }
-      else if (act === 'edit-vip-entry') { if (!state.notesPanel) toggleNotesPanel(); switchNotesTab('vip'); state.notesPanel.tab = 'vip'; state.vipModal = freshVipDraft(); render(); }
       else if (act === 'open-note-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); } }
-      else if (act === 'allergy-pick-seat') { pickAllergySeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
-      else if (act === 'close-allergy-seat-pop') { state.allergySeatPop = false; render(); }
-      else if (act === 'open-allergy-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.allergySeatPop = true; state.adminError = ''; render(); } }
       else if (act === 'remove-note') { removeNoteEntry(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-entry') {
         // Tap a note chip -> its tab opens prefilled; saving replaces the entry.
@@ -41001,15 +40390,6 @@ function handleActClick(el, e) {
           render();
         }
       }
-      else if (act === 'save-vip-modal') { saveVipModal(); }
-      else if (act === 'pick-vip-preset') {
-        const cur = (state.vipModal.type || '').split(',').map(s => s.trim()).filter(Boolean);
-        const v = el.dataset.val, i = cur.indexOf(v);
-        if (i === -1) cur.push(v); else cur.splice(i, 1);
-        state.vipModal.type = cur.join(', ');
-        render();
-      }
-      else if (act === 'clear-vip') { clearVip(); }
       else if (act === 'clear-quick-note') { state.quickNote = ''; state.quickNoteStation = null; render(); }
       else if (act === 'toggle-quick-note') { toggleQuickNotePad(); }
       else if (act === 'close-quick-note') { state.quickNotePad = false; render(); }

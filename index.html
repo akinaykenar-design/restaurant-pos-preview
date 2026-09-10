@@ -6774,6 +6774,27 @@ function loadAndMigrate() {
     }
   }
   if (folded || movedTables) writeData(data);
+  // A NOTE TYPE'S COLOUR LIVES ON THE TYPE (owner, Sep '26: "yes move it").
+  // It was painted on the Table status page into settings.tableStatusColors
+  // under a "mark:<id>" key, while the type's own `color` sat unused — one
+  // colour, the working door on the wrong screen and a dead field on the
+  // right one. The paint moves onto the type; the old key goes.
+  {
+    const tsc = (data.settings && data.settings.tableStatusColors) || {};
+    let movedPaint = false;
+    for (const c of (data.noteCategories || [])) {
+      // '#999' was never a choice: the save route forced it on every type
+      // whose colour was empty, so clearing one was impossible. Drop it and
+      // the type goes back to no colour, which is what it always was.
+      if (c.color === '#999') { c.color = null; movedPaint = true; }
+      const key = 'mark:' + c.id;
+      if (tsc[key] === undefined) continue;
+      if (!c.color && tsc[key]) c.color = tsc[key];
+      delete tsc[key];
+      movedPaint = true;
+    }
+    if (movedPaint) writeData(data);
+  }
   // A note entry always carries its own line of words, so nothing downstream
   // has to test for it.
   if ((data.floorPlans || []).some(fp => (fp.tables || []).some(t => Array.isArray(t.notes) && t.notes.some(n => n && n.note === undefined)))) {
@@ -7259,7 +7280,9 @@ app.put('/api/note-categories', (req, res) => {
     .map(c => ({
       id: String((c && c.id) || Date.now()),
       name: String((c && c.name) || '').trim().slice(0, 40),
-      color: (c && c.color) || '#999',
+      // A type with no colour keeps its built-in mark. This forced '#999' on
+      // the way in, so clearing a colour was impossible — it came back grey.
+      color: (c && typeof c.color === 'string' && /^#[0-9A-Fa-f]{3,8}$/.test(c.color)) ? c.color : null,
       // Which printer station this note type rides to (null = every docket).
       station: (c && c.station && (data.printerStations || []).some(s => s.id === c.station)) ? c.station : null,
       // ONE PICK OR SEVERAL, per note type (owner, Aug '26: "special occasion
@@ -8190,13 +8213,6 @@ app.put('/api/settings', (req, res) => {
       keep[k] = (typeof v === 'string' && /^#[0-9A-Fa-f]{3,8}$/.test(v)) ? v : null;
     }
     data.settings.tableStatusColors = Object.assign({}, data.settings.tableStatusColors, keep);
-  }
-  if (req.body.noteTypeColors && typeof req.body.noteTypeColors === 'object') {
-    const ok = v => (typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v)) ? v : null;
-    data.settings.noteTypeColors = Object.assign({}, data.settings.noteTypeColors, {
-      vip: ok(req.body.noteTypeColors.vip),
-      allergy: ok(req.body.noteTypeColors.allergy),
-    });
   }
   if (takeawayEnabled !== undefined) data.settings.takeawayEnabled = !!takeawayEnabled;
   if (deliveryEnabled !== undefined) data.settings.deliveryEnabled = !!deliveryEnabled;
@@ -14315,6 +14331,8 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'bulk-discount-preset') bulkSetDiscountPresetColor(color);
   else if (kind === 'note-preset') setNotePresetColor(id, color);
   else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
+  else if (kind === 'note-type') setNoteTypeColor(id, color);
+  else if (kind === 'bulk-note-type') bulkSetNoteTypeColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
   else if (kind === 'course-pill') setCoursePillLevel(parseInt(id, 10), { color: color || null });
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
@@ -14324,8 +14342,15 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'modifier-group') quickUpdateModifierGroupColor(id, color);
   else if (kind === 'combo') quickUpdateComboColor(id, color);
 }
-// Preset-button colours (the waiter-facing buttons; the note TYPE rows
-// themselves carry no colour — only their presets do).
+// A note type's colour: the paint on its mark on the floor.
+function setNoteTypeColor(id, color) {
+  saveNoteCategories(state.noteCategories.map(c => c.id === id ? { ...c, color: color || null } : c));
+}
+function bulkSetNoteTypeColor(color) {
+  const sel = state.selectedNoteTypeIds || [];
+  saveNoteCategories(state.noteCategories.map(c => sel.includes(c.id) ? { ...c, color: color || null } : c));
+}
+// Preset-button colours: the waiter-facing buttons inside a type.
 function setNotePresetColor(ref, color) {
   const [catId, idx] = String(ref).split(':');
   const cats = state.noteCategories.map(c => c.id !== catId ? c : {
@@ -25975,8 +26000,10 @@ function renderOrderNotesAdmin() {
   // The full list of visible note types (built-ins first), used for select-all.
   const allTypeIds = cats.map(c => c.id);
 
-  // Type rows carry NO colour — colour lives on the preset buttons inside,
-  // where the waiter actually sees it.
+  // A TYPE'S COLOUR PAINTS ITS MARK ON THE FLOOR, so it belongs on the type's
+  // own card with its name, where it prints and who it is about (owner,
+  // Sep '26: "yes move it"). It used to be painted on the Table status page
+  // into a settings key, while this field sat unused.
   const typeRow = (cat) => {
     const id = cat.id, name = cat.name;
     const open = openId === id;
@@ -25985,6 +26012,7 @@ function renderOrderNotesAdmin() {
     <div class="menu-item-expandable note-type-row${selected ? ' selected' : ''}" data-typeid="${id}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;">
       <div class="menu-item-header sel-head" data-act="notes-toggle-open" data-id="${id}" data-sellist="note-type" data-selkey="${id}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-type" data-key="${id}" ${selected ? 'checked' : ''}>
+        ${colorDotButton('note-type', id, cat.color, { size: 20 })}
         <span style="font-weight:700;font-size:var(--fs-md);">${esc(name)}</span>
         <span style="flex:1;"></span>
       </div>
@@ -26008,6 +26036,7 @@ function renderOrderNotesAdmin() {
   return `
   ${rows.length === 0 ? `<div class="empty-hist">No note types yet.</div>` : ''}
   ${listToolbar({ list: 'note-type', keys: allTypeIds, sort: 'note-type',
+    editHtml: `<span style="display:inline-flex;align-items:center;gap:4px;" data-stop="1">${colorDotButton('bulk-note-type', 'x', null, { pencil: true, allowClear: true })}</span>`,
     copy: 'duplicate-selected-note-types', del: 'delete-selected-note-types',
     clear: 'clear-note-type-selection',
     extra: hidden.length ? `<button class="icon-sq" data-act="restore-note-types" aria-label="Restore hidden">${ACT_RESET_SVG}</button>` : '',
@@ -29063,7 +29092,7 @@ function renderTableStatusAdmin() {
           <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
             ${guestFmt === 'symbol'
               ? iconDotButton('mark', g.key, markSymbol(g.key), true, '', { blank: true, cls: 'color-dot-btn mark-sym', style: `background:${guestMarkColor(g)};color:${contrastTextColor(guestMarkColor(g))};` })
-              : colorDotButton('table-status', 'mark:' + g.key, markPaint(g.key), { bg: guestMarkColor(g), title: 'Change colour' })}
+              : ''}
             <label class="field-label" style="margin:0;flex:1;">${esc(g.name)}</label>
             <button class="status-chip mi-onoff ${on ? 'paid' : 'void'}" data-act="set-guest-mark-on" data-key="${esc(g.key)}">${on ? 'On' : 'Off'}</button>
           </div>`; }).join('')}
@@ -29952,8 +29981,8 @@ function tableStatusFx(t, cs, lock) {
 function tableMarksHtml(t) {
   // A mark keeps its built-in look until the venue paints it; only then does
   // an inline colour go on, with ink that can be read over it.
-  const paint = (key) => {
-    const c = markPaint(key);
+  const paint = (id) => {
+    const c = markPaint(id);
     return c ? ` style="background:${c};color:${contrastTextColor(c)};"` : '';
   };
   const marks = [];
@@ -29961,7 +29990,7 @@ function tableMarksHtml(t) {
     if (guestMarkIsOff(g.key)) continue;
     if (CORNER_MARKS.includes(g.id)) {
       if (notesOfType(g.id, t.notes).some(n => String(n.text || '').trim())) {
-        marks.push(`<span class="tbl-mark tbl-mark-${esc(g.id)}"${paint(g.key)}>${esc(markSymbol(g.key))}</span>`);
+        marks.push(`<span class="tbl-mark tbl-mark-${esc(g.id)}"${paint(g.id)}>${esc(markSymbol(g.key))}</span>`);
       }
       continue;
     }
@@ -30002,8 +30031,10 @@ function guestMarks() {
 // colours"). VIP and Allergies used to borrow the pill's warn/danger keys —
 // so painting Allergies repainted the Late pill as well, two things on one
 // number — and a note type's box wrote a key nothing ever read.
-function markPaint(key) { return (state.settings.tableStatusColors || {})['mark:' + key] || null; }
-function guestMarkColor(g) { return markPaint(g.key) || g.colour; }
+// The paint a venue actually chose, or nothing — a mark nobody painted keeps
+// its built-in look rather than being washed with a default.
+function markPaint(id) { return ((state.noteCategories || []).find(c => c.id === id) || {}).color || null; }
+function guestMarkColor(g) { return g.colour; }
 // WRITTEN OR SYMBOL, one switch for the lens (owner, Sep '26: "maybe have
 // written and symbol option like spend"). Written spells the note out on the
 // pill; symbol lets the corner marks carry it and shows no pill at all —

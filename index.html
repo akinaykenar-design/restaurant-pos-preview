@@ -6594,11 +6594,18 @@ function loadAndMigrate() {
     data.settings.managerApprovalForVoid = true;
     writeData(data);
   }
-  // Seed an "Instructions" note category (kitchen/service instructions) if there
-  // isn't one already.
+  // A SEED IS SOWN ONCE (owner, Sep '26). "Instructions" was pushed back in on
+  // every read where no type carried that name, so deleting it in Order Notes
+  // lasted until the next restart, and renaming a type TO "Instructions"
+  // silently suppressed the seed while renaming away spawned a second one.
+  // It is a starter note type now, like any other: it arrives on a fresh
+  // store and the venue owns it after that.
   if (!Array.isArray(data.noteCategories)) data.noteCategories = [];
-  if (!data.noteCategories.some(c => (c.name || '').trim().toLowerCase() === 'instructions')) {
-    data.noteCategories.push({ id: 'instructions', name: 'Instructions', color: null, presets: ['Rush', 'No substitutions', 'Birthday'] });
+  if (!data.settings.__instructionsSeeded) {
+    if (!data.noteCategories.some(c => c.id === 'instructions')) {
+      data.noteCategories.push({ id: 'instructions', name: 'Instructions', color: null, presets: ['Rush', 'No substitutions', 'Birthday'] });
+    }
+    data.settings.__instructionsSeeded = true;
     writeData(data);
   }
 
@@ -8239,9 +8246,26 @@ app.put('/api/settings', (req, res) => {
   if (Array.isArray(req.body.cardTypes)) {
     data.settings.cardTypes = req.body.cardTypes.map(s => String(s).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
   }
+  // Numbers a venue sets for itself: what a loyalty point is worth, how much
+  // rest earns a roster warning, when a kitchen ticket turns amber then red.
+  // All four were literals nothing could reach (owner, Sep '26).
+  for (const [k, lo, hi] of [['loyaltyPointsPerDollar', 1, 10000], ['restGapHours', 1, 48],
+                             ['kdsWarnMins', 1, 240], ['kdsLateMins', 1, 240]]) {
+    if (req.body[k] === undefined) continue;
+    const n = parseInt(req.body[k], 10);
+    if (!isNaN(n)) data.settings[k] = Math.max(lo, Math.min(hi, n));
+  }
+  // The venue's own job titles. Six were fixed in the code.
+  if (Array.isArray(req.body.staffRoles)) {
+    data.settings.staffRoles = req.body.staffRoles
+      .map(r => String(r || '').trim().slice(0, 40)).filter(Boolean).slice(0, 40);
+  }
   if (managerApprovalForVoid !== undefined) data.settings.managerApprovalForVoid = !!managerApprovalForVoid;
   if (allergyCustomEnabled !== undefined) data.settings.allergyCustomEnabled = !!allergyCustomEnabled;
-  if (Array.isArray(courses) && courses.length > 0) {
+  // An EMPTY list is a real answer (owner, Sep '26): a venue with no courses
+  // said so. This refused it, so the last course could never be deleted --
+  // the floor's own delete quietly kept one back to match.
+  if (Array.isArray(courses)) {
     data.settings.courses = courses.slice(0, 12).map((c, i) => ({
       name: (c.name && String(c.name).trim()) || `Course ${i + 1}`,
       color: c.color || null,
@@ -9077,7 +9101,8 @@ app.post('/api/customers/:id/redeem-points', (req, res) => {
   const points = parseInt(req.body.points);
   if (isNaN(points) || points <= 0) return res.status(400).json({ error: 'Enter a valid number of points' });
   if ((customer.points || 0) < points) return res.status(400).json({ error: 'Not enough points' });
-  const amount = points / LOYALTY_POINTS_PER_DOLLAR;
+  const perDollar = parseInt(data.settings && data.settings.loyaltyPointsPerDollar, 10) || LOYALTY_POINTS_PER_DOLLAR;
+  const amount = points / perDollar;
   customer.points -= points;
   logAudit(data, staffFromReq(req), `Redeemed ${points} loyalty points ($${amount.toFixed(2)}) for ${customer.name}`);
   writeData(data);
@@ -13923,7 +13948,35 @@ function contrastTextColor(hex) {
 
 // A fixed, curated set of simple colors always offered first, so managers
 // aren't stuck picking from a raw color wheel every time.
-const STAFF_ROLE_OPTIONS = ['manager', 'staff', 'trainee', 'waiter', 'cashier', 'chef'];
+// §§ Staff, tips and loyalty — the numbers and lists a venue sets
+const STAFF_ROLE_OPTIONS = ['manager', 'staff', 'trainee', 'waiter', 'cashier', 'chef']; // the starting set
+function staffRoles() {
+  const v = (state.settings || {}).staffRoles;
+  return (Array.isArray(v) && v.length) ? v.filter(Boolean) : STAFF_ROLE_OPTIONS;
+}
+function saveStaffRoles(list) {
+  state.settings.staffRoles = list;
+  saveTicketSetting({ staffRoles: list });
+  render();
+}
+function addStaffRole() { saveStaffRoles([...staffRoles(), 'New role']); }
+function updateStaffRole(idx, v) { saveStaffRoles(staffRoles().map((r, i) => i === idx ? v : r)); }
+function duplicateSelectedStaffRoles() {
+  const sel = state.selectedStaffRoleIdxs || [];
+  const all = staffRoles();
+  state.selectedStaffRoleIdxs = [];
+  saveStaffRoles([...all, ...all.filter((_, i) => sel.includes(i)).map(r => dupName(r, all))]);
+}
+function deleteSelectedStaffRoles() {
+  const sel = state.selectedStaffRoleIdxs || [];
+  state.selectedStaffRoleIdxs = [];
+  saveStaffRoles(staffRoles().filter((_, i) => !sel.includes(i)));
+}
+function reorderStaffRoles(from, to) {
+  const list = staffRoles().slice();
+  const [m] = list.splice(from, 1); list.splice(to, 0, m);
+  saveStaffRoles(list);
+}
 // Tip pooling: each staff member takes a weighted share of the pooled tips.
 const TIP_SHARE_OPTIONS = [
   { key: 'full', label: 'Full share', weight: 1 },
@@ -13933,7 +13986,11 @@ const TIP_SHARE_OPTIONS = [
 ];
 function tipShareWeight(k) { const o = TIP_SHARE_OPTIONS.find(x => x.key === (k || 'full')); return o ? o.weight : 1; }
 function tipShareLabel(k) { const o = TIP_SHARE_OPTIONS.find(x => x.key === (k || 'full')); return o ? o.label : 'Full share'; }
-const LOYALTY_POINTS_PER_DOLLAR = 20;
+const LOYALTY_POINTS_PER_DOLLAR = 20;   // the starting value; the venue's own wins
+function loyaltyPointsPerDollar() {
+  const n = parseInt((state.settings || {}).loyaltyPointsPerDollar, 10);
+  return (n > 0) ? n : LOYALTY_POINTS_PER_DOLLAR;
+}
 
 // Preset palette: six hues, two strengths — row one the softer (darker
 // pastel) version, row two the solid deep version of the SAME hue, so the
@@ -20453,14 +20510,13 @@ function doRemoveSent(match, qty, then) {
   state.voidItemPrompt = { match, qty, then, needPin: !ask, reason: null, pin: '', pinError: '' };
   render();
 }
-// The venue's own void reasons (Settings → Voids) when they've set them, so
-// their wording wins; a sensible default set otherwise. Wastage is always an
-// option — it's the whole point of the prompt.
+// The venue's own void reasons (Settings → Voids), theirs entirely. It used
+// to force "Wastage" back onto the list whatever they had written, so a venue
+// that says "Spoilage" got both and could never be rid of ours (owner,
+// Sep '26). An empty list falls back to a starter set, and nothing else.
 function itemVoidReasons() {
   const venue = (state.voidReasons || []).filter(Boolean);
-  const list = venue.length ? venue.slice() : ['Wastage', 'Comp', 'Staff meal', 'Wrong order', 'Returned'];
-  if (!list.some(r => /wastage/i.test(r))) list.unshift('Wastage');
-  return list;
+  return venue.length ? venue.slice() : ['Wastage', 'Comp', 'Staff meal', 'Wrong order', 'Returned'];
 }
 function renderVoidReasonPop() {
   const m = state.voidItemPrompt; if (!m) return '';
@@ -21562,8 +21618,8 @@ function renderCheckoutMiddle() {
       <label>Customer (optional)</label>
       ${attachedCustomer ? `
         <div class="seat-chip" style="margin-bottom:10px;">${esc(attachedCustomer.name)} — ${attachedCustomer.points || 0} pts <button data-act="detach-customer" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></div>
-        ${!state.discount && (attachedCustomer.points || 0) >= LOYALTY_POINTS_PER_DOLLAR ? `
-          <button class="btn-secondary" style="width:auto;padding:8px 14px;margin-bottom:14px;" data-act="redeem-loyalty-points">${SYS_GIFT_SVG} Redeem ${Math.floor(attachedCustomer.points / LOYALTY_POINTS_PER_DOLLAR) * LOYALTY_POINTS_PER_DOLLAR} pts for ${money(Math.floor(attachedCustomer.points / LOYALTY_POINTS_PER_DOLLAR))} off</button>
+        ${!state.discount && (attachedCustomer.points || 0) >= loyaltyPointsPerDollar() ? `
+          <button class="btn-secondary" style="width:auto;padding:8px 14px;margin-bottom:14px;" data-act="redeem-loyalty-points">${SYS_GIFT_SVG} Redeem ${Math.floor(attachedCustomer.points / loyaltyPointsPerDollar()) * loyaltyPointsPerDollar()} pts for ${money(Math.floor(attachedCustomer.points / loyaltyPointsPerDollar()))} off</button>
         ` : ''}
       ` : `
         <input id="customer-search-input" type="text" value="${state.customerSearch}" placeholder="Search by name or phone…" style="margin-bottom:${state.customerSearchResults.length > 0 ? '6px' : '14px'};">
@@ -22131,7 +22187,23 @@ function renderBriefingAdmin() {
   </div>`;
 }
 
-const REST_GAP_HOURS = 11; // flag any close-then-open ("clopening") with less rest between shifts
+const REST_GAP_HOURS = 11; // the starting value; the venue's own wins
+// A NUMBER THE VENUE SETS, drawn the same way wherever it lands: a short
+// label, the number, its unit. Nothing here needs a sentence.
+function numSettingRow(label, key, val, unit, min, max) {
+  return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+    <label class="field-label" style="margin:0;flex:1;">${esc(label)}</label>
+    <input type="number" min="${min}" max="${max}" step="1" value="${val}" class="num-field"
+      onblur="saveTicketSetting({ ${key}: Math.max(${min}, Math.min(${max}, parseInt(this.value,10) || ${min})) })">
+    <span class="ts" style="flex-shrink:0;">${esc(unit)}</span>
+  </div>`;
+}
+function kdsWarnMins() { const n = parseInt((state.settings || {}).kdsWarnMins, 10); return (n > 0) ? n : 10; }
+function kdsLateMins() { const n = parseInt((state.settings || {}).kdsLateMins, 10); return (n > 0) ? n : 20; }
+function restGapHours() {
+  const n = parseInt((state.settings || {}).restGapHours, 10);
+  return (n > 0) ? n : REST_GAP_HOURS;
+}
 // Read-only rule over the roster we already store: for each staffer, sort their
 // scheduled shifts and flag any pair with under REST_GAP_HOURS between one
 // shift ending and the next starting. Returns the set of flagged shift ids.
@@ -22141,7 +22213,7 @@ function restGapShiftIds() {
   const toMin = t => { const a = String(t || '0:0').split(':'); return (+a[0]) * 60 + (+a[1] || 0); };
   const startMs = sh => dayMs(sh.date) + toMin(sh.start) * 60000;
   const endMs = sh => startMs(sh) + rosterShiftHours(sh) * 3600000; // rosterShiftHours handles overnight
-  const gapMs = REST_GAP_HOURS * 3600000;
+  const gapMs = restGapHours() * 3600000;
   const byStaff = {};
   (state.roster || []).forEach(sh => { if (!sh.date || sh.start == null) return; (byStaff[sh.staffId] = byStaff[sh.staffId] || []).push(sh); });
   Object.values(byStaff).forEach(list => {
@@ -22187,6 +22259,10 @@ function renderRosterAdmin() {
       ${restCount ? `<span class="status-chip warn">${restCount} short rest gap${restCount === 1 ? '' : 's'}</span>` : ''}
     </div>
     <button class="btn-secondary sm" data-act="roster-copy-week">⧉ Copy last week</button>
+  </div>
+  <div class="settings-card" style="max-width:var(--admin-list-w,560px);margin-bottom:14px;">
+    <div class="th" style="margin-bottom:10px;">Rest between shifts</div>
+    ${numSettingRow('Warn under', 'restGapHours', restGapHours(), 'hrs', 1, 48)}
   </div>
   <div class="roster-scroll">
     <table class="roster-grid">
@@ -22374,7 +22450,7 @@ function renderRosterShiftModal() {
       </div>
       <label>Role / station <span class="ts">(optional)</span></label>
       <input id="roster-role" type="text" value="${esc(m.role || '')}" placeholder="e.g. Bar, Floor, Kitchen" list="roster-roles">
-      <datalist id="roster-roles">${STAFF_ROLE_OPTIONS.map(r => `<option value="${r.charAt(0).toUpperCase() + r.slice(1)}">`).join('')}</datalist>
+      <datalist id="roster-roles">${staffRoles().map(r => `<option value="${r.charAt(0).toUpperCase() + r.slice(1)}">`).join('')}</datalist>
       <label>Note <span class="ts">(optional)</span></label>
       <input id="roster-note" type="text" value="${esc(m.note || '')}" placeholder="e.g. training, close">
       <div class="modal-actions">
@@ -22533,6 +22609,11 @@ function kdsAllDayHtml(rows) {
 function renderKitchenAdmin() {
   const rows = kdsItemRows();
   return `
+  <div class="settings-card" style="max-width:var(--admin-list-w,560px);margin-bottom:12px;">
+    <div class="th" style="margin-bottom:10px;">Ticket age</div>
+    ${numSettingRow('Turns amber after', 'kdsWarnMins', kdsWarnMins(), 'min', 1, 240)}
+    ${numSettingRow('Turns red after', 'kdsLateMins', kdsLateMins(), 'min', 1, 240)}
+  </div>
   ${kdsAllDayHtml(rows)}
   <div class="kds-board">
     ${KDS_COLUMNS.map(col => {
@@ -22544,7 +22625,7 @@ function renderKitchenAdmin() {
         <div class="kds-col-body">
         ${tickets.length === 0 ? '' : tickets.map(t => {
           const mins = Math.floor((Date.now() - t.sentAt) / 60000);
-          const ageClass = mins >= 20 ? ' kds-age-late' : (mins >= 10 ? ' kds-age-warn' : '');
+          const ageClass = mins >= kdsLateMins() ? ' kds-age-late' : (mins >= kdsWarnMins() ? ' kds-age-warn' : '');
           return `
           <div class="kds-ticket">
             <div class="kds-ticket-head">
@@ -22728,6 +22809,10 @@ function renderCustomersAdmin() {
   const list = applyListSort('customers', state.customers);
   return `
   <div style="max-width:var(--admin-list-w,600px);">
+    <div class="settings-card" style="margin-bottom:12px;">
+      <div class="th" style="margin-bottom:10px;">Loyalty</div>
+      ${numSettingRow('Points for $1 off', 'loyaltyPointsPerDollar', loyaltyPointsPerDollar(), 'pts', 1, 10000)}
+    </div>
     ${listToolbar({ list: 'customer', keys: list.map(c => c.id), sort: 'customers',
       del: 'delete-selected-customers', clear: 'clear-customer-selection',
       add: { act: 'add-customer', label: '+ Customer' } })}
@@ -22833,11 +22918,11 @@ async function searchCustomers(q) {
 async function redeemLoyaltyPoints() {
   const customer = state.customers.find(c => c.id === state.attachedCustomerId);
   if (!customer) return;
-  const points = Math.floor((customer.points || 0) / LOYALTY_POINTS_PER_DOLLAR) * LOYALTY_POINTS_PER_DOLLAR;
+  const points = Math.floor((customer.points || 0) / loyaltyPointsPerDollar()) * loyaltyPointsPerDollar();
   if (points <= 0) return;
   try {
     // Points leave the customer when the bill is PAID, not now.
-    const amount = points / LOYALTY_POINTS_PER_DOLLAR;
+    const amount = points / loyaltyPointsPerDollar();
     state.discount = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
     render();
   } catch (e) {
@@ -26221,15 +26306,21 @@ function renderSurchargesSettingsAdmin() {
     ['SA', 'South Australia'], ['WA', 'Western Australia'], ['TAS', 'Tasmania'],
     ['NT', 'Northern Territory'], ['ACT', 'Australian Capital Territory'],
   ];
+  // THE CARD FOLLOWS THE RULE (owner, Sep '26: the stuck things). This is an
+  // Australian state list, and it sat on the page forever — a venue anywhere
+  // else had a card it could not use and could not remove. It appears only
+  // once a rule actually asks about public holidays, and goes when none does.
+  const usesHolidays = (state.discountPresets || []).some(p => p && p.field === 'holiday');
   return `
   ${renderPresetTileList('surcharge', '+ Surcharge')}
+  ${usesHolidays ? `
   <div class="settings-card" style="margin-top:12px;">
     <div class="th" style="margin-bottom:4px;">Public holidays</div>
     <div class="ts" style="margin-bottom:10px;">Which state's holiday dates to use.</div>
     <select class="pp-select" style="width:210px;" onchange="saveAutoSurcharge({ state: this.value })">
       ${states.map(([code, name]) => `<option value="${code}" ${cfg.state === code ? 'selected' : ''}>${code} — ${name}</option>`).join('')}
     </select>
-  </div>`;
+  </div>` : ''}`;
 }
 
 
@@ -26669,7 +26760,7 @@ function renderStaffAdmin() {
               <div style="display:flex;flex-direction:column;max-width:200px;">
                 <label class="field-label">Role</label>
                 <select class="staff-role-quick-edit" data-id="${s.id}" style="padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);" onchange="saveStaffRole('${s.id}', this.value)">
-                  ${STAFF_ROLE_OPTIONS.map(r => `<option value="${r}" ${s.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
+                  ${staffRoles().map(r => `<option value="${r}" ${s.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
                 </select>
               </div>
               ${state.settings.tipsEnabled ? `
@@ -26706,6 +26797,32 @@ function renderStaffAdmin() {
       </div>`;
     }).join('')}
   </div>
+  ${/* THE VENUE NAMES ITS OWN JOBS. Six words were fixed in the code, so a
+        runner or a sommelier could never be one (owner, Sep '26). Same list
+        shape as every other: the standard toolbar, drag to order, edit in
+        the row. No colour — a job title is never drawn in colour. */ ''}
+  <div style="margin-top:16px;max-width:var(--admin-list-w,560px);">
+    <div class="th" style="margin-bottom:10px;">Job titles</div>
+    ${listToolbar({ list: 'staff-role', keys: staffRoles().map((_, i) => i), sort: 'staff-roles',
+      copy: 'duplicate-selected-staff-roles', del: 'delete-selected-staff-roles',
+      clear: 'clear-staff-role-selection',
+      add: { act: 'add-staff-role', label: '+ Job title' } })}
+    ${applyListSort('staff-roles', staffRoles().map((r, i) => ({ r, i }))).map(({ r, i: idx }) => `
+      <div class="menu-item-expandable staff-role-row${(state.selectedStaffRoleIdxs || []).includes(idx) ? ' selected' : ''}${(state.expandedStaffRoleIdxs || []).includes(idx) ? ' open' : ''}" data-idx="${idx}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;margin-bottom:var(--list-gap);">
+        <div class="menu-item-header sel-head" data-act="staff-role-toggle-open" data-idx="${idx}" data-sellist="staff-role" data-selkey="${idx}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
+          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="staff-role" data-key="${idx}" ${(state.selectedStaffRoleIdxs || []).includes(idx) ? 'checked' : ''}>
+          <span class="t1" style="font-weight:700;font-size:var(--fs-md);text-transform:capitalize;">${esc(r)}</span>
+          <span style="flex:1;"></span>
+        </div>
+        ${(state.expandedStaffRoleIdxs || []).includes(idx) ? `
+        <div style="padding:0 12px 12px 40px;">
+          <div style="display:flex;flex-direction:column;max-width:280px;">
+            <label class="field-label">Name</label>
+            <input class="staff-role-input" data-idx="${idx}" type="text" value="${esc(r)}" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
+          </div>
+        </div>` : ''}
+      </div>`).join('')}
+  </div>
   `;
 }
 
@@ -26718,7 +26835,7 @@ function renderBulkStaffModal() {
       <h2>Set role for ${n} staff member${n === 1 ? '' : 's'}</h2>
       <label>Role</label>
       <div class="pay-options" style="flex-wrap:wrap;">
-        ${STAFF_ROLE_OPTIONS.map(r => `<div class="pay-opt ${m.role === r ? 'active' : ''}" style="flex:none;text-transform:capitalize;" data-act="bulk-staff-role" data-val="${r}">${r}</div>`).join('')}
+        ${staffRoles().map(r => `<div class="pay-opt ${m.role === r ? 'active' : ''}" style="flex:none;text-transform:capitalize;" data-act="bulk-staff-role" data-val="${r}">${r}</div>`).join('')}
       </div>
       <div class="modal-actions">
         <button class="icon-action neutral" data-act="close-bulk-staff">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
@@ -27139,6 +27256,10 @@ const SORT_DEFS = {
     az: { label: 'A\u2013Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
     za: { label: 'Z\u2013A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
   },
+  'staff-roles': {
+    az: { label: 'A\u2013Z', cmp: (a, b) => String(a.r).localeCompare(String(b.r)) },
+    za: { label: 'Z\u2013A', cmp: (a, b) => String(b.r).localeCompare(String(a.r)) },
+  },
   'categories': {
     az: { label: 'A–Z', cmp: (a, b) => (a.name || '').localeCompare(b.name || '') },
     za: { label: 'Z–A', cmp: (a, b) => (b.name || '').localeCompare(a.name || '') },
@@ -27165,7 +27286,7 @@ function sortDefsFor(listId) { return SORT_DEFS[listId] || SORT_DEFS[String(list
 const SORT_MANUAL = { 'menu-items': true, 'modifiers': true, 'categories': true,
   'note-preset': true, 'sales-categories': true, 'combos': true, 'note-type': true,
   'quicknotes': true, 'void-reasons': true, 'courses': true, 'discount-presets': true,
-  'happy-hours': true, 'stations': true, 'sizes': true };
+  'happy-hours': true, 'stations': true, 'sizes': true, 'staff-roles': true };
 function itemSortPrice(m) {
   const vs = (m.variants || []);
   return vs.length ? Math.min(...vs.map(v => v.price)) : (m.price || 0);
@@ -29507,7 +29628,7 @@ function renderStaffModal() {
       <input id="staff-pin-input" type="text" maxlength="8" value="${m.pin}" placeholder="1234">
       <label>Role</label>
       <select id="staff-role-input">
-        ${STAFF_ROLE_OPTIONS.map(r => `<option value="${r}" ${m.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
+        ${staffRoles().map(r => `<option value="${r}" ${m.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
       </select>
       ${state.settings.tipsEnabled ? `
       <label>Tip share</label>
@@ -34734,8 +34855,6 @@ function deleteSelectedCourses() {
   const sel = new Set(state.selectedCourseIdxs || []);
   if (!sel.size) return;
   const all = state.settings.courses;
-  if (sel.size >= all.length) sel.delete(0); // never zero courses
-  if (!sel.size) return;
   const keep = all.map((_, i) => i).filter(i => !sel.has(i));
   const mapN = n => sel.has(n - 1) ? null : keep.indexOf(n - 1) + 1;
   const refs = [...sel].map(i => { const r = courseRefLabel(i + 1); return r ? `${r} default to ${all[i].name}` : ''; }).filter(Boolean);
@@ -34753,7 +34872,6 @@ function deleteSelectedVoidReasons() {
   if (!sel.size) return;
   const reasons = state.voidReasons.filter((_, i) => !sel.has(i));
   state.selectedVoidReasonIdxs = [];
-  if (!reasons.length) reasons.push(state.voidReasons[0]); // keep at least one
   saveVoidReasons(reasons);
 }
 function deleteSelectedTipPresets() {
@@ -35053,7 +35171,6 @@ function updateVoidReason(idx, value) {
   saveVoidReasons(state.voidReasons.map((p, i) => i === idx ? value : p));
 }
 function removeVoidReason(idx) {
-  if (state.voidReasons.length <= 1) return;
   saveVoidReasons(state.voidReasons.filter((_, i) => i !== idx));
 }
 function reorderVoidReasons(fromIdx, toIdx) {
@@ -37488,6 +37605,7 @@ const SEL_LISTS = {
   staff: { arr: 'selectedStaffIds' },
   'note-preset': { arr: 'selectedNotePresetIdxs', numeric: true },
   quicknote: { arr: 'selectedQuickNoteIdxs', numeric: true },
+  'staff-role': { arr: 'selectedStaffRoleIdxs', numeric: true },
   'menu-item': { arr: 'selectedMenuItemIds' },
   'note-type': { arr: 'selectedNoteTypeIds' },
   timeoff: { arr: 'selectedTimeoffIds' },
@@ -38122,6 +38240,7 @@ function bindEvents() {
   makeSortable('note-preset-drag', reorderNotePresets, { canStart: () => !isListSorted('note-preset:' + state.notesOpenId) });
   makeSortable('course-template-row', reorderCourseTemplates, { canStart: () => !isListSorted('courses') });
   makeSortable('quicknote-row', reorderQuickNotePresets, { canStart: () => !isListSorted('quicknotes') });
+  makeSortable('staff-role-row', reorderStaffRoles, { canStart: () => !isListSorted('staff-roles') });
   // The Design mockup IS the layout editor: drag a panel of the carbon copy
   // sideways to rearrange the screen; drag the Categories rail UP to dock the
   // menu bar on top (PC/tablet). A plain tap still jumps to the settings card.
@@ -38354,6 +38473,9 @@ function bindEvents() {
   });
   document.querySelectorAll('.note-section-name-input').forEach(el => {
     el.addEventListener('change', (e) => { updateNoteCategory(parseInt(el.dataset.idx), 'name', e.target.value); saveNoteCategories(state.noteCategories); });
+  });
+  document.querySelectorAll('.staff-role-input').forEach(el => {
+    el.addEventListener('change', (e) => { updateStaffRole(parseInt(el.dataset.idx, 10), e.target.value.trim()); });
   });
   document.querySelectorAll('.note-preset-input').forEach(el => {
     el.addEventListener('change', (e) => { updateNotePreset(el.dataset.id, parseInt(el.dataset.idx), e.target.value); });
@@ -39884,6 +40006,16 @@ function handleActClick(el, e) {
       else if (act === 'clear-quicknote-selection') { state.selectedQuickNoteIdxs = []; render(); }
       else if (act === 'bulk-color-quicknotes') { openBulkColorModal('quicknote'); }
       else if (act === 'bulk-color-courses') { openBulkColorModal('course'); }
+      else if (act === 'staff-role-toggle-open') {
+        const i = parseInt(el.dataset.idx, 10);
+        const open = state.expandedStaffRoleIdxs || [];
+        state.expandedStaffRoleIdxs = open.includes(i) ? open.filter(x => x !== i) : [...open, i];
+        render();
+      }
+      else if (act === 'add-staff-role') { addStaffRole(); }
+      else if (act === 'duplicate-selected-staff-roles') { duplicateSelectedStaffRoles(); }
+      else if (act === 'delete-selected-staff-roles') { openConfirm({ message: `Delete ${(state.selectedStaffRoleIdxs || []).length} selected?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedStaffRoles()); }
+      else if (act === 'clear-staff-role-selection') { state.selectedStaffRoleIdxs = []; render(); }
       else if (act === 'set-note-scope') { saveNoteCategoryScope(el.dataset.id, el.dataset.val); }
       else if (act === 'notes-admin-section') { state.notesAdminSection = el.dataset.id; state.selectedNotePresetIdxs = []; render(); }
       else if (act === 'notes-toggle-open') { const id = el.dataset.id; state.notesOpenId = state.notesOpenId === id ? null : id; state.notesAdminSection = id; state.selectedNotePresetIdxs = []; render(); }

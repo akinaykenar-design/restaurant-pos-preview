@@ -1519,10 +1519,11 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    same: .28s over 390 puts 1024 at about .45s. */
 :root{ --t-map:var(--t-move); }
 @media (min-width:769px){ :root{ --t-map:.45s; } }
-/* CARRIED BY A FINGER: no transition and no keyframe, or the map would chase
-   the thumb a beat behind it instead of being stuck to it. The class comes
-   off at the release and the map's own slide finishes the trip. */
-.middle-view.tp-drag{ animation:none !important; transition:none !important; }
+/* CARRIED BY A FINGER — the map or the docket. No transition and no keyframe,
+   or the panel would chase the thumb a beat behind it instead of being stuck
+   to it. The class comes off at the release and the panel's own slide
+   finishes the trip. */
+.panel-drag{ animation:none !important; transition:none !important; }
 .middle-view:is(.tp-off,.tp-entering){ animation:none; transform:translateX(-100%); transition:transform var(--t-map) ease; } /* parked left: on the way out, and on the first painted frame of the way in */
 /* THE MAP KEEPS ITS TRANSITION AT ALL TIMES (owner, Sep '26: "swipe back to
    the order panel is instant on tablet"; the phone was always fine). For a
@@ -33818,40 +33819,61 @@ const DRAG_TAKE = 0.33;   // past a third of the screen and it goes
 const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it got
 (function () {
   let sx = 0, sy = 0, armed = false, onPeekStrip = false, dktAtTop = false;
-  // The live drag: the pane being carried, how wide its trip is, and the last
-  // two samples, which are what a flick is judged on.
-  let pane = null, paneW = 0, paneX = 0, lastX = 0, lastT = 0, vel = 0, frame = 0;
+  // ONE ENGINE, TWO PANELS. A carried panel is four numbers and nothing else:
+  // the node, how far its trip is, where it sat when the finger landed
+  // (`base`) and where the other end is (`rest`). The map only ever CLOSES
+  // this way; the docket goes both ways, because unlike the map it is already
+  // built and parked off the right edge whether it is open or not.
+  let pane = null, paneW = 0, paneX = 0, base = 0, rest = 0, kind = '', slop = 0;
+  let lastX = 0, lastT = 0, vel = 0, frame = 0;
   const paint = () => { frame = 0; if (pane) pane.style.transform = 'translateX(' + paneX + 'px)'; };
   const letGo = () => {
     if (frame) { cancelAnimationFrame(frame); frame = 0; }
-    if (pane) { pane.classList.remove('tp-drag'); pane.style.transform = ''; }
-    pane = null;
+    if (pane) { pane.classList.remove('panel-drag'); pane.style.transform = ''; }
+    pane = null; kind = '';
   };
-  // A drag usually starts on the floor's own band, which is made of chips. The
+  // A drag usually starts on a panel's own band, which is made of chips. The
   // browser will not fire a click after a real 200px drag, but a short one it
-  // judged a tap would — and that chip would fire as the map slid away. A drag
-  // that actually moved the map eats the click it was born from.
+  // judged a tap would — and that chip would fire as the panel slid away. A
+  // drag that actually moved a panel eats the click it was born from.
   const eatClick = () => {
     const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
     document.addEventListener('click', swallow, { capture: true, once: true });
     setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 350);
   };
-  // A render mid-drag would replace the very node under the finger. The poll
-  // already holds its rebuild until _tpAnimUntil, so the drag keeps pushing
-  // that mark ahead of itself.
-  const holdRender = () => { state._tpAnimUntil = Date.now() + 400; };
+  // A render mid-drag would replace the very node under the finger, and one
+  // landing on the slide that finishes the trip would kill it in flight.
+  const holdRender = () => { state._tpAnimUntil = Date.now() + 400; panelMoving(400); };
+  // Which panel — if any — this drag has claimed, and where its two ends are.
+  const claim = (dx, dy) => {
+    if (Math.abs(dx) < Math.abs(dy) * 1.4) return null; // a vertical drag is a scroll
+    // THE MAP: only the way out, because opening would mean building the whole
+    // map behind the screen on the chance a finger is about to ask for it —
+    // exactly the work the poll was taught to avoid.
+    if (state.showTablePicker) {
+      if (dx > -10 || !state._tpFromOrder || state._tpLeaving) return null;
+      if (state.view !== 'order' || floorMustStay()) return null;
+      const el = document.querySelector('.middle-view.tp-view');
+      if (!el) return null;
+      const w = el.getBoundingClientRect().width || window.innerWidth;
+      return { el, w, base: 0, rest: -w, kind: 'map', slop: 10 };
+    }
+    // THE DOCKET, both ways. It is parked off the right edge when closed with
+    // its lines already drawn, so a finger can pull it in as well as push it
+    // out. Peek mode is not this gesture: there the docket is a strip that
+    // grows upward, and up/down is its own door.
+    if (window.innerWidth > 768 || state.view !== 'order') return null;
+    if (state.showCheckout || state.billSplit || phoneDocketPeek()) return null;
+    const el = document.querySelector('.ticket-panel');
+    if (!el || el.classList.contains('peek')) return null;
+    const w = el.getBoundingClientRect().width || window.innerWidth;
+    if (state.mobileCartOpen) { if (dx < 10) return null; return { el, w, base: 0, rest: w, kind: 'docket', slop: -10 }; }
+    if (dx > -10) return null;
+    return { el, w, base: w, rest: 0, kind: 'docket', slop: 10 };
+  };
   document.addEventListener('touchstart', (e) => {
     armed = false; onPeekStrip = false; dktAtTop = false;
     letGo();
-    // TABLET GETS THIS TOO (owner, Aug '26). Only the docket half is phone-only
-    // below: at tablet width the docket is always on screen, so swiping it in
-    // and out means nothing there. The floor half is wanted on both - it
-    // already slides over the hub at that width (panel law).
-    if (!e.touches[0]) return;
-    // A LOCKED SCREEN TAKES NO GESTURES (owner, Aug '26: you could still swipe
-    // the docket in behind the lock and read the split). Taps were already
-    // refused; the swipes were not, because the lock keeps you signed in and
-    // that is all this checked.
     if (state.frozen) return;
     if (!state.currentStaff) return;
     const t = e.target;
@@ -33891,53 +33913,62 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
   }, { passive: true });
   // Passive, and it only ever writes a transform — the browser keeps scrolling
   // and panning on its own thread (no non-passive listener on the document,
-  // ever). A drag that has taken the map claims the gesture; the release below
+  // ever). A drag that has taken a panel claims the gesture; the release below
   // sees that and does not judge it a second time.
   document.addEventListener('touchmove', (e) => {
     if (!armed || !e.touches[0]) return;
     const t = e.touches[0], dx = t.clientX - sx, dy = t.clientY - sy;
     if (!pane) {
-      // Only the map, only when there is a screen behind it to go back to,
-      // and only a clear leftward drag — the direction it leaves in.
-      if (!state.showTablePicker || !state._tpFromOrder || state._tpLeaving) return;
-      if (state.view !== 'order' || floorMustStay()) return;
-      if (dx > -10 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
-      const el = document.querySelector('.middle-view.tp-view');
-      if (!el) return;
-      pane = el; paneW = el.getBoundingClientRect().width || window.innerWidth;
-      pane.classList.add('tp-drag');
+      const c = claim(dx, dy);
+      if (!c) return;
+      pane = c.el; paneW = c.w; base = c.base; rest = c.rest; kind = c.kind; slop = c.slop;
+      paneX = base;
+      pane.classList.add('panel-drag');
       lastX = t.clientX; lastT = e.timeStamp || Date.now(); vel = 0;
     }
     const now = e.timeStamp || Date.now();
     // Smoothed, not the last pair alone: one jittery sample at the end of a
-    // slow, deliberate drag used to read as a flick and throw the map off.
-    if (now > lastT) vel = vel * 0.4 + ((t.clientX - lastX) / (now - lastT)) * 0.6; // px per ms, negative = leaving
+    // slow, deliberate drag used to read as a flick and threw the panel off.
+    if (now > lastT) vel = vel * 0.4 + ((t.clientX - lastX) / (now - lastT)) * 0.6; // px per ms
     lastX = t.clientX; lastT = now;
-    paneX = Math.max(-paneW, Math.min(0, dx + 10)); // the 10px it took to claim the drag is not a jump
+    // The few pixels it took to claim the drag are not a jump.
+    const want = base + dx + slop;
+    paneX = Math.max(Math.min(base, rest), Math.min(Math.max(base, rest), want));
     holdRender();
     if (!frame) frame = requestAnimationFrame(paint);
   }, { passive: true });
-  document.addEventListener('touchcancel', () => { if (pane) { pane.style.transition = ''; paneX = 0; paint(); setTimeout(letGo, 200); } armed = false; });
+  document.addEventListener('touchcancel', () => { if (pane) { const el = pane; el.classList.remove('panel-drag'); el.style.transform = ''; pane = null; } armed = false; });
   document.addEventListener('touchend', (e) => {
     if (pane) {
       armed = false;
-      const el = pane, w = paneW;
-      const take = (-paneX > w * DRAG_TAKE) || vel < -DRAG_FLICK;
-      el.style.transition = '';               // back to the map's own slide
-      el.classList.remove('tp-drag');
+      const el = pane, w = paneW, was = kind, from = base, to = rest;
+      // THE RELEASE ONLY DECIDES WHETHER TO FINISH THE TRIP OR PUT IT BACK.
+      // Two ways to finish, both how a phone does it: past a third of the way,
+      // or a flick — a short fast drag that never got far but was clearly
+      // meant. The flick has to point the way the panel was going.
+      const gone = Math.abs(paneX - from);
+      const towards = to > from ? 1 : -1;
+      const take = gone > w * DRAG_TAKE || (vel * towards > DRAG_FLICK);
+      const land = take ? to : from;
+      el.classList.remove('panel-drag');         // back to the panel's own slide
       holdRender(); eatClick();
-      if (take) {
-        el.style.transform = 'translateX(-100%)';
-        pane = null;
-        let fired = false;
-        const gone = () => { if (fired) return; fired = true; el.style.transform = ''; closeTablePicker(null, true); };
-        el.addEventListener('transitionend', (ev) => { if (ev.target === el && ev.propertyName === 'transform') gone(); });
-        setTimeout(gone, tpSlideMs() + 80);   // the net, if the browser never says the slide ended
-      } else {
-        paneX = 0; el.style.transform = '';   // springs back to where it was
-        pane = null;
-        setTimeout(() => { el.style.transition = ''; }, tpSlideMs() + 40);
-      }
+      pane = null; kind = '';
+      let fired = false;
+      const settled = () => {
+        if (fired) return; fired = true;
+        el.style.transform = '';
+        if (!take) { if (was === 'docket') el.classList.toggle('open', !!state.mobileCartOpen); return; }
+        if (was === 'map') { closeTablePicker(null, true); return; }
+        state.mobileCartOpen = (to === 0);    // the docket's far end IS open
+        render();
+      };
+      // The docket holds its own end state while the slide runs: the class is
+      // what parks it, and the inline transform is what is moving.
+      if (was === 'docket') el.classList.toggle('open', land === 0);
+      el.style.transform = 'translateX(' + land + 'px)';
+      if (land === paneX) { settled(); return; }   // already there: no slide to wait for
+      el.addEventListener('transitionend', (ev) => { if (ev.target === el && ev.propertyName === 'transform') settled(); });
+      setTimeout(settled, tpSlideMs() + 120);  // the net, if the browser never says the slide ended
       return;
     }
     if (!armed) return; armed = false;
@@ -40988,7 +41019,12 @@ document.addEventListener('click', (e) => {
 // still renders at once; the background — polls, alerts — waits until no
 // finger is down and nothing has scrolled for a beat.
 let _fingersDown = 0, _scrollUntil = 0, _bgRenderQueued = false, _bgFlushTimer = 0;
-function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil; }
+// A panel carried by a finger counts as a live gesture for a beat AFTER the
+// finger lifts, too: the slide that finishes the trip is still running, and a
+// background rebuild there replaces the very node that is moving.
+let _panelUntil = 0;
+function panelMoving(ms) { _panelUntil = Date.now() + (ms || 400); }
+function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil || Date.now() < _panelUntil; }
 function _flushBgRender() { if (!_bgRenderQueued || gestureLive()) return; _bgRenderQueued = false; render(); }
 function renderWhenStill() { if (gestureLive()) { _bgRenderQueued = true; return; } render(); }
 document.addEventListener('touchstart', (e) => { _fingersDown = e.touches.length; }, { passive: true, capture: true });

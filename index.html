@@ -31186,7 +31186,11 @@ function closeTablePicker(then, alreadyOff) {
   requestAnimationFrame(() => { if (state._tpLeaving) live.classList.add('tp-off'); });
 }
 // §§ The floor: opening, closing, transferring
-function openTablePicker() {
+// `heldByFinger` builds the map and PARKS it off the left edge, then stops:
+// the drag owns its arrival from there, so neither the entrance rAF nor the
+// entrance timer may touch it (a render mid-drag replaces the very node the
+// finger is carrying). The drag finishes the bookkeeping at the release.
+function openTablePicker(heldByFinger) {
   const current = findTableById(state.table);
   const owningFp = current && state.floorPlans.find(f => f.tables.some(t => t.id === current.id));
   dropMobileDrawer();
@@ -31199,7 +31203,12 @@ function openTablePicker() {
     // ...and never while the map is on its way OFF: this deferred rebuild
     // replaced the very node that was sliding, so the transition died in
     // flight and its end never arrived.
-    setTimeout(() => { if (state.showTablePicker && !state._tpLeaving) render(); }, wait);
+    // ...and never under a finger. This wait is worked out ONCE, when the lock
+    // call answers, so a drag that starts after it was armed used to have this
+    // rebuild land in the middle of it — the map the finger was carrying was
+    // replaced by a fresh one parked off screen, and it vanished mid-gesture
+    // (filmed, Sep '26). renderWhenStill holds it until the hand is off.
+    setTimeout(() => { if (state.showTablePicker && !state._tpLeaving) renderWhenStill(); }, wait);
   });
   state.pickerFloorPlanId = owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
   state.showTablePicker = true;
@@ -31229,7 +31238,7 @@ function openTablePicker() {
   // mark holds those rules off until the map is actually there.
   document.body.setAttribute('data-tp-entering', '');
   clearTimeout(state._tpEnterTimer);
-  state._tpEnterTimer = setTimeout(() => {
+  if (!heldByFinger) state._tpEnterTimer = setTimeout(() => {
     document.body.removeAttribute('data-tp-entering');
     if (state.showTablePicker) render();
   }, tpSlideMs() + 60);
@@ -31240,6 +31249,7 @@ function openTablePicker() {
   if (tpDrawerOn() || matchMedia('(prefers-reduced-motion: reduce)').matches) {
     state._tpEntering = true;
     render();
+    if (heldByFinger) return; // parked left, waiting for the finger
     requestAnimationFrame(() => requestAnimationFrame(() => {
       state._tpEntering = false;
       const live = document.querySelector('.middle-view.tp-view');
@@ -33845,7 +33855,29 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
   // landing on the slide that finishes the trip would kill it in flight.
   const holdRender = () => { state._tpAnimUntil = Date.now() + 400; panelMoving(400); };
   // Which panel — if any — this drag has claimed, and where its two ends are.
-  const claim = (dx, dy) => {
+  // BUILDING THE MAP DETACHES THE NODE THE FINGER IS ON. A rebuild replaces the
+  // whole screen, and a touch that started on a node no longer in the document
+  // still fires listeners ON THAT NODE but no longer bubbles to the document —
+  // so the drag froze mid-air and the release never arrived, leaving the map
+  // stranded half way (measured, Sep '26). The rest of the gesture is bound to
+  // the original node as well, and each event is answered once.
+  let src = null;
+  const bindSrc = (el) => {
+    src = el;
+    if (!src) return;
+    src.addEventListener('touchmove', onMove, { passive: true });
+    src.addEventListener('touchend', onEnd);
+    src.addEventListener('touchcancel', onCancel);
+  };
+  const unbindSrc = () => {
+    if (!src) return;
+    src.removeEventListener('touchmove', onMove);
+    src.removeEventListener('touchend', onEnd);
+    src.removeEventListener('touchcancel', onCancel);
+    src = null;
+  };
+  const once = (ev) => { if (ev.__panelSeen) return false; ev.__panelSeen = true; return true; };
+  const claim = (dx, dy, target) => {
     if (Math.abs(dx) < Math.abs(dy) * 1.4) return null; // a vertical drag is a scroll
     // THE MAP: only the way out, because opening would mean building the whole
     // map behind the screen on the chance a finger is about to ask for it —
@@ -33863,13 +33895,34 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // out. Peek mode is not this gesture: there the docket is a strip that
     // grows upward, and up/down is its own door.
     if (window.innerWidth > 768 || state.view !== 'order') return null;
-    if (state.showCheckout || state.billSplit || phoneDocketPeek()) return null;
-    const el = document.querySelector('.ticket-panel');
-    if (!el || el.classList.contains('peek')) return null;
+    if (state.showCheckout || state.billSplit) return null;
+    const dk = document.querySelector('.ticket-panel');
+    if (dk && !dk.classList.contains('peek') && !phoneDocketPeek()) {
+      const w = dk.getBoundingClientRect().width || window.innerWidth;
+      if (state.mobileCartOpen) { if (dx < 10) return null; return { el: dk, w, base: 0, rest: w, kind: 'docket', slop: -10 }; }
+      if (dx < -10) return { el: dk, w, base: w, rest: 0, kind: 'docket', slop: 10 };
+    }
+    // THE MAP COMES IN ON THE FINGER TOO, ON THE PHONE (owner, Sep '26: "map
+    // on phone same"). It cannot be parked off screen in advance the way the
+    // docket is — it is not built until it is asked for — so the drag builds
+    // it the moment it is claimed and parks it off the left edge, then carries
+    // it in. That costs one rebuild at the start of the gesture, which is why
+    // this is the PHONE only: on the till the same rebuild was measured at
+    // 212ms, a fifth of a second of nothing, and the eye has moved on.
+    // Every pane is a door of its own, so none of them may be dragged past.
+    if (dx < 10 || state.mobileCartOpen) return null;
+    if (state.itemOptions || state.notesPanel || state.editLine || state.editSent
+      || state.moveItems || state.callAway || state.quickNotePad || state.coversPad) return null;
+    bindSrc(target);          // bound BEFORE the rebuild takes the node away
+    openTablePicker(true);
+    const el = document.querySelector('.middle-view.tp-view');
+    if (!el) { unbindSrc(); return null; }
     const w = el.getBoundingClientRect().width || window.innerWidth;
-    if (state.mobileCartOpen) { if (dx < 10) return null; return { el, w, base: 0, rest: w, kind: 'docket', slop: -10 }; }
-    if (dx > -10) return null;
-    return { el, w, base: w, rest: 0, kind: 'docket', slop: 10 };
+    // The parking is the inline transform from here on; .tp-entering stays put
+    // (same place, no jump) and comes off when the map has landed.
+    el.classList.add('panel-drag');
+    el.style.transform = 'translateX(' + (-w) + 'px)';
+    return { el, w, base: -w, rest: 0, kind: 'map-in', slop: -10 };
   };
   document.addEventListener('touchstart', (e) => {
     armed = false; onPeekStrip = false; dktAtTop = false;
@@ -33915,11 +33968,12 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
   // and panning on its own thread (no non-passive listener on the document,
   // ever). A drag that has taken a panel claims the gesture; the release below
   // sees that and does not judge it a second time.
-  document.addEventListener('touchmove', (e) => {
+  function onMove(e) {
+    if (!once(e)) return;
     if (!armed || !e.touches[0]) return;
     const t = e.touches[0], dx = t.clientX - sx, dy = t.clientY - sy;
     if (!pane) {
-      const c = claim(dx, dy);
+      const c = claim(dx, dy, e.target);
       if (!c) return;
       pane = c.el; paneW = c.w; base = c.base; rest = c.rest; kind = c.kind; slop = c.slop;
       paneX = base;
@@ -33936,11 +33990,31 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     paneX = Math.max(Math.min(base, rest), Math.min(Math.max(base, rest), want));
     holdRender();
     if (!frame) frame = requestAnimationFrame(paint);
-  }, { passive: true });
-  document.addEventListener('touchcancel', () => { if (pane) { const el = pane; el.classList.remove('panel-drag'); el.style.transform = ''; pane = null; } armed = false; });
-  document.addEventListener('touchend', (e) => {
+  }
+  document.addEventListener('touchmove', onMove, { passive: true });
+  // The system took the gesture (a call, the app switcher). A panel half way
+  // across is put back where it came from — and a map that only exists because
+  // this drag built it is undone outright.
+  function onCancel(e) {
+    if (e && !once(e)) return;
+    armed = false;
+    if (!pane) { unbindSrc(); return; }
+    const el = pane, was = kind, home = base;
+    pane = null; kind = ''; unbindSrc();
+    el.classList.remove('panel-drag');
+    el.style.transform = 'translateX(' + home + 'px)';
+    setTimeout(() => {
+      el.style.transform = '';
+      if (was === 'map-in') { state._tpEntering = false; el.classList.remove('tp-entering'); document.body.removeAttribute('data-tp-entering'); closeTablePicker(null, true); }
+      else if (was === 'docket') el.classList.toggle('open', !!state.mobileCartOpen);
+    }, tpSlideMs() + 60);
+  }
+  document.addEventListener('touchcancel', onCancel);
+  function onEnd(e) {
+    if (!once(e)) return;
     if (pane) {
       armed = false;
+      unbindSrc();
       const el = pane, w = paneW, was = kind, from = base, to = rest;
       // THE RELEASE ONLY DECIDES WHETHER TO FINISH THE TRIP OR PUT IT BACK.
       // Two ways to finish, both how a phone does it: past a third of the way,
@@ -33957,6 +34031,16 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
       const settled = () => {
         if (fired) return; fired = true;
         el.style.transform = '';
+        if (was === 'map-in') {
+          // Landed: finish what openTablePicker left to the finger. Sent back:
+          // undo the open outright, since it was never really made.
+          state._tpEntering = false;
+          el.classList.remove('tp-entering');
+          document.body.removeAttribute('data-tp-entering');
+          if (!take) { closeTablePicker(null, true); return; }
+          render(); tpCentreOnOpen();
+          return;
+        }
         if (!take) { if (was === 'docket') el.classList.toggle('open', !!state.mobileCartOpen); return; }
         if (was === 'map') { closeTablePicker(null, true); return; }
         state.mobileCartOpen = (to === 0);    // the docket's far end IS open
@@ -34006,7 +34090,8 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     else if (dx > 0 && !state.showTablePicker && !state.itemOptions && !state.notesPanel
       && !state.editLine && !state.editSent && !state.showCheckout && !state.billSplit
       && !state.moveItems && !state.callAway && !state.quickNotePad && !state.coversPad) openTablePicker();
-  }, { passive: true });
+  }
+  document.addEventListener('touchend', onEnd, { passive: true });
 })();
 
 
@@ -41025,7 +41110,14 @@ let _fingersDown = 0, _scrollUntil = 0, _bgRenderQueued = false, _bgFlushTimer =
 let _panelUntil = 0;
 function panelMoving(ms) { _panelUntil = Date.now() + (ms || 400); }
 function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil || Date.now() < _panelUntil; }
-function _flushBgRender() { if (!_bgRenderQueued || gestureLive()) return; _bgRenderQueued = false; render(); }
+// A queued rebuild always drains: if the hand is still busy when the flush
+// comes round, it asks again shortly rather than sitting there forgotten until
+// the next touch happens to wake it.
+function _flushBgRender() {
+  if (!_bgRenderQueued) return;
+  if (gestureLive()) { clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 160); return; }
+  _bgRenderQueued = false; render();
+}
 function renderWhenStill() { if (gestureLive()) { _bgRenderQueued = true; return; } render(); }
 document.addEventListener('touchstart', (e) => { _fingersDown = e.touches.length; }, { passive: true, capture: true });
 document.addEventListener('touchend', (e) => { _fingersDown = e.touches.length; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });

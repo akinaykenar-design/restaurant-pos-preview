@@ -1519,6 +1519,10 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    same: .28s over 390 puts 1024 at about .45s. */
 :root{ --t-map:var(--t-move); }
 @media (min-width:769px){ :root{ --t-map:.45s; } }
+/* CARRIED BY A FINGER: no transition and no keyframe, or the map would chase
+   the thumb a beat behind it instead of being stuck to it. The class comes
+   off at the release and the map's own slide finishes the trip. */
+.middle-view.tp-drag{ animation:none !important; transition:none !important; }
 .middle-view:is(.tp-off,.tp-entering){ animation:none; transform:translateX(-100%); transition:transform var(--t-map) ease; } /* parked left: on the way out, and on the first painted frame of the way in */
 /* THE MAP KEEPS ITS TRANSITION AT ALL TIMES (owner, Sep '26: "swipe back to
    the order panel is instant on tablet"; the phone was always fine). For a
@@ -31096,7 +31100,11 @@ function settleOrderArrival() {
   const el = document.querySelector('.menu-panel');
   if (el) el.style.animation = '';
 }
-function closeTablePicker(then) {
+// `alreadyOff` is the finger's own close: the drag has already carried the map
+// off the left edge, so there is nothing left to slide. Without it the map
+// would be put back at rest and slid off a second time — the one thing a
+// follow-the-finger panel must never do.
+function closeTablePicker(then, alreadyOff) {
   if (floorMustStay()) { if (then) { then(); render(); } return; } // no table yet: the floor stays, whatever asked
   if (state._tpLeaving) { if (then) state._tpAfter.push(then); return; } // already on its way off: the caller's bookkeeping joins the queue
   const done = () => {
@@ -31107,6 +31115,7 @@ function closeTablePicker(then) {
     if (then) then(); after.forEach(f => f()); render();
   };
   if (!state.showTablePicker) { done(); return; }
+  if (alreadyOff) { done(); return; } // the drag already took it off screen
   // Reduce Motion no longer means NO motion here: the map still slides, just
   // faster (the CSS shortens it). A panel that leaves has to be seen leaving,
   // or the screen simply changes and nobody knows where the map went.
@@ -33791,10 +33800,49 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }
 // Read from the content (not the raw screen edge), so it never fights the
 // phone's own edge panel/back gesture. Horizontal-dominant only, so vertical
 // scrolling and the sideways category rail are untouched.
+// THE MAP FOLLOWS THE FINGER (owner, Sep '26: "panels follow your finger
+// would be awesome"). Until now every swipe was judged at the END: the finger
+// travelled, nothing moved, and only on release did the map slide off on its
+// own clock. So a waiter half-way through a swipe had no idea whether it had
+// taken, and could not change their mind.
+// Now the map is stuck to the thumb the whole way, and the release only
+// decides whether to finish the trip or put it back. Two ways to finish, both
+// how a phone does it: PAST A THIRD of the way, or a FLICK — a short fast
+// drag that never got far but was clearly meant.
+// It rides the map's own transform, the same one the slide uses, so nothing
+// new draws and nothing fights the slide. Only the CLOSE follows the finger:
+// opening would mean building the whole map behind the screen on the chance
+// that a finger is about to ask for it, and that work is what the poll was
+// taught to avoid.
+const DRAG_TAKE = 0.33;   // past a third of the screen and it goes
+const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it got
 (function () {
   let sx = 0, sy = 0, armed = false, onPeekStrip = false, dktAtTop = false;
+  // The live drag: the pane being carried, how wide its trip is, and the last
+  // two samples, which are what a flick is judged on.
+  let pane = null, paneW = 0, paneX = 0, lastX = 0, lastT = 0, vel = 0, frame = 0;
+  const paint = () => { frame = 0; if (pane) pane.style.transform = 'translateX(' + paneX + 'px)'; };
+  const letGo = () => {
+    if (frame) { cancelAnimationFrame(frame); frame = 0; }
+    if (pane) { pane.classList.remove('tp-drag'); pane.style.transform = ''; }
+    pane = null;
+  };
+  // A drag usually starts on the floor's own band, which is made of chips. The
+  // browser will not fire a click after a real 200px drag, but a short one it
+  // judged a tap would — and that chip would fire as the map slid away. A drag
+  // that actually moved the map eats the click it was born from.
+  const eatClick = () => {
+    const swallow = (ev) => { ev.stopPropagation(); ev.preventDefault(); };
+    document.addEventListener('click', swallow, { capture: true, once: true });
+    setTimeout(() => document.removeEventListener('click', swallow, { capture: true }), 350);
+  };
+  // A render mid-drag would replace the very node under the finger. The poll
+  // already holds its rebuild until _tpAnimUntil, so the drag keeps pushing
+  // that mark ahead of itself.
+  const holdRender = () => { state._tpAnimUntil = Date.now() + 400; };
   document.addEventListener('touchstart', (e) => {
     armed = false; onPeekStrip = false; dktAtTop = false;
+    letGo();
     // TABLET GETS THIS TOO (owner, Aug '26). Only the docket half is phone-only
     // below: at tablet width the docket is always on screen, so swiping it in
     // and out means nothing there. The floor half is wanted on both - it
@@ -33841,7 +33889,57 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }
     }
     sx = e.touches[0].clientX; sy = e.touches[0].clientY; armed = true;
   }, { passive: true });
+  // Passive, and it only ever writes a transform — the browser keeps scrolling
+  // and panning on its own thread (no non-passive listener on the document,
+  // ever). A drag that has taken the map claims the gesture; the release below
+  // sees that and does not judge it a second time.
+  document.addEventListener('touchmove', (e) => {
+    if (!armed || !e.touches[0]) return;
+    const t = e.touches[0], dx = t.clientX - sx, dy = t.clientY - sy;
+    if (!pane) {
+      // Only the map, only when there is a screen behind it to go back to,
+      // and only a clear leftward drag — the direction it leaves in.
+      if (!state.showTablePicker || !state._tpFromOrder || state._tpLeaving) return;
+      if (state.view !== 'order' || floorMustStay()) return;
+      if (dx > -10 || Math.abs(dx) < Math.abs(dy) * 1.4) return;
+      const el = document.querySelector('.middle-view.tp-view');
+      if (!el) return;
+      pane = el; paneW = el.getBoundingClientRect().width || window.innerWidth;
+      pane.classList.add('tp-drag');
+      lastX = t.clientX; lastT = e.timeStamp || Date.now(); vel = 0;
+    }
+    const now = e.timeStamp || Date.now();
+    // Smoothed, not the last pair alone: one jittery sample at the end of a
+    // slow, deliberate drag used to read as a flick and throw the map off.
+    if (now > lastT) vel = vel * 0.4 + ((t.clientX - lastX) / (now - lastT)) * 0.6; // px per ms, negative = leaving
+    lastX = t.clientX; lastT = now;
+    paneX = Math.max(-paneW, Math.min(0, dx + 10)); // the 10px it took to claim the drag is not a jump
+    holdRender();
+    if (!frame) frame = requestAnimationFrame(paint);
+  }, { passive: true });
+  document.addEventListener('touchcancel', () => { if (pane) { pane.style.transition = ''; paneX = 0; paint(); setTimeout(letGo, 200); } armed = false; });
   document.addEventListener('touchend', (e) => {
+    if (pane) {
+      armed = false;
+      const el = pane, w = paneW;
+      const take = (-paneX > w * DRAG_TAKE) || vel < -DRAG_FLICK;
+      el.style.transition = '';               // back to the map's own slide
+      el.classList.remove('tp-drag');
+      holdRender(); eatClick();
+      if (take) {
+        el.style.transform = 'translateX(-100%)';
+        pane = null;
+        let fired = false;
+        const gone = () => { if (fired) return; fired = true; el.style.transform = ''; closeTablePicker(null, true); };
+        el.addEventListener('transitionend', (ev) => { if (ev.target === el && ev.propertyName === 'transform') gone(); });
+        setTimeout(gone, tpSlideMs() + 80);   // the net, if the browser never says the slide ended
+      } else {
+        paneX = 0; el.style.transform = '';   // springs back to where it was
+        pane = null;
+        setTimeout(() => { el.style.transition = ''; }, tpSlideMs() + 40);
+      }
+      return;
+    }
     if (!armed) return; armed = false;
     const tch = e.changedTouches && e.changedTouches[0]; if (!tch) return;
     const dx = tch.clientX - sx, dy = tch.clientY - sy;

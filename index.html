@@ -33835,7 +33835,14 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
   // this way; the docket goes both ways, because unlike the map it is already
   // built and parked off the right edge whether it is open or not.
   let pane = null, paneW = 0, paneX = 0, base = 0, rest = 0, kind = '', slop = 0;
+  // `anchor` is where the panel was when THIS finger landed. Normally that is
+  // the same as `base` — the end it started from — but a panel caught in mid
+  // flight starts somewhere in between, while the trip it is still on is
+  // measured from the end it originally left.
+  let anchor = 0;
   let lastX = 0, lastT = 0, vel = 0, frame = 0;
+  // The landing slide, while it runs. A panel in flight can be caught.
+  let flight = null;
   const paint = () => { frame = 0; if (pane) pane.style.transform = 'translateX(' + paneX + 'px)'; };
   const letGo = () => {
     if (frame) { cancelAnimationFrame(frame); frame = 0; }
@@ -33877,6 +33884,35 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     src = null;
   };
   const once = (ev) => { if (ev.__panelSeen) return false; ev.__panelSeen = true; return true; };
+  // Catching a panel in flight: stop it dead where it is and hand it back to
+  // the finger. Where it SET OFF FROM stays the measuring stick, so a panel
+  // caught nine tenths of the way out and released still goes — it got there.
+  const catchFlight = (e) => {
+    // Held in a local: stopping the landing clears `flight`, and the trip's
+    // two ends still have to be read off it afterwards.
+    const f = flight;
+    if (!f) return false;
+    if (e.touches.length !== 1) return false;
+    if (document.body.classList.contains('osk-open')) return false;
+    const el = f.el;
+    if (!el.isConnected) { f.stop(); return false; }
+    // ONLY BY TOUCHING THE THING THAT IS MOVING. Catching on any touch at all
+    // would mean that for the third of a second after a flick, a tap on a menu
+    // tile grabbed the panel instead of ringing the item in.
+    const t0 = e.touches[0], r = el.getBoundingClientRect();
+    if (t0.clientX < r.left || t0.clientX > r.right || t0.clientY < r.top || t0.clientY > r.bottom) return false;
+    let at = 0;
+    try { at = new DOMMatrixReadOnly(getComputedStyle(el).transform).m41; } catch (err) { return false; }
+    f.stop();                            // the landing is cancelled, not finished
+    el.classList.add('panel-drag');
+    el.style.transform = 'translateX(' + at + 'px)';
+    pane = el; paneW = f.w; base = f.from; rest = f.to; kind = f.kind;
+    anchor = at; paneX = at; slop = 0;
+    const t = e.touches[0];
+    lastX = t.clientX; lastT = e.timeStamp || Date.now(); vel = 0;
+    holdRender();
+    return true;
+  };
   const claim = (dx, dy, target) => {
     if (Math.abs(dx) < Math.abs(dy) * 1.4) return null; // a vertical drag is a scroll
     // THE MAP: only the way out, because opening would mean building the whole
@@ -33927,6 +33963,12 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
   document.addEventListener('touchstart', (e) => {
     armed = false; onPeekStrip = false; dktAtTop = false;
     letGo();
+    // A panel still sliding is caught before anything else is considered —
+    // the finger is plainly reaching for the thing that is moving.
+    if (!state.frozen && e.touches[0] && catchFlight(e)) {
+      sx = e.touches[0].clientX; sy = e.touches[0].clientY; armed = true;
+      return;
+    }
     if (state.frozen) return;
     if (!state.currentStaff) return;
     const t = e.target;
@@ -33976,7 +34018,7 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
       const c = claim(dx, dy, e.target);
       if (!c) return;
       pane = c.el; paneW = c.w; base = c.base; rest = c.rest; kind = c.kind; slop = c.slop;
-      paneX = base;
+      anchor = base; paneX = base;
       pane.classList.add('panel-drag');
       lastX = t.clientX; lastT = e.timeStamp || Date.now(); vel = 0;
     }
@@ -33986,7 +34028,7 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     if (now > lastT) vel = vel * 0.4 + ((t.clientX - lastX) / (now - lastT)) * 0.6; // px per ms
     lastX = t.clientX; lastT = now;
     // The few pixels it took to claim the drag are not a jump.
-    const want = base + dx + slop;
+    const want = anchor + dx + slop;
     paneX = Math.max(Math.min(base, rest), Math.min(Math.max(base, rest), want));
     holdRender();
     if (!frame) frame = requestAnimationFrame(paint);
@@ -34027,9 +34069,11 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
       el.classList.remove('panel-drag');         // back to the panel's own slide
       holdRender(); eatClick();
       pane = null; kind = '';
-      let fired = false;
+      let fired = false, net = 0, onTransEnd = null;
+      const unwatch = () => { clearTimeout(net); if (onTransEnd) el.removeEventListener('transitionend', onTransEnd); flight = null; };
       const settled = () => {
         if (fired) return; fired = true;
+        unwatch();
         el.style.transform = '';
         if (was === 'map-in') {
           // Landed: finish what openTablePicker left to the finger. Sent back:
@@ -34051,8 +34095,16 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
       if (was === 'docket') el.classList.toggle('open', land === 0);
       el.style.transform = 'translateX(' + land + 'px)';
       if (land === paneX) { settled(); return; }   // already there: no slide to wait for
-      el.addEventListener('transitionend', (ev) => { if (ev.target === el && ev.propertyName === 'transform') settled(); });
-      setTimeout(settled, tpSlideMs() + 120);  // the net, if the browser never says the slide ended
+      onTransEnd = (ev) => { if (ev.target === el && ev.propertyName === 'transform') settled(); };
+      el.addEventListener('transitionend', onTransEnd);
+      net = setTimeout(settled, tpSlideMs() + 120);  // the net, if the browser never says the slide ended
+      // A PANEL STILL MOVING CAN BE CAUGHT. Until now a finger landing on one
+      // mid-slide was ignored until it had finished — the screen carried on
+      // without you, which is the one thing a panel that follows the finger is
+      // supposed to stop. The trip is remembered by the two ends it is
+      // travelling between, so catching it does not restart the journey: the
+      // release still measures how far it got from where it set off.
+      flight = { el, kind: was, from, to, w, stop: unwatch };
       return;
     }
     if (!armed) return; armed = false;

@@ -11817,6 +11817,65 @@ app.get('/connect.svg', async (req, res) => {
 });
 
 // ---------- Start the server ----------
+// ---------- Bootstrap: the whole room in ONE trip ----------
+// Signing in used to cost TWENTY-FOUR round trips. On a desk that is nothing;
+// on the venue's wifi it is the whole wait, and it grows with every new list
+// somebody adds. Measured at 90ms of latency: the floor took 285ms to appear
+// and the menu 612ms; over one call that is one wait, not twenty-four.
+//
+// It does NOT copy those handlers — it CALLS them, and collects what each one
+// answers. Two things doing one job is how a payload drifts from the endpoint
+// it was copied from, and the menu, the note types and the quick notes each do
+// real work on the way out (stock counts, normalising) that must not be
+// duplicated here.
+const BOOTSTRAP_PARTS = {
+  theme: '/api/theme',
+  settings: '/api/settings',
+  floorPlans: '/api/floorplans',
+  menu: '/api/menu',
+  categories: '/api/categories',
+  subcategories: '/api/subcategories',
+  salesCategories: '/api/sales-categories',
+  modifierGroups: '/api/modifier-groups',
+  savedColors: '/api/saved-colors',
+  sizePresets: '/api/size-presets',
+  noteCategories: '/api/note-categories',
+  quickNotePresets: '/api/quicknote-presets',
+  discountPresets: '/api/discount-presets',
+  voidReasons: '/api/void-reasons',
+  happyHours: '/api/happy-hours',
+  printerStations: '/api/printer-stations',
+  customers: '/api/customers',
+  combos: '/api/combos',
+  ruleFields: '/api/rule-fields',
+};
+function bootstrapPart(path, req) {
+  return new Promise((resolve) => {
+    const router = app._router || app.router;
+    const layer = (router && router.stack || []).find(l => l.route && l.route.path === path && l.route.methods && l.route.methods.get);
+    if (!layer) return resolve(null);
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; resolve(v === undefined ? null : v); } };
+    // A fake reply that only has to catch what these handlers actually use.
+    const res = {
+      json: finish,
+      send: finish,
+      status() { return res; },
+      set() { return res; },
+      type() { return res; },
+    };
+    try { layer.route.stack[0].handle(req, res, () => finish(null)); }
+    catch (e) { finish(null); }
+  });
+}
+app.get('/api/bootstrap', async (req, res) => {
+  const keys = Object.keys(BOOTSTRAP_PARTS);
+  const vals = await Promise.all(keys.map(k => bootstrapPart(BOOTSTRAP_PARTS[k], req)));
+  const out = {};
+  keys.forEach((k, i) => { out[k] = vals[i]; });
+  res.json(out);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   const nets = os.networkInterfaces();
   const addresses = [];
@@ -15510,13 +15569,33 @@ async function loadInitial() {
     // on the first (the locks are two bytes, so they simply always come).
     // Two trips in a row were a third of the sign-in (owner, Sep '26:
     // "signing in takes a bit of time").
-    const [theme, settings, floorPlans] = await Promise.all([
-      api('/api/theme'), api('/api/settings'), api('/api/floorplans'),
+    // ONE TRIP FOR THE WHOLE ROOM. It was twenty-four — a call per list — and
+    // every new list somebody added made signing in slower. Measured at 90ms
+    // of latency, which is an ordinary venue wifi: the floor took 285ms to
+    // arrive and the menu 612ms. They all come together now.
+    // The bootstrap goes out ALONGSIDE the orders and the locks, not before
+    // them: none of them waits on the others.
+    // A server without it (an older till, the browser-only preview) falls
+    // back to the calls it has always made, so nothing is stranded.
+    const [reply] = await Promise.all([
+      api('/api/bootstrap').catch(() => null),
       refreshOrders(),
       refreshSummary(),
       refreshTableLocks(),
       state.currentStaff ? loadShift() : Promise.resolve(),
     ]);
+    // AN ANSWER IS NOT THE SAME AS THE RIGHT ANSWER. The preview's own tiny
+    // server answers every /api path with something rather than a 404, so a
+    // "did it throw?" check passed and the app then trusted a bootstrap with
+    // nothing in it — the theme came back null and the whole screen died on
+    // open (caught by the sell-flow gate, Sep '26). It has to LOOK like the
+    // room before it is used.
+    const boot = (reply && reply.theme && reply.settings
+      && Array.isArray(reply.floorPlans) && Array.isArray(reply.menu)
+      && Array.isArray(reply.categories)) ? reply : null;
+    const [theme, settings, floorPlans] = boot
+      ? [boot.theme, boot.settings, boot.floorPlans]
+      : await Promise.all([api('/api/theme'), api('/api/settings'), api('/api/floorplans')]);
     state.theme = theme; applyTheme();
     state.settings = settings; applyPanelLayout();
     state.floorPlans = floorPlans;
@@ -15539,7 +15618,14 @@ async function loadInitial() {
         savedColors, sizePresets, noteCategories,
         quickNotePresets,
         discountPresets, voidReasons, happyHours, printerStations, customers, combos,
-        ruleFields] = await Promise.all([
+        ruleFields] = boot
+        ? [boot.menu, boot.categories, boot.subcategories, boot.salesCategories, boot.modifierGroups,
+           boot.savedColors || [], boot.sizePresets, boot.noteCategories,
+           boot.quickNotePresets || [],
+           boot.discountPresets, boot.voidReasons, boot.happyHours,
+           boot.printerStations, boot.customers, boot.combos,
+           boot.ruleFields || {}]
+        : await Promise.all([
           api('/api/menu'), api('/api/categories'), api('/api/subcategories'),
           api('/api/sales-categories'), api('/api/modifier-groups'),
           api('/api/saved-colors').catch(() => []),

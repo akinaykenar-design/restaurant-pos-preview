@@ -1235,6 +1235,46 @@ label.toggle-row{display:flex;align-items:center;gap:8px;cursor:pointer;font-siz
 .hist-day-head{font-size:var(--fs-md);font-weight:700;color:var(--charcoal-soft);margin:18px 0 8px;}
 .hist-day-head:first-child{margin-top:0;}
 
+/* TABLE HISTORY — one box, one button, one popup behind it (owner, Sep '26:
+   "make this as easy as possible"). The period chips above are shortcuts to
+   the same window the calendar sets, so picking days switches them off. */
+.hist-seg{margin:0 0 12px;}
+.hist-bar{display:flex;gap:8px;align-items:center;margin:0 0 16px;flex-wrap:wrap;}
+.hist-find{position:relative;flex:1;min-width:220px;max-width:420px;}
+.hist-find input{width:100%;box-sizing:border-box;height:var(--h-control);padding:0 44px 0 40px;border-radius:var(--btn-radius);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:inherit;}
+.hist-mag{position:absolute;left:12px;top:50%;transform:translateY(-50%);display:flex;pointer-events:none;color:var(--text-secondary);}
+.hist-mag svg{width:20px;height:20px;display:block;}
+.hist-x{position:absolute;right:4px;top:50%;transform:translateY(-50%);width:36px;height:36px;display:grid;place-items:center;border:none;background:none;border-radius:var(--btn-radius);color:var(--text-secondary);cursor:pointer;}
+.hist-x svg{width:20px;height:20px;display:block;}
+.hist-narrow{width:auto;height:var(--h-control);white-space:nowrap;}
+.hist-narrow.on{border-color:var(--orange);box-shadow:inset 0 0 0 var(--ring) var(--orange);}
+.hist-clear{width:auto;margin-left:8px;}
+
+/* The Narrow popup: a FORM (Popup law) tall enough to scroll on a phone. */
+.hist-sheet{max-height:82vh;display:flex;flex-direction:column;}
+/* The keys stay put while the chips scroll — a popup you have to scroll to
+   get OUT of is a popup with no visible way out (Popup exits). */
+.hist-body{overflow-y:auto;flex:1;min-height:0;}
+.hist-cal{margin-bottom:16px;}
+.hist-cal-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;}
+.hist-cal-name{font-size:var(--fs-lg);font-weight:700;color:var(--text-primary);}
+.hist-wk{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin-bottom:4px;}
+.hist-wk span{text-align:center;font-size:var(--fs-chip);font-weight:600;color:var(--text-secondary);}
+.hist-days{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;}
+.hist-day{min-height:var(--h-control);border:none;background:none;border-radius:var(--btn-radius);font-size:var(--fs-md);font-weight:600;font-family:inherit;color:var(--text-primary);cursor:pointer;}
+.hist-day.mid{background:var(--orange-dim);}
+.hist-day.edge{background:var(--orange);color:#fff;font-weight:700;}
+.hist-day.ahead{opacity:var(--dim);}
+.hist-group{margin-bottom:16px;}
+.hist-glabel{font-size:var(--fs-chip);font-weight:700;color:var(--text-secondary);margin-bottom:8px;}
+.hist-chips{display:flex;flex-wrap:wrap;gap:8px;}
+.hist-chip{flex:none;text-transform:capitalize;}
+.hist-nums{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.modal .hist-nums input{flex:0 0 88px;width:88px;box-sizing:border-box;height:var(--h-control);padding:0 12px;border-radius:var(--btn-radius);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);}
+.hist-dash{color:var(--text-secondary);}
+.hist-count{font-size:var(--fs-md);font-weight:700;color:var(--text-secondary);margin-bottom:12px;}
+
+
 /* The bottom bar owns its 57px: popups centre in the space ABOVE it, so a
    tall popup's Close never slides under the bar (owner, Aug '26). */
 .modal-bg{position:fixed;inset:0;background:var(--scrim);display:flex;align-items:center;justify-content:center;z-index:calc(var(--z-panel) + 5);padding:20px 20px calc(20px + 57px);}
@@ -12277,6 +12317,16 @@ let state = {
   giftCardAppliedCode: '',
   adjustStockModal: null, // { itemId, change, reason }
   summary: { ordersToday: 0, salesToday: 0, avgTicket: 0, tipsToday: 0 },
+  // Table history — what the list is narrowed to. histQ is the one box (it
+  // matches table, customer, staff, ticket number, how it was paid and the
+  // amount); histFrom/histTo are picked days and OUTRANK the period chips;
+  // histF holds the chip filters. histSheet is the open Narrow popup, and it
+  // carries a snapshot so Cancel really cancels.
+  histQ: '',
+  histFrom: null,
+  histTo: null,
+  histF: { status: [], paid: [], staff: [], has: [], min: '', max: '', covers: '' },
+  histSheet: null,
   showCheckout: false,
   paymentMethod: 'card',
   cashGiven: '',
@@ -19110,6 +19160,7 @@ function render() {
     ${state.notesPanel ? renderNotesMiddle() : ''}
     ${state.customerPane ? renderCustomerMiddle() : ''}
     ${state.moveItems && !state.showTablePicker ? renderMoveItemsMiddle() : ''}
+    ${state.histSheet ? renderHistSheet() : ''}
     ${state.confirmDialog ? renderConfirmDialog() : ''}
     ${state.idleWarn ? renderIdleWarn() : ''}
     ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
@@ -22093,53 +22144,211 @@ function histTime(o) { return o.closedAt || o.calledAwayAt || o.createdAt || 0; 
 // ONE trading day (owner, Sep '26): 4am, the same rule as server.js — change both or neither.
 function dayStartsAt() { const h = parseInt(state.settings && state.settings.dayStartsAt, 10); return Number.isFinite(h) && h >= 0 && h <= 12 ? h : 4; } // Settings → Venue
 function tradingDayStart(ts) { const d = new Date(ts); d.setHours(dayStartsAt(), 0, 0, 0); return d.getTime() > ts ? d.getTime() - 86400000 : d.getTime(); }
+// ---- Table history: one box, one calendar, one set of chips ----------------
+// THE WHOLE JOB IS "NARROW THIS LIST" (owner, Sep '26: "tables closed able to
+// search by date amounts customer, etc … make this as easy as possible"). So
+// there is ONE mechanism: a box you type anything into, and a popup that holds
+// the days and the chips. The period chips above are shortcuts to the same
+// window, not a second control — picking days switches them off.
+const HIST_PERIODS = [['today', 'Today'], ['yest', 'Yesterday'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year'], ['all', 'All']];
+const HIST_HAS = [['discount', 'Discount'], ['surcharge', 'Surcharge'], ['tip', 'Tip'], ['customer', 'Customer']];
+const HIST_STATUS = [['paid', 'Paid'], ['open', 'Open'], ['void', 'Void'], ['refunded', 'Refunded']];
+// The day a calendar square stands for, as a trading day (4am turnover), so a
+// 1am bill files under the night it belongs to — the same rule the list groups by.
+function histDayStart(y, m, d) { return tradingDayStart(new Date(y, m, d, 12, 0, 0, 0).getTime()); }
+// The window on screen: picked days win, otherwise the chip.
+function histWindow() {
+  if (state.histFrom) return { from: state.histFrom, to: (state.histTo || state.histFrom) + 86400000 };
+  const period = state.histPeriod || 'all';
+  const startToday = tradingDayStart(Date.now());
+  if (period === 'today') return { from: startToday, to: Infinity };
+  if (period === 'yest') return { from: startToday - 86400000, to: startToday };
+  if (period === 'week') return { from: startToday - 6 * 86400000, to: Infinity };
+  // Month and year are tax periods and stay on the calendar (the receipt's date wins there).
+  if (period === 'month') { const d = new Date(); d.setDate(1); d.setHours(0, 0, 0, 0); return { from: d.getTime(), to: Infinity }; }
+  if (period === 'year') { const d = new Date(); d.setMonth(0, 1); d.setHours(0, 0, 0, 0); return { from: d.getTime(), to: Infinity }; }
+  return { from: 0, to: Infinity };
+}
+// Everything a row can be found by, in one string.
+function histHaystack(o) {
+  const tot = o.grandTotal !== undefined ? o.grandTotal : o.total;
+  return [
+    '#' + o.id, o.id, o.table, o.customerName, o.staffName, o.paymentMethod, o.orderType,
+    o.status, (o.discount && o.discount.label) || '', o.voidReason || '',
+    Number(tot || 0).toFixed(2), String(tot || 0),
+  ].join(' ').toLowerCase();
+}
+function histFilterCount() {
+  const f = state.histF || {};
+  return (f.status || []).length + (f.paid || []).length + (f.staff || []).length + (f.has || []).length
+    + (f.min ? 1 : 0) + (f.max ? 1 : 0) + (f.covers ? 1 : 0);
+}
+function histAnythingOn() { return !!(state.histQ || state.histFrom || histFilterCount()); }
+function histMatch(o, win) {
+  const t = histTime(o);
+  if (t < win.from || t >= win.to) return false;
+  const q = (state.histQ || '').trim().toLowerCase().replace(/^#/, '');
+  if (q && histHaystack(o).indexOf(q) < 0) return false;
+  const f = state.histF || {};
+  if ((f.status || []).length) {
+    const refunded = (o.refundedTotal || 0) > 0.005;
+    const ok = f.status.some(s => s === 'refunded' ? refunded : o.status === s);
+    if (!ok) return false;
+  }
+  if ((f.paid || []).length && !f.paid.includes(o.paymentMethod || '')) return false;
+  if ((f.staff || []).length && !f.staff.includes(o.staffName || '')) return false;
+  for (const h of (f.has || [])) {
+    if (h === 'discount' && !(o.discount && o.discount.kind !== 'surcharge')) return false;
+    if (h === 'surcharge' && !(o.discount && o.discount.kind === 'surcharge')) return false;
+    if (h === 'tip' && !(o.tip > 0)) return false;
+    if (h === 'customer' && !o.customerName && !o.customerId) return false;
+  }
+  const tot = o.grandTotal !== undefined ? o.grandTotal : o.total;
+  if (f.min !== '' && f.min != null && !(Number(tot) >= parseFloat(f.min))) return false;
+  if (f.max !== '' && f.max != null && !(Number(tot) <= parseFloat(f.max))) return false;
+  if (f.covers !== '' && f.covers != null && Number(o.covers || 0) !== parseInt(f.covers, 10)) return false;
+  return true;
+}
+function histRows() {
+  const win = histWindow();
+  return state.orders.filter(o => histMatch(o, win)).sort((a, b) => histTime(b) - histTime(a));
+}
+// The chips a venue actually has, read off its own accounts — never a list
+// someone has to keep in step with the till.
+function histPaidWays() { return [...new Set(state.orders.map(o => o.paymentMethod).filter(Boolean))].sort(); }
+function histStaffNames() { return [...new Set(state.orders.map(o => o.staffName).filter(Boolean))].sort(); }
+// What the one button says: the days, and how many chips are on.
+function histSheetLabel() {
+  const f = histFilterCount();
+  const days = state.histFrom
+    ? (state.histTo && state.histTo !== state.histFrom
+        ? `${fmtDate(state.histFrom)} – ${fmtDate(state.histTo)}` : fmtDate(state.histFrom))
+    : 'Any date';
+  return days + (f ? ` · ${f}` : '');
+}
+function histClearAll() {
+  state.histQ = ''; state.histFrom = null; state.histTo = null;
+  state.histF = { status: [], paid: [], staff: [], has: [], min: '', max: '', covers: '' };
+}
+
 function renderTableHistoryView() {
   const period = state.histPeriod || 'all';
-  const PERIODS = [['today', 'Today'], ['week', 'Week'], ['month', 'Month'], ['year', 'Year'], ['all', 'All']];
-  // Period thresholds off the TRADING day (turns over at 4am — the same rule
-  // the server's reports use), week = the last 7 of them. Filtered on PAID time.
-  const startToday = tradingDayStart(Date.now());
-  const startWeek = startToday - 6 * 86400000;
-  // Month and year are tax periods and stay on the calendar (the receipt's date wins there).
-  const dm = new Date(); dm.setDate(1); dm.setHours(0, 0, 0, 0);
-  const dy = new Date(); dy.setMonth(0, 1); dy.setHours(0, 0, 0, 0);
-  const threshold = period === 'today' ? startToday : period === 'week' ? startWeek : period === 'month' ? dm.getTime() : period === 'year' ? dy.getTime() : 0;
+  const onDays = !!state.histFrom;   // picked days outrank the chips
   return `
-    <div class="seg" style="margin:0 0 12px;display:inline-flex;">
-      ${PERIODS.map(([k, lbl]) => `<button class="${period === k ? 'active' : ''}" data-act="hist-period" data-val="${k}">${lbl}</button>`).join('')}
+    <div class="seg hist-seg">
+      ${HIST_PERIODS.map(([k, lbl]) => `<button class="${!onDays && period === k ? 'active' : ''}" data-act="hist-period" data-val="${k}">${lbl}</button>`).join('')}
     </div>
-    <div style="display:flex;gap:8px;align-items:center;margin:0 0 14px;">
-      <label class="ts" style="margin:0;">Table</label>
-      <input id="hist-table-filter" type="text" value="${esc(state.histTableFilter || '')}" placeholder="all tables" style="width:120px;padding:8px 8px;border-radius:var(--r-control);border:1px solid var(--steel-300);background:var(--surface);color:var(--text-primary);">
-      ${state.histTableFilter ? `<button class="icon-sq" data-act="hist-table-clear">${ACT_X_SVG}</button>` : ''}
+    <div class="hist-bar">
+      <div class="hist-find">
+        <span class="hist-mag">${SYS_SEARCH_SVG}</span>
+        <input id="hist-q" type="text" value="${esc(state.histQ || '')}" placeholder="Table, customer, staff, ticket or amount" autocomplete="off">
+        ${/* The ✕ is ALWAYS in the page and merely hidden — drawing it on the
+              first keystroke meant a whole-page render mid-word, and the field
+              went out from under the cursor. */ ''}
+        <button class="hist-x" data-act="hist-q-clear" aria-label="Clear" ${state.histQ ? '' : 'hidden'}>${ACT_X_SVG}</button>
+      </div>
+      <button class="btn-secondary sm hist-narrow${state.histFrom || histFilterCount() ? ' on' : ''}" data-act="hist-sheet">${esc(histSheetLabel())}</button>
     </div>
-    ${(() => {
-      const f = (state.histTableFilter || '').trim().toLowerCase();
-      let rows = state.orders.filter(o => histTime(o) >= threshold);
-      if (f) rows = rows.filter(o => String(o.table || '').toLowerCase() === f);
-      // Newest paid first.
-      rows = rows.slice().sort((a, b) => histTime(b) - histTime(a));
-      if (rows.length === 0) return `<div class="empty-hist">No accounts${f ? ' for table ' + esc(state.histTableFilter) : ''}${period !== 'all' ? ' in this period' : ''}.</div>`;
-      // Group under a date header per day so it reads as a diary of paid tables.
-      let lastDay = '';
-      return rows.map(o => {
-        const t = histTime(o);
-        const dayKey = new Date(tradingDayStart(t)).toDateString(); // a 1am bill files under the night it belongs to
-        const header = dayKey !== lastDay ? (lastDay = dayKey, `<div class="hist-day-head">${fmtDate(tradingDayStart(t))}</div>`) : '';
-        const paidLabel = o.closedAt ? fmtTime(o.closedAt) : (o.status === 'open' ? 'open' : fmtTime(t));
-        return `${header}
-        <div class="order-row" data-act="detail" data-id="${o.id}">
-          <div class="order-badge">#${o.id}</div>
-          <div class="order-info">
-            <div class="t1">${o.orderType === 'dine-in' ? 'Table ' + esc(o.table) : esc(o.customerName || o.orderType)}${o.discount ? ` <span class="status-chip course">${o.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span>` : ''}</div>
-            <div class="t2">${paidLabel} · ${o.items.reduce((s, i) => s + i.qty, 0)} items${o.covers ? ' · ' + o.covers + ' covers' : ''} · ${o.paymentMethod || 'unpaid'} · ${esc(o.staffName || 'Unknown')}</div>
-          </div>
-          <span class="status-chip ${o.status === 'void' ? 'void' : o.status === 'open' ? 'course' : 'paid'}">${o.status === 'open' ? 'open tab' : o.status}</span>
-          <div class="order-total">${money(o.grandTotal !== undefined ? o.grandTotal : o.total)}${o.tip ? `<div class="ts" style="font-size:var(--fs-md);">+${money(o.tip)} tip</div>` : ''}</div>
-        </div>`;
-      }).join('');
-    })()}
+    <div id="hist-rows">${histRowsHtml()}</div>
   `;
+}
+// The rows alone, so typing in the box repaints these and nothing else — the
+// field keeps the cursor, and a long list does not rebuild the whole page.
+function histRowsHtml() {
+  const rows = histRows();
+  if (rows.length === 0) {
+    return `<div class="empty-hist">No accounts match.${histAnythingOn()
+      ? ` <button class="btn-secondary sm hist-clear" data-act="hist-clear-all">Clear</button>` : ''}</div>`;
+  }
+  let lastDay = '';
+  return rows.map(o => {
+    const t = histTime(o);
+    const dayKey = new Date(tradingDayStart(t)).toDateString(); // a 1am bill files under the night it belongs to
+    const header = dayKey !== lastDay ? (lastDay = dayKey, `<div class="hist-day-head">${fmtDate(tradingDayStart(t))}</div>`) : '';
+    const paidLabel = o.closedAt ? fmtTime(o.closedAt) : (o.status === 'open' ? 'open' : fmtTime(t));
+    // The NAME rides on the row, not just on takeaways — it is one of the
+    // things you search by, so a row found by it has to show it.
+    const who = o.orderType === 'dine-in' ? 'Table ' + esc(o.table) : esc(o.customerName || o.orderType);
+    const alsoName = o.orderType === 'dine-in' && o.customerName ? ` · ${esc(o.customerName)}` : '';
+    return `${header}
+    <div class="order-row" data-act="detail" data-id="${o.id}">
+      <div class="order-badge">#${o.id}</div>
+      <div class="order-info">
+        <div class="t1">${who}${alsoName}${o.discount ? ` <span class="status-chip course">${o.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span>` : ''}</div>
+        <div class="t2">${paidLabel} · ${o.items.reduce((s, i) => s + i.qty, 0)} items${o.covers ? ' · ' + o.covers + ' covers' : ''} · ${o.paymentMethod || 'unpaid'} · ${esc(o.staffName || 'Unknown')}</div>
+      </div>
+      <span class="status-chip ${o.status === 'void' ? 'void' : o.status === 'open' ? 'course' : 'paid'}">${o.status === 'open' ? 'open tab' : o.status}</span>
+      <div class="order-total">${money(o.grandTotal !== undefined ? o.grandTotal : o.total)}${o.tip ? `<div class="ts" style="font-size:var(--fs-md);">+${money(o.tip)} tip</div>` : ''}</div>
+    </div>`;
+  }).join('');
+}
+// NARROW — a FORM (Popup law): the month, then the chips, then the keys. It
+// applies as you tap, so the list behind is the answer; Cancel puts back the
+// snapshot taken when it opened.
+function renderHistSheet() {
+  const sh = state.histSheet;
+  if (!sh) return '';
+  const f = state.histF;
+  const m = new Date(sh.month);
+  const y = m.getFullYear(), mo = m.getMonth();
+  const first = new Date(y, mo, 1);
+  const lead = (first.getDay() + 6) % 7;           // weeks start Monday
+  const days = new Date(y, mo + 1, 0).getDate();
+  const today = tradingDayStart(Date.now());
+  const from = state.histFrom, to = state.histTo || state.histFrom;
+  const chip = (act, group, val, lbl, on) =>
+    `<button class="pay-opt hist-chip${on ? ' active' : ''}" data-act="${act}" data-group="${group}" data-val="${esc(val)}">${esc(lbl)}</button>`;
+  const group = (title, chips) => chips ? `<div class="hist-group"><div class="hist-glabel">${title}</div><div class="hist-chips">${chips}</div></div>` : '';
+  const ways = histPaidWays(), staff = histStaffNames();
+  const count = histRows().length;
+  return `
+  <div class="modal-bg">
+    <div class="modal hist-sheet" data-stop="1">
+      <h2>Narrow the list</h2>
+      <div class="hist-body">
+      <div class="hist-cal">
+        <div class="hist-cal-head">
+          <button class="icon-sq" data-act="hist-month" data-val="-1" aria-label="Previous month">${SYS_CHEV_L_SVG}</button>
+          <div class="hist-cal-name">${m.toLocaleString(undefined, { month: 'long' })} ${y}</div>
+          <button class="icon-sq" data-act="hist-month" data-val="1" aria-label="Next month">${SYS_CHEV_R_SVG}</button>
+        </div>
+        <div class="hist-wk">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(d => `<span>${d}</span>`).join('')}</div>
+        <div class="hist-days">
+          ${Array.from({ length: lead }).map(() => '<span></span>').join('')}
+          ${Array.from({ length: days }).map((_, i) => {
+            const d = i + 1, ts = histDayStart(y, mo, d);
+            const edge = from && (ts === from || ts === to);
+            const mid = from && to && ts > from && ts < to;
+            const future = ts > today;
+            return `<button class="hist-day${edge ? ' edge' : mid ? ' mid' : ''}${future ? ' ahead' : ''}" data-act="hist-day" data-val="${ts}">${d}</button>`;
+          }).join('')}
+        </div>
+      </div>
+      ${group('Status', HIST_STATUS.map(([v, l]) => chip('hist-chip', 'status', v, l, (f.status || []).includes(v))).join(''))}
+      ${group('Paid with', ways.map(w => chip('hist-chip', 'paid', w, w, (f.paid || []).includes(w))).join(''))}
+      ${group('Staff', staff.map(n => chip('hist-chip', 'staff', n, n, (f.staff || []).includes(n))).join(''))}
+      ${group('Has', HIST_HAS.map(([v, l]) => chip('hist-chip', 'has', v, l, (f.has || []).includes(v))).join(''))}
+      <div class="hist-group">
+        <div class="hist-glabel">Amount and covers</div>
+        <div class="hist-nums">
+          <input id="hist-min" type="number" inputmode="decimal" value="${esc(f.min || '')}" placeholder="min">
+          <span class="hist-dash">–</span>
+          <input id="hist-max" type="number" inputmode="decimal" value="${esc(f.max || '')}" placeholder="max">
+          <input id="hist-covers" type="number" inputmode="numeric" value="${esc(f.covers || '')}" placeholder="covers">
+        </div>
+      </div>
+      </div>
+      <div class="hist-count">${count} account${count === 1 ? '' : 's'}</div>
+      <div class="modal-actions">
+        <button class="icon-action neutral" data-act="hist-sheet-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        ${/* Clear is GREY, and always there: it destroys nothing (Popup law —
+              only a key that destroys wears red), and a key that comes and
+              goes would move the row under the finger. */ ''}
+        <button class="icon-action neutral" data-act="hist-clear-all">${ACT_X_SVG}<span class="ia-label">Clear</span></button>
+        <button class="icon-action send" data-act="hist-sheet-save">${ACT_TICK_SVG}<span class="ia-label">Show</span></button>
+      </div>
+    </div>
+  </div>`;
 }
 
 function renderRegisterAdmin() {
@@ -38286,8 +38495,23 @@ function bindEvents() {
   if (exportFromInput) exportFromInput.addEventListener('change', (e) => { state.analyticsFrom = e.target.value; render(); });
   const exportToInput = document.getElementById('export-to-input');
   if (exportToInput) exportToInput.addEventListener('change', (e) => { state.analyticsTo = e.target.value; render(); });
-  const histTableFilter = document.getElementById('hist-table-filter');
-  if (histTableFilter) histTableFilter.addEventListener('input', (e) => { state.histTableFilter = e.target.value; const rows = document.querySelector('.hist-summary'); if (rows) { const sel = histTableFilter.selectionStart; render(); const el = document.getElementById('hist-table-filter'); if (el) { el.focus(); try { el.setSelectionRange(sel, sel); } catch (_) {} } } });
+  // TYPING NARROWS AS YOU GO, and only the rows are repainted — a whole-page
+  // render would take the field out from under the cursor mid-word.
+  const histQ = document.getElementById('hist-q');
+  if (histQ) histQ.addEventListener('input', (e) => {
+    state.histQ = e.target.value;
+    const rows = document.getElementById('hist-rows');
+    if (rows) rows.innerHTML = histRowsHtml();
+    const x = document.querySelector('.hist-find .hist-x');
+    if (x) x.hidden = !state.histQ;
+  });
+  const histNum = (id, key) => { const el = document.getElementById(id); if (el) el.addEventListener('input', (ev) => {
+    state.histF[key] = ev.target.value;
+    const c = document.querySelector('.hist-count');
+    if (c) { const n = histRows().length; c.textContent = `${n} account${n === 1 ? '' : 's'}`; }
+    const rows = document.getElementById('hist-rows'); if (rows) rows.innerHTML = histRowsHtml();
+  }); };
+  histNum('hist-min', 'min'); histNum('hist-max', 'max'); histNum('hist-covers', 'covers');
   const adminSearchInput = document.getElementById('admin-search-input');
   if (adminSearchInput) {
     adminSearchInput.addEventListener('input', (e) => {
@@ -39377,8 +39601,44 @@ function handleActClick(el, e) {
       }
       else if (act === 'house-log-add') { addHouseLogEntry(); }
       else if (act === 'stock-clear') { saveMenuItemCountdown(el.dataset.id, ''); }
-      else if (act === 'hist-table-clear') { state.histTableFilter = ''; render(); }
-      else if (act === 'hist-period') { state.histPeriod = el.dataset.val; render(); }
+      else if (act === 'hist-q-clear') { state.histQ = ''; render(); }
+      else if (act === 'hist-period') { state.histPeriod = el.dataset.val; state.histFrom = null; state.histTo = null; render(); }
+      else if (act === 'hist-sheet') {
+        // The snapshot is what Cancel puts back — the chips apply as you tap
+        // so the list behind is the answer, and that is only safe if leaving
+        // by Cancel really leaves.
+        state.histSheet = { month: state.histFrom || Date.now(),
+          snap: { from: state.histFrom, to: state.histTo, f: JSON.parse(JSON.stringify(state.histF)) } };
+        render();
+      }
+      else if (act === 'hist-sheet-cancel') {
+        const sn = state.histSheet && state.histSheet.snap;
+        if (sn) { state.histFrom = sn.from; state.histTo = sn.to; state.histF = sn.f; }
+        state.histSheet = null; render();
+      }
+      else if (act === 'hist-sheet-save') { state.histSheet = null; render(); }
+      else if (act === 'hist-clear-all') { histClearAll(); render(); }
+      else if (act === 'hist-month') {
+        const d = new Date(state.histSheet.month); d.setDate(1);
+        d.setMonth(d.getMonth() + parseInt(el.dataset.val, 10));
+        state.histSheet.month = d.getTime(); render();
+      }
+      else if (act === 'hist-day') {
+        // One tap picks a day. A second picks the other end. A third starts
+        // again — no modes, no "from/to" boxes to fill in.
+        const ts = parseInt(el.dataset.val, 10);
+        if (!state.histFrom || state.histTo) { state.histFrom = ts; state.histTo = null; }
+        else if (ts < state.histFrom) { state.histTo = state.histFrom; state.histFrom = ts; }
+        else { state.histTo = ts; }
+        render();
+      }
+      else if (act === 'hist-chip') {
+        const g = el.dataset.group, v = el.dataset.val;
+        const list = state.histF[g] || (state.histF[g] = []);
+        const i = list.indexOf(v);
+        if (i < 0) list.push(v); else list.splice(i, 1);
+        render();
+      }
       else if (act === 'close-void-reason') { state.voidItemPrompt = null; render(); }
       else if (act === 'remove-sent-line') { removeSentLine(el); }
       else if (act === 'remove-new-line') { const i = parseInt(el.dataset.idx); if (!isNaN(i)) removeLine(i); }

@@ -62,6 +62,7 @@
   --charcoal:#23211D; --charcoal-soft:#918E88;
   --orange:#2F74C9; --orange-dim:color-mix(in srgb, var(--orange) 12%, var(--surface));
   --pick-wash:color-mix(in srgb, var(--orange) 6%, var(--surface)); /* the slight blue behind a picked row — half the dim, so it reads as a highlight, not a fill (owner, Sep '26) */
+  --sent-flash:color-mix(in srgb, var(--green) 34%, var(--surface)); /* the round that just went, for a beat */
   --green:#4FA51D; --green-hover:#4FA51D; --green-dim:color-mix(in srgb, var(--green) 13%, var(--surface)); --green-sel:#5C9720; --red:#A8483A; --blue:#2F74C9; --gold:#C08A00; --pay-yellow:#F7C900;
   /* Brighter red for the solid discard/close action buttons only — the deep
      --red stays for warnings, chips and delete icons. */
@@ -316,6 +317,7 @@ body[data-theme="dark"]{
   --orange-dim:color-mix(in srgb, var(--orange) 27%, var(--surface));
   --pick-wash:color-mix(in srgb, var(--orange) 6%, var(--surface));
   --green-dim:color-mix(in srgb, var(--green) 20%, var(--surface));
+  --sent-flash:color-mix(in srgb, var(--green) 26%, var(--surface)); /* dark rooms take less of it */
   --teal:#19C3AB;
   --violet:#8B6FE8;
 }
@@ -1498,7 +1500,13 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   .qty-pop{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .qty-pop.covers-pop, .io-pop{ animation: mo-pop var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .toast{ animation: mo-rise .18s cubic-bezier(.2,.8,.3,1); }
-  .ticket-line.mo-just-sent{ animation: mo-dim .35s ease-out; }
+  /* THE ROUND THAT JUST WENT. Green already means "gone to the kitchen"
+     everywhere else in the app, so the lines that just left light up in it for
+     a beat and then settle to their sent grey. The length is the one in
+     app.js (SENT_FLASH_MS). Nothing moves or changes size, so no row jumps.
+     It ends on the sent look exactly, so there is no fill mode to hold and
+     nothing to clean up when it stops. */
+  .ticket-line.mo-just-sent{ animation: mo-sent .38s ease-out; }
   .icon-action.mo-flick svg{ animation: mo-print .4s ease; }
 }
 /* The till's floor lies OVER the hub (the hub is drawn under it on every
@@ -1546,6 +1554,10 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 @keyframes mo-pop{ from{ transform:translate(-50%,calc(-50% + 10px)) scale(.975); } }
 @keyframes mo-rise{ from{ opacity:0; transform:translate(-50%, 10px); } }
 @keyframes mo-dim{ from{ opacity:1; } }
+/* No end frame on purpose: with only a FROM state the browser lands on the
+   line's own resting look, so the sent line's fade and its background each
+   stay defined in exactly one place. mo-dim above works the same way. */
+@keyframes mo-sent{ 0%,45%{ background:var(--sent-flash); opacity:1; } }
 @keyframes mo-print{ 0%{ transform:translateY(0); } 35%{ transform:translateY(-4px); } 100%{ transform:translateY(0); } }
 /* The toast used to land ON the action row - covering Pay and Discard, the
    very buttons a message about sending is talking about. It lifts clear only
@@ -19143,6 +19155,32 @@ function render() {
 // animation stamped off (the settle plays once, on true arrival), a docket
 // line whose count grew gets a pulse, a line that just went to the kitchen
 // dims once, and a line that changed row glides to its new spot (FLIP).
+// How long the just-sent round stays lit. One number: the stylesheet's
+// animation is the same length, read from it rather than repeated.
+const SENT_FLASH_MS = 380;
+// Put the mark back on every render inside the window, and hand the fresh node
+// a NEGATIVE delay so the light carries on from where it was instead of
+// starting again. Without that a poll landing mid-flash would replay it.
+function applySentFlash(lines) {
+  const f = state._sentFlash;
+  if (!f) return;
+  const gone = Date.now() - f.at;
+  if (gone >= SENT_FLASH_MS) { state._sentFlash = null; sweepSentFlash(); return; }
+  lines.forEach(({ el, base }) => {
+    if (!el.classList.contains('sent') || !f.names.has(base.slice(0, -2))) return;
+    el.style.animationDelay = '-' + gone + 'ms';
+    el.classList.add('mo-just-sent');
+  });
+  // Nothing outlives its moment: if no further render comes, the light still
+  // goes out on its own, and the borrowed delay comes off with it.
+  clearTimeout(state._sentFlashTimer);
+  state._sentFlashTimer = setTimeout(() => { state._sentFlash = null; sweepSentFlash(); }, SENT_FLASH_MS - gone + 20);
+}
+function sweepSentFlash() {
+  document.querySelectorAll('.ticket-line.mo-just-sent').forEach(el => {
+    el.classList.remove('mo-just-sent'); el.style.animationDelay = '';
+  });
+}
 function motionOff() {
   try { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
 }
@@ -19230,18 +19268,22 @@ function applyMotion(prev) {
   }
   const lines = _lineKeys();
   const sameSet = lines.map(L => L.key).sort().join('\u0001') === prev.lineSet;
+  // THE ROUND THAT JUST WENT LIGHTS UP. Which lines those are is worked out
+  // first, so the light starts on this render rather than the next one.
+  lines.forEach(({ el, base }) => {
+    if (!el.classList.contains('sent')) return;
+    const name = base.slice(0, -2);
+    if (!prev.bases.has(name + '|n') || prev.bases.has(name + '|s')) return;
+    const f = state._sentFlash;
+    if (!f || Date.now() - f.at > SENT_FLASH_MS) state._sentFlash = { names: new Set([name]), at: Date.now() };
+    else f.names.add(name);
+  });
+  applySentFlash(lines);
   lines.forEach(L => {
     const { el, base, key } = L;
     // NO pulse on the docket quantity. It scaled the number to 120% every time
     // it went up, so adding four of something made the docket jump four times
     // (owner, Aug '26). The number changing IS the feedback.
-    if (el.classList.contains('sent')) {
-      const name = base.slice(0, -2);
-      if (prev.bases.has(name + '|n') && !prev.bases.has(name + '|s')) {
-        el.classList.add('mo-just-sent');
-        setTimeout(() => el.classList.remove('mo-just-sent'), 500);
-      }
-    }
     // Glide ONLY when the same set of lines changed ORDER (course move,
     // merge). A new line pushing the others down must not send the whole
     // docket sliding (owner: "items act weird when you add them").

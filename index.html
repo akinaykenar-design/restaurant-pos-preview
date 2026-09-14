@@ -8490,7 +8490,7 @@ app.put('/api/settings', (req, res) => {
   if (req.body.phoneDocket === 'sheet' || req.body.phoneDocket === 'peek') data.settings.phoneDocket = req.body.phoneDocket;
   if (req.body.docketShortcuts && typeof req.body.docketShortcuts === 'object') {
     const next = Object.assign({}, data.settings.docketShortcuts);
-    for (const k of ['table', 'notes', 'quickNote', 'callAway', 'auto', 'customer', 'reprint', 'move', 'showOrder']) {
+    for (const k of ['table', 'covers', 'notes', 'quickNote', 'callAway', 'auto', 'customer', 'reprint', 'move', 'showOrder']) {
       if (typeof req.body.docketShortcuts[k] === 'boolean') next[k] = req.body.docketShortcuts[k];
     }
     data.settings.docketShortcuts = next;
@@ -10979,6 +10979,7 @@ app.post('/api/orders', (req, res) => {
   writeData(data);
   printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), 1);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
+  printing.drawerForSale(data, order);
 
   res.json(order);
 });
@@ -11008,6 +11009,10 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
   if (!restore) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
+  // A NEW ROUND UN-PRINTS THE BILL. The mark stayed lit after more was
+  // ordered, so Bill looked done and the table kept its bill colour while
+  // the guest held a total missing the last round (owner, Sep '26).
+  if (!restore && order.billPrinted) order.billPrinted = false;
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
   writeData(data);
   // Later rounds ALWAYS print only the added items — reprinting the whole
@@ -11276,6 +11281,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   creditLoyalty(data, order.customerId, order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(order.items));
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
+  printing.drawerForSale(data, order);
   res.json(order);
 });
 
@@ -11352,6 +11358,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
     at: Date.now(), staffName: by });
   logAudit(data, by, `Took ${String(label || k).slice(0, 60)} ($${amt.toFixed(2)}, ${m}) on Ticket #${order.id}`);
   writeData(data);
+  printing.drawerForSale(data, order, { method: m });
   res.json(order);
 });
 
@@ -13041,6 +13048,17 @@ const DK_MOVE_BLOCK = { header: 'header', table: 'table', round: 'round', covers
 DK_OPT_PARTS.forEach(k => { DK_MOVE_BLOCK[k] = k; });
 // `ov` = designer station overrides, so the sample paper tracks the station
 // being designed; real prints pass nothing.
+// The surcharge / discount line, as the printer prints it (printing.js has
+// the same two lines — the paper IS the print): the name, and the right sign
+// whatever sign the server stored the amount with.
+function discountLabel(d) {
+  // The reason IS the name ('Public holiday 15%'); the kind word only stands
+  // in when the venue typed none. Cut to leave room for the amount.
+  return String(d.reason || (d.kind === 'surcharge' ? 'Surcharge' : 'Discount')).slice(0, 30);
+}
+function discountAmountText(d) {
+  return (d.kind === 'surcharge' ? '+' : '-') + Math.abs(d.amount).toFixed(2);
+}
 // §§ Receipt and invoice designer
 function docketDocClasses(ov) {
   const s = state.settings || {}, d = Object.assign({}, docketCfg(), ov || {});
@@ -13253,7 +13271,7 @@ function buildReceiptDoc(order, edit) {
       items: `${ruleHtml}${partR('items', itemsHtml, true, rstl('items'))}${ruleHtml}`,
       subtotal: partR('subtotal', `
       <div class="print-line"><span>Subtotal</span><span>${money(order.subtotal)}</span></div>
-      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.kind === 'surcharge' ? '+' : '-'}${order.discount.amount.toFixed(2)}</span></div>` : ''}`, true, rstl('subtotal')),
+      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${esc(discountLabel(order.discount))}</span><span>${discountAmountText(order.discount)}</span></div>` : ''}`, true, rstl('subtotal')),
       gstExcl: order.tax && !taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
       gstIncl: order.tax && taxLabelInclusive() ? partR('gst', `<div class="print-line"><span>Total includes ${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>`, true, rstl('gst')) : '',
       // Tip rides above the TOTAL, plain; TOTAL is the grand total, bold and
@@ -13298,7 +13316,7 @@ function buildReceiptDoc(order, edit) {
       ${ruleHtml}
       ${partR('items', itemsHtml, true, rstl('items'))}
       ${ruleHtml}
-      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${order.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span><span>${order.discount.kind === 'surcharge' ? '+' : '-'}${order.discount.amount.toFixed(2)}</span></div>` : ''}
+      ${order.discount && order.discount.amount ? `<div class="print-line"><span>${esc(discountLabel(order.discount))}</span><span>${discountAmountText(order.discount)}</span></div>` : ''}
       ${order.tax && !taxLabelInclusive() ? `<div class="print-line"><span>${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>` : ''}
       ${order.tip ? `<div class="print-line"><span>Tip</span><span>${money(order.tip)}</span></div>` : ''}
       ${order.tax && taxLabelInclusive() ? `<div class="print-line"><span>Incl. ${esc(taxCfg().name)} (${rcPct()}%)</span><span>${money(order.tax)}</span></div>` : ''}
@@ -21181,7 +21199,7 @@ const SYS_DOLLAR_SVG = ACT_PAY_SVG.replace('<svg ', '<svg class="sys-i" ');
 let _suppressLineTap = false;
 // Docket shortcut icons: most default ON, a few are opt-in. "Pinned" == shown
 // on the docket head row. Holding a tile in the table account toggles it.
-const DOCKET_DEFAULT_ON = ['table', 'notes', 'quickNote', 'callAway'];
+const DOCKET_DEFAULT_ON = ['table', 'covers', 'notes', 'quickNote', 'callAway'];
 const ACCT_PIN_KEY = {
   'open-covers-pad': 'covers',
   'toggle-notes-panel': 'notes',
@@ -21194,9 +21212,10 @@ const ACCT_PIN_KEY = {
   'show-order-history': 'showOrder',
 };
 function docketPinned(key) {
-  // Covers isn't a docketShortcut — it rides its own coversEnabled setting,
-  // which is what actually shows/hides the covers chip on the docket.
-  if (key === 'covers') return !!state.settings.coversEnabled;
+  // The Covers PIN is a pin like the others. It used to BE the venue's covers
+  // setting, so a manager tidying one docket switched covers off for every
+  // table (owner, Sep '26). The setting lives on its own card in Settings; the
+  // pin only says whether the key sits on the docket.
   const sc = state.settings.docketShortcuts || {};
   return DOCKET_DEFAULT_ON.includes(key) ? sc[key] !== false : sc[key] === true;
 }
@@ -21210,8 +21229,7 @@ function toggleDocketPin(key) {
     return;
   }
   const now = docketPinned(key);
-  if (key === 'covers') saveTicketSetting({ coversEnabled: !now });
-  else { const sc = state.settings.docketShortcuts || {}; saveTicketSetting({ docketShortcuts: { ...sc, [key]: !now } }); }
+  { const sc = state.settings.docketShortcuts || {}; saveTicketSetting({ docketShortcuts: { ...sc, [key]: !now } }); }
   state.toast = !now ? 'Pinned to docket' : 'Unpinned from docket';
   armToastTimer(1400);
 }
@@ -21348,7 +21366,7 @@ function renderTicketPanel() {
             ${DKT_TABLE_SVG}
             <span class="gnum">${(() => { const t = findTableById(state.table); return t ? esc(String(t.label)) : '—'; })()}</span>
           </button>` : ''}
-          ${state.settings.coversEnabled ? `<button class="tkt-icon-btn lg glyph-btn covers-chip ${state.coversPad ? 'active held-open' : ''}" data-act="open-covers-pad" aria-label="Covers">
+          ${state.settings.coversEnabled && sc.covers !== false ? `<button class="tkt-icon-btn lg glyph-btn covers-chip ${state.coversPad ? 'active held-open' : ''}" data-act="open-covers-pad" aria-label="Covers">
             ${DKT_USER_SVG}
             <span class="gnum cov">${state.covers || '—'}</span>
           </button>` : ''}
@@ -38137,8 +38155,7 @@ function openMkEditPop(el) {
     else if (key === 'toggle:delivery') saveTicketSetting({ deliveryEnabled: false });
     else {
       const k = key.slice('shortcut:'.length);
-      if (k === 'covers') saveTicketSetting({ coversEnabled: false });
-      else saveTicketSetting({ docketShortcuts: { ...(state.settings.docketShortcuts || {}), [k]: false } });
+      saveTicketSetting({ docketShortcuts: { ...(state.settings.docketShortcuts || {}), [k]: false } });
     }
   });
   pop.querySelector('.mep-close').addEventListener('click', (e) => { e.stopPropagation(); closeMkEditPop(); });

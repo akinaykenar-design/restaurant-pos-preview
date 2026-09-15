@@ -9113,9 +9113,19 @@ app.delete('/api/floorplans/:id/layouts/:layoutId', (req, res) => {
 // ---------- Tables (each belongs to one floor plan layout) ----------
 // Table numbers must be unique across ALL layouts (Main, Outside, …), not just
 // within one (decor objects like plants aren't tables, so they're exempt).
-function tableLabelTaken(data, label, excludeId) {
+// Where a table number is already in use — the plan it sits on, or null.
+// The message used to say "another layout" even when the clash was on the
+// floor you were looking at (Sep '26).
+function tableLabelOwner(data, label, excludeId) {
   const normalized = String(label).trim().toLowerCase();
-  return (data.floorPlans || []).some(fp => fp.tables.some(t => t.type === 'table' && t.id !== excludeId && t.label.trim().toLowerCase() === normalized));
+  return (data.floorPlans || []).find(fp => fp.tables.some(t => t.type === 'table' && t.id !== excludeId && t.label.trim().toLowerCase() === normalized)) || null;
+}
+function tableLabelClash(data, label, excludeId, here) {
+  const owner = tableLabelOwner(data, label, excludeId);
+  if (!owner) return null;
+  return owner.id === (here && here.id)
+    ? `Table ${String(label).trim()} is already on this floor`
+    : `Table ${String(label).trim()} is already on ${owner.name}`;
 }
 
 // The four shapes a table can be (square, round, rectangle, oval) — anything
@@ -9127,8 +9137,9 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const { label, x, y, shape, width, height, seats, type, decorType, icon, rotation, color, finish } = req.body;
   if (!label) return res.status(400).json({ error: 'A table label is required' });
-  if (type !== 'decor' && tableLabelTaken(data, label, null)) {
-    return res.status(400).json({ error: 'That table number is already used in another layout' });
+  if (type !== 'decor') {
+    const clash = tableLabelClash(data, label, null, floorPlan);
+    if (clash) return res.status(400).json({ error: clash });
   }
   const table = {
     id: 't' + Date.now(),
@@ -9160,8 +9171,9 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!table) return res.status(404).json({ error: 'Table not found' });
   const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, finish, color, decorType, icon, prevX, prevY, discount } = req.body;
   if (label !== undefined) {
-    if (table.type === 'table' && tableLabelTaken(data, label, table.id)) {
-      return res.status(400).json({ error: 'That table number is already used in another layout' });
+    if (table.type === 'table') {
+      const clash = tableLabelClash(data, label, table.id, floorPlan);
+      if (clash) return res.status(400).json({ error: clash });
     }
     table.label = label;
   }
@@ -12456,6 +12468,17 @@ const TABLE_FINISHES = [
 ];
 function tableFinish(key) { return TABLE_FINISHES.find(f => f.key === key) || TABLE_FINISHES[0]; }
 
+// THE NUMBERS CONTINUE THE SERIES (Sep '26). A new table used to take the
+// lowest number free across every layout, so twelve taps in a fresh area
+// gave 3, 5, 6, 7, 8, 20, 27… and a room had to be renumbered by hand. Now
+// it carries on from the LAST table put down here (T1 → T2 → T3, B4 → B5),
+// skipping any in use; the lowest free number is the fallback for a floor
+// whose last table has no number in its name.
+function nextInSeries(fp) {
+  const mine = (fp && fp.tables || []).filter(t => t.type === 'table');
+  const last = mine[mine.length - 1];
+  return last ? labelAfter(fp, last) : nextTableLabel(fp);
+}
 function nextTableLabel(fp) {
   // Table numbers are unique across ALL layouts, so scan every floor plan.
   const used = new Set();
@@ -28855,8 +28878,14 @@ function renderFloorPlanAdmin() {
           : `<button class="icon-sq" disabled style="font-family:'IBM Plex Mono',monospace;font-weight:800;opacity:var(--dim);cursor:default;">#</button>`}
         ${/* NO SECOND COLOUR DOT HERE. The card already carries one, on its
               own Colour &amp; finish row above — the same door twice. */ ''}
+        ${/* WELDED IS WELDED, FROM EITHER END. The key only offered to UNDO
+              the weld on the follower; on the table that LEADS the pair it
+              still read "link", and the toast pointed you at that leader —
+              so the one table you were told to go to could not undo it
+              (Sep '26). unlinkTapTable already breaks the whole group from
+              the leader; only this key was missing. */ ''}
         ${selTable
-          ? (selTable.mergedInto && selTable.mergedInto !== selTable.id
+          ? ((selTable.mergedInto && selTable.mergedInto !== selTable.id) || fp.tables.some(x => x.mergedInto === selTable.id && x.id !== selTable.id)
             ? `<button class="icon-sq" data-act="unlink-table" data-id="${selected.id}" style="border-color:var(--orange);color:var(--orange);">${SYS_LINK_SVG}</button>`
             : `<button class="icon-sq" data-act="link-tap-arm" data-id="${selected.id}" style="${state.linkTapFrom === selTable.id ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`)
           : `<button class="icon-sq" data-act="floor-link-mode" data-mode="link" style="${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`}
@@ -32948,7 +32977,7 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
       render();
       return;
     }
-    payload = { label: nextTableLabel(fp), x: xPct, y: yPct, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    payload = { label: nextInSeries(fp), x: xPct, y: yPct, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -32969,7 +32998,7 @@ async function addObject(fpId) {
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
     const td = templateDims(tpl);
-    payload = { label: nextTableLabel(fp), x: 50, y: 50, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    payload = { label: nextInSeries(fp), x: 50, y: 50, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -41054,7 +41083,13 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'scale-selected-tables') { scaleSelectedTables(parseInt(el.dataset.dir)); }
-      else if (act === 'delete-table') { deleteTableAction(el.dataset.id, el.dataset.fp); }
+      else if (act === 'delete-table') {
+        // ONE TABLE ASKS TOO. Deleting two asked first and deleting one just
+        // did it — the same key, two different promises (Sep '26).
+        const t = findTableById(el.dataset.id);
+        const id = el.dataset.id, fp = el.dataset.fp;
+        openConfirm({ message: t && t.type === 'table' ? `Delete table ${t.label}?` : 'Delete this?', confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
+      }
       else if (act === 'delete-selected-tables') { deleteSelectedTables(); }
       else if (act === 'pick-table-shape') {
         const tpl = TABLE_TEMPLATES.find(t => t.key === el.dataset.key); if (!tpl) return;

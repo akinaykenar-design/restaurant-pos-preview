@@ -3831,6 +3831,9 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    share of the room's width — the same on a stool and a twelve-top, and it
    zooms with the room. It read 30cqmin of the table's own side until then. */
 .floor-canvas{ container-type:size; }
+/* A JOINED TABLE SAYS WHOSE IT IS: its leader's number under its own, in the
+   same upright block, small and quiet (Sep '26). */
+.floor-marker .fm-into{ font-size:clamp(6px, 1.3cqw, 30px); font-weight:700; line-height:1.1; opacity:.8; white-space:nowrap; }
 .floor-marker .fm-num{ font-size:clamp(8px, 2.1cqw, 60px); font-weight:800; line-height:1.1; white-space:nowrap; box-sizing:border-box; padding:2px 6px !important; } /* one size on every table, so a three-digit number can be wider than a small table: it stays CENTRED and overhangs both sides alike (it was capped at 96% and slid off centre — owner, Sep '26: "number is not centred") */
 .simple-table-btn .stb-num{ --stb-fs:32px; }
 
@@ -12409,34 +12412,44 @@ const DECOR_ART = {
 };
 // Objects size by preset, not raw dimensions — the template's own width/height
 // (a %, so it scales on any screen) times one factor keeps the shape's look.
-const DECOR_SIZE_STEPS = [0.7, 1, 1.4];
-const DECOR_SIZE_LABELS = ['S', 'M', 'L'];
 // Floor background: a small set of calm neutrals only — a loud floor fights the
 // tables for attention. Objects/areas (walls, zones) get greys + muted tones so
 // they recede behind the tables rather than compete.
-const OBJECT_COLORS = [
-  { v: '', label: 'Icon only' },
-  { v: '#5b5f66', label: 'Charcoal' },
-  { v: '#8a8f97', label: 'Grey' },
-  { v: '#b8bdc4', label: 'Light' },
-  { v: '#C9B79C', label: 'Tan' },
-  { v: '#A9B6A0', label: 'Sage' },
-];
-function swatchRow(act, current, colors, dataAttrs = '') {
-  return `<div class="swatch-row">${colors.map(c => {
-    const on = String(current || '') === String(c.v);
-    const face = c.v || 'repeating-linear-gradient(45deg,var(--steel-200) 0 4px,var(--surface) 4px 8px)';
-    return `<button class="swatch${on ? ' active' : ''}" data-act="${act}" data-val="${c.v}" ${dataAttrs} style="background:${face};"></button>`;
-  }).join('')}</div>`;
+// A STRUCTURE IS MEASURED LIKE A TABLE (owner, Sep '26: "I want structures to
+// have the same editing ability as tables"). It wore S/M/L chips — the very
+// chips the owner replaced with real numbers on tables — so a wall could only
+// be three sizes, all of them multiples of whatever it was born as. Same grid
+// squares now, same steppers, same limits.
+const DECOR_MIN = 1, DECOR_MAX = 40; // a wall may run the length of the room
+function decorUnits(t) {
+  return {
+    w: Math.max(DECOR_MIN, Math.round((t.width || 0) / FLOOR_GRID)),
+    h: Math.max(DECOR_MIN, Math.round((t.height || 0) / FLOOR_GRID_Y)),
+  };
 }
-function decorSizeChips(obj, fp) {
-  const tpl = DECOR_TEMPLATES.find(t => t.key === obj.decorType);
-  const base = tpl ? tpl.width : (obj.width || 6);
-  const ratio = base ? (obj.width || base) / base : 1;
-  let active = 0, best = Infinity;
-  DECOR_SIZE_STEPS.forEach((s, i) => { const d = Math.abs(s - ratio); if (d < best) { best = d; active = i; } });
-  return `<div class="shape-chip-row">${DECOR_SIZE_STEPS.map((s, i) =>
-    `<button class="shape-chip${i === active ? ' active' : ''}" data-act="set-decor-size" data-step="${s}" data-id="${obj.id}" data-fp="${fp.id}">${DECOR_SIZE_LABELS[i]}</button>`).join('')}</div>`;
+function stepDecorUnits(id, dim, d) {
+  const fp = state.floorPlans.find(f => f.tables.some(x => x.id === id));
+  const t = fp && fp.tables.find(x => x.id === id);
+  if (!t) return;
+  const u = decorUnits(t);
+  const n = Math.max(DECOR_MIN, Math.min(DECOR_MAX, (dim === 'w' ? u.w : u.h) + d));
+  pushFloorHistory();
+  patchFloorObject(fp.id, id, dim === 'w'
+    ? { width: Math.round(n * FLOOR_GRID * 100) / 100 }
+    : { height: Math.round(n * FLOOR_GRID_Y * 100) / 100 });
+}
+// Length and depth, drawn the way a table's two numbers are drawn.
+function decorSizeRows(obj) {
+  const u = decorUnits(obj);
+  return [['w', 'Length', u.w], ['h', 'Depth', u.h]].map(([dim, label, v]) => `
+        <div class="fp-inline-row">
+          <span class="fp-sub fp-sub-flat">${label}</span>
+          <div class="grid-stepper" style="margin:0;">
+            <button class="btn-secondary sm" data-act="decor-size" data-dim="${dim}" data-id="${obj.id}" data-d="-1"${v <= DECOR_MIN ? ' disabled' : ''}>−</button>
+            <span class="grid-step-val">${v}</span>
+            <button class="btn-secondary sm" data-act="decor-size" data-dim="${dim}" data-id="${obj.id}" data-d="1"${v >= DECOR_MAX ? ' disabled' : ''}>+</button>
+          </div>
+        </div>`).join('');
 }
 // Table-top textures, drawn in-code (inline SVG tiles + gradient layers) so the
 // app stays fully offline. Wood shows grain, marble shows veins, metals show a
@@ -14872,6 +14885,7 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'floor-bg') updateFloorPlanBgColor(id, color);
   else if (kind === 'floor-table-new') { state.floorTableColor = color || null; render(); }
   else if (kind === 'table-color') updateTableColor(id, color);
+  else if (kind === 'object-color') { const fp = state.floorPlans.find(f => f.tables.some(x => x.id === id)); if (fp) patchFloorObject(fp.id, id, { color: color || null }); }
   else if (kind === 'accent') { if (color) setThemeDraft({ accent: color }); }
   else if (kind === 'modifier-group') quickUpdateModifierGroupColor(id, color);
   else if (kind === 'combo') quickUpdateComboColor(id, color);
@@ -28646,12 +28660,25 @@ function renderSimpleTablesAdmin() {
 // after a named confirm; the dashed card saves the arrangement on screen now
 // (tap → name it, Enter/blur saves). Save/overwrite is by name, capped at 8.
 // §§ Floor layouts: saved plans strip
+// What the room can do for you at this moment, in a waiter's words. The
+// phone picks a table up on a tap first (its map pans under a finger); a
+// till and an iPad move one from the first pixel.
+function floorEditorCaption(fp) {
+  // Seven words is the admin's cap — say it in six.
+  if (state.floorPlacing) return 'tap the floor to place it';
+  if (state.floorLinkMode === 'link' || state.linkTapFrom) return 'tap the table to join';
+  if (state.floorLinkMode === 'unlink') return 'tap a joined table to separate';
+  const many = state.selectedAdminTableIds.length;
+  if (many) return `${many} picked · drag one to move all`;
+  const phone = window.innerWidth <= 768;
+  return phone ? 'tap to pick up · hold for several' : 'drag to move · hold for several';
+}
 function floorLayoutsStrip(fp) {
   const layouts = fp.savedLayouts || [];
   const naming = state.layoutNaming === fp.id;
   return `
   <div class="pp-group">
-    <div class="pp-label" data-sub="Where everything sits, saved.">Layouts</div>
+    <div class="pp-label" data-sub="Tap one to bring it back.">Saved arrangements</div>
     ${/* ONE ROW PER SAVED ARRANGEMENT: the name reads left, its two square
           controls sit right, the way every other admin list is built. The
           save-over and delete icons used to be pinned to the two top corners
@@ -28702,6 +28729,19 @@ function renderFloorPlanAdmin() {
         : `<button type="button" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('')}
     </div>
     <button type="button" class="btn-add inline" data-act="add-floorplan" aria-label="Add area">+<span class="ba-word"> Area</span></button>
+    ${/* UNDO WHERE THE HAND IS (Sep '26). After a bad drag the key you want is
+          Undo; it was the LAST card in the options column, about 250 below the
+          bottom of a till screen at rest and 470 with a table picked, and
+          Ctrl+Z is no help to a till with no keyboard. A control pushed to
+          the far end opens a stretch, not a gap (band law). */ ''}
+    ${(() => {
+      const cu = floorHistory.fpId === fp.id && floorHistory.undo.length;
+      const cr = floorHistory.fpId === fp.id && floorHistory.redo.length;
+      return `<div class="fp-band-hist">`
+        + `<button class="icon-sq" data-act="floor-undo" aria-label="Undo" ${cu ? '' : 'disabled'} style="${cu ? '' : 'opacity:var(--dim);cursor:default;'}">${ACT_UNDO_SVG}</button>`
+        + `<button class="icon-sq" data-act="floor-redo" aria-label="Redo" ${cr ? '' : 'disabled'} style="${cr ? '' : 'opacity:var(--dim);cursor:default;'}">${ACT_REDO_SVG}</button>`
+        + `</div>`;
+    })()}
   </div>`;
   return fp ? `
   ${/* THE ROOM IN THE MIDDLE, THE OPTIONS DOWN THE RIGHT (owner, Aug '26:
@@ -28712,7 +28752,10 @@ function renderFloorPlanAdmin() {
         in a strip over the top of it. */ ''}
   <div class="fp-wrap fp-split">
     <div class="fp-rail fp-rail-side">
-      ${floorLayoutsStrip(fp)}
+      ${/* TABLES FIRST. The first card a new manager met was about SAVED
+            COPIES of the room — a list called "Layouts", on a page called
+            Floor layout, above an area chip also called a layout. The work
+            comes first now and the copies go last (Sep '26). */ ''}
 
   ${(() => {
     // Tool bar (above the canvas): with nothing selected the controls set up
@@ -28773,12 +28816,17 @@ function renderFloorPlanAdmin() {
         // Structures are pure shapes — NO words. A little block shaped like the
         // primitive (wide rect, square, circle, thin line) is the whole chip.
         if (grp === 'structure') {
+          // With one picked these are its SHAPE chips, exactly as a table's
+          // are: the current one is lit and a tap re-shapes it. They were a
+          // dropdown with "Keep as is" in it (Sep '26).
+          const pick = selDecor;
           return `<div class="decor-chip-row">${list.map(t => {
             const val = `decor:${t.key}`;
+            const on = pick ? pick.decorType === t.key : state.floorPlacing === val;
             const thin = t.height <= 3;
             const [sw, sh] = t.shape === 'round' ? [20, 20] : t.shape === 'square' ? [20, 20] : thin ? [20, 4] : [20, 12];
-            const rad = t.shape === 'round' ? '50%' : thin ? '3px' : '3px';
-            return `<button class="decor-chip shape-only${state.floorPlacing === val ? ' active' : ''}" data-act="palette-place" data-val="${val}"><span class="decor-chip-block" style="width:${sw}px;height:${sh}px;border-radius:${rad};background:${t.color || 'var(--steel-300)'};"></span></button>`;
+            const rad = t.shape === 'round' ? '50%' : '3px';
+            return `<button class="decor-chip shape-only${on ? ' active' : ''}" data-act="palette-place" data-val="${val}" ${pick ? `data-id="${pick.id}" data-fp="${fp.id}"` : ''}><span class="decor-chip-block" style="width:${sw}px;height:${sh}px;border-radius:${rad};background:${t.color || 'var(--steel-300)'};"></span></button>`;
           }).join('')}</div>`;
         }
         return `<div class="decor-chip-row">${list.map(t => {
@@ -28787,13 +28835,6 @@ function renderFloorPlanAdmin() {
           return `<button class="decor-chip${state.floorPlacing === val ? ' active' : ''}" data-act="palette-place" data-val="${val}">${face}<span class="decor-chip-lbl">${esc(t.label)}</span></button>`;
         }).join('')}</div>`;
       };
-      // EDIT a selected object: its type dropdown (within its own group).
-      if (selDecor) {
-        const grp = decorTpl ? (decorTpl.group || 'object') : 'object';
-        const list = DECOR_TEMPLATES.filter(t => (t.group || 'object') === grp);
-        return `<div class="pp-group"><div class="pp-label">${esc(selDecor.label)} · type</div>
-      <select class="pp-select pp-retype-select" data-id="${selDecor.id}" data-fp="${fp.id}"><option value="">${decorTpl ? 'Keep as is' : 'Custom object'}</option>${list.map(t => `<option value="decor:${t.key}" ${decorTpl && decorTpl.key === t.key ? 'selected' : ''}>${t.icon ? t.icon + ' ' : ''}${esc(t.label)}</option>`).join('')}</select></div>`;
-      }
       // NOTHING selected → ONE tidy "Add to floor" group: a category segment
       // (all visual) + the matching chip picker.
       // Objects came off the Add row (owner, Aug '26: "remove objects, I think it's
@@ -28868,14 +28909,17 @@ function renderFloorPlanAdmin() {
           </div>
         </div>`; }).join('');
         })()}` : ''}
+        ${/* THE NUMBER IS A ROW, LIKE SEATS (Sep '26). It was a fifth key in a
+              four-wide row, so the bin dropped onto a line of its own with
+              room to spare beside it, and with several tables picked the
+              number key sat there dim doing nothing. */ ''}
+        ${selTable ? `<div class="fp-inline-row">
+          <span class="fp-sub fp-sub-flat">Number</span>
+          <button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${esc(String(selected.label))}</button>
+        </div>` : ''}
         ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
-        ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control,
-              the number included. It was a 40-tall pill sitting beside 44
-              squares (owner, Aug '26: "icons and colour boxes all diff.
-              shapes and sizes"). */ ''}
-        ${selTable
-          ? `<button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${esc(String(selected.label))}</button>`
-          : `<button class="icon-sq" disabled style="font-family:'IBM Plex Mono',monospace;font-weight:800;opacity:var(--dim);cursor:default;">#</button>`}
+        ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control.
+              Four keys, in the order the selection bar uses them. */ ''}
         ${/* NO SECOND COLOUR DOT HERE. The card already carries one, on its
               own Colour &amp; finish row above — the same door twice. */ ''}
         ${/* WELDED IS WELDED, FROM EITHER END. The key only offered to UNDO
@@ -28890,11 +28934,32 @@ function renderFloorPlanAdmin() {
             : `<button class="icon-sq" data-act="link-tap-arm" data-id="${selected.id}" style="${state.linkTapFrom === selTable.id ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`)
           : `<button class="icon-sq" data-act="floor-link-mode" data-mode="link" style="${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`}
         <button class="icon-sq" data-act="duplicate-selected-tables" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_COPY_SVG}</button>
-        <button class="icon-sq" data-act="clear-table-selection">${ACT_X_SVG}</button>
         <button class="icon-sq" data-act="${selTable ? 'delete-table' : 'delete-selected-tables'}" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_TRASH_SVG}</button>
+        <button class="icon-sq" data-act="clear-table-selection">${ACT_X_SVG}</button>
       </div>` : ''}
       </div>`;
-      return tableCard + `<div class="pp-group"><div class="pp-label" data-sub="Tap one, then tap the floor.">Structure</div>${placeChips('structure')}</div>`;
+      // A STRUCTURE WEARS THE TABLE'S CARD (owner, Sep '26: "I want structures
+      // to have the same editing ability as tables — integrate them into
+      // options seamlessly"). Picking a wall used to reshuffle the column into
+      // three cards of its own kind: a dropdown with "Keep as is", a swatch
+      // row whose "icon only" made the wall invisible, and S/M/L chips. Now
+      // the same card as a table: heading, shape chips, colour, two numbers,
+      // the same keys — and it never moves.
+      const decorTurn = selDecor ? `<button type="button" class="icon-sq fp-rot" data-act="rotate-decor" data-id="${selDecor.id}" aria-label="Turn">${FP_TURN_SVG}</button>` : '';
+      const structureCard = `
+      <div class="pp-group fp-table-card">
+        <div class="pp-label" data-sub="${selDecor ? 'Its look, and what you can do.' : 'Tap one, then tap the floor.'}">${selDecor ? esc(selDecor.label) : 'Structure'}${decorTurn}</div>
+        ${placeChips('structure')}
+        ${selDecor ? `<div class="fp-inline-row">
+          <span class="fp-sub fp-sub-flat">Colour</span>
+          ${colorDotButton('object-color', selDecor.id, selDecor.color, { title: 'Colour', allowClear: false })}
+        </div>` + decorSizeRows(selDecor) + `<div class="fp-sub">This one</div><div class="fp-act-row">
+          <button class="icon-sq" data-act="duplicate-selected-tables" data-id="${selDecor.id}" data-fp="${fp.id}">${ACT_COPY_SVG}</button>
+          <button class="icon-sq" data-act="delete-table" data-id="${selDecor.id}" data-fp="${fp.id}">${ACT_TRASH_SVG}</button>
+          <button class="icon-sq" data-act="clear-table-selection">${ACT_X_SVG}</button>
+        </div>` : ''}
+      </div>`;
+      return tableCard + structureCard;
     })()}
     ${/* THE COLOUR A NEW TABLE GETS BELONGS WITH ADDING ONE, not in a card of
           its own between Add and the floor's settings (owner, Aug '26:
@@ -28904,30 +28969,12 @@ function renderFloorPlanAdmin() {
           with a different set of colours. A TABLE's colour now lives on the
           table card, beside its shape (owner, Aug '26: "maybe add colour to
           table options merge together"). */ ''}
-    ${selDecor ? `
-    <div class="pp-group">
-      <div class="pp-label">${esc(selDecor.label)} · colour</div>
-      ${swatchRow('set-object-color', selDecor.color, OBJECT_COLORS, `data-id="${selDecor.id}" data-fp="${fp.id}"`)}
-    </div>` : ''}
     ${/* The selected table's ACTIONS moved onto the table card (owner, Aug
           '26: "I dont want table select to alter the options"). They used to
           arrive as a card of their own, so picking a table grew the column by
           one and pushed everything under it down. Nothing appears or
           disappears now — the same seven cards, always, and the table card
           simply gains its buttons. */ ''}
-    ${selDecor ? `
-    <div class="pp-group">
-      <div class="pp-label">Selected</div>
-      <div class="pp-row" style="align-items:center;flex-wrap:wrap;gap:8px;">
-        <label class="ts" style="margin:0;">Size</label>
-        ${decorSizeChips(selected, fp)}
-        <div style="display:inline-flex;gap:4px;align-items:center;margin-left:auto;">
-        <button class="icon-sq" data-act="duplicate-selected-tables" data-id="${selected.id}" data-fp="${fp.id}">${ACT_COPY_SVG}</button>
-        <button class="icon-sq" data-act="clear-table-selection">${ACT_X_SVG}</button>
-        <button class="icon-sq" data-act="delete-table" data-id="${selected.id}" data-fp="${fp.id}">${ACT_TRASH_SVG}</button>
-        </div>
-      </div>
-    </div>` : ''}
     `;
   })()}
     ${/* THE FLOOR'S OWN SETTINGS ARE SHOWN, NOT HIDDEN (owner, Aug '26: "don't
@@ -28960,20 +29007,13 @@ function renderFloorPlanAdmin() {
       ${colorDotButton('floor-bg', fp.id, fp.bgColor, { bg: 'var(--surface)', title: 'Floor colour' })}
     </div>
     <div class="pp-group">
-      <div class="pp-label" data-sub="Tables line up as you drag them.">Snap to grid</div>
+      <div class="pp-label" data-sub="Land on the dots.">Snap to grid</div>
       ${togglePill(!!fp.snapToGrid, 'toggle-floor-snap', `data-fp="${fp.id}"`)}
     </div>
-    ${(() => {
-      const cu = floorHistory.fpId === fp.id && floorHistory.undo.length;
-      const cr = floorHistory.fpId === fp.id && floorHistory.redo.length;
-      return `<div class="pp-group"><div class="pp-label" data-sub="Step back through what you moved.">Undo</div><div class="fp-hist-row">`
-        + `<button class="icon-sq" data-act="floor-undo" aria-label="Undo" ${cu ? '' : 'disabled'} style="${cu ? '' : 'opacity:var(--dim);cursor:default;'}">${ACT_UNDO_SVG}</button>`
-        + `<button class="icon-sq" data-act="floor-redo" aria-label="Redo" ${cr ? '' : 'disabled'} style="${cr ? '' : 'opacity:var(--dim);cursor:default;'}">${ACT_REDO_SVG}</button>`
-        + `</div></div>`;
-    })()}
       ${/* Everything that changes the room stands in this one column, in the
             order you would reach for it: what to add, the floor's own
-            settings, then what the colours mean. */ ''}
+            settings, and last the copies of the room you have kept. */ ''}
+      ${floorLayoutsStrip(fp)}
     </div>
     ${/* THE ROOM IS A CARD, THE DESIGN PAGE'S OWN (owner, Sep '26: "make it
           look similar, box colours etc"): the area chips on top, the room, a
@@ -29010,7 +29050,13 @@ function renderFloorPlanAdmin() {
     `).join('')}
   </div>
     </div>
-      <div class="ts fp-cap">tap a table · hold to move</div>
+      ${/* THE LINE UNDER THE ROOM SAYS WHAT YOU CAN DO NOW (Sep '26). It read
+            "tap a table · hold to move" in every state and on every device:
+            on a till and an iPad a drag moves at once and there is no tap
+            first, a HOLD picks several rather than moving anything, and while
+            a shape was armed or the link key was waiting it said nothing at
+            all. */ ''}
+      <div class="ts fp-cap">${floorEditorCaption(fp)}</div>
     </div>
   </div>
   ` : band + `<div class="ts">No floor plan layouts yet.</div>`; })()}
@@ -31313,7 +31359,13 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // hideStatus: the admin Table Layout editor shows a neutral layout — just the
   // table label, no live course/status readout (that belongs on the order-screen
   // floor map during service).
-  if (opts.hideStatus) return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}`;
+  // A JOINED TABLE SAYS WHOSE IT IS (Sep '26). It only went pale — the same
+  // look as switched off — and nothing on the floor said which table it now
+  // belongs to; the toast that said so was gone in three seconds.
+  if (opts.hideStatus) {
+    const lead = t.mergedInto && t.mergedInto !== t.id ? allTables().find(x => x.id === t.mergedInto) : null;
+    return `${up0}<span class="fm-num">${esc(t.label)}</span>${lead ? `<span class="fm-into">→ ${esc(String(lead.label))}</span>` : ''}${up1}`;
+  }
   const cs = opts.noPill ? null : tableCourseStatus(t.label);
   // THE LOCK BADGE IS A BADGE: it rides the same upright anchor as the pill,
   // sits above the table and is never cut. It used to sit in the marker's
@@ -32468,7 +32520,8 @@ async function linkTables(fromId, intoId, drop, opts) {
     }
   } catch (e) { render(); return false; }
   const n = allTables().filter(t => t.mergedInto === main.id).length;
-  state.toast = `Linked — table ${String(main.label)} runs the group of ${n + 1}`;
+  // Plain words: "runs the group of 2" is not how anyone says it (Sep '26).
+  state.toast = `${n + 1} tables are one now — order on ${String(main.label)}`;
   render();
   armToastTimer(2500);
   return true;
@@ -32492,7 +32545,7 @@ async function unlinkTapTable(tableId) {
     }
     pushFloorHistory();
     for (const m of members) await unmergeTable(m.id);
-    state.toast = `Table ${String(t.label)}'s group unlinked.`;
+    state.toast = `Table ${String(t.label)} is on its own again.`;
   }
   if (state.floorLinkMode === 'unlink' && !allTables().some(x => x.mergedInto && x.mergedInto !== x.id)) state.floorLinkMode = null;
   render();
@@ -38205,31 +38258,7 @@ document.addEventListener('change', (e) => {
     state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
     render();
   }
-  // With an object selected, the same dropdown re-types it instead of placing.
-  if (e.target && e.target.classList && e.target.classList.contains('pp-retype-select')) {
-    const val = e.target.value;
-    if (!val) return;
-    const [kind, key] = val.split(':');
-    if (kind === 'decor') {
-      const tpl = DECOR_TEMPLATES.find(t => t.key === key);
-      if (tpl) patchFloorObject(e.target.dataset.fp, e.target.dataset.id, { decorType: tpl.key, icon: tpl.icon, label: tpl.label, width: tpl.width, height: tpl.height });
-    } else {
-      // Changing shape keeps the size the owner dragged it to — an enlarged
-      // table is not a different table.
-      const tpl = TABLE_TEMPLATES.find(t => t.key === key);
-      if (!tpl) return;
-      const fpId = e.target.dataset.fp;
-      // Turning a table into a Circle makes it a real circle (height from its
-      // width, per the floor's aspect) rather than inheriting a stretched size.
-      const shapeFor = (t) => tableShapePatch(t, tpl.shape);
-      if (e.target.dataset.id === 'multi') {
-        state.selectedAdminTableIds.forEach(id => { const t = findTableById(id); if (t) patchFloorObject(fpId, id, shapeFor(t)); });
-      } else {
-        const t = findTableById(e.target.dataset.id);
-        if (t) patchFloorObject(fpId, e.target.dataset.id, shapeFor(t));
-      }
-    }
-  }
+
 });
 
 // Admin lists: HOLD a row (mouse press-and-hold or touch long-press) to select
@@ -40924,18 +40953,6 @@ function handleActClick(el, e) {
         if (p && p.buf) patchFloorObject(p.fp, p.id, { label: p.buf });
         render();
       }
-      else if (act === 'set-decor-size') {
-        const fp = state.floorPlans.find(f => f.id === el.dataset.fp);
-        const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id));
-        const tpl = t && DECOR_TEMPLATES.find(x => x.key === t.decorType);
-        if (t && tpl) {
-          const step = parseFloat(el.dataset.step);
-          patchFloorObject(el.dataset.fp, t.id, {
-            width: Math.round(tpl.width * step * 10) / 10,
-            height: Math.round(tpl.height * step * 10) / 10,
-          });
-        }
-      }
       else if (act === 'set-table-mode') { setTableMode(el.dataset.mode); }
       else if (act === 'clear-countdowns') {
         // Scope = whatever the Items filters currently show (section,
@@ -40957,9 +40974,30 @@ function handleActClick(el, e) {
       }
       else if (act === 'set-course-wait') { const v = el.dataset.val; saveTicketSetting({ courseWaitMinutes: v === 'null' ? null : parseInt(v) }); }
       else if (act === 'palette-place') {
+        // With a structure picked these chips are ITS shape chips: a tap
+        // re-shapes it, exactly as a table's do (Sep '26). The size it was
+        // dragged to is kept — a longer wall is not a different wall.
+        if (el.dataset.id) {
+          const [kind, key] = String(el.dataset.val).split(':');
+          const tpl = kind === 'decor' && DECOR_TEMPLATES.find(t => t.key === key);
+          const t = findTableById(el.dataset.id);
+          if (tpl && t) {
+            pushFloorHistory();
+            const u = decorUnits(t);
+            patchFloorObject(el.dataset.fp, t.id, { decorType: tpl.key, icon: tpl.icon, label: tpl.label,
+              width: Math.round(u.w * FLOOR_GRID * 100) / 100, height: Math.round(u.h * FLOOR_GRID_Y * 100) / 100 });
+          }
+          return;
+        }
         state.floorPlacing = state.floorPlacing === el.dataset.val ? null : el.dataset.val;
         state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
         render();
+      }
+      else if (act === 'decor-size') { stepDecorUnits(el.dataset.id, el.dataset.dim, parseInt(el.dataset.d, 10)); }
+      else if (act === 'rotate-decor') {
+        const t = findTableById(el.dataset.id);
+        const fp = state.floorPlans.find(f => f.tables.some(x => x.id === el.dataset.id));
+        if (t && fp) { pushFloorHistory(); patchFloorObject(fp.id, t.id, { rotation: ((t.rotation || 0) + 90) % 360 }); }
       }
       else if (act === 'ask-seat-off') { toggleAskSeatOff(el.dataset.kind, el.dataset.id); }
       else if (act === 'mock-jump') {
@@ -41127,7 +41165,10 @@ function handleActClick(el, e) {
         // card underneath also fires and its LOAD confirm replaces this one.
         e.stopPropagation();
         const fpId = el.dataset.fp, name = el.dataset.name;
-        openConfirm({ message: `Overwrite “${name}” with the layout on screen?`, confirmLabel: 'Overwrite', danger: false }, () => saveFloorLayout(fpId, name));
+        // A TICK READS AS "yes, use this one", and this one REPLACES what is
+        // kept under that name — so the question says which way round it goes,
+        // in the words a person would use (Sep '26).
+        openConfirm({ message: `Save the room on screen over “${name}”? What is kept there now is lost.`, confirmLabel: 'Save over', danger: false }, () => saveFloorLayout(fpId, name));
       }
       else if (act === 'delete-floor-layout') {
         e.stopPropagation();
@@ -41141,7 +41182,6 @@ function handleActClick(el, e) {
       else if (act === 'table-seats') { stepTableSeats(parseInt(el.dataset.d, 10)); }
       else if (act === 'unlink-table') { unlinkTapTable(el.dataset.id); }
       else if (act === 'toggle-floor-snap') { saveFloorPlanGrid(el.dataset.fp, { snapToGrid: el.dataset.val === 'true' }); }
-      else if (act === 'set-object-color') { const fp = state.floorPlans.find(f => f.id === el.dataset.fp); const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id)); if (t) patchFloorObject(el.dataset.fp, t.id, { color: el.dataset.val || null }); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
       else if (act === 'set-warn-over-seats') { saveTicketSetting({ warnOverSeats: el.dataset.val === 'true' }); }

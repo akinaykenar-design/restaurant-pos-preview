@@ -1038,7 +1038,7 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
    the shape in the table's current colour/finish. */
 /* Four across, so seven shapes land 4 + 3 instead of 6 + 1 with an orphan
    on a row of its own (owner: "awful spacing"). */
-.shape-chip-row{ display:grid; grid-template-columns:repeat(4,44px); gap:8px; justify-content:start; }
+.shape-chip-row{ display:flex; flex-wrap:wrap; gap:8px; } /* as many as fit on a line — five shapes sit in one row; a grid of four wrapped the fifth */
 /* ONE SQUARE PER SHAPE (owner, Aug '26: "add to floor option has awful
    spacing"). The chip sized itself to the shape drawn inside it, so seven
    shapes came out 44, 46 and 50 wide and wrapped 6 + 1 — an orphan on a row
@@ -1488,7 +1488,7 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 .fp-handle{ position:absolute; width:32px; height:32px; background:var(--orange); color:#fff; display:flex; align-items:center; justify-content:center; pointer-events:auto; box-shadow:var(--lift-1); }
 /* The rotate and resize handles are finger-sized: 32 drawn, 44 to the touch
    (the halo, tap-target law). They were 22 and 18 — pinpricks on a tablet. */
-.rotate-handle::before,.resize-handle::before,.stretch-handle::before{ content:""; position:absolute; inset:-6px; border-radius:inherit; }
+.rotate-handle::before,.resize-handle::before{ content:""; position:absolute; inset:-6px; border-radius:inherit; }
 /* Editor markers let the browser pan the page vertically (native scroll past
    the floor); only a horizontal/diagonal drag or a hold grabs the table —
    see startFloorDrag's touch gate. */
@@ -6645,12 +6645,40 @@ function loadAndMigrate() {
     delete data.floorPlan;
     writeData(data);
   }
+  // FIVE SHAPES IN GRID SQUARES (Sep '26): a table is a shape and a size in
+  // whole squares of the floor grid (2.5% of the width, the matching share of
+  // the height). Everything already on a floor lands on the nearest squares
+  // once: a square that had been pulled long becomes a rectangle, a round one
+  // an oval, and the old "stretch" number goes.
+  if (!(data.settings || {}).tableShapesV3) {
+    const G = 2.5, GY = 2.5 * 900 / 560;
+    let n = 0;
+    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+      if (t.type === 'decor') return;
+      // A whisker under a square rounds UP: the old square template sat a
+      // step under the round one to look equal, and nearest-square would
+      // have split them (2.4 → 2, 2.55 → 3).
+      const w = Math.max(2, Math.min(10, Math.round((t.width || 9) / G + 0.1)));
+      const h = Math.max(2, Math.min(10, Math.round((t.height || 15) / GY + 0.1)));
+      const pulled = (t.stretch || 1) > 1 || w !== h;
+      const round = t.shape === 'round';
+      const shape = round ? (pulled ? 'oval' : 'round') : (pulled ? 'rect' : 'square');
+      t.shape = shape;
+      t.width = Math.round(w * G * 100) / 100;
+      t.height = Math.round((shape === 'round' || shape === 'square' ? w : h) * GY * 100) / 100;
+      delete t.stretch;
+      n++;
+    }));
+    data.settings = Object.assign({}, data.settings, { tableShapesV3: true });
+    writeData(data);
+    if (n) console.log(`${n} tables landed on the grid's squares (five shapes)`);
+  }
   if (data.floorPlans.some(fp => fp.tables.some(t => !t.shape))) {
     data.floorPlans.forEach(fp => {
       fp.tables.forEach(t => {
         if (!t.shape) t.shape = 'square';
-        if (!t.width) t.width = 9;
-        if (!t.height) t.height = 15;
+        if (!t.width) t.width = 7.5;
+        if (!t.height) t.height = 12.05;
         if (!t.seats) t.seats = 4;
       });
     });
@@ -9039,6 +9067,9 @@ function tableLabelTaken(data, label, excludeId) {
   return (data.floorPlans || []).some(fp => fp.tables.some(t => t.type === 'table' && t.id !== excludeId && t.label.trim().toLowerCase() === normalized));
 }
 
+// The five shapes a table can be (square, round, rectangle, oval, half-round)
+// — anything else is stored as a square.
+const TABLE_SHAPE_KEYS = ['square', 'round', 'rect', 'oval', 'half'];
 app.post('/api/floorplans/:fpId/tables', (req, res) => {
   const data = readData();
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
@@ -9053,9 +9084,9 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
     label,
     x: x !== undefined ? x : 50,
     y: y !== undefined ? y : 50,
-    shape: shape || 'square',
-    width: width || 9,
-    height: height || 15,
+    shape: TABLE_SHAPE_KEYS.includes(shape) ? shape : 'square',
+    width: width || 7.5,
+    height: height || 12.05,
     seats: seats !== undefined ? seats : 4,
     type: type === 'decor' ? 'decor' : 'table',
     decorType: decorType || null,
@@ -9089,11 +9120,10 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   // unlink puts it back there.
   if (prevX !== undefined) table.prevX = prevX === null ? null : parseFloat(prevX) || 0;
   if (prevY !== undefined) table.prevY = prevY === null ? null : parseFloat(prevY) || 0;
-  if (shape !== undefined) table.shape = shape;
+  if (shape !== undefined) table.shape = TABLE_SHAPE_KEYS.includes(shape) ? shape : table.shape;
   if (width !== undefined) table.width = width;
   if (height !== undefined) table.height = height;
   if (seats !== undefined) table.seats = seats;
-  if (req.body.stretch !== undefined) table.stretch = Math.max(1, Math.min(3, parseFloat(req.body.stretch) || 1)); // how much longer it has been pulled
   if (rotation !== undefined) table.rotation = ((rotation % 360) + 360) % 360;
   if (finish !== undefined) table.finish = finish;
   if (color !== undefined) table.color = color || null;
@@ -12182,37 +12212,32 @@ const CATEGORY_ICONS = {
 // One grid for every layout — a fine 2.5% step lets tables sit close and line
 // up precisely, while still snapping cleanly on a touchscreen.
 const FLOOR_GRID = 2.5;
-// A square, a circle and a stool look the same turned, so they never offer a
-// Turn (owner, Sep '26: "no sense to rotate symmetrical shapes").
-function symmetricalTable(t) { return !!t && (t.shape === 'round' || t.shape === 'square') && (t.stretch || 1) === 1; } // a pulled table has a long way and a short way, so it turns
-// The two handles on a picked table: drawn on the 24 grid like every icon, and
-// SET AT 16 in their 32 button. At 20 they filled the handle corner to corner
-// and read as a solid blue blob with something scratched on it (owner, Sep
-// '26: "it looks ugly or too big the arrows"). Every other round or square
-// control in the app gives its glyph about the same share of the box — 20 in
-// the 44 square — and 16 in 32 is that proportion. The paths are untouched:
-// the grid is still 24 and the content still 20, so they stay in the family.
+// FIVE SHAPES, ONE HANDLE, REAL NUMBERS (owner, Sep '26). A table is a
+// shape and a size in GRID SQUARES (FLOOR_GRID): a square, a circle and a
+// half-round carry one number, a rectangle and an oval carry two (length,
+// height). Sizes land on whole squares, never in between, so the floor stays
+// tidy. A square and a circle look the same turned, so they never offer a
+// Turn; the rest do (a half-round has a flat side).
+const TABLE_SHAPES = {
+  square: { label: 'Square', sym: true },
+  round: { label: 'Round', sym: true },
+  rect: { label: 'Rectangle', sym: false },
+  oval: { label: 'Oval', sym: false },
+  half: { label: 'Half round', sym: false, half: true },
+};
+const TABLE_MIN = 2, TABLE_MAX = 10; // a table is 2 to 10 grid squares along either way
+function symmetricalTable(t) { return !!t && !!(TABLE_SHAPES[t.shape] || {}).sym; }
+function tableOneNumber(shape) { const sh = TABLE_SHAPES[shape] || TABLE_SHAPES.square; return sh.sym || !!sh.half; } // one size, or length + height
 const FP_TURN_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12a10 10 0 1 1-3.33-7.44"/><path d="M22 2v5.56h-5.56"/></svg>';
-const FP_STRETCH_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h20"/><path d="M6 8l-4 4 4 4"/><path d="M18 8l4 4-4 4"/></svg>';
 const FP_SIZE_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22 22 2"/><path d="M14.5 2H22v7.5"/><path d="M2 14.5V22h7.5"/></svg>';
-// TWO shapes (owner, Sep '26, from first principles): a round table and a
-// square one. Pull a table's SIDE handle and it gets longer — a square becomes
-// a long table, a round becomes an oval — so Oval, Rectangle, Long, Half-round
-// and the Barstool are gone. `stretch` (1 = as dropped, up to 3) is how much
-// longer it has been pulled; seats follow it.
+// What a shape is born as, in grid squares; seats follow the shape.
 const TABLE_TEMPLATES = [
-  { key: 'round', label: 'Round', shape: 'round', width: 7.5, height: 12.2, seats: 4 },
-  // A square of the same footprint READS bigger than a circle (corners add
-  // ~27% area), so it sits a step smaller to look equal on the floor (owner, Aug '26).
-  { key: 'square', label: 'Square', shape: 'square', width: 7, height: 11.5, seats: 4 },
+  { key: 'square', label: 'Square', shape: 'square', w: 3, h: 3, seats: 4 },
+  { key: 'round', label: 'Round', shape: 'round', w: 3, h: 3, seats: 4 },
+  { key: 'rect', label: 'Rectangle', shape: 'rect', w: 4, h: 3, seats: 6 },
+  { key: 'oval', label: 'Oval', shape: 'oval', w: 4, h: 3, seats: 6 },
+  { key: 'half', label: 'Half round', shape: 'half', w: 4, h: 2, seats: 4 },
 ];
-const TABLE_STRETCH_STEPS = [1, 1.5, 2, 2.5, 3]; // how much longer a pulled table can be — snapped on release
-
-// Tables snap to these size steps (× the shape's base template) so the floor
-// stays a set of consistent sizes instead of a jumble of hand-dragged ones.
-// Dragging the resize handle lands on the nearest step; the shape's aspect is
-// held, so a round table stays round — it just grows to a known size.
-const TABLE_SIZE_STEPS = [0.55, 0.7, 0.85];
 // The floor renders at ONE standard aspect (900×500 ≈ 16:9-ish) on every
 // screen — width:100% keeps it responsive. No per-plan height any more, so
 // tables never squish; positions stay in %.
@@ -12232,20 +12257,31 @@ function resnapFloorPlans() {
   // every time the grid changed. The grid only applies when a table is actually
   // dragged or placed — saved layouts are left exactly as the owner arranged them.
 }
-const TABLE_SIZE_LABELS = ['S', 'M', 'L'];
-function tableBaseDims(shape) {
-  const tpl = TABLE_TEMPLATES.find(x => x.shape === (shape === 'rect' ? 'square' : shape));
-  return tpl ? { width: tpl.width, height: tpl.height } : null;
+// A table's size in grid squares (width% is of the canvas width, height% of
+// its height, so each way has its own square) — and back again. A symmetric
+// shape is as tall as it is long; a half-round is half as tall.
+function tableUnits(t) {
+  const w = Math.max(1, Math.round((t.width || 0) / FLOOR_GRID));
+  const h = tableOneNumber(t.shape) ? w : Math.max(1, Math.round((t.height || 0) / FLOOR_GRID_Y));
+  return { w, h };
 }
-// A circle must be a TRUE circle on the floor, whatever the floor's aspect:
-// width% is of canvas width and height% of canvas height, so an equal-pixel
-// circle needs height% = width% × (canvasW / canvasH). Reads the live canvas.
-function circleHeightPct(widthPct) {
-  const c = document.getElementById('admin-floor-canvas');
-  if (!c) return widthPct;
-  const r = c.getBoundingClientRect();
-  if (!r.height) return widthPct;
-  return Math.round(widthPct * (r.width / r.height) * 10) / 10;
+function clampUnits(n) { return Math.max(TABLE_MIN, Math.min(TABLE_MAX, Math.round(n))); }
+function tableDims(shape, w, h) {
+  const sh = TABLE_SHAPES[shape] || TABLE_SHAPES.square;
+  const hh = sh.half ? w / 2 : (sh.sym ? w : h);
+  return { width: Math.round(w * FLOOR_GRID * 100) / 100, height: Math.round(hh * FLOOR_GRID_Y * 100) / 100 };
+}
+function templateDims(tpl) { return tableDims(tpl.shape, tpl.w, tpl.h); }
+// A new shape keeps the size the owner set: the squares carry over.
+function tableShapePatch(t, shape) { const u = tableUnits(t); return { shape, ...tableDims(shape, u.w, u.h) }; }
+// The size the FLOOR is on: the length most of its tables share (decor
+// doesn't count), so the floor-wide stepper always has somewhere to start.
+function floorSizeUnits(fp) {
+  const tables = ((fp && fp.tables) || []).filter(t => t.type !== 'decor');
+  if (!tables.length) return 3;
+  const tally = {};
+  tables.forEach(t => { const w = tableUnits(t).w; tally[w] = (tally[w] || 0) + 1; });
+  return +Object.entries(tally).sort((a, b) => b[1] - a[1] || a[0] - b[0])[0][0];
 }
 // Keep a table fully INSIDE the floor: clamp its centre so no part can hang
 // past the canvas. Uses the ROTATED bounding box — a table turned 45° pokes
@@ -12263,14 +12299,14 @@ function clampToFloor(x, y, w, h, rot, fpHeight) {
     y: Math.max(hh, Math.min(100 - hh, Math.round(y * 10) / 10)),
   };
 }
-// Corner rounding: a round table is a full radius (an oval when pulled), a
-// square one wears the tile corner. (Legacy 'rect' tables read as square.)
-function tableRadius(shape) { return shape === 'round' ? '50%' : '10px'; }
-// Corner radius for a PLACED table — proportional to the table's smaller side so
-// every square/rect rounds the same amount at any size. A fixed px radius reads
-// sharp on big tables and round on small ones (the "two different snaps" bug).
+// Corner rounding for a placed table: a circle and an oval are a full
+// radius, a half-round is a dome on a flat side, a square and a rectangle
+// wear a corner proportional to their smaller side so every one rounds the
+// same amount at any size (a fixed px read sharp on big tables, round on
+// small ones).
 function tableRadiusFor(t) {
-  if (!t || t.shape === 'round') return '50%';
+  if (!t || t.shape === 'round' || t.shape === 'oval') return '50%';
+  if (t.shape === 'half') return '50% 50% 0 0 / 100% 100% 0 0';
   const wpx = (t.width || 10) * 9, hpx = (t.height || 10) * (STD_FLOOR_H / 100);
   const r = 0.16 * Math.min(wpx, hpx);
   return `${(r / wpx * 100).toFixed(1)}% / ${(r / hpx * 100).toFixed(1)}%`;
@@ -12335,35 +12371,6 @@ function decorSizeChips(obj, fp) {
   DECOR_SIZE_STEPS.forEach((s, i) => { const d = Math.abs(s - ratio); if (d < best) { best = d; active = i; } });
   return `<div class="shape-chip-row">${DECOR_SIZE_STEPS.map((s, i) =>
     `<button class="shape-chip${i === active ? ' active' : ''}" data-act="set-decor-size" data-step="${s}" data-id="${obj.id}" data-fp="${fp.id}">${DECOR_SIZE_LABELS[i]}</button>`).join('')}</div>`;
-}
-// S/M/L chips for real tables — snap the passed table(s) to a size step (same
-// steps the corner-drag lands on). Used for a single selected table and for a
-// whole multi-selection (bulk resize). `active` = the step they share, else -1.
-function tableSizeStepIndex(t) {
-  const base = tableBaseDims(t.shape);
-  if (!base || !base.width) return -1;
-  const ratio = (t.width || base.width) / base.width;
-  let active = 0, best = Infinity;
-  TABLE_SIZE_STEPS.forEach((s, i) => { const d = Math.abs(s - ratio); if (d < best) { best = d; active = i; } });
-  return active;
-}
-function tableSizeChips(tables) {
-  const idxs = tables.map(tableSizeStepIndex);
-  const common = idxs.length && idxs.every(i => i === idxs[0]) ? idxs[0] : -1;
-  return `<div class="shape-chip-row">${TABLE_SIZE_STEPS.map((s, i) =>
-    `<button class="shape-chip${i === common ? ' active' : ''}" data-act="set-table-size" data-step="${s}">${TABLE_SIZE_LABELS[i]}</button>`).join('')}</div>`;
-}
-// The size the FLOOR is on: the step most of its tables sit at (decor doesn't
-// count). A floor of hand-dragged sizes still reads as one letter, so the
-// stepper always has somewhere to start; an empty floor starts at M.
-function floorSizeStepIndex(fp) {
-  const tables = ((fp && fp.tables) || []).filter(t => t.type !== 'decor');
-  if (!tables.length) return 1;
-  const tally = [];
-  tables.forEach(t => { const i = tableSizeStepIndex(t); if (i >= 0) tally[i] = (tally[i] || 0) + 1; });
-  let best = 1, n = -1;
-  TABLE_SIZE_STEPS.forEach((_, i) => { if ((tally[i] || 0) > n) { n = tally[i] || 0; best = i; } });
-  return best;
 }
 // Table-top textures, drawn in-code (inline SVG tiles + gradient layers) so the
 // app stays fully offline. Wood shows grain, marble shows veins, metals show a
@@ -28610,16 +28617,19 @@ function renderFloorPlanAdmin() {
         // number for the same job (caught when the owner asked "did we fuck up
         // our old rules?").
         const SHAPE_BOX = 20; // the icon law's content box — see below
-        const ratio = { round: 1, square: 1 };
-        const dims = Object.fromEntries(Object.entries(ratio).map(([k, r]) =>
-          [k, r >= 1 ? [SHAPE_BOX, Math.round(SHAPE_BOX / r)] : [Math.round(SHAPE_BOX * r), SHAPE_BOX]]));
+        // EVERY SHAPE THE SAME HEIGHT (owner's pick from three, Sep '26: same
+        // width made the flat ones read small). Each is drawn at its born
+        // proportion, 20 tall, as wide as that makes it, up to the chip's
+        // inside (28); a half-round is a true half circle and comes out low.
+        const SHAPE_W_MAX = 28;
+        const dims = Object.fromEntries(TABLE_TEMPLATES.map(t => { const d = templateDims(t); const r = (d.width * STD_FLOOR_W) / (d.height * STD_FLOOR_H); const w = Math.min(SHAPE_W_MAX, Math.round(SHAPE_BOX * r)); return [t.key, [w, Math.round(w / r)]]; }));
         // In PLACEMENT mode highlight the exact template picked (barstool and the
         // round table share shape:'round', so matching by shape lit both). When
         // editing a table we only know its shape, so fall back to that.
         const isActive = (t) => idAttr ? (t.shape === activeShape) : (t.key === placingKey);
         // Swatch corner radius mirrors a REAL placed table (~16% of the short side),
         // not a fat fixed 10px that made every square swatch look pill-rounded.
-        const chipRadius = (shape, w, h) => shape === 'round' ? '50%' : `${Math.max(2, Math.round(Math.min(w, h) * 0.16))}px`;
+        const chipRadius = (shape, w, h) => shape === 'round' || shape === 'oval' ? '50%' : shape === 'half' ? '50% 50% 0 0 / 100% 100% 0 0' : `${Math.max(2, Math.round(Math.min(w, h) * 0.16))}px`;
         return `<div class="shape-chip-row">${TABLE_TEMPLATES.map(t => { const [w, h] = dims[t.key] || dims[t.shape] || [26, 26];
           return `<button class="shape-chip ${isActive(t) ? 'active' : ''}" data-act="pick-table-shape" data-key="${t.key}" ${idAttr} data-fp="${fp.id}" aria-label="${esc(t.label)}"><span class="shape-chip-preview" style="width:${w}px;height:${h}px;border-radius:${chipRadius(t.shape, w, h)};background:${pvBg};"></span></button>`; }).join('')}</div>`;
       };
@@ -28705,7 +28715,26 @@ function renderFloorPlanAdmin() {
             <span class="grid-step-val">${selTable ? (selTable.seats || 0) : (same(selMany.map(t => t.seats || 0)) == null ? '·' : same(selMany.map(t => t.seats || 0)))}</span>
             <button class="btn-secondary sm" data-act="table-seats" data-d="1"${(selTable ? (selTable.seats || 0) >= 20 : false) ? ' disabled' : ''}>+</button>
           </div>
-        </div>` : ''}
+        </div>
+        ${/* HOW BIG, IN GRID SQUARES (owner, Sep '26: "real numbers instead"
+              of S/M/L). One number for a square, a circle, a half-round; a
+              length and a height for a rectangle or an oval. The same stepper
+              as Seats; the corner handle on the floor moves the same numbers. */ ''}
+        ${(() => {
+          const tables = selTable ? [selTable] : selMany.filter(t => t.type !== 'decor');
+          if (!tables.length) return '';
+          const one = tables.every(t => tableOneNumber(t.shape));
+          const rows = one ? [['Size', 's']] : [['Length', 'w'], ['Height', 'h']];
+          return rows.map(([name, dim]) => { const vals = tables.map(t => dim === 'h' ? tableUnits(t).h : tableUnits(t).w); const v = same(vals); return `
+        <div class="fp-inline-row">
+          <span class="fp-sub fp-sub-flat">${name}</span>
+          <div class="grid-stepper" style="margin:0;">
+            <button class="btn-secondary sm" data-act="table-size" data-dim="${dim}" data-d="-1"${vals.every(x => x <= TABLE_MIN) ? ' disabled' : ''}>−</button>
+            <span class="grid-step-val">${v == null ? '·' : v}</span>
+            <button class="btn-secondary sm" data-act="table-size" data-dim="${dim}" data-d="1"${vals.every(x => x >= TABLE_MAX) ? ' disabled' : ''}>+</button>
+          </div>
+        </div>`; }).join('');
+        })()}` : ''}
         ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
         ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control,
               the number included. It was a 40-tall pill sitting beside 44
@@ -28714,9 +28743,6 @@ function renderFloorPlanAdmin() {
         ${selTable
           ? `<button class="icon-sq" data-act="open-tablenum-pad" data-id="${selected.id}" data-fp="${fp.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${esc(String(selected.label))}</button>`
           : `<button class="icon-sq" disabled style="font-family:'IBM Plex Mono',monospace;font-weight:800;opacity:var(--dim);cursor:default;">#</button>`}
-        ${selTable
-          ? `<button class="icon-sq" data-act="cycle-table-size" data-id="${selected.id}" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${TABLE_SIZE_LABELS[tableSizeStepIndex(selected)] || 'M'}</button>`
-          : (() => { const cs = same(selMany.map(t => tableSizeStepIndex(t))); return `<button class="icon-sq" data-act="cycle-size-selected" style="font-family:'IBM Plex Mono',monospace;font-weight:800;">${cs == null ? '·' : (TABLE_SIZE_LABELS[cs] || 'M')}</button>`; })()}
         ${/* NO SECOND COLOUR DOT HERE. The card already carries one, on its
               own Colour &amp; finish row above — the same door twice. */ ''}
         ${selTable
@@ -28779,12 +28805,11 @@ function renderFloorPlanAdmin() {
             pills; a stepper is two finger-sized keys and the value between
             them, and it obeys the stepper law. */ ''}
       ${(() => {
-        const i = Math.max(0, floorSizeStepIndex(fp));
-        const at = (n) => TABLE_SIZE_STEPS[Math.max(0, Math.min(TABLE_SIZE_STEPS.length - 1, n))];
+        const n = floorSizeUnits(fp);
         return `<div class="grid-stepper" style="margin-bottom:0;">
-          <button class="btn-secondary sm" data-act="size-all-tables" data-step="${at(i - 1)}" ${i <= 0 ? 'disabled' : ''}>−</button>
-          <span class="grid-step-val">${TABLE_SIZE_LABELS[i] || 'M'}</span>
-          <button class="btn-secondary sm" data-act="size-all-tables" data-step="${at(i + 1)}" ${i >= TABLE_SIZE_STEPS.length - 1 ? 'disabled' : ''}>+</button>
+          <button class="btn-secondary sm" data-act="size-all-tables" data-d="-1" ${n <= TABLE_MIN ? 'disabled' : ''}>−</button>
+          <span class="grid-step-val">${n}</span>
+          <button class="btn-secondary sm" data-act="size-all-tables" data-d="1" ${n >= TABLE_MAX ? 'disabled' : ''}>+</button>
         </div>`;
       })()}
     </div>
@@ -28824,22 +28849,22 @@ function renderFloorPlanAdmin() {
       const [kind, key] = state.floorPlacing.split(':');
       const tpl = kind === 'decor' ? DECOR_TEMPLATES.find(t => t.key === key) : TABLE_TEMPLATES.find(t => t.key === key);
       if (!tpl) return '';
-      const radius = kind === 'decor' ? '8px' : tableRadius(tpl.shape);
-      return `<div id="floor-place-ghost" style="position:absolute;left:-9999px;top:0;width:${tpl.width}%;height:${tpl.height}%;transform:translate(-50%,-50%);border:2px ${kind === 'decor' ? 'dashed' : 'solid'} var(--orange);border-radius:${radius};background:var(--orange-dim);opacity:0.65;pointer-events:none;z-index:6;display:flex;align-items:center;justify-content:center;font-size:var(--fs-xl);">${kind === 'decor' ? (DECOR_ART[tpl.key] ? `<span style="width:80%;height:80%;display:flex;">${DECOR_ART[tpl.key]}</span>` : (tpl.icon || '')) : ''}</div>`;
+      const gd = kind === 'decor' ? { width: tpl.width, height: tpl.height } : templateDims(tpl);
+      const radius = kind === 'decor' ? '8px' : tableRadiusFor({ shape: tpl.shape, ...gd });
+      return `<div id="floor-place-ghost" style="position:absolute;left:-9999px;top:0;width:${gd.width}%;height:${gd.height}%;transform:translate(-50%,-50%);border:2px ${kind === 'decor' ? 'dashed' : 'solid'} var(--orange);border-radius:${radius};background:var(--orange-dim);opacity:0.65;pointer-events:none;z-index:6;display:flex;align-items:center;justify-content:center;font-size:var(--fs-xl);">${kind === 'decor' ? (DECOR_ART[tpl.key] ? `<span style="width:80%;height:80%;display:flex;">${DECOR_ART[tpl.key]}</span>` : (tpl.icon || '')) : ''}</div>`;
     })() : ''}
     ${fp.tables.map(t => `
       <button class="floor-marker admin-floor-marker${state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id) ? ' mk-sel' : ''}" data-id="${t.id}" style="${shapeStyle(t, state.selectedAdminTableId === t.id || state.selectedAdminTableIds.includes(t.id))}cursor:pointer;">
         ${floorMarkerInner(t, fp.height, { hideStatus: true })}
         ${state.selectedAdminTableId === t.id ? `
           <div style="position:absolute;inset:0;transform:rotate(${-(t.rotation || 0)}deg);pointer-events:none;z-index:2;">
-            ${/* Three handles on three CORNERS: turn top-left, stretch
-                  top-right, size bottom-right. They stood in one stack down
-                  the right edge, 39px apart on a phone's 46px table — three
-                  44px targets on top of each other and the table under them
-                  (owner, Sep '26: "too cluttered"). */ ''}
+            ${/* Two handles on two CORNERS: turn top-left, size bottom-right
+                  (the pull handle went in Sep '26 — a rectangle and an oval
+                  are shapes now, sized by the one corner). They stood in one
+                  stack down the right edge once, three 44px targets on top of
+                  each other (owner: "too cluttered"). */ ''}
             ${symmetricalTable(t) ? '' : `<span class="rotate-handle fp-handle" data-id="${t.id}" style="top:-16px;left:-16px;border-radius:50%;cursor:pointer;">${FP_TURN_SVG}</span>`}
             <span class="resize-handle fp-handle" data-id="${t.id}" style="bottom:-16px;right:-16px;border-radius:var(--r-control);cursor:nwse-resize;">${FP_SIZE_SVG}</span>
-            ${t.type === 'decor' ? '' : `<span class="stretch-handle fp-handle" data-id="${t.id}" style="top:-16px;right:-16px;border-radius:var(--r-control);cursor:ew-resize;">${FP_STRETCH_SVG}</span>`}
           </div>
         ` : ''}
       </button>
@@ -32805,15 +32830,15 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
     if (!tpl) return;
-    const ct = clampToFloor(xPct, yPct, tpl.width, tpl.height, 0, fp.height);
+    const td = templateDims(tpl);
+    const ct = clampToFloor(xPct, yPct, td.width, td.height, 0, fp.height);
     xPct = ct.x; yPct = ct.y;
-    if (tableWouldOverlap(fp, xPct, yPct, tpl.width, tpl.height, null)) {
+    if (tableWouldOverlap(fp, xPct, yPct, td.width, td.height, null)) {
       state.toast = 'Tables can’t overlap — drop it somewhere clear';
       render();
       return;
     }
-    const ph = tpl.shape === 'round' ? circleHeightPct(tpl.width) : tpl.height;
-    payload = { label: nextTableLabel(fp), x: xPct, y: yPct, shape: tpl.shape, width: tpl.width, height: ph, seats: tpl.seats, stretch: 1, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    payload = { label: nextTableLabel(fp), x: xPct, y: yPct, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -32833,7 +32858,8 @@ async function addObject(fpId) {
     payload = { label: tpl.label, x: 50, y: 50, shape: 'square', width: tpl.width, height: tpl.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon, rotation: 0 };
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
-    payload = { label: nextTableLabel(fp), x: 50, y: 50, shape: tpl.shape, width: tpl.width, height: tpl.height, seats: tpl.seats, stretch: 1, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
+    const td = templateDims(tpl);
+    payload = { label: nextTableLabel(fp), x: 50, y: 50, shape: tpl.shape, width: td.width, height: td.height, seats: tpl.seats, type: 'table', rotation: 0, color: state.floorTableColor || null, finish: state.floorTableColor ? null : (state.floorTableFinish || null) };
   }
   pushFloorHistory();
   try {
@@ -32861,40 +32887,38 @@ async function scaleSelectedTables(dir) {
   }));
 }
 
-// Uniform size: set EVERY table on the current floor to one preset step,
-// keeping each shape's proportions (circles stay circular). One tap tidies
-// a floor of hand-dragged sizes.
-async function sizeAllTables(step) {
+// SIZE, IN SQUARES. One function moves a table's numbers, whether the card's
+// stepper or the floor-wide stepper asked: dim 's' steps the size (both ways
+// on a rectangle or an oval), 'w' the length, 'h' the height. A table that
+// would overlap or leave the floor says so and stays.
+async function stepTableUnits(tables, dim, d) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
-  await Promise.all(fp.tables.filter(t => t.type !== 'decor').map(t => {
-    const base = tableBaseDims(t.shape) || { width: t.width / (t.stretch || 1), height: t.height };
-    const width = Math.round(base.width * step * (t.stretch || 1) * 10) / 10; // a pulled table stays pulled
-    const height = t.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
-    return patchFloorObject(fp.id, t.id, { width, height });
+  let blocked = 0;
+  await Promise.all(tables.filter(t => t && t.type !== 'decor').map(t => {
+    const u = tableUnits(t);
+    const one = tableOneNumber(t.shape);
+    if (dim === 'w' || dim === 's') u.w = clampUnits(u.w + d);
+    if (dim === 'h' || (dim === 's' && !one)) u.h = clampUnits(u.h + d);
+    const dims = tableDims(t.shape, u.w, u.h);
+    if (dims.width === t.width && dims.height === t.height) return null;
+    if (tableWouldOverlap(fp, t.x, t.y, dims.width, dims.height, t.id)) { blocked++; return null; }
+    const cr = clampToFloor(t.x, t.y, dims.width, dims.height, t.rotation, fp.height);
+    return patchFloorObject(fp.id, t.id, { ...dims, ...(cr.x !== t.x || cr.y !== t.y ? { x: cr.x, y: cr.y } : {}) });
   }));
-  const li = TABLE_SIZE_STEPS.indexOf(step);
-  state.toast = `All tables → Size ${TABLE_SIZE_LABELS[li] || ''}`;
-  armToastTimer(1600);
+  if (blocked) { state.toast = blocked === 1 ? 'One table would overlap — it stays' : `${blocked} tables would overlap — they stay`; render(); armToastTimer(1600); }
 }
-// Resize only the CURRENT selection (the multi set, or the single selected
-// table) to a size step — the S/M/L bulk-size chips in the tool rail.
-async function sizeSelectedTables(step) {
+function stepTableSize(dim, d) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
-  const ids = state.selectedAdminTableIds.length ? state.selectedAdminTableIds.slice()
-    : state.selectedAdminTableId ? [state.selectedAdminTableId] : [];
-  const targets = ids.map(id => fp.tables.find(t => t.id === id)).filter(t => t && t.type !== 'decor');
-  if (!targets.length) return;
-  await Promise.all(targets.map(t => {
-    const base = tableBaseDims(t.shape) || { width: t.width / (t.stretch || 1), height: t.height };
-    const width = Math.round(base.width * step * (t.stretch || 1) * 10) / 10; // a pulled table stays pulled
-    const height = t.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
-    return patchFloorObject(fp.id, t.id, { width, height });
-  }));
-  const li = TABLE_SIZE_STEPS.indexOf(step);
-  state.toast = `${targets.length > 1 ? targets.length + ' tables' : 'Table'} → Size ${TABLE_SIZE_LABELS[li] || ''}`;
-  armToastTimer(1600);
+  const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : (state.selectedAdminTableIds || []);
+  return stepTableUnits(ids.map(id => fp.tables.find(x => x.id === id)), dim, d);
+}
+// Every table on the floor one square bigger or smaller, each keeping its shape.
+function sizeAllTables(d) {
+  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+  if (!fp) return;
+  return stepTableUnits(fp.tables, 's', d);
 }
 
 // A search hit lands ON the thing: scroll its row (matched by data-id /
@@ -33601,49 +33625,6 @@ function endRotateDrag() {
 // growing/shrinking symmetrically around its fixed center point (x/y).
 let floorResizeDrag = null; // { tableId, fpId, markerEl, canvasEl, startWidth, startHeight, startClientX, startClientY, rotationRad, maxDim }
 
-// PULL a table longer by its side handle (owner, Sep '26). Only the length
-// moves: a square becomes a long table, a round an oval. Snaps to
-// TABLE_STRETCH_STEPS on release; seats follow (a table twice as long sits
-// twice as many).
-let floorStretchDrag = null;
-function startStretchDrag(e, tableId) {
-  const markerEl = e.currentTarget.closest('.admin-floor-marker');
-  const canvasEl = markerEl.closest('.floor-canvas');
-  const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-  const t = fp && fp.tables.find(x => x.id === tableId);
-  if (!fp || !t || t.type === 'decor') return;
-  const clientX = e.touches ? e.touches[0].clientX : e.clientX;
-  const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  const stretch = t.stretch || 1;
-  floorStretchDrag = { tableId, fpId: fp.id, markerEl, canvasEl, rect: canvasEl.getBoundingClientRect(), startClientX: clientX, startClientY: clientY, rotationRad: (t.rotation || 0) * Math.PI / 180, baseWidth: t.width / stretch, startStretch: stretch, last: stretch };
-  e.preventDefault();
-}
-function moveStretchDrag(clientX, clientY) {
-  if (!floorStretchDrag) return;
-  const d = floorStretchDrag, rect = d.rect;
-  const dxPx = clientX - d.startClientX, dyPx = clientY - d.startClientY;
-  const localDxPx = dxPx * Math.cos(d.rotationRad) + dyPx * Math.sin(d.rotationRad);
-  const dxPct = (localDxPx / rect.width) * 100;
-  // The handle is on one side and the table is anchored at its centre, so a
-  // pull of x grows the width by 2x.
-  const min = TABLE_STRETCH_STEPS[0], max = TABLE_STRETCH_STEPS[TABLE_STRETCH_STEPS.length - 1];
-  d.last = Math.max(min, Math.min(max, d.startStretch + (dxPct * 2) / d.baseWidth));
-  d.markerEl.style.width = (Math.round(d.baseWidth * d.last * 10) / 10) + '%';
-}
-function endStretchDrag() {
-  if (!floorStretchDrag) return;
-  const d = floorStretchDrag; floorStretchDrag = null;
-  const step = TABLE_STRETCH_STEPS.reduce((a, b) => Math.abs(b - d.last) < Math.abs(a - d.last) ? b : a);
-  const fp = state.floorPlans.find(f => f.id === d.fpId);
-  const t = fp && fp.tables.find(x => x.id === d.tableId);
-  if (!t) { render(); return; }
-  const width = Math.round(d.baseWidth * step * 10) / 10;
-  if (tableWouldOverlap(fp, t.x, t.y, width, t.height, t.id)) { state.toast = 'Tables can’t overlap'; render(); return; }
-  const tpl = TABLE_TEMPLATES.find(x => x.shape === (t.shape === 'rect' ? 'square' : t.shape));
-  const seats = Math.max(1, Math.round((tpl ? tpl.seats : (t.seats || 4)) * step));
-  state.toast = step === 1 ? `Seats ${seats}` : `×${step} long · seats ${seats}`; armToastTimer(1400);
-  patchFloorObject(fp.id, t.id, { width, stretch: step, seats });
-}
 function startResizeDrag(e, tableId) {
   const markerEl = e.currentTarget.closest('.admin-floor-marker');
   const canvasEl = markerEl.closest('.floor-canvas');
@@ -33652,7 +33633,6 @@ function startResizeDrag(e, tableId) {
   if (!fp || !t) return;
   const clientX = e.touches ? e.touches[0].clientX : e.clientX;
   const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-  const base = t.type === 'decor' ? null : (tableBaseDims(t.shape) || { width: t.width, height: t.height });
   floorResizeDrag = {
     tableId, fpId: fp.id, markerEl, canvasEl, rect: canvasEl.getBoundingClientRect(),
     startWidth: t.width, startHeight: t.height,
@@ -33661,11 +33641,7 @@ function startResizeDrag(e, tableId) {
     maxDim: t.type === 'decor' ? 60 : 40,
     isDecor: t.type === 'decor',
     shape: t.shape,
-    base,
-    // Where the current size sits on the step scale, so the drag continues
-    // from the table's real size rather than jumping to a step boundary.
-    stretch: t.type === 'decor' ? 1 : (t.stretch || 1),
-    startScale: base ? (t.width / (t.stretch || 1)) / base.width : 1,
+    units: t.type === 'decor' ? null : tableUnits(t),
   };
   e.preventDefault();
 }
@@ -33691,36 +33667,28 @@ function moveResizeDrag(clientX, clientY) {
     floorResizeDrag.lastHeight = Math.round(height * 10) / 10;
     return;
   }
-  // Tables: SMOOTH during the drag (continuous scale, clamped between the
-  // smallest and largest preset so dragging "past" XL just stops instead of
-  // jittering), then SNAP to the nearest preset on release. Shape proportions
-  // held, so the table keeps its shape.
-  const base = floorResizeDrag.base;
-  const steps = TABLE_SIZE_STEPS;
-  const minStep = steps[0], maxStep = steps[steps.length - 1];
-  const growPct = (dxPct + dyPct) / 2;
-  let scale = floorResizeDrag.startScale + (growPct / ((base.width + base.height) / 2)) * 1.1;
-  scale = Math.max(minStep, Math.min(maxStep, scale));
-  const width = Math.round(base.width * scale * floorResizeDrag.stretch * 10) / 10;
-  const height = floorResizeDrag.shape === 'round' ? circleHeightPct(base.width * scale) : Math.round(base.height * scale * 10) / 10;
-  floorResizeDrag.markerEl.style.width = width + '%';
-  floorResizeDrag.markerEl.style.height = height + '%';
-  floorResizeDrag.lastScale = scale;
+  // Tables: the corner moves the table's SQUARES, live — the drag lands on a
+  // whole square as the finger passes it, so what you see is what you get. A
+  // square, a circle and a half-round grow both ways from the one number; a
+  // rectangle and an oval take length and height from the two directions.
+  // The handle is on a corner and the table is anchored at its centre, so a
+  // pull of x grows the side by 2x.
+  const u0 = floorResizeDrag.units;
+  const dxU = Math.round((dxPct * 2) / FLOOR_GRID), dyU = Math.round((dyPct * 2) / FLOOR_GRID_Y);
+  const one = tableOneNumber(floorResizeDrag.shape);
+  const w = clampUnits(u0.w + (one ? Math.max(dxU, dyU) : dxU));
+  const h = one ? w : clampUnits(u0.h + dyU);
+  const dims = tableDims(floorResizeDrag.shape, w, h);
+  floorResizeDrag.markerEl.style.width = dims.width + '%';
+  floorResizeDrag.markerEl.style.height = dims.height + '%';
+  floorResizeDrag.lastWidth = dims.width;
+  floorResizeDrag.lastHeight = dims.height;
 }
 
 function endResizeDrag() {
   if (!floorResizeDrag) return;
   const { tableId, fpId, isDecor } = floorResizeDrag;
-  let lastWidth = floorResizeDrag.lastWidth, lastHeight = floorResizeDrag.lastHeight;
-  if (!isDecor && floorResizeDrag.lastScale !== undefined) {
-    // Snap the continuous drag to the nearest preset step.
-    const base = floorResizeDrag.base, sc = floorResizeDrag.lastScale;
-    const step = TABLE_SIZE_STEPS.reduce((a, b) => Math.abs(b - sc) < Math.abs(a - sc) ? b : a);
-    lastWidth = Math.round(base.width * step * floorResizeDrag.stretch * 10) / 10;
-    lastHeight = floorResizeDrag.shape === 'round' ? circleHeightPct(base.width * step) : Math.round(base.height * step * 10) / 10;
-    const li = TABLE_SIZE_STEPS.indexOf(step);
-    if (li >= 0) { state.toast = `Size ${TABLE_SIZE_LABELS[li]}`; armToastTimer(1400); }
-  }
+  const lastWidth = floorResizeDrag.lastWidth, lastHeight = floorResizeDrag.lastHeight;
   if (lastWidth !== undefined) {
     const fp = state.floorPlans.find(f => f.id === fpId);
     const t = fp && fp.tables.find(x => x.id === tableId);
@@ -33739,28 +33707,28 @@ function endResizeDrag() {
 
 // Nothing being dragged → out at once. These ran four functions on every
 // finger move anywhere in the app, drag or no drag.
-function floorDragLive() { return !!(floorDrag || floorRotateDrag || floorResizeDrag || floorStretchDrag || floorMarquee); }
+function floorDragLive() { return !!(floorDrag || floorRotateDrag || floorResizeDrag || floorMarquee); }
 document.addEventListener('mousemove', (e) => {
   if (!floorDragLive()) return;
   moveFloorDrag(e.clientX, e.clientY);
   moveRotateDrag(e.clientX, e.clientY);
-  moveResizeDrag(e.clientX, e.clientY); moveStretchDrag(e.clientX, e.clientY);
+  moveResizeDrag(e.clientX, e.clientY);
   moveMarquee(e.clientX, e.clientY);
 });
-document.addEventListener('mouseup', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endStretchDrag(); endMarquee(); });
+document.addEventListener('mouseup', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endMarquee(); });
 document.addEventListener('touchmove', (e) => {
   if (!e.touches[0] || !floorDragLive()) return;
   moveFloorDrag(e.touches[0].clientX, e.touches[0].clientY);
   moveRotateDrag(e.touches[0].clientX, e.touches[0].clientY);
-  moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY); moveStretchDrag(e.touches[0].clientX, e.touches[0].clientY);
+  moveResizeDrag(e.touches[0].clientX, e.touches[0].clientY);
 }, { passive: true });
-document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); endStretchDrag(); });
+document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); endResizeDrag(); });
 // Browser took the gesture for a native scroll: drop a still-pending drag so it
 // never lands as a stray tap/select; commit a drag that had already started.
 document.addEventListener('touchcancel', () => {
   if (floorDrag && floorDrag.pending) { if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer); floorDrag = null; }
   else endFloorDrag();
-  endRotateDrag(); endResizeDrag(); endStretchDrag();
+  endRotateDrag(); endResizeDrag();
 });
 // Long-press an item tile → quantity popover (½ ×2 ×3 ×4 ×5). No hidden mode:
 // hold the tile, pick a quantity, done. The pick funnels through the same
@@ -37888,7 +37856,7 @@ document.addEventListener('change', (e) => {
       const fpId = e.target.dataset.fp;
       // Turning a table into a Circle makes it a real circle (height from its
       // width, per the floor's aspect) rather than inheriting a stretched size.
-      const shapeFor = (t) => tpl.shape === 'round' ? { shape: 'round', height: circleHeightPct(t.width) } : { shape: tpl.shape };
+      const shapeFor = (t) => tableShapePatch(t, tpl.shape);
       if (e.target.dataset.id === 'multi') {
         state.selectedAdminTableIds.forEach(id => { const t = findTableById(id); if (t) patchFloorObject(fpId, id, shapeFor(t)); });
       } else {
@@ -39668,7 +39636,6 @@ function bindEvents() {
   });
   handle('.rotate-handle', startRotateDrag);
   handle('.resize-handle', startResizeDrag);
-  handle('.stretch-handle', startStretchDrag);
 
   // HOLD an account tile to pin/unpin its icon on the docket head row. A short
   // press still runs the tile's action; the hold suppresses that one tap.
@@ -40745,7 +40712,7 @@ function handleActClick(el, e) {
       else if (act === 'pick-table-shape') {
         const tpl = TABLE_TEMPLATES.find(t => t.key === el.dataset.key); if (!tpl) return;
         const fpId = el.dataset.fp, id = el.dataset.id;
-        const shapeFor = (t) => tpl.shape === 'round' ? { shape: 'round', height: circleHeightPct(t.width) } : { shape: tpl.shape };
+        const shapeFor = (t) => tableShapePatch(t, tpl.shape);
         if (!id) { // nothing selected → arm/disarm placement of this shape
           state.floorPlacing = state.floorPlacing === `table:${tpl.key}` ? null : `table:${tpl.key}`;
           state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
@@ -40757,7 +40724,7 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'duplicate-selected-tables') { duplicateSelectedTables(el.dataset.id); }
-      else if (act === 'size-all-tables') { sizeAllTables(parseFloat(el.dataset.step)); }
+      else if (act === 'size-all-tables') { sizeAllTables(parseInt(el.dataset.d, 10)); }
       else if (act === 'name-floor-layout') {
         state.layoutNaming = el.dataset.fp; render();
         const inp = document.getElementById('layout-name-input'); if (inp) inp.focus();
@@ -40787,29 +40754,9 @@ function handleActClick(el, e) {
         const lay = (fp && (fp.savedLayouts || []).find(l => l.id === id)) || {};
         openConfirm({ message: `Delete layout “${lay.name || ''}”?`, confirmLabel: 'Delete', danger: true }, () => deleteFloorLayout(fpId, id));
       }
-      else if (act === 'set-table-size') { sizeSelectedTables(parseFloat(el.dataset.step)); }
       // §§ router: floor editor tools
+      else if (act === 'table-size') { stepTableSize(el.dataset.dim, parseInt(el.dataset.d, 10)); }
       else if (act === 'table-seats') { stepTableSeats(parseInt(el.dataset.d, 10)); }
-      else if (act === 'cycle-table-size') {
-        const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-        const t = fp && fp.tables.find(x => x.id === el.dataset.id);
-        if (t) {
-          const cur = tableSizeStepIndex(t);
-          const next = TABLE_SIZE_STEPS[((cur < 0 ? 0 : cur) + 1) % TABLE_SIZE_STEPS.length];
-          state.selectedAdminTableId = t.id; state.selectedAdminTableIds = [];
-          sizeSelectedTables(next);
-        }
-      }
-      else if (act === 'cycle-size-selected') {
-        const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-        const sel = state.selectedAdminTableIds.map(id => fp && fp.tables.find(x => x.id === id)).filter(t => t && t.type !== 'decor');
-        if (sel.length) {
-          const idxs = sel.map(tableSizeStepIndex);
-          const common = idxs.every(i => i === idxs[0]) ? idxs[0] : -1;
-          const next = TABLE_SIZE_STEPS[((common < 0 ? 0 : common) + 1) % TABLE_SIZE_STEPS.length];
-          sizeSelectedTables(next);
-        }
-      }
       else if (act === 'unlink-table') { unlinkTapTable(el.dataset.id); }
       else if (act === 'toggle-floor-snap') { saveFloorPlanGrid(el.dataset.fp, { snapToGrid: el.dataset.val === 'true' }); }
       else if (act === 'set-object-color') { const fp = state.floorPlans.find(f => f.id === el.dataset.fp); const t = fp && fp.tables.find(x => String(x.id) === String(el.dataset.id)); if (t) patchFloorObject(el.dataset.fp, t.id, { color: el.dataset.val || null }); }

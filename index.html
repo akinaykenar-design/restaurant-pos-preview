@@ -5826,6 +5826,12 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     try { stored = JSON.parse(localStorage.getItem(POSKEY) || 'null'); } catch (e) {}
     document.body.appendChild(save);
     if (stored && stored.x != null) place(stored.x, stored.y);
+    // ON A PHONE THE PILLS START AT THE TOP, NOT OVER THE MONEY KEYS: the
+    // bottom-right of a 390-wide screen is the pay pane's Confirm key, and
+    // both pills landed on it (owner, Sep '26: "secondary payments don't
+    // work on mobile"). The top-right is the rail's faded end. Still
+    // draggable, still remembered.
+    else if (innerWidth < 500) place(innerWidth - 150, 8);
     else place(innerWidth - 150, innerHeight - 110);
     window.addEventListener('resize', function () { var r = save.getBoundingClientRect(); place(r.left, r.top); });
     var drag = null;
@@ -5868,6 +5874,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     try { rstored = JSON.parse(localStorage.getItem(RPOSKEY) || 'null'); } catch (e) {}
     document.body.appendChild(ref);
     if (rstored && rstored.x != null) rplace(rstored.x, rstored.y);
+    else if (innerWidth < 500) rplace(innerWidth - 150, 52);
     else rplace(innerWidth - 150, innerHeight - 150);
     window.addEventListener('resize', function () { var r = ref.getBoundingClientRect(); rplace(r.left, r.top); });
     // FRAMED (the phone / tablet preview page): the page hosts both pills
@@ -11361,6 +11368,10 @@ const CARD_TYPE_KEYS = ['visa', 'mastercard', 'amex', 'eftpos'];
 function splitPaidTotal(order) {
   return (order.splitPaid || []).reduce((s, p) => s + (p.amount || 0), 0);
 }
+// The same parts less their tips: what they have paid of the BILL.
+function splitPaidNet(order) {
+  return (order.splitPaid || []).reduce((s, p) => s + (p.amount || 0) - (p.tip || 0), 0);
+}
 
 // How the bill is being divided, kept on the order so every till shows the
 // same parts. Locked once any part has been paid.
@@ -11406,7 +11417,17 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const amt = Math.round((parseFloat(amount) || 0) * 100) / 100;
   if (!(amt > 0)) return res.status(400).json({ error: 'That part has no amount' });
   const billNow = order.grandTotal !== undefined ? order.grandTotal : order.total;
-  if (splitPaidTotal(order) + amt > billNow + 0.01) return res.status(400).json({ error: `Only $${Math.max(0, billNow - splitPaidTotal(order)).toFixed(2)} is still owing on this bill` });
+  // A part is what the card or the till actually took, tip included, and its
+  // tip is whatever of it was over the bill: the parts fill the BILL first,
+  // and only money past the bill is tip. Judged net of tip, or a tipped bill
+  // paid in two goes was refused on the second — the till counted the tip
+  // in what was owed and this check did not (owner, Sep '26: "secondary
+  // payments don't work").
+  const tipAsked = Math.max(0, Math.round((parseFloat(tip) || 0) * 100) / 100);
+  const netPaid = splitPaidNet(order);
+  const room = Math.max(0, Math.round((billNow - netPaid) * 100) / 100);
+  if (amt > room + tipAsked + 0.01) return res.status(400).json({ error: `Only $${(room + tipAsked).toFixed(2)} is still owing on this bill` });
+  const tipNow = Math.min(tipAsked, Math.max(0, Math.round((amt - room) * 100) / 100));
   if (!order.splitParts && Array.isArray(parts) && parts.length) {
     order.splitParts = parts.slice(0, 60).map(p => ({
       key: String(p.key || '').slice(0, 40),
@@ -11418,7 +11439,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const by = String(staffName || 'Unknown').slice(0, 40);
   order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
     cardType: CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null,
-    tip: Math.max(0, Math.min(amt, Math.round((parseFloat(tip) || 0) * 100) / 100)),
+    tip: tipNow,
     at: Date.now(), staffName: by });
   logAudit(data, by, `Took ${String(label || k).slice(0, 60)} ($${amt.toFixed(2)}, ${m}) on Ticket #${order.id}`);
   writeData(data);
@@ -39880,7 +39901,11 @@ function handleActClick(el, e) {
           render();
         }
       }
-      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round((already + (p ? cartTotal() * p / 100 : 0)) * 100) / 100; render(); }
+      // A preset is that much OF THE BILL, the whole bill — never that much
+      // on top of a tip an earlier part already carried away (the chips
+      // stacked and never lit once a part had gone through, Sep '26). Tip
+      // already taken cannot be un-taken, so the total never drops below it.
+      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round(Math.max(already, p ? cartTotal() * p / 100 : 0) * 100) / 100; render(); }
       else if (act === 'ordertype') {
         // Mode chips live in the bar now — tapping one from ANY view lands on
         // the order screen in that mode. Dine-in has no chip: Order IS dine-in.

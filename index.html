@@ -1489,6 +1489,15 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
 /* The rotate and resize handles are finger-sized: 32 drawn, 44 to the touch
    (the halo, tap-target law). They were 22 and 18 — pinpricks on a tablet. */
 .rotate-handle::before,.resize-handle::before{ content:""; position:absolute; inset:-6px; border-radius:inherit; }
+/* Where the two handles sit: centred on their corner, so half of each lies on
+   the table. On a table too small to hold them (under 64 drawn — a phone on
+   its side draws every table at 28) they step fully OUTSIDE, or they meet in
+   the middle and a finger on the table resizes it instead of moving it
+   (Sep '26). .mk-small is measured after every render, in fitAdminFloorCanvas. */
+.rotate-handle{ top:-16px; left:-16px; }
+.resize-handle{ bottom:-16px; right:-16px; }
+.mk-small .rotate-handle{ top:-32px; left:-32px; }
+.mk-small .resize-handle{ bottom:-32px; right:-32px; }
 /* Editor markers let the browser pan the page vertically (native scroll past
    the floor); only a horizontal/diagonal drag or a hold grabs the table —
    see startFloorDrag's touch gate. */
@@ -12431,12 +12440,17 @@ function nextTableLabel(fp) {
 }
 // True if a table box (centre x/y %, w/h %) would overlap ANOTHER table in the
 // plan. Decor (plants/walls) is exempt on both sides — only tables can't overlap.
-function tableWouldOverlap(fp, x, y, w, h, excludeId) {
-  const aL = x - w / 2, aR = x + w / 2, aT = y - h / 2, aB = y + h / 2;
+function tableWouldOverlap(fp, x, y, w, h, excludeId, rot) {
+  // THE BOX TURNS WITH THE TABLE. It used to measure every table upright, so
+  // a table at 45 degrees had four blind corners and could be buried under
+  // another one (Sep '26). One reckoning now, the clamp's: tableHalfExtents.
+  const a = tableHalfExtents(w, h, rot, fp.height);
+  const aL = x - a.hw, aR = x + a.hw, aT = y - a.hh, aB = y + a.hh;
   const pad = 0.5; // let edges touch without counting as overlap
   return fp.tables.some(t => {
     if (t.type !== 'table' || t.id === excludeId) return false;
-    const bL = t.x - t.width / 2, bR = t.x + t.width / 2, bT = t.y - t.height / 2, bB = t.y + t.height / 2;
+    const b = tableHalfExtents(t.width, t.height, t.rotation, fp.height);
+    const bL = t.x - b.hw, bR = t.x + b.hw, bT = t.y - b.hh, bB = t.y + b.hh;
     return aL < bR - pad && aR > bL + pad && aT < bB - pad && aB > bT + pad;
   });
 }
@@ -20096,6 +20110,17 @@ function fitAdminFloorCanvas() {
     for (let el = rail.parentElement; el && el !== pane; el = el.parentElement) inset += parseFloat(getComputedStyle(el).paddingBottom || 0);
     const h = Math.round(pr.bottom - inset - rail.getBoundingClientRect().top);
     if (h > 120 && rail.style.getPropertyValue('--fp-rail-h') !== h + 'px') rail.style.setProperty('--fp-rail-h', h + 'px');
+  }
+  // THE MIDDLE OF A TABLE IS THE TABLE. Both handles sit centred on a corner,
+  // so each eats 22px into the body; on a small table — and on every table
+  // with the phone on its side, where the room draws 374 wide — they met in
+  // the middle and a finger on the table resized it instead of moving it
+  // (Sep '26). Under that, they step fully outside the corners.
+  c.querySelectorAll('.admin-floor-marker.mk-small').forEach(m => m.classList.remove('mk-small'));
+  const picked = c.querySelector('.admin-floor-marker.mk-sel');
+  if (picked) {
+    const r = picked.getBoundingClientRect();
+    if (Math.min(r.width, r.height) < 64) picked.classList.add('mk-small');
   }
 }
 let _tbResize = null;
@@ -28894,8 +28919,8 @@ function renderFloorPlanAdmin() {
                   are shapes now, sized by the one corner). They stood in one
                   stack down the right edge once, three 44px targets on top of
                   each other (owner: "too cluttered"). */ ''}
-            ${symmetricalTable(t) ? '' : `<span class="rotate-handle fp-handle" data-id="${t.id}" style="top:-16px;left:-16px;border-radius:50%;cursor:pointer;">${FP_TURN_SVG}</span>`}
-            <span class="resize-handle fp-handle" data-id="${t.id}" style="bottom:-16px;right:-16px;border-radius:var(--r-control);cursor:nwse-resize;">${FP_SIZE_SVG}</span>
+            ${symmetricalTable(t) ? '' : `<span class="rotate-handle fp-handle" data-id="${t.id}" style="border-radius:50%;cursor:pointer;">${FP_TURN_SVG}</span>`}
+            <span class="resize-handle fp-handle" data-id="${t.id}" style="border-radius:var(--r-control);cursor:nwse-resize;">${FP_SIZE_SVG}</span>
           </div>
         ` : ''}
       </button>
@@ -32933,7 +32958,7 @@ async function stepTableUnits(tables, dim, d) {
     if (dim === 'h' || (dim === 's' && !one)) u.h = clampUnits(u.h + d);
     const dims = tableDims(t.shape, u.w, u.h);
     if (dims.width === t.width && dims.height === t.height) return null;
-    if (tableWouldOverlap(fp, t.x, t.y, dims.width, dims.height, t.id)) { blocked++; return null; }
+    if (tableWouldOverlap(fp, t.x, t.y, dims.width, dims.height, t.id, t.rotation)) { blocked++; return null; }
     const cr = clampToFloor(t.x, t.y, dims.width, dims.height, t.rotation, fp.height);
     return patchFloorObject(fp.id, t.id, { ...dims, ...(cr.x !== t.x || cr.y !== t.y ? { x: cr.x, y: cr.y } : {}) });
   }));
@@ -33343,6 +33368,17 @@ function paintFloorGuides(canvasEl, g) {
 }
 function clearFloorGuides() { document.querySelectorAll('.fp-guides').forEach(e => e.remove()); }
 
+// The floor's box is read ONCE per drag (a layout on every move stuttered on
+// a phone), so anything that moves the floor mid-drag must say so: a window
+// resize or a scroll left the table 46x54 off the cursor for the rest of the
+// drag, and saved it there (Sep '26).
+function remeasureFloorDrag() {
+  if (floorDrag && floorDrag.canvasEl) floorDrag.rect = floorDrag.canvasEl.getBoundingClientRect();
+  if (floorMarquee && floorMarquee.canvasEl) floorMarquee.rect = floorMarquee.canvasEl.getBoundingClientRect();
+}
+window.addEventListener('resize', remeasureFloorDrag);
+document.addEventListener('scroll', remeasureFloorDrag, { passive: true, capture: true });
+
 function startFloorDrag(e, tableId) {
   // Ctrl/⌘-click toggles a table in the multi-select set instead of dragging.
   if (e.ctrlKey || e.metaKey) {
@@ -33373,7 +33409,11 @@ function startFloorDrag(e, tableId) {
   // let go and press again). No render here: a rebuilt marker is a new node
   // and the touch that started on the old one would never reach it. The
   // live marker wears the ring now; the screen catches up when the finger lifts.
-  floorDrag.holdTimer = setTimeout(() => {
+  // A HOLD PICKS SEVERAL — WITH A FINGER. It is the touch stand-in for
+  // ctrl-click, and a mouse already has ctrl-click; bound for the mouse too,
+  // a press that paused half a second silently added the table to a
+  // multi-pick, and the next drag moved a table nobody had touched (Sep '26).
+  floorDrag.holdTimer = !isTouch ? null : setTimeout(() => {
     if (!floorDrag || floorDrag.moved) return;
     floorDrag.holdTimer = null; floorDrag.holdFired = true;
     state.selectedAdminTableId = null;
@@ -33468,7 +33508,7 @@ function copySpot(fp, src) {
     const want = axis === 'x' ? { x: box.r + gap + size / 2, y: src.y } : { x: src.x, y: box.b + gap + size / 2 };
     const c = clampToFloor(want.x, want.y, src.width, src.height, src.rotation, fp.height);
     if (Math.abs(c.x - want.x) > 0.11 || Math.abs(c.y - want.y) > 0.11) continue; // it would hang off the floor
-    if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null)) return c;
+    if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null, src.rotation)) return c;
   }
   return null;
 }
@@ -33497,7 +33537,7 @@ async function duplicateSelectedTables(singleId) {
     let spot = copySpot(fp, src);
     for (let i = 1; i <= 6 && !spot; i++) {
       const c = clampToFloor(src.x + i * 5, src.y + i * 5, src.width, src.height, src.rotation, fp.height);
-      if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null)) spot = c;
+      if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null, src.rotation)) spot = c;
     }
     if (!spot) spot = clampToFloor(src.x + 5, src.y + 5, src.width, src.height, src.rotation, fp.height);
     const payload = src.type === 'decor'
@@ -33724,8 +33764,24 @@ function endFloorDrag() {
   // A hold that never moved already did its picking; the screen catches up now.
   if (!moved && floorDrag.holdFired) { floorDrag = null; render(); return; }
   if (moved && floorDrag.group) {
-    // Group move: save every member's new spot (no overlap veto between
-    // group members — they moved rigidly together).
+    // Group move: the members moved rigidly together, so they may not veto
+    // each other — but they may not park on a table OUTSIDE the group
+    // either. It used to save straight over one, with no toast and the
+    // buried table invisible (Sep '26).
+    const fpG = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+    const ids = floorDrag.group.map(g => g.id);
+    const onSomebody = fpG && floorDrag.group.some(g => {
+      const t = fpG.tables.find(x => x.id === g.id);
+      if (!t || t.type !== 'table' || g.lastX === undefined) return false;
+      const outsiders = { height: fpG.height, tables: fpG.tables.filter(x => !ids.includes(x.id)) };
+      return tableWouldOverlap(outsiders, g.lastX, g.lastY, t.width, t.height, null, t.rotation);
+    });
+    if (onSomebody) {
+      state.toast = 'Tables can’t overlap';
+      floorDrag = null;
+      render(); // every member snaps back to where it was
+      return;
+    }
     pushFloorHistory();
     for (const g of floorDrag.group) {
       if (g.lastX !== undefined) saveTablePosition(g.id, Math.round(g.lastX * 10) / 10, Math.round(g.lastY * 10) / 10);
@@ -33736,7 +33792,7 @@ function endFloorDrag() {
   if (moved && lastX !== undefined) {
     const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
     const t = fp && fp.tables.find(x => x.id === tableId);
-    if (t && t.type === 'table' && tableWouldOverlap(fp, lastX, lastY, t.width, t.height, tableId)) {
+    if (t && t.type === 'table' && tableWouldOverlap(fp, lastX, lastY, t.width, t.height, tableId, t.rotation)) {
       state.toast = 'Tables can’t overlap';
       floorDrag = null;
       render(); // snap the marker back to its saved position
@@ -33891,7 +33947,7 @@ function endResizeDrag() {
   if (lastWidth !== undefined) {
     const fp = state.floorPlans.find(f => f.id === fpId);
     const t = fp && fp.tables.find(x => x.id === tableId);
-    if (t && t.type === 'table' && tableWouldOverlap(fp, t.x, t.y, lastWidth, lastHeight, tableId)) {
+    if (t && t.type === 'table' && tableWouldOverlap(fp, t.x, t.y, lastWidth, lastHeight, tableId, t.rotation)) {
       state.toast = 'Tables can’t overlap';
       floorResizeDrag = null;
       render(); // snap back to the saved size
@@ -35089,6 +35145,25 @@ document.addEventListener('touchstart', (e) => {
   const wrap = e.target.closest && e.target.closest('.tp-canvas-wrap, .fp-main');
   if (!wrap) return;
   const editor = wrap.classList.contains('fp-main');
+  // TWO FINGERS MEAN ZOOM, NOTHING ELSE. A second finger landing while one
+  // was carrying a table used to take the table along with the first
+  // finger's drift and WRITE the new spot to the server (Sep '26). The drag
+  // is dropped where it began and nothing is saved; no render here, because
+  // rebuilding the page would swap the box this pinch has just measured.
+  if (editor && (floorDrag || floorResizeDrag || floorRotateDrag)) {
+    if (floorDrag) {
+      if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer);
+      const fpD = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
+      const home = (id, el) => { const t = fpD && fpD.tables.find(x => x.id === id); if (t && el) { el.style.left = t.x + '%'; el.style.top = t.y + '%'; } };
+      if (floorDrag.group) floorDrag.group.forEach(g => home(g.id, g.el));
+      else home(floorDrag.tableId, floorDrag.markerEl);
+      clearFloorGuides();
+      floorDrag = null;
+    }
+    // A half-dragged size or angle is only inline paint: the screen catches
+    // up when the fingers lift.
+    if (floorResizeDrag || floorRotateDrag) { floorResizeDrag = null; floorRotateDrag = null; renderWhenStill(); }
+  }
   const [a, b] = e.touches;
   // Pinching IN goes past 1× down to "the whole room on screen" (owner,
   // Aug '26): the floor below fit-width would just squash, so the fit IS
@@ -35385,6 +35460,10 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !state.confirmDialog && !state.menuModal && !state.staffModal) escapeMiddlePane();
 });
 document.addEventListener('keydown', (e) => {
+  // Not while a dialog is asking: Escape used to empty the pick BEHIND
+  // "Delete 2 tables?", leaving its Delete key to close and delete nothing
+  // (Sep '26). Escape belongs to whatever is on top.
+  if (state.confirmDialog) return;
   if (e.key === 'Escape' && state.floorPlacing) { stopPlacing(); }
   else if (e.key === 'Escape' && state.selectedAdminTableIds.length) { clearTableSelection(); }
 });
@@ -35447,7 +35526,7 @@ document.addEventListener('keydown', (e) => {
 // Ctrl+Y (or Ctrl+Shift+Z) redoes it. Layout tab only — never hijacked in a
 // text field or another admin screen.
 document.addEventListener('keydown', (e) => {
-  if (!floorEditorActive() || typingInField()) return;
+  if (!floorEditorActive() || typingInField() || state.confirmDialog) return;
   if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
   const k = e.key.toLowerCase();
   if (k === 'z' && !e.shiftKey) { e.preventDefault(); floorUndo(); }
@@ -35457,7 +35536,11 @@ document.addEventListener('keydown', (e) => {
 // through the tables, Esc clears it, the arrow keys nudge the selected table(s)
 // (Shift = a bigger step), and Ctrl/⌘+D duplicates.
 document.addEventListener('keydown', (e) => {
-  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField()) return;
+  // THE KEYBOARD BELONGS TO WHATEVER IS ON TOP. While a dialog is asking,
+  // Tab, the arrows, Ctrl+D and Escape are not the floor's: Escape used to
+  // empty the pick BEHIND "Delete 2 tables?", leaving its Delete key to
+  // close and delete nothing (Sep '26).
+  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField() || state.confirmDialog) return;
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp || !fp.tables.length) return;
   const k = e.key;
@@ -40738,7 +40821,18 @@ function handleActClick(el, e) {
         else if (p.buf.length < 5) p.buf += el.dataset.key;
         render();
       }
-      else if (act === 'tablenum-abc') { const f = document.querySelector('.tn-field'); if (f) { f.focus(); try { f.setSelectionRange(f.value.length, f.value.length); } catch (_) {} if (oskEligible()) oskShow(f); } } // a laptop types with its own keys; a till gets ours
+      else if (act === 'tablenum-abc') {
+        // ONE RULE FOR BOTH: typing REPLACES the old number. A digit key
+        // always did; ABC put the caret at the end of it, so renaming 21 to
+        // B1 gave "21B1" (Sep '26). The old number stays as the placeholder.
+        const p = state.tableNumPad; const f = document.querySelector('.tn-field');
+        if (p && f) {
+          p.touched = true; p.buf = ''; f.value = '';
+          const ok = document.querySelector('[data-act="tablenum-ok"]'); if (ok) ok.disabled = true;
+          f.focus(); try { f.setSelectionRange(0, 0); } catch (_) {}
+          if (oskEligible()) oskShow(f); // a laptop types with its own keys; a till gets ours
+        }
+      }
       else if (act === 'tablenum-cancel') { state.tableNumPad = null; render(); }
       else if (act === 'tablenum-ok') {
         const p = state.tableNumPad;
@@ -41907,7 +42001,7 @@ let _fingersDown = 0, _scrollUntil = 0, _bgRenderQueued = false, _bgFlushTimer =
 // background rebuild there replaces the very node that is moving.
 let _panelUntil = 0;
 function panelMoving(ms) { _panelUntil = Date.now() + (ms || 400); }
-function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil || Date.now() < _panelUntil; }
+function gestureLive() { return _fingersDown > 0 || Date.now() < _scrollUntil || Date.now() < _panelUntil || !!(floorDrag || floorResizeDrag || floorRotateDrag || floorMarquee); }
 // A queued rebuild always drains: if the hand is still busy when the flush
 // comes round, it asks again shortly rather than sitting there forgotten until
 // the next touch happens to wake it.

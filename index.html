@@ -4593,6 +4593,12 @@ select.ie-field{font-weight:700;}
     min-height:0; overflow-y:auto; touch-action:pan-y; -webkit-overflow-scrolling:touch; }
   .admin-content:has(.screen-ctl-scroll) .paper-stage .seg{ flex:none; } /* the paper tabs were crushed to a sliver on a phone; the desk scrolls instead (owner's walk, Sep '26) */
   .admin-content:has(.tstatus-split){ overflow:auto; }
+  /* Table status on a phone: the preview card is most of the screen, so the
+     settings were reading through a thin slot under it. Here the settings
+     are not their own scroller — the whole page scrolls past the preview
+     (owner's pick from the mock, Sep '26). The Design page keeps its pinned
+     card; this page's card is too tall to pin. */
+  .tstatus-split .screen-ctl-scroll{ flex:none; min-height:auto; overflow:visible; }
   /* Not zoomed, the preview is a picture: a thumb that lands on it scrolls the
      PAGE, not a second scroller inside a third (owner, Sep '26: "scrolling is
      not smooth at certain areas" — the areas were the mock). Pinch it and it
@@ -14381,7 +14387,6 @@ function editIconButton(act, id, title) {
 const ROW_EDIT_ACTIONS = {
   'edit-combo': (id) => openEditCombo(id),
   'edit-modifier-group': (id) => openEditModifierGroup(id),
-  'edit-discount-preset': (id) => openEditDiscountPreset(id),
   'edit-reservation': (id) => openEditReservation(id),
   'edit-customer': (id) => openEditCustomer(id),
   'edit-printer-station': (id) => openEditPrinterStation(id),
@@ -14398,7 +14403,6 @@ const MODAL_DELETE_ACTIONS = {
   'modal-delete-supplier': ['supplierModal', (id) => deleteSupplier(id), 'Delete this supplier?'],
   'modal-delete-inventory-item': ['inventoryItemModal', (id) => deleteInventoryItem(id), 'Delete this inventory item?'],
   'modal-delete-happy-hour': ['happyHourModal', (id) => deleteHappyHourAction(id), 'Delete this promotion?'],
-  'modal-delete-discount-preset': ['discountPresetModal', (id) => deleteDiscountPresetAction(id), 'Delete this preset?'],
   'modal-delete-modifier-group': ['modifierGroupModal', (id) => deleteModifierGroupAction(id), 'Delete this modifier group? Items using it will lose it.'],
   'modal-delete-combo': ['comboModal', (id) => deleteComboAction(id), 'Delete this set menu?'],
   'modal-delete-menu-item': ['menuModal', (id) => deleteMenuItemAction(id), 'Delete this menu item?'],
@@ -18078,6 +18082,66 @@ function presetAmountChip(r) {
   return `${r.kind === 'discount' ? '−' : '+'}${amt}`;
 }
 // One line under the name saying when it happens and who puts it on.
+// THE WHEN, DRAWN ONCE (DESIGN.md § Automatic rules law): the popup that adds
+// a preset and the opened row that edits one share these dropdowns. id '' is
+// the popup's draft (state.discountPresetModal); a preset id is that row's
+// draft, which saves itself the moment it can be honoured. The row used to
+// carry a When KEY that opened the whole Edit popup, asking Name, Type and
+// Who all over again, with a second Delete (owner's walk, Sep '26).
+function presetWhenFields(m, id) {
+  const did = `data-id="${id}"`, pid = id ? '' : 'id="preset-when-value1-input"', pid2 = id ? '' : 'id="preset-when-value2-input"';
+  const kind = m.field ? ruleFieldKind(m.field) : '';
+  return `
+      <select class="pp-select" data-act="preset-when-field" ${did}>
+        <option value="" ${m.field ? '' : 'selected'}>Any time</option>
+        ${Object.keys(RULE_FIELD_LABELS).map(f => `<option value="${f}" ${m.field === f ? 'selected' : ''}>${RULE_FIELD_LABELS[f]}</option>`).join('')}
+      </select>
+      ${m.field ? `
+      <select class="pp-select" style="margin-top:8px;" data-act="preset-when-op" ${did}>
+        ${ruleFieldOps(m.field).map(o => `<option value="${o}" ${m.op === o ? 'selected' : ''}>${RULE_OP_LABELS[o] || o}</option>`).join('')}
+      </select>
+      ${kind === 'time' ? `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <input ${pid} class="preset-when-value1" ${did} type="time" value="${esc(m.value1 || '')}" style="flex:1;">
+        <span class="ts">and</span>
+        <input ${pid2} class="preset-when-value2" ${did} type="time" value="${esc(m.value2 || '')}" style="flex:1;">
+      </div>` : kind === 'date' ? `
+      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
+        <input ${pid} class="preset-when-value1" ${did} type="date" value="${esc(m.value1 || '')}" style="flex:1;">
+        ${m.op === 'between' ? `<span class="ts">to</span>
+        <input ${pid2} class="preset-when-value2" ${did} type="date" value="${esc(m.value2 || '')}" style="flex:1;">` : ''}
+      </div>` : kind === 'choice' ? `
+      <select class="pp-select" style="margin-top:8px;" data-act="preset-when-value1" ${did}>
+        ${ruleChoices(m.field).length === 0 ? `<option value="">Nothing to pick yet</option>` : ''}
+        ${ruleChoices(m.field).map(([v, l]) => `<option value="${esc(String(v))}" ${String(m.value1) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+      </select>` : `
+      <input ${pid} class="preset-when-value1" ${did} type="number" min="0" step="${kind === 'money' ? '0.01' : '1'}" value="${esc(String(m.value1 === undefined ? '' : m.value1))}" placeholder="${kind === 'money' ? '100.00' : '8'}" style="margin-top:8px;">`}` : ''}
+      <div class="ts preset-when-says" ${did} style="margin-top:10px;">${esc(presetWhenLine(m))}</div>`;
+}
+// An opened row's When lives in a draft until it can be honoured, then saves
+// itself — half a when (a field with no value yet) is never sent to be refused.
+function whenDraft(id) {
+  state.whenDrafts = state.whenDrafts || {};
+  if (!state.whenDrafts[id]) { const p = (state.discountPresets || []).find(x => x.id === id) || {}; state.whenDrafts[id] = { field: p.field || '', op: p.op || '', value1: p.value1 === undefined ? '' : p.value1, value2: p.value2 || '', auto: !!p.auto }; }
+  return state.whenDrafts[id];
+}
+function whenTarget(id) { return id ? whenDraft(id) : state.discountPresetModal; }
+// The server's own check, mirrored, so the row saves only what will be kept.
+function whenComplete(m) {
+  if (!m.field) return true;
+  const k = ruleFieldKind(m.field);
+  if (!ruleFieldOps(m.field).includes(m.op)) return false;
+  if (k === 'number' || k === 'money') return m.value1 !== '' && !isNaN(parseFloat(m.value1));
+  if (k === 'time') return [m.value1, m.value2].every(v => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(v || '')));
+  if (k === 'date') { const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')); return ok(m.value1) && (m.op !== 'between' || (ok(m.value2) && m.value2 >= m.value1)); }
+  return m.value1 !== '' && m.value1 !== null && m.value1 !== undefined;
+}
+async function saveWhenDraft(id) {
+  const d = whenDraft(id);
+  if (!whenComplete(d)) { render(); return; }
+  await updateDiscountPresetField(id, { field: d.field, op: d.op, value1: d.value1, value2: d.value2 });
+  delete state.whenDrafts[id];
+}
 function presetWhenLine(p) {
   if (!p.field) return p.auto ? 'Every bill · goes on by itself' : 'Staff tap it';
   return `${ruleWhenText(p)} · ${p.auto ? 'goes on by itself' : 'staff tap it'}`;
@@ -24244,8 +24308,6 @@ function renderDoshiiSettingsAdmin() {
     <input id="doshii-client-secret" type="password" placeholder="${d.configured ? '••••••••' : ''}" style="${inputStyle}">
     <label class="field-label">Location ID (your venue)</label>
     <input id="doshii-location-id" type="text" value="${esc(d.locationId || '')}" style="${inputStyle}">
-    <label class="field-label">Doshii address</label>
-    <input id="doshii-base-url" type="text" value="${esc(d.baseUrl || '')}" placeholder="leave blank for the standard address" style="${inputStyle}">
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
       <button class="btn-add inline" data-act="save-doshii-config">Save connection</button>
       <button class="btn-secondary" data-act="test-doshii">Test connection</button>
@@ -24266,7 +24328,6 @@ async function saveDoshiiConfig() {
         clientId: val('doshii-client-id'),
         clientSecret: val('doshii-client-secret'),
         locationId: val('doshii-location-id'),
-        baseUrl: val('doshii-base-url'),
         payAtTable: d.payAtTable !== false,
       }),
     });
@@ -26887,7 +26948,7 @@ function renderPresetTileList(kind, addLabel) {
               <button class="pay-opt sm${p.auto ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="preset-inline-auto" data-id="${p.id}" data-val="1">By itself</button>
             </div>
             <label class="field-label" style="margin-top:10px;">When</label>
-            <button class="btn-secondary sm" style="align-self:flex-start;" data-act="edit-discount-preset" data-id="${p.id}">${esc(p.field ? ruleWhenText(p) : 'Any time')}</button>
+            ${presetWhenFields(whenDraft(p.id), p.id)}
           </div>
         </div>` : ''}
       </div>`).join('')}
@@ -27017,7 +27078,7 @@ function renderDiscountPresetModal() {
   return `
   <div class="modal-bg">
     <div class="modal" data-stop="1">
-      <h2>${m.mode === 'add' ? 'Add' : 'Edit'} ${m.kind === 'surcharge' ? 'surcharge' : 'discount'}</h2>
+      <h2>Add ${m.kind === 'surcharge' ? 'surcharge' : 'discount'}</h2>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
       <label>Name</label>
       <input id="discount-preset-name-input" type="text" value="${esc(m.name)}" placeholder="${m.kind === 'surcharge' ? 'e.g. Weekend surcharge' : 'e.g. Staff Discount'}">
@@ -27034,34 +27095,9 @@ function renderDiscountPresetModal() {
         <div class="pay-opt ${m.auto ? 'active' : ''}" data-act="preset-who" data-val="1">By itself</div>
       </div>
       <label>When</label>
-      <select class="pp-select" data-act="preset-when-field">
-        <option value="" ${m.field ? '' : 'selected'}>Any time</option>
-        ${Object.keys(RULE_FIELD_LABELS).map(f => `<option value="${f}" ${m.field === f ? 'selected' : ''}>${RULE_FIELD_LABELS[f]}</option>`).join('')}
-      </select>
-      ${m.field ? `
-      <select class="pp-select" style="margin-top:8px;" data-act="preset-when-op">
-        ${ruleFieldOps(m.field).map(o => `<option value="${o}" ${m.op === o ? 'selected' : ''}>${RULE_OP_LABELS[o] || o}</option>`).join('')}
-      </select>
-      ${ruleFieldKind(m.field) === 'time' ? `
-      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-        <input id="preset-when-value1-input" type="time" value="${esc(m.value1 || '')}" style="flex:1;">
-        <span class="ts">and</span>
-        <input id="preset-when-value2-input" type="time" value="${esc(m.value2 || '')}" style="flex:1;">
-      </div>` : ruleFieldKind(m.field) === 'date' ? `
-      <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
-        <input id="preset-when-value1-input" type="date" value="${esc(m.value1 || '')}" style="flex:1;">
-        ${m.op === 'between' ? `<span class="ts">to</span>
-        <input id="preset-when-value2-input" type="date" value="${esc(m.value2 || '')}" style="flex:1;">` : ''}
-      </div>` : ruleFieldKind(m.field) === 'choice' ? `
-      <select class="pp-select" style="margin-top:8px;" data-act="preset-when-value1">
-        ${ruleChoices(m.field).length === 0 ? `<option value="">Nothing to pick yet</option>` : ''}
-        ${ruleChoices(m.field).map(([v, l]) => `<option value="${esc(String(v))}" ${String(m.value1) === String(v) ? 'selected' : ''}>${esc(l)}</option>`).join('')}
-      </select>` : `
-      <input id="preset-when-value1-input" type="number" min="0" step="${ruleFieldKind(m.field) === 'money' ? '0.01' : '1'}" value="${esc(String(m.value1 === undefined ? '' : m.value1))}" placeholder="${ruleFieldKind(m.field) === 'money' ? '100.00' : '8'}" style="margin-top:8px;">`}` : ''}
-      <div class="ts" style="margin-top:10px;">${esc(presetWhenLine(m))}</div>
+      ${presetWhenFields(m, '')}
       <div class="modal-actions">
         <button class="icon-action neutral" data-act="close-discount-preset-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.discountPresetModal && state.discountPresetModal.id ? `<button type="button" class="icon-action discard btn-modal-delete" data-act="modal-delete-discount-preset">${ACT_TRASH_SVG}<span class="ia-label">Delete</span></button>` : ''}
         <button class="icon-action send" data-act="save-discount-preset-modal">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
     </div>
@@ -29937,7 +29973,6 @@ function renderMenuImport() {
     <textarea id="mi-paste" rows="4" placeholder="Copy the rows in Excel, paste here" style="width:100%;max-width:var(--admin-list-w,560px);padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:inherit;" oninput="miSetText(this.value)"></textarea>
     <div style="display:flex;gap:4px;align-items:center;margin-top:10px;flex-wrap:wrap;">
       <label class="fp-chip" style="cursor:pointer;">Open CSV<input type="file" accept=".csv,text/csv,text/tab-separated-values,.tsv,.txt" style="display:none;" onchange="miFile(this.files)"></label>
-      <button class="btn-secondary sm" data-act="mi-export-copy">Copy for Excel</button>
       <button class="btn-secondary sm" data-act="mi-export-csv">Download CSV</button>
       ${mi ? `<button class="fp-chip" data-act="mi-clear">Clear</button>` : ''}
     </div>
@@ -30007,12 +30042,6 @@ function miExportRows(sep) {
      sep === ',' ? '"' + (m.category || '').replace(/"/g, '""') + '"' : (m.category || ''),
      m.price].join(sep));
   return [head, ...rows].join('\n');
-}
-function miExportCopy() {
-  navigator.clipboard.writeText(miExportRows('\t')).then(() => {
-    state.toast = state.menu.filter(m => !m.disabled).length + ' items copied — paste into Excel.';
-    render(); armToastTimer(2600);
-  }).catch(() => { state.toast = 'Could not reach the clipboard.'; render(); armToastTimer(2600); });
 }
 function miExportCsv() {
   const blob = new Blob([miExportRows(',')], { type: 'text/csv' });
@@ -36130,17 +36159,17 @@ async function confirmAddTip() {
 // The when's field decides which tests make sense, so changing it snaps the
 // operator and value back to something valid — a half-changed preset can't
 // be saved.
-function setPresetWhenField(field) {
-  const m = state.discountPresetModal;
+function setPresetWhenField(field, id) {
+  const m = whenTarget(id);
   m.field = field;
-  if (!field) { m.op = ''; m.value1 = ''; m.value2 = ''; render(); return; }
+  if (!field) { m.op = ''; m.value1 = ''; m.value2 = ''; if (id) saveWhenDraft(id); else render(); return; }
   m.op = ruleFieldOps(field)[0];
   const kind = ruleFieldKind(field);
   if (kind === 'time') { m.value1 = '17:00'; m.value2 = '19:00'; }
   else if (kind === 'date') { const t = new Date(); m.value1 = ruleDateKey(t); m.value2 = ruleDateKey(new Date(t.getFullYear(), t.getMonth(), t.getDate() + 7)); }
   else if (kind === 'choice') { const c = ruleChoices(field); m.value1 = c.length ? String(c[0][0]) : ''; m.value2 = ''; }
   else { m.value1 = ''; m.value2 = ''; }
-  render();
+  if (id) saveWhenDraft(id); else render();
 }
 async function togglePresetEnabled(id) {
   const p = state.discountPresets.find(x => x.id === id);
@@ -36212,12 +36241,6 @@ async function deleteSelectedDiscountPresetsNow() {
   state.selectedDiscountPresetIds = [];
   render();
 }
-function openEditDiscountPreset(id) {
-  const p = state.discountPresets.find(x => x.id === id);
-  state.discountPresetModal = withDirtyCheck({ mode: 'edit', id: p.id, name: p.name, kind: p.kind, type: p.type, value: p.value, field: p.field || '', op: p.op || '', value1: p.value1 === undefined ? '' : p.value1, value2: p.value2 || '', auto: !!p.auto, enabled: p.enabled !== false });
-  state.adminError = '';
-  render();
-}
 function closeDiscountPresetModal() { if (!confirmDiscard(state.discountPresetModal)) return; state.discountPresetModal = null; state.adminError = ''; render(); }
 async function saveDiscountPresetModal() {
   const m = state.discountPresetModal;
@@ -36225,11 +36248,7 @@ async function saveDiscountPresetModal() {
   if (m.value === '' || isNaN(parseFloat(m.value))) { state.adminError = 'Enter a valid value.'; render(); return; }
   const payload = { name: m.name, kind: m.kind, type: m.type, value: parseFloat(m.value), field: m.field, op: m.op, value1: m.value1, value2: m.value2, auto: !!m.auto, enabled: m.enabled !== false };
   try {
-    if (m.mode === 'add') {
-      await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    } else {
-      await api(`/api/discount-presets/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    }
+    await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     state.discountPresets = await api('/api/discount-presets');
     state.discountPresetModal = null;
     state.adminError = '';
@@ -37764,11 +37783,14 @@ async function deleteComboAction(id) {
 // input is re-created by every render).
 document.addEventListener('change', (e) => {
   // Automatic rules: the three dropdowns in the rule editor.
-  if (e.target && e.target.dataset && state.discountPresetModal) {
-    const a = e.target.dataset.act;
-    if (a === 'preset-when-field') { setPresetWhenField(e.target.value); return; }
-    if (a === 'preset-when-op') { state.discountPresetModal.op = e.target.value; render(); return; }
-    if (a === 'preset-when-value1') { state.discountPresetModal.value1 = e.target.value; render(); return; }
+  if (e.target && e.target.dataset && /^preset-when-/.test(e.target.dataset.act || '')) {
+    const a = e.target.dataset.act, id = e.target.dataset.id || '', m = whenTarget(id);
+    if (!m) return;
+    if (a === 'preset-when-field') { setPresetWhenField(e.target.value, id); return; }
+    if (a === 'preset-when-op') m.op = e.target.value;
+    if (a === 'preset-when-value1') m.value1 = e.target.value;
+    if (id) saveWhenDraft(id); else render();
+    return;
   }
   if (e.target && e.target.id === 'import-data-input' && e.target.files && e.target.files[0]) {
     importDataFile(e.target.files[0]);
@@ -38815,14 +38837,13 @@ function bindEvents() {
   // re-render on blur, which rebuilt the popup the instant a finger left the
   // field — so the tap on Save landed on a node that no longer existed and
   // nothing happened. Save took two taps and read as a freeze.
-  const sayWhen = () => {
-    const el = document.getElementById('preset-when-says');
-    if (el && state.discountPresetModal) el.textContent = presetWhenLine(state.discountPresetModal);
-  };
-  const presetValue1Input = document.getElementById('preset-when-value1-input');
-  if (presetValue1Input) presetValue1Input.addEventListener('input', (e) => { state.discountPresetModal.value1 = e.target.value; sayWhen(); });
-  const presetValue2Input = document.getElementById('preset-when-value2-input');
-  if (presetValue2Input) presetValue2Input.addEventListener('input', (e) => { state.discountPresetModal.value2 = e.target.value; sayWhen(); });
+  // A typed when value: the popup's draft or the row's — the line under it
+  // says what it now means, and a row saves on change once it can be honoured.
+  document.querySelectorAll('.preset-when-value1, .preset-when-value2').forEach(el => {
+    const id = el.dataset.id || '', key = el.classList.contains('preset-when-value1') ? 'value1' : 'value2';
+    el.addEventListener('input', (e) => { const m = whenTarget(id); if (!m) return; m[key] = e.target.value; const say = document.querySelector(`.preset-when-says[data-id="${id}"]`); if (say) say.textContent = presetWhenLine(m); });
+    if (id) el.addEventListener('change', () => saveWhenDraft(id));
+  });
   const discountPresetValueInput = document.getElementById('discount-preset-value-input');
   if (discountPresetValueInput) discountPresetValueInput.addEventListener('input', (e) => { state.discountPresetModal.value = e.target.value; });
 
@@ -40757,7 +40778,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'set-search-enabled') { saveTicketSetting({ searchEnabled: state.settings.searchEnabled === false }); }
       else if (act === 'mi-clear') { state.menuImport = null; render(); }
-      else if (act === 'mi-export-copy') { miExportCopy(); }
       else if (act === 'mi-export-csv') { miExportCsv(); }
       else if (act === 'mi-apply') { miApply(); }
       else if (act === 'set-ticket-pos') {
@@ -40952,7 +40972,6 @@ function handleActClick(el, e) {
       else if (act === 'duplicate-selected-discount-presets') { duplicateSelectedDiscountPresets(); }
       else if (act === 'delete-selected-discount-presets') { deleteSelectedDiscountPresets(); }
       else if (act === 'clear-discount-preset-selection') { state.selectedDiscountPresetIds = []; render(); }
-      else if (act === 'edit-discount-preset') { openEditDiscountPreset(el.dataset.id); }
       else if (act === 'delete-discount-preset') { deleteDiscountPresetAction(el.dataset.id); }
       else if (act === 'close-discount-preset-modal') { closeDiscountPresetModal(); }
       else if (act === 'save-discount-preset-modal') { saveDiscountPresetModal(); }

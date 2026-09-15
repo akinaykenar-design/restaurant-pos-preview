@@ -33451,6 +33451,39 @@ async function deleteSelectedTablesNow() {
 // Duplicate the selected table(s)/object(s): each copy lands just off its
 // original (nudged clear of overlaps), tables get the next free number, and
 // the new copies become the selection so you can drag them into place.
+// Where "one more like this" lands: one gap along its row — the gap the
+// source keeps to its nearest neighbour in that row, one square when it has
+// none — then one gap down its column; null when neither spot is free. It
+// used to drop diagonally, half onto whatever sat there (owner, Sep '26).
+function copySpot(fp, src) {
+  const box = floorBoxOf(src, src.x, src.y, fp.height);
+  const others = fp.tables.filter(t => t.id !== src.id).map(t => floorBoxOf(t, t.x, t.y, fp.height));
+  const EPS = 0.05;
+  for (const [lo, hi, xlo, xhi, axis] of [['l', 'r', 't', 'b', 'x'], ['t', 'b', 'l', 'r', 'y']]) {
+    const row = others.filter(O => O[xlo] < box[xhi] && O[xhi] > box[xlo] && (O[hi] <= box[lo] + EPS || O[lo] >= box[hi] - EPS));
+    let gap = Infinity;
+    for (const O of row) gap = Math.min(gap, O[hi] <= box[lo] + EPS ? box[lo] - O[hi] : O[lo] - box[hi]);
+    if (!isFinite(gap)) gap = axis === 'x' ? FLOOR_GRID : FLOOR_GRID_Y;
+    const size = box[hi] - box[lo];
+    const want = axis === 'x' ? { x: box.r + gap + size / 2, y: src.y } : { x: src.x, y: box.b + gap + size / 2 };
+    const c = clampToFloor(want.x, want.y, src.width, src.height, src.rotation, fp.height);
+    if (Math.abs(c.x - want.x) > 0.11 || Math.abs(c.y - want.y) > 0.11) continue; // it would hang off the floor
+    if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null)) return c;
+  }
+  return null;
+}
+// The copy's number: the next one up from the source (12 → 13, B4 → B5),
+// skipping any in use anywhere; a name with no number gets the lowest free.
+function labelAfter(fp, src) {
+  const m = /^(.*?)(\d+)$/.exec((src.label || '').trim());
+  if (!m) return nextTableLabel(fp);
+  const used = new Set();
+  (state.floorPlans || []).forEach(f => f.tables.filter(t => t.type === 'table').forEach(t => used.add(t.label.trim())));
+  const pad = m[2].startsWith('0') ? m[2].length : 0;
+  let n = parseInt(m[2], 10);
+  do { n++; } while (used.has(m[1] + String(n).padStart(pad, '0')));
+  return m[1] + String(n).padStart(pad, '0');
+}
 async function duplicateSelectedTables(singleId) {
   const ids = state.selectedAdminTableIds.length ? [...state.selectedAdminTableIds]
     : (singleId || state.selectedAdminTableId ? [singleId || state.selectedAdminTableId] : []);
@@ -33461,7 +33494,7 @@ async function duplicateSelectedTables(singleId) {
     const fp = state.floorPlans.find(fl => fl.tables.some(t => t.id === id));
     const src = fp && fp.tables.find(t => t.id === id);
     if (!fp || !src) continue;
-    let spot = null;
+    let spot = copySpot(fp, src);
     for (let i = 1; i <= 6 && !spot; i++) {
       const c = clampToFloor(src.x + i * 5, src.y + i * 5, src.width, src.height, src.rotation, fp.height);
       if (src.type === 'decor' || !tableWouldOverlap(fp, c.x, c.y, src.width, src.height, null)) spot = c;
@@ -33469,7 +33502,7 @@ async function duplicateSelectedTables(singleId) {
     if (!spot) spot = clampToFloor(src.x + 5, src.y + 5, src.width, src.height, src.rotation, fp.height);
     const payload = src.type === 'decor'
       ? { label: src.label, x: spot.x, y: spot.y, shape: src.shape, width: src.width, height: src.height, seats: 0, type: 'decor', decorType: src.decorType, icon: src.icon, rotation: src.rotation || 0 }
-      : { label: nextTableLabel(fp), x: spot.x, y: spot.y, shape: src.shape, width: src.width, height: src.height, seats: src.seats, type: 'table', rotation: src.rotation || 0, color: src.color || null, finish: src.finish || null };
+      : { label: labelAfter(fp, src), x: spot.x, y: spot.y, shape: src.shape, width: src.width, height: src.height, seats: src.seats, type: 'table', rotation: src.rotation || 0, color: src.color || null, finish: src.finish || null };
     try {
       const obj = await api(`/api/floorplans/${fp.id}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       fp.tables.push(obj);

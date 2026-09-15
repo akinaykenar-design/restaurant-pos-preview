@@ -3409,11 +3409,6 @@ body{ --pad-drop:250px; /* half THE number pad's height: where every pad's foot 
 .tkt-icon-btn.lg{ width:56px; height:58px; font-size:var(--fs-xl); }
 .covers-ctl{ display:inline-flex; align-items:center; gap:4px; height:42px; padding:0 8px; border:1px solid var(--steel-200); border-radius:var(--btn-radius); background:var(--surface); }
 /* Split-evenly count stepper */
-.even-split-count{ display:flex; align-items:center; gap:8px; margin-bottom:14px; font-size:var(--fs-md); color:var(--text-secondary); }
-.even-split-count b{ color:var(--text-primary); }
-.even-split-count button{ width:var(--h-control); height:var(--h-control); border:1px solid var(--steel-200); background:var(--surface); border-radius:var(--r-control); font-weight:800; font-size:var(--fs-lg); cursor:pointer; color:var(--text-primary); line-height:1; }
-.even-split-count button:disabled{ opacity:var(--dim); cursor:default; }
-.even-split-count .es-n{ font-family:var(--font-mono); font-weight:800; font-size:var(--fs-lg); min-width:20px; text-align:center; color:var(--text-primary); }
 .covers-ctl .cov-face{ font-size:var(--fs-lg); }
 .covers-ctl button{ width:24px; height:24px; border:none; background:var(--steel-100); border-radius:var(--r-control); font-weight:700; cursor:pointer; font-size:var(--fs-lg); color:var(--text-primary); }
 .covers-ctl .covers-n{ font-family:var(--font-mono); font-weight:700; min-width:16px; text-align:center; }
@@ -4919,8 +4914,6 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 
 /* ---- Splitting a bill into parts. One row per part, same field and button
    heights as everywhere else so the row reads as a row. ------------------- */
-.split-row{display:flex;gap:8px;align-items:center;margin-bottom:8px;}
-.split-row .split-tender-amount-input{min-width:0;}
 
 /* ---- The bill panel. Same shell as the docket — it IS the docket panel,
    wearing its other hat while a table is being settled. ------------------- */
@@ -5734,6 +5727,11 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     printZReport: function () {},
     zReport: function () { return null; },
     getAlerts: function () { return []; },
+    // The till kicks the cash drawer on a cash sale (Sep '26); the preview
+    // has no drawer, and a missing stub here made EVERY payment fail with
+    // "Something went wrong on the server" (owner, Sep '26).
+    drawerForSale: function () {},
+    cashTaken: function () { return false; },
     PRINTER_PORT: 9100,
   };
   // Simulated backups: the preview has no disk, so snapshots live in memory
@@ -12482,8 +12480,6 @@ let state = {
   payRailVouchers: false, // the pay rail's Vouchers pane is open
   billSplit: null, // { way, n, amounts[], paid{}, methods{}, printed{} }
   splitTenders: [], // [{ method: 'card'|'cash', amount }]
-  paySeat: null,    // split-by-seat: { methods: {seat: 'card'|'cash'}, paid: {seat: true} }
-  evenSplit: null,  // split-evenly: { n, methods: {key: 'card'|'cash'}, paid: {key: true} }
   transferMode: false,
   transferFrom: null, // Transfer step 1: the table being moved (tap source, then destination)
   pickFlashId: null, // table showing the green pick sweep (held while the covers pad asks)
@@ -16207,8 +16203,8 @@ function logOut() {
   // NOTHING OF THE LAST SHIFT STAYS ON SCREEN. The cart and the table were
   // cleared but the open panes were not, so a log-off in the middle of a
   // split left the split sitting there for whoever signed in next.
-  state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null;
-  state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0;
+  state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null;
+  state.cardAmount = ''; state.cardTip = 0;
   state.editLine = null; state.editSent = null; state.itemOptions = null;
   state.notesPanel = null; state.noteSeatPop = null;
   state.quickNotePad = false; state.coversPad = null; state.callAway = false;
@@ -16488,29 +16484,6 @@ function cardTipPending() {
 }
 function cartGrandTotal() { return cartTotal() + cartTipAmount(); }
 
-function toggleSplitMode() {
-  state.paySeat = null;
-  state.evenSplit = null;
-  state.splitMode = !state.splitMode;
-  if (state.splitMode && state.splitTenders.length === 0) {
-    const total = amountOwing(); // what is still owing, never the whole bill (Sep '26)
-    const half = Math.round(total * 50) / 100;
-    const rest = Math.round((total - half) * 100) / 100;
-    state.splitTenders = [
-      { method: 'card', amount: half.toFixed(2) },
-      { method: 'cash', amount: rest.toFixed(2) },
-    ];
-  }
-  render();
-}
-function addSplitTender() { state.splitTenders.push({ method: 'card', amount: '' }); render(); }
-function removeSplitTender(idx) {
-  if (state.splitTenders.length <= 1) return;
-  state.splitTenders.splice(idx, 1);
-  render();
-}
-function updateSplitTenderMethod(idx, method) { state.splitTenders[idx].method = method; render(); }
-function updateSplitTenderAmount(idx, value) { state.splitTenders[idx].amount = value; render(); }
 function splitTendersSum() { return state.splitTenders.reduce((s, t) => s + (parseFloat(t.amount) || 0), 0); }
 function splitRemaining() { return cartGrandTotal() - splitTendersSum(); }
 
@@ -16831,6 +16804,9 @@ function billSplitParts() {
 }
 
 
+// Each seat's share of what is owing: seated lines to their seat, shared
+// lines spread across the seats, cents balanced so the shares add up. The
+// Bill hold's split-by-seat paper reads this.
 function seatShares() {
   const openOrder = activeOpenOrder();
   const all = [...(openOrder ? openOrder.items : []), ...state.cart];
@@ -16849,7 +16825,7 @@ function seatShares() {
   }
   seats.forEach(s => { bySeat[s] += shared / seats.length; });
   const rawSum = seats.reduce((s, n) => s + bySeat[n], 0);
-  const target = Math.round((amountOwing() + splitSharesTaken(state.paySeat)) * 100);
+  const target = Math.round(amountOwing() * 100);
   const rows = seats.map(s => {
     const cents = rawSum > 0 ? (bySeat[s] / rawSum) * target : target / seats.length;
     return { seat: s, cents, floor: Math.floor(cents) };
@@ -16858,105 +16834,6 @@ function seatShares() {
   [...rows].sort((a, b) => (b.cents - b.floor) - (a.cents - a.floor))
     .forEach(r => { if (leftover > 0) { r.floor += 1; leftover--; } });
   return rows.map(r => ({ seat: r.seat, amount: r.floor / 100 }));
-}
-
-function toggleSeatSplit() {
-  if (state.paySeat) { state.paySeat = null; render(); return; }
-  state.splitMode = false;
-  state.evenSplit = null;
-  state.paySeat = { methods: {}, paid: {} };
-  render();
-}
-
-async function paySeatShare(seatKey) {
-  const p = state.paySeat;
-  if (!p || p.paid[seatKey] || state.terminalPending) return;
-  const share = seatShares().find(s => String(s.seat) === String(seatKey));
-  if (!share) return;
-  const method = p.methods[seatKey] || 'card';
-  // A share on a SENT ticket is recorded on the server the moment it is
-  // taken (a part, like a card part) — it used to live only in memory until
-  // the last share, so a reload or a tap on Card lost cash already in the
-  // drawer (sweep, Sep '26). takePart runs the terminal and closes the bill
-  // itself when the last share lands.
-  if (activeOpenOrder()) { p.paid[seatKey] = share.amount || true; await takePart(share.amount, method); return; }
-  if (method === 'card' && terminalActive()) {
-    const ok = await runTerminalPurchase(share.amount);
-    if (!ok) return;
-  }
-  p.paid[seatKey] = true;
-  const shares = seatShares();
-  if (shares.every(s => p.paid[s.seat])) {
-    // Last seat settled — record every share as its own tender and close.
-    state.splitTenders = shares.map(s => ({ method: p.methods[s.seat] || 'card', amount: s.amount.toFixed(2) }));
-    state.splitMode = true;
-    state.paySeat = null;
-    await confirmPaymentNow();
-    return;
-  }
-  render();
-}
-
-// ── Split evenly (N ways) ──────────────────────────────────────────────────
-// Divide the amount due into N equal shares, cent-accurate (odd cents go to
-// the earliest shares so they add up exactly). Each share settles on its own
-// method; the last one closes the tab, recording every share as its own tender.
-// A share keeps its size once taken. The shares divide what is owing PLUS
-// the shares this split has already taken — dividing the remainder alone
-// shrank every later share ($12 → $6 → $3) and the bill never closed
-// (trainee probe, Sep '26). A taken share is stored as its amount.
-function splitSharesTaken(p) {
-  if (!p || !p.paid) return 0;
-  return Object.values(p.paid).reduce((a, v) => a + (typeof v === 'number' ? v : 0), 0);
-}
-function evenShares() {
-  const n = Math.max(2, (state.evenSplit && state.evenSplit.n) || 2);
-  const target = Math.round((amountOwing() + splitSharesTaken(state.evenSplit)) * 100);
-  const base = Math.floor(target / n);
-  let leftover = target - base * n;
-  const rows = [];
-  for (let i = 1; i <= n; i++) {
-    let cents = base;
-    if (leftover > 0) { cents += 1; leftover--; }
-    rows.push({ key: i, amount: cents / 100 });
-  }
-  return rows;
-}
-function toggleEvenSplit() {
-  if (state.evenSplit) { state.evenSplit = null; render(); return; }
-  state.splitMode = false;
-  state.paySeat = null;
-  state.evenSplit = { n: Math.max(2, state.covers || 2), methods: {}, paid: {} };
-  render();
-}
-function setEvenSplitCount(n) {
-  const p = state.evenSplit;
-  if (!p || Object.keys(p.paid).length) return; // locked once a share is paid
-  p.n = Math.max(2, Math.min(20, n));
-  render();
-}
-async function payEvenShare(key) {
-  const p = state.evenSplit;
-  if (!p || p.paid[key] || state.terminalPending) return;
-  const share = evenShares().find(s => String(s.key) === String(key));
-  if (!share) return;
-  const method = p.methods[key] || 'card';
-  if (activeOpenOrder()) { p.paid[key] = share.amount || true; await takePart(share.amount, method); return; } // recorded at once — see paySeatShare
-  if (method === 'card' && terminalActive()) {
-    const ok = await runTerminalPurchase(share.amount);
-    if (!ok) return;
-  }
-  p.paid[key] = true;
-  const shares = evenShares();
-  if (shares.every(s => p.paid[s.key])) {
-    // Last share settled — record every share as its own tender and close.
-    state.splitTenders = shares.map(s => ({ method: p.methods[s.key] || 'card', amount: s.amount.toFixed(2) }));
-    state.splitMode = true;
-    state.evenSplit = null;
-    await confirmPaymentNow();
-    return;
-  }
-  render();
 }
 
 function allTables() { return state.floorPlans.flatMap(fp => fp.tables.filter(t => t.type !== 'decor')); }
@@ -18278,8 +18155,6 @@ function openCheckout() {
   state.splitMode = false;
   state.payRailVouchers = false;
   state.splitTenders = [];
-  state.paySeat = null;
-  state.evenSplit = null;
   state.checkoutGiftCardCode = '';
   state.giftCardAppliedCode = '';
   state.checkoutVoucherCode = '';
@@ -18291,7 +18166,7 @@ function openCheckout() {
   state.attachedCustomerId = state.attachedCustomerId || (openOrder && openOrder.customerId) || null;
   render();
 }
-function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.paySeat = null; state.evenSplit = null; state.cardAmount = ''; state.cardTip = 0; render(); }
+function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.cardAmount = ''; state.cardTip = 0; render(); }
 
 // How many of this dish the ingredients can still make — worked out by the
 // server off the recipe, null when the dish has no recipe.
@@ -21893,10 +21768,9 @@ function renderCallAwayPop() {
 // it stays with the table.
 function payDirty() {
   return !!((state.cardAmount && parseFloat(state.cardAmount) > 0) || (state.cashGiven && parseFloat(state.cashGiven) > 0) || (state.cardTip > 0)
-    || state.splitMode || state.billSplit || state.paySeat || state.evenSplit);
+    || state.billSplit);
 }
 function payReady() {
-  if (state.paySeat || state.evenSplit) return false;
   // A half-typed discount is not a payment: while its form is open the
   // docket's Confirm waits, or a tap paid full price and binned the discount
   // (owner's walk, Sep '26).
@@ -21911,9 +21785,6 @@ function payReady() {
     const o = activeOpenOrder();
     return cartTotal() > 0.005 || state.cart.length > 0 || !!(o && o.items && o.items.length);
   }
-  if (state.splitMode) {
-    return Math.abs(splitRemaining()) <= 0.01 && state.splitTenders.every(t => (parseFloat(t.amount) || 0) > 0);
-  }
   if (state.paymentMethod === 'card') {
     // Over the bill has to be answered first — tip or fix the number. And
     // WHICH card: a table could close with no card type on the record
@@ -21927,7 +21798,6 @@ function payReady() {
 }
 function payConfirmLabel() {
   const grand = cartGrandTotal();
-  if (state.paySeat || state.evenSplit) return 'Mark each share'; // the rows carry the action; the bar's key is off
   if (state.paymentMethod === 'card' && !state.splitMode) {
     const taken = cardTakenAmount();
     const part = taken < amountOwing() - 0.005;
@@ -21972,7 +21842,6 @@ async function takePart(amount, method) {
   if (amountOwing() <= 0.005) {
     // The parts add up to the bill — close it, each part its own payment.
     // A seat or even split ends here too, so its screen state goes first.
-    state.paySeat = null; state.evenSplit = null;
     state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
     state.splitMode = true;
     await confirmPaymentNow();
@@ -22007,10 +21876,6 @@ function renderCheckoutMiddle() {
   const total = cartTotal();
   const tipAmount = cartTipAmount();
   const grandTotal = cartGrandTotal();
-  const remaining = splitRemaining();
-  const openForSeats = activeOpenOrder();
-  const seatSplitAvailable = (state.covers || 0) > 1
-    || [...(openForSeats ? openForSeats.items : []), ...state.cart].some(i => typeof i.seat === 'number');
   const attachedCustomer = state.customers.find(c => c.id === state.attachedCustomerId);
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
   return `
@@ -22045,73 +21910,7 @@ function renderCheckoutMiddle() {
             `).join('')}
           </div>` : ''}
       `}`}
-      <div style="display:flex;gap:16px;flex-wrap:wrap;">
-        ${state.splitMode || state.paySeat || state.evenSplit ? `
-        <div class="pay-options" style="margin-bottom:0;">
-          <div class="pay-opt ${state.evenSplit ? 'active' : ''}" data-act="toggle-even-split">Evenly</div>
-          ${seatSplitAvailable ? `<div class="pay-opt ${state.paySeat ? 'active' : ''}" data-act="toggle-seat-split">By seat</div>` : ''}
-          <div class="pay-opt ${state.splitMode ? 'active' : ''}" data-act="toggle-split-mode">In parts</div>
-        </div>` : ''}
-      </div>
-      ${state.paySeat ? `
-        <label>Each seat pays</label>
-        ${seatShares().map(s => {
-          const paid = state.paySeat.paid[s.seat];
-          const method = state.paySeat.methods[s.seat] || 'card';
-          return `
-          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;${paid ? 'opacity:var(--dim);' : ''}">
-            <div style="font-weight:700;flex:none;width:62px;">Seat ${s.seat}</div>
-            <div class="pay-options" style="margin-bottom:0;flex:none;width:110px;">
-              <div class="pay-opt ${method === 'card' ? 'active' : ''}" data-act="seat-split-method" data-seat="${s.seat}" data-val="card">${SYS_CARD_SVG}</div>
-              <div class="pay-opt ${method === 'cash' ? 'active' : ''}" data-act="seat-split-method" data-seat="${s.seat}" data-val="cash">${SYS_CASH_SVG}</div>
-            </div>
-            <div style="flex:1;text-align:right;font-weight:800;font-variant-numeric:tabular-nums;">${money(s.amount)}</div>
-            ${paid
-              ? `<span class="status-chip paid" style="flex:none;">${SYS_TICK_SVG} Paid</span>`
-              : `<button class="btn-confirm" style="width:auto;flex:none;" data-act="seat-split-pay" data-seat="${s.seat}" ${state.terminalPending ? 'disabled' : ''}>${terminalActive() && method === 'card' ? 'To terminal' : 'Mark paid'}</button>`}
-          </div>`;
-        }).join('')}
-      ` : state.evenSplit ? `
-        <label>Split evenly</label>
-        <div class="even-split-count">
-          <span>Split</span>
-          <button data-act="even-split-dec" ${Object.keys(state.evenSplit.paid).length ? 'disabled' : ''}>−</button>
-          <span class="es-n">${state.evenSplit.n}</span>
-          <button data-act="even-split-inc" ${Object.keys(state.evenSplit.paid).length ? 'disabled' : ''}>+</button>
-          <span>ways · <b>${(Math.round(cartGrandTotal() * 100) % state.evenSplit.n) ? '≈ ' : ''}${money(evenShares()[0].amount)} each</b></span>
-        </div>
-        ${evenShares().map(s => {
-          const paid = state.evenSplit.paid[s.key];
-          const method = state.evenSplit.methods[s.key] || 'card';
-          return `
-          <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;${paid ? 'opacity:var(--dim);' : ''}">
-            <div style="font-weight:700;flex:none;width:72px;">Person ${s.key}</div>
-            <div class="pay-options" style="margin-bottom:0;flex:none;width:110px;">
-              <div class="pay-opt ${method === 'card' ? 'active' : ''}" data-act="even-split-method" data-key="${s.key}" data-val="card">${SYS_CARD_SVG}</div>
-              <div class="pay-opt ${method === 'cash' ? 'active' : ''}" data-act="even-split-method" data-key="${s.key}" data-val="cash">${SYS_CASH_SVG}</div>
-            </div>
-            <div style="flex:1;text-align:right;font-weight:800;font-variant-numeric:tabular-nums;">${money(s.amount)}</div>
-            ${paid
-              ? `<span class="status-chip paid" style="flex:none;">${SYS_TICK_SVG} Paid</span>`
-              : `<button class="btn-confirm" style="width:auto;flex:none;" data-act="even-split-pay" data-key="${s.key}" ${state.terminalPending ? 'disabled' : ''}>${terminalActive() && method === 'card' ? 'To terminal' : 'Mark paid'}</button>`}
-          </div>`;
-        }).join('')}
-      ` : state.splitMode ? `
-        <label>Paying in parts</label>
-        ${state.splitTenders.map((t, idx) => `
-          <div class="split-row">
-            <div class="pay-options" style="margin-bottom:0;flex:none;width:132px;">
-              <div class="pay-opt ${t.method === 'card' ? 'active' : ''}" data-act="split-tender-method" data-idx="${idx}" data-val="card">${SYS_CARD_SVG}</div>
-              <div class="pay-opt ${t.method === 'cash' ? 'active' : ''}" data-act="split-tender-method" data-idx="${idx}" data-val="cash">${SYS_CASH_SVG}</div>
-            </div>
-            <input class="split-tender-amount-input" data-idx="${idx}" type="number" min="0" step="0.01" placeholder="0.00" value="${t.amount}" style="flex:1;">
-            <button class="btn-secondary" style="width:96px;flex:none;padding:0;" data-act="split-tender-rest" data-idx="${idx}">The rest</button>
-            ${state.splitTenders.length > 1 ? deleteIconButton('remove-split-tender', idx, 'Remove') : ''}
-          </div>
-        `).join('')}
-        <button class="btn-secondary" style="width:100%;margin-bottom:10px;" data-act="add-split-tender">+ Another part</button>
-        <div class="tot-row grand" style="${Math.abs(remaining) <= 0.01 ? '' : 'color:var(--red);'}"><span>${Math.abs(remaining) <= 0.01 ? 'All accounted for' : 'Still to pay'}</span><span>${money(remaining)}</span></div>
-      ` : `
+      ${`
       ${state.paymentMethod === 'giftcard' ? `
         <div style="margin-bottom:14px;padding:8px;border-radius:var(--r-control);background:var(--green-dim);color:var(--green);font-weight:700;font-size:var(--fs-md);display:flex;justify-content:space-between;align-items:center;">
           <span>${SYS_GIFT_SVG} Paying with gift card ${state.giftCardAppliedCode}</span>
@@ -38996,9 +38795,6 @@ function bindEvents() {
   if (cashGivenInput) {
     cashGivenInput.addEventListener('change', (e) => { state.cashGiven = String(e.target.value || ''); render(); });
   }
-  document.querySelectorAll('.split-tender-amount-input').forEach(el => {
-    el.addEventListener('change', (e) => { updateSplitTenderAmount(parseInt(el.dataset.idx), e.target.value); });
-  });
   const staffNameInput = document.getElementById('staff-name-input');
   if (staffNameInput) staffNameInput.addEventListener('input', (e) => { state.staffModal.name = e.target.value; });
   const staffPinInput = document.getElementById('staff-pin-input');
@@ -40059,13 +39855,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'split-print') { printSplitPart(el.dataset.key); }
       else if (act === 'close-bill-split') { closeBillSplit(); }
-      else if (act === 'split-tender-rest') {
-        const idx = parseInt(el.dataset.idx, 10);
-        const others = state.splitTenders.reduce((sum, t, i) => i === idx ? sum : sum + (parseFloat(t.amount) || 0), 0);
-        const rest = Math.max(0, amountOwing() - others);
-        state.splitTenders[idx].amount = rest.toFixed(2);
-        render();
-      }
       else if (act === 'pay-rail') {
         const k = el.dataset.val;
         if (k === 'discount') {
@@ -40081,9 +39870,6 @@ function handleActClick(el, e) {
           state.payRailVouchers = true;
           render();
         } else {
-          if (state.splitMode) toggleSplitMode();
-          else if (state.paySeat) toggleSeatSplit();
-          else if (state.evenSplit) toggleEvenSplit();
           // Choosing how to pay puts any open side-form away with it —
           // including the split pane (it trapped you until you divided).
           state.billSplit = null;
@@ -40095,10 +39881,6 @@ function handleActClick(el, e) {
         }
       }
       else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round((already + (p ? cartTotal() * p / 100 : 0)) * 100) / 100; render(); }
-      else if (act === 'toggle-split-mode') { toggleSplitMode(); }
-      else if (act === 'split-tender-method') { updateSplitTenderMethod(parseInt(el.dataset.idx), el.dataset.val); }
-      else if (act === 'add-split-tender') { addSplitTender(); }
-      else if (act === 'remove-split-tender') { removeSplitTender(parseInt(el.dataset.id)); }
       else if (act === 'ordertype') {
         // Mode chips live in the bar now — tapping one from ANY view lands on
         // the order screen in that mode. Dine-in has no chip: Order IS dine-in.
@@ -40746,14 +40528,6 @@ function handleActClick(el, e) {
       else if (act === 'set-tax-mode') { saveTaxSettings({ mode: el.dataset.val }); }
       else if (act === 'backup-now') { backupNow(); }
       else if (act === 'restore-backup') { restoreBackup(el.dataset.file); }
-      else if (act === 'toggle-seat-split') { toggleSeatSplit(); }
-      else if (act === 'seat-split-method') { const p = state.paySeat; if (p && !p.paid[el.dataset.seat]) { p.methods[el.dataset.seat] = el.dataset.val; render(); } }
-      else if (act === 'seat-split-pay') { paySeatShare(el.dataset.seat); }
-      else if (act === 'toggle-even-split') { toggleEvenSplit(); }
-      else if (act === 'even-split-inc') { if (state.evenSplit) setEvenSplitCount(state.evenSplit.n + 1); }
-      else if (act === 'even-split-dec') { if (state.evenSplit) setEvenSplitCount(state.evenSplit.n - 1); }
-      else if (act === 'even-split-method') { const p = state.evenSplit; if (p && !p.paid[el.dataset.key]) { p.methods[el.dataset.key] = el.dataset.val; render(); } }
-      else if (act === 'even-split-pay') { payEvenShare(el.dataset.key); }
       else if (act === 'find-printers') { findPrinters(); }
       else if (act === 'set-terminal-provider') { setTerminalProvider(el.dataset.val); }
       else if (act === 'toggle-doshii-enabled') { const d = state.settings.doshii || {}; d.enabled = !d.enabled; state.settings.doshii = d; saveDoshiiConfig(); }

@@ -3640,7 +3640,24 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    places and 20 in others (owner, Aug '26: "icons ... all diff shapes and
    sizes"). The square-controls rule says 20. */
 .seg-icon svg, .icon-sq svg, .sort-btn svg, .delete-icon-btn svg{ width:20px; height:20px; }
-.fp-main{order:1;flex:1;min-width:0;overflow:auto;-webkit-overflow-scrolling:touch;}
+.fp-main{order:1;flex:1;min-width:0;overflow:auto;-webkit-overflow-scrolling:touch;position:relative;} /* positioned: the guide layer lays itself over the room inside this frame */
+/* GUIDES WHILE DRAGGING (DESIGN.md § Guide law): a line in the picked ring's
+   blue, as thick as that ring, from the dragged table to the thing it has
+   lined up with; a bracket in each gap when it has made a row's gaps equal.
+   Painted on a layer after the canvas — above every table, no layer number —
+   and gone the moment the finger lifts. */
+.fp-guides{ position:absolute; pointer-events:none; }
+.fp-guide, .fp-gap{ position:absolute; background:var(--orange); }
+.fp-guide.v{ width:var(--tbl-sel-ring); transform:translateX(-50%); }
+.fp-guide.h{ height:var(--tbl-sel-ring); transform:translateY(-50%); }
+.fp-gap.h{ height:var(--tbl-sel-ring); transform:translateY(-50%); }
+.fp-gap.v{ width:var(--tbl-sel-ring); transform:translateX(-50%); }
+.fp-gap::before, .fp-gap::after{ content:""; position:absolute; background:var(--orange); }
+.fp-gap.h::before, .fp-gap.h::after{ top:calc(-1 * var(--gap-tick)); width:var(--tbl-sel-ring); height:calc(var(--gap-tick) * 2 + var(--tbl-sel-ring)); }
+.fp-gap.h::before{ left:0; } .fp-gap.h::after{ right:0; }
+.fp-gap.v::before, .fp-gap.v::after{ left:calc(-1 * var(--gap-tick)); height:var(--tbl-sel-ring); width:calc(var(--gap-tick) * 2 + var(--tbl-sel-ring)); }
+.fp-gap.v::before{ top:0; } .fp-gap.v::after{ bottom:0; }
+.fp-gap{ --gap-tick:5px; } /* a bracket's foot, each side of the line */
 /* The editor's pinch: the same transform zoom the till's map wears, from the
    top-left, with the margins telling the scrolling box how big the zoomed
    room is. --fp-w/--fp-h are the room's unzoomed size, published by the
@@ -12285,12 +12302,19 @@ function floorSizeUnits(fp) {
 // its corners past the plain width/height box (that was the "tables outside
 // the grid" glitch). Width% is of canvas width, height% of canvas height, so
 // the rotation mix converts between the axes via the canvas aspect.
-function clampToFloor(x, y, w, h, rot, fpHeight) {
+// Half the box a placed thing covers, in % of the floor each way — its own
+// size turned by its angle. One reckoning for the clamp and the guides.
+function tableHalfExtents(w, h, rot, fpHeight) {
   const rad = ((rot || 0) * Math.PI) / 180;
   const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
   const r = (fpHeight || 500) / 900; // canvas H/W ratio (aspect-ratio 900/fpHeight)
-  const hw = Math.min(((w || 0) * c + (h || 0) * r * s) / 2, 50);
-  const hh = Math.min(((w || 0) / r * s + (h || 0) * c) / 2, 50);
+  return {
+    hw: Math.min(((w || 0) * c + (h || 0) * r * s) / 2, 50),
+    hh: Math.min(((w || 0) / r * s + (h || 0) * c) / 2, 50),
+  };
+}
+function clampToFloor(x, y, w, h, rot, fpHeight) {
+  const { hw, hh } = tableHalfExtents(w, h, rot, fpHeight);
   return {
     x: Math.max(hw, Math.min(100 - hw, Math.round(x * 10) / 10)),
     y: Math.max(hh, Math.min(100 - hh, Math.round(y * 10) / 10)),
@@ -33195,6 +33219,131 @@ let floorDrag = null; // { tableId, canvasEl, markerEl, moved }
 let _floorTouchAt = 0; // suppresses the compat mouse events a touch tap emits
 const FLOOR_DRAG_SLOP = 8; // px a finger must travel before a drag/scroll is judged
 
+// ── Guides: a dragged table clicks to its neighbours (DESIGN.md § Guide law) ──
+// Canva's lines. While a table is under a finger, its edges and centre are
+// held against every other thing on the floor and the room's own centre;
+// within GUIDE_REACH of one it clicks to it and a line in the picked ring's
+// blue runs between the two. A row or column with even gaps is a target too:
+// the gaps are drawn as brackets when the dragged table makes them equal.
+// One reach, on the screen (a finger's near is the same on every zoom); the
+// lines are painted, never rendered, and go the moment the finger lifts.
+const GUIDE_REACH = 6; // px on screen
+
+// The box a thing covers at (x, y), in % each way. A table turned off the
+// square has no straight edge to line up: its centre only.
+function floorBoxOf(t, x, y, fpH) {
+  const { hw, hh } = tableHalfExtents(t ? t.width : 0, t ? t.height : 0, t && t.rotation, fpH);
+  return { l: x - hw, r: x + hw, t: y - hh, b: y + hh, cx: x, cy: y, straight: !t || ((t.rotation || 0) % 90) === 0 };
+}
+
+// Where the moving box (one table, or the whole selection as one box) should
+// click to, and what to draw once it has. Returns { dx, dy, lines, gaps }:
+// dx/dy in %, lines as { axis, at, from, to }, gaps as { axis, at, from, to }.
+function floorGuides(fp, boxes, movingIds, rect) {
+  const M = {
+    l: Math.min(...boxes.map(b => b.l)), r: Math.max(...boxes.map(b => b.r)),
+    t: Math.min(...boxes.map(b => b.t)), b: Math.max(...boxes.map(b => b.b)),
+    straight: boxes.every(b => b.straight),
+  };
+  M.cx = (M.l + M.r) / 2; M.cy = (M.t + M.b) / 2;
+  const others = fp.tables.filter(t => !movingIds.includes(t.id)).map(t => floorBoxOf(t, t.x, t.y, fp.height));
+  const reach = { x: (GUIDE_REACH / rect.width) * 100, y: (GUIDE_REACH / rect.height) * 100 };
+  const EPS = 0.05;
+  // One axis at a time. `a` names the axis: its two edges, its centre, and
+  // the cross axis whose overlap makes a row (for x) or a column (for y).
+  const AX = {
+    x: { lo: 'l', hi: 'r', c: 'cx', xlo: 't', xhi: 'b', xc: 'cy', reach: reach.x },
+    y: { lo: 't', hi: 'b', c: 'cy', xlo: 'l', xhi: 'r', xc: 'cx', reach: reach.y },
+  };
+  const out = { dx: null, dy: null, lines: [], gaps: [] };
+  const shift = (axis, d) => { if (axis === 'x') { M.l += d; M.r += d; M.cx += d; } else { M.t += d; M.b += d; M.cy += d; } };
+  // One axis at a time: y first, then x — a row is the things sharing the
+  // dragged table's height, so the height is settled before the row is read.
+  // Pass one picks the nearest target on each axis and clicks to it; pass two
+  // draws, once both are settled, so a line reaches exactly as far as the box.
+  const picked = {};
+  for (const axis of ['y', 'x']) {
+    const A = AX[axis];
+    const cands = []; // { at: the line clicked to, d: the shift that gets there, O, kind }
+    for (const O of others) {
+      // The centre first: on a tie (a neighbour of the same size lines up on
+      // both edges and the centre at once) the centre is the line drawn.
+      const pairs = M.straight && O.straight
+        ? [[A.c, A.c], [A.lo, A.lo], [A.lo, A.hi], [A.hi, A.lo], [A.hi, A.hi]]
+        : [[A.c, A.c]];
+      for (const [m, o] of pairs) cands.push({ at: O[o], d: O[o] - M[m], O, kind: 'line' });
+    }
+    cands.push({ at: 50, d: 50 - M[A.c], O: null, kind: 'line' }); // the room's own centre
+    // Even gaps: the things this one shares a row (or column) with.
+    const size = M[A.hi] - M[A.lo];
+    const row = others.filter(O => O[A.xlo] < M[A.xhi] && O[A.xhi] > M[A.xlo] && (O[A.hi] <= M[A.lo] + EPS || O[A.lo] >= M[A.hi] - EPS))
+      .sort((p, q) => p[A.lo] - q[A.lo]);
+    for (let i = 0; i < row.length - 1; i++) {
+      const B = row[i], C = row[i + 1];
+      const room = C[A.lo] - B[A.hi];
+      if (room <= 0) continue;
+      // Between the two, with the same air each side.
+      if (M[A.c] > B[A.hi] && M[A.c] < C[A.lo] && room >= size) {
+        const gap = (room - size) / 2;
+        cands.push({ d: B[A.hi] + gap - M[A.lo], kind: 'gap', spans: [[B[A.hi], B[A.hi] + gap], [C[A.lo] - gap, C[A.lo]]], cross: [B, C] });
+      }
+      // Past the pair, one more gap along.
+      if (M[A.c] >= C[A.hi]) cands.push({ d: C[A.hi] + room - M[A.lo], kind: 'gap', spans: [[B[A.hi], C[A.lo]], [C[A.hi], C[A.hi] + room]], cross: [B, C] });
+      if (M[A.c] <= B[A.lo]) cands.push({ d: B[A.lo] - room - M[A.hi], kind: 'gap', spans: [[B[A.lo] - room, B[A.lo]], [B[A.hi], C[A.lo]]], cross: [B, C] });
+    }
+    let best = null;
+    for (const c of cands) if (Math.abs(c.d) <= A.reach && (!best || Math.abs(c.d) < Math.abs(best.d) - 1e-9)) best = c; // a real tie keeps the first: the centre
+    if (!best) continue;
+    shift(axis, best.d);
+    out[axis === 'x' ? 'dx' : 'dy'] = best.d;
+    picked[axis] = { best, cands };
+  }
+  for (const axis of ['y', 'x']) {
+    if (!picked[axis]) continue;
+    const A = AX[axis], { best, cands } = picked[axis];
+    if (best.kind === 'line') {
+      // ONE line: the place it clicked to, from the moving box to the
+      // farthest thing sharing that line. (On a grid nearly everything
+      // lines up with something; drawing every coincidence was a mesh.)
+      const line = { axis, at: best.at, from: M[A.xlo], to: M[A.xhi] };
+      for (const c of cands) {
+        if (c.kind !== 'line' || Math.abs(c.at - best.at) > EPS) continue;
+        if (c.O) { line.from = Math.min(line.from, c.O[A.xlo]); line.to = Math.max(line.to, c.O[A.xhi]); } else { line.from = 0; line.to = 100; }
+      }
+      out.lines.push(line);
+    } else {
+      // A bracket in each gap, drawn where the three overlap.
+      const lo = Math.max(M[A.xlo], ...best.cross.map(O => O[A.xlo])), hi = Math.min(M[A.xhi], ...best.cross.map(O => O[A.xhi]));
+      const at = lo < hi ? (lo + hi) / 2 : M[A.xc];
+      for (const [from, to] of best.spans) out.gaps.push({ axis, at, from, to });
+    }
+  }
+  return out;
+}
+
+// The lines are painted on a layer laid over the room — a sibling after the
+// canvas, so it sits above every table without a layer number of its own,
+// and inside the room's scroll frame so it pans with the room.
+function paintFloorGuides(canvasEl, g) {
+  let layer = canvasEl.parentElement && canvasEl.parentElement.querySelector(':scope > .fp-guides');
+  if (!g || (!g.lines.length && !g.gaps.length)) { if (layer) layer.remove(); return; }
+  if (!layer) {
+    layer = document.createElement('div');
+    layer.className = 'fp-guides';
+    canvasEl.insertAdjacentElement('afterend', layer);
+  }
+  const frame = canvasEl.parentElement, fr = frame.getBoundingClientRect(), cr = canvasEl.getBoundingClientRect();
+  layer.style.left = (cr.left - fr.left + frame.scrollLeft - frame.clientLeft) + 'px';
+  layer.style.top = (cr.top - fr.top + frame.scrollTop - frame.clientTop) + 'px';
+  layer.style.width = cr.width + 'px';
+  layer.style.height = cr.height + 'px';
+  const v = (cls, at, from, to) => `<i class="${cls} v" style="left:${at}%;top:${from}%;height:${to - from}%"></i>`;
+  const h = (cls, at, from, to) => `<i class="${cls} h" style="top:${at}%;left:${from}%;width:${to - from}%"></i>`;
+  layer.innerHTML = g.lines.map(l => (l.axis === 'x' ? v : h)('fp-guide', l.at, l.from, l.to)).join('')
+    + g.gaps.map(p => (p.axis === 'x' ? h : v)('fp-gap', p.at, p.from, p.to)).join('');
+}
+function clearFloorGuides() { document.querySelectorAll('.fp-guides').forEach(e => e.remove()); }
+
 function startFloorDrag(e, tableId) {
   // Ctrl/⌘-click toggles a table in the multi-select set instead of dragging.
   if (e.ctrlKey || e.metaKey) {
@@ -33459,34 +33608,43 @@ function moveFloorDrag(clientX, clientY) {
   let x = ((clientX - rect.left) / rect.width) * 100;
   let y = ((clientY - rect.top) / rect.height) * 100;
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
-  // Grid snap stays out of the Link tool's way — the weld places the table
-  // exactly flush itself, and snapping could yank it out of touch range.
-  if (fp && fp.snapToGrid && !(state.floorLinkMode === 'link' && !floorDrag.group)) {
-    x = snapFloorPos(x, FLOOR_GRID);
-    y = snapFloorPos(y, FLOOR_GRID_Y);
-  }
   floorDrag.moved = true;
-  const dims = (id) => { const t = fp && fp.tables.find(z => z.id === id); return t ? [t.width, t.height, t.rotation] : [0, 0, 0]; };
+  const tableOf = (id) => fp && fp.tables.find(z => z.id === id);
+  const fpH = fp && fp.height;
+  const clampT = (t, px, py) => t ? clampToFloor(px, py, t.width, t.height, t.rotation, fpH) : { x: px, y: py };
+  // Where the finger puts it — one table, or every member of the selection
+  // by the same shift — each kept fully inside the floor.
+  let moving;
   if (floorDrag.group) {
-    // Whole selection rides along: same delta for every member, each kept
-    // fully inside the floor.
     const me = floorDrag.group.find(g => g.id === floorDrag.tableId);
     const dx = x - me.startX, dy = y - me.startY;
-    for (const g of floorDrag.group) {
-      const [w, h, rot] = dims(g.id);
-      const c = clampToFloor(g.startX + dx, g.startY + dy, w, h, rot, fp && fp.height);
-      g.lastX = c.x;
-      g.lastY = c.y;
-      g.el.style.left = g.lastX + '%';
-      g.el.style.top = g.lastY + '%';
-    }
+    moving = floorDrag.group.map(g => ({ g, t: tableOf(g.id), ...clampT(tableOf(g.id), g.startX + dx, g.startY + dy) }));
   } else {
-    const [w, h, rot] = dims(floorDrag.tableId);
-    const c = clampToFloor(x, y, w, h, rot, fp && fp.height);
-    x = c.x; y = c.y;
-    floorDrag.markerEl.style.left = x + '%';
-    floorDrag.markerEl.style.top = y + '%';
+    moving = [{ g: null, t: tableOf(floorDrag.tableId), ...clampT(tableOf(floorDrag.tableId), x, y) }];
   }
+  // THE GUIDES: near a neighbour's edge, its centre, the room's centre or an
+  // equal gap, the table clicks to it and a blue line says so. A neighbour
+  // beats the grid: the grid only takes an axis no guide caught. Neither
+  // works under the Link tool — the weld places the table flush itself, and
+  // a snap could yank it out of touch range.
+  const linking = state.floorLinkMode === 'link' && !floorDrag.group;
+  const guides = fp && !linking
+    ? floorGuides(fp, moving.map(m => floorBoxOf(m.t, m.x, m.y, fpH)), moving.map(m => m.t && m.t.id), rect)
+    : null;
+  const grid = fp && fp.snapToGrid && !linking;
+  for (const m of moving) {
+    const gx = guides && guides.dx !== null, gy = guides && guides.dy !== null;
+    const nx = gx ? m.x + guides.dx : (grid ? snapFloorPos(m.x, FLOOR_GRID) : m.x);
+    const ny = gy ? m.y + guides.dy : (grid ? snapFloorPos(m.y, FLOOR_GRID_Y) : m.y);
+    Object.assign(m, clampT(m.t, nx, ny));
+    const el = m.g ? m.g.el : floorDrag.markerEl;
+    el.style.left = m.x + '%';
+    el.style.top = m.y + '%';
+    if (m.g) { m.g.lastX = m.x; m.g.lastY = m.y; }
+  }
+  paintFloorGuides(floorDrag.canvasEl, guides);
+  const held = moving.find(m => m.g ? m.g.id === floorDrag.tableId : true);
+  x = held.x; y = held.y;
   floorDrag.lastX = x;
   floorDrag.lastY = y;
   // Link tool armed: light up the table the dragged body is touching.
@@ -33501,6 +33659,7 @@ function moveFloorDrag(clientX, clientY) {
 
 function endFloorDrag() {
   if (!floorDrag) return;
+  clearFloorGuides(); // the lines live only under a finger
   if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const { tableId, moved, lastX, lastY } = floorDrag;
   if (floorDrag.overEl) floorDrag.overEl.classList.remove('link-target');

@@ -11761,7 +11761,10 @@ app.post('/api/no-sale', (req, res) => {
   const data = readData();
   let drawer = false;
   try { drawer = printing.openCashDrawer(data); } catch (e) { drawer = false; }
-  logAudit(data, staffFromReq(req), 'No sale — cash drawer opened');
+  // The log says what HAPPENED, not what was asked for: a No Sale with no
+  // receipt station kicks nothing, and a log that claims otherwise is the one
+  // record a manager checks when cash goes missing.
+  logAudit(data, staffFromReq(req), drawer ? 'No sale — cash drawer opened' : 'No sale — no drawer to open');
   writeData(data);
   res.json({ ok: true, drawer });
 });
@@ -31846,8 +31849,14 @@ function renderStaleAccounts() {
 // No Sale — open the cash drawer without a transaction (make change, etc.).
 async function noSaleDrawer() {
   try {
-    await api('/api/no-sale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
-    state.toast = 'Cash drawer opened (no sale)';
+    // THE SERVER SAYS WHETHER THE DRAWER ACTUALLY OPENED, and this ignored it:
+    // with no receipt station set up nothing is kicked, yet the till said
+    // "Cash drawer opened" in green and the log agreed (owner's walk, Sep '26).
+    // A drawer that did not open has to say so — it is a till telling a
+    // manager money was reachable when it was not.
+    const r = await api('/api/no-sale', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+    if (r && r.drawer) state.toast = 'Cash drawer opened (no sale)';
+    else state.toast = toastFail('Could not open the drawer — no receipt printer');
   } catch (e) { state.toast = toastFail(e.message || 'Could not open the drawer.'); }
   render();
   armToastTimer(2500);

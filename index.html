@@ -34971,7 +34971,20 @@ document.addEventListener('wheel', (e) => { if (e.ctrlKey) e.preventDefault(); }
 const DRAG_TAKE = 0.33;   // past a third of the screen and it goes
 const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it got
 (function () {
-  let sx = 0, sy = 0, armed = false, onPeekStrip = false, dktAtTop = false;
+  let sx = 0, sy = 0, armed = false, onPeekStrip = false, dktAtTop = false, mapUnder = null;
+  // THE MAP HANDS THE GESTURE ON WHEN IT RUNS OUT. On a phone the floor is
+  // drawn to the screen's height, so it is wider than the screen — measured,
+  // 1043 across a 404 window — and it swallowed every swipe back to the order
+  // screen (owner, Sep '26: "works on phone except from floor layout to order
+  // panel"; "I just want to be able to scroll on the table and then stick to
+  // thumb"). So: slide the map while it has somewhere to go that way, and the
+  // moment it is against its end the screen takes over and follows the thumb —
+  // one gesture doing both, the way a list inside a list behaves. Read live,
+  // so panning to the end and carrying on is ONE push, not two.
+  const mapRoomLeft = () => {
+    if (!mapUnder || !mapUnder.isConnected) return false;
+    return mapUnder.scrollLeft < mapUnder.scrollWidth - mapUnder.clientWidth - 1;
+  };
   // ONE ENGINE, TWO PANELS. A carried panel is four numbers and nothing else:
   // the node, how far its trip is, where it sat when the finger landed
   // (`base`) and where the other end is (`rest`). The map only ever CLOSES
@@ -35063,6 +35076,7 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // exactly the work the poll was taught to avoid.
     if (state.showTablePicker) {
       if (dx > -10 || !state._tpFromOrder || state._tpLeaving) return null;
+      if (mapRoomLeft()) return null;   // the map still has somewhere to slide — it owns this
       if (state.view !== 'order' || floorMustStay()) return null;
       const el = document.querySelector('.middle-view.tp-view');
       if (!el) return null;
@@ -35073,9 +35087,9 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // its lines already drawn, so a finger can pull it in as well as push it
     // out. Peek mode is not this gesture: there the docket is a strip that
     // grows upward, and up/down is its own door.
-    if (window.innerWidth > 768 || state.view !== 'order') return null;
+    if (state.view !== 'order') return null;
     if (state.showCheckout || state.billSplit) return null;
-    const dk = document.querySelector('.ticket-panel');
+    const dk = window.innerWidth > 768 ? null : document.querySelector('.ticket-panel');
     if (dk && !dk.classList.contains('peek') && !phoneDocketPeek()) {
       const w = dk.getBoundingClientRect().width || window.innerWidth;
       if (state.mobileCartOpen) { if (dx < 10) return null; return { el: dk, w, base: 0, rest: w, kind: 'docket', slop: -10 }; }
@@ -35085,11 +35099,21 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // on phone same"). It cannot be parked off screen in advance the way the
     // docket is — it is not built until it is asked for — so the drag builds
     // it the moment it is claimed and parks it off the left edge, then carries
-    // it in. That costs one rebuild at the start of the gesture, which is why
-    // this is the PHONE only: on the till the same rebuild was measured at
-    // 212ms, a fifth of a second of nothing, and the eye has moved on.
+    // it in. That costs one rebuild at the start of the gesture. It was the
+    // PHONE only, because on a till that rebuild once measured 212ms — a fifth
+    // of a second of nothing. Measured again Sep '26: 11ms on a till, 13 on a
+    // phone, 67 with the processor slowed four times. The reason had expired
+    // and the rule was still being obeyed, which is how a tablet ended up with
+    // no finger control at all (owner: "the tablet does not do it at all").
     // Every pane is a door of its own, so none of them may be dragged past.
-    if (dx < 10 || state.mobileCartOpen) return null;
+    // A TILL IS TAPPED, A PHONE IS SWIPED. On a phone 10px of sideways travel
+    // means a swipe. On a till a finger tapping a tile slides further than
+    // that without meaning anything, and the floor started coming in on it the
+    // moment this stopped being phone-only — a tile press was then eaten by
+    // the floor springing back (caught by the press gate, Sep '26). The map is
+    // a whole-screen journey, so a till asks for a real push first. The phone
+    // is untouched.
+    if (dx < (window.innerWidth > 768 ? 40 : 10) || state.mobileCartOpen) return null;
     if (state.itemOptions || state.notesPanel || state.editLine || state.editSent
       || state.moveItems || state.callAway || state.quickNotePad || state.coversPad) return null;
     bindSrc(target);          // bound BEFORE the rebuild takes the node away
@@ -35104,7 +35128,7 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     return { el, w, base: -w, rest: 0, kind: 'map-in', slop: -10 };
   };
   document.addEventListener('touchstart', (e) => {
-    armed = false; onPeekStrip = false; dktAtTop = false;
+    armed = false; onPeekStrip = false; dktAtTop = false; mapUnder = null;
     letGo();
     // A panel still sliding is caught before anything else is considered —
     // the finger is plainly reaching for the thing that is moving.
@@ -35134,7 +35158,8 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // already ignored there), so it must not eat the pay swipe. It did: once
     // the money boxes moved up the pane, the two of them covered the middle of
     // the phone's pay screen and a swipe started on one did nothing.
-    else if (t && t.closest && t.closest('.catrail, input:not(.pay-amount), textarea, select, .floor-canvas, .tp-canvas-wrap, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk, .qty-pop, .line-edit-pane')) return;
+    else if (t && t.closest && t.closest('.floor-canvas, .tp-canvas-wrap')) mapUnder = t.closest('.tp-canvas-wrap');
+    else if (t && t.closest && t.closest('.catrail, input:not(.pay-amount), textarea, select, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk, .qty-pop, .line-edit-pane')) return;
     // THE PAY SCREEN SWIPES THE WAYS TO PAY (owner, Sep '26): left is the
     // next chip on the pay rail, right the one before. Every other pane
     // takes no swipe.
@@ -35270,6 +35295,7 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
       if (dy > 0 && state.mobileCartOpen && dktAtTop) { closeMobileCart(); return; }
     }
     if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.6) return; // not a clear sideways swipe
+    if (mapRoomLeft()) return;          // that was a pan across the floor, not a way out
     if (state.view === 'admin') { adminSwipeTile(dx < 0 ? 1 : -1); return; }
     // The map is open → a left swipe puts it back, exactly as a right swipe
     // puts the docket back. It never opens the docket from here.

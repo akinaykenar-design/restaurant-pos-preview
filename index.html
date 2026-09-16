@@ -9980,7 +9980,12 @@ app.post('/api/orders/:id/print-bill', (req, res) => {
   // A split part prints as its own bill, with that share as the total.
   const label = req.body && typeof req.body.splitLabel === 'string' ? req.body.splitLabel.slice(0, 40) : '';
   const amount = req.body && parseFloat(req.body.splitAmount);
-  const split = label && !isNaN(amount) && amount > 0 ? { label, amount } : null;
+  // Split by item knows WHICH lines are this person's, so it sends them and
+  // the paper prints only those. Every other way divides money, not food, and
+  // sends no lines — that paper keeps the whole bill for reference.
+  const sent = req.body && req.body.splitLines;
+  const lines = Array.isArray(sent) ? sent.filter(l => l && typeof l === 'object').slice(0, 200) : null;
+  const split = label && !isNaN(amount) && amount > 0 ? { label, amount, lines } : null;
   printing.printReceiptForOrder(data, order, 'bill', split);
   res.json({ ok: true });
 });
@@ -16790,7 +16795,10 @@ async function printSplitPart(key) {
   try {
     await api(`/api/orders/${order.id}/print-bill`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ splitLabel: part.label, splitAmount: part.amount }),
+      // The lines ride with the part when the split knows them (by item). No
+      // lines means "divide the money, keep the whole bill" — evenly, by
+      // amount, and the paid rows — exactly as before.
+      body: JSON.stringify({ splitLabel: part.label, splitAmount: part.amount, splitLines: part.lines || null }),
     });
     state.billSplit.printed[key] = true;
     state.toast = `${part.label} printed`;
@@ -17020,9 +17028,21 @@ function billSplitParts() {
     });
     // Every bill stays on the list even at nothing — an empty one is exactly
     // where you walk to in order to start putting lines on it.
+    // EACH BILL CARRIES ITS OWN LINES. Split by item is the one way that
+    // knows exactly what each person had, and the paper has to say so — it
+    // printed the whole table's lines with that person's share at the bottom,
+    // so four people got four identical bills with four different totals
+    // (owner, Sep '26: "split by item on bill does not split by item on print,
+    // only by amount"). Every other way divides money, not food, and keeps
+    // the whole bill for reference.
+    const lines = Array.from({ length: n }, () => []);
+    billItems().forEach((it, idx) => {
+      const pick = picks[splitItemKey(it, idx)];
+      lines[(pick >= 1 && pick < n) ? pick - 1 : n - 1].push(it);
+    });
     const rows = raws.map((r, i) => ({ key: 'i' + (i + 1), label: `Bill ${i + 1} of ${n}${i === n - 1 ? ' · the rest' : ''}`, raw: r }));
     const amounts = shareCents(rows.map(r => r.raw), target);
-    return paidRows.concat(rows.map((r, i) => ({ key: r.key, label: r.label, amount: amounts[i] })));
+    return paidRows.concat(rows.map((r, i) => ({ key: r.key, label: r.label, amount: amounts[i], lines: lines[i] })));
   }
   if (sp.way === 'amount') {
     const typed = (sp.amounts || []).map(a => Math.max(0, Math.round((parseFloat(a) || 0) * 100)));
@@ -35108,7 +35128,13 @@ const DRAG_FLICK = 0.8;   // ...or a real flick — 800 a second, however far it
     // A PANE TAKES NO SWIPE (owner, Sep '26: "I can swipe left and right on
     // the item editor and it brings up the order menu"): the line editor,
     // the pay screen and every other pane leave by their own keys only.
-    else if (t && t.closest && t.closest('.catrail, input, textarea, select, .floor-canvas, .tp-canvas-wrap, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk, .qty-pop, .line-edit-pane')) return;
+    // `input` is here to protect TYPING — a finger dragging to select text is
+    // not a request to change rooms. A pay-screen amount box is not a typing
+    // field: every tap on one opens the number pad instead (a drag over it is
+    // already ignored there), so it must not eat the pay swipe. It did: once
+    // the money boxes moved up the pane, the two of them covered the middle of
+    // the phone's pay screen and a swipe started on one did nothing.
+    else if (t && t.closest && t.closest('.catrail, input:not(.pay-amount), textarea, select, .floor-canvas, .tp-canvas-wrap, .simple-table-grid, .modal-bg, .io-pop, .covers-pad, .pop-scrim, .color-popover, .price-pop, .seat-pop, .osk, .qty-pop, .line-edit-pane')) return;
     // THE PAY SCREEN SWIPES THE WAYS TO PAY (owner, Sep '26): left is the
     // next chip on the pay rail, right the one before. Every other pane
     // takes no swipe.

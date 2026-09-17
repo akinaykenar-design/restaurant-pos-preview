@@ -21675,6 +21675,9 @@ const SYS_SCISSORS_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" str
 const SYS_CHEV_L_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2 L7 12 L17 22"/></svg>`;
 const SYS_CHEV_R_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 2 L17 12 L7 22"/></svg>`;
 const ACT_CROSS_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18M21 3L3 21"/></svg>`;
+// A cross says "this is gone", an arrow says "one step back". The options
+// popup wore the cross on every step while its label said Back — see ioBack.
+const ACT_BACK_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2M11 3L2 12l9 9"/></svg>`;
 const ACT_BILL_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4.22 2h15.56v20l-3.33 -2.22 -2.22 2.22 -2.22 -2.22 -2.22 2.22 -3.33 -2.22V2z"/><path d="M8.11 7.56h7.78M8.11 12h7.78M8.11 16.44h5"/></svg>`;
 const ACT_PAY_SVG = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 6c-1 -1.6 -3 -2.5 -5 -2.5 -2.8 0 -5 1.4 -5 3.7 0 5.2 10 2.6 10 7.6 0 2.4 -2.3 3.7 -5 3.7 -2.2 0 -4.2 -1 -5 -2.6"/></svg>`;
 // Trash can drawn in the same stroke line-art language as the docket icons above.
@@ -32982,29 +32985,11 @@ function renderItemOptionsPop() {
   const item = state.menu.find(m => m.id === state.itemOptions.itemId);
   if (!item) return '';
   const io = state.itemOptions;
-  const groups = item.modifierGroupIds.map(gid => state.modifierGroups.find(g => g.id === gid)).filter(Boolean).filter(g => (g.promptAt || 'ordering') === 'ordering');
-  // No seat picker in the options pane when an active seat is already chosen —
-  // the add uses that seat automatically.
-  const needsSeat = itemAddNeedsSeatPrompt() && !(state.activeSeat === 'all' || (state.activeSeat && state.activeSeat <= state.covers));
-
   // One choice at a time: each group gets the pane to itself and the pane
-  // switches forward the moment the choice is made. Earlier steps stay
-  // reachable as chips showing what was picked.
-  const steps = [];
-  if (item.variants.length > 0) steps.push({ kind: 'variant', label: 'Size' });
-  groups.forEach(g => steps.push({ kind: 'mods', g, label: g.name }));
-  if (needsSeat) steps.push({ kind: 'seat', label: 'Seat' });
-  const cur = Math.max(0, Math.min(io.step || 0, steps.length - 1));
+  // switches forward the moment the choice is made. Back walks it the other way.
+  const steps = ioSteps(io);
+  const cur = ioStepAt(io);
   const step = steps[cur];
-  const summaryOf = (s) => {
-    if (s.kind === 'variant') { const v = item.variants.find(x => x.id === io.variantId); return v ? v.label : ''; }
-    if (s.kind === 'mods') {
-      const names = modSel(io.modSelections, s.g.id).map(id => (s.g.options.find(o => o.id === id) || {}).label).filter(Boolean);
-      return names.join(', ') || ((s.g.min != null ? s.g.min : 1) === 0 ? 'None' : '');
-    }
-    const seats = [...(io.assignedSeats || []), ...(io.seat != null ? [io.seat] : [])];
-    return seats.map(x => seatText(x)).join(', ');
-  };
   const stepHtml = (s) => {
     if (!s) return '';
     if (s.kind === 'variant') {
@@ -33055,7 +33040,7 @@ function renderItemOptionsPop() {
       ${(() => { const only = matchedAllergenBases(item, io.seat || undefined); return only.length ? allergenChipRow(item, only) : ''; })()}
       ${stepHtml(step)}
       <div class="pane-actions">
-        <button class="icon-action neutral" data-act="close-item-options">${ACT_CROSS_SVG}<span class="ia-label">Back</span></button>
+        <button class="icon-action neutral" data-act="io-back">${cur > 0 ? ACT_BACK_SVG : ACT_CROSS_SVG}<span class="ia-label">Back</span></button>
         ${ioHasChoiceButton() && cur === steps.length - 1 ? `
         <button class="icon-action send" data-act="confirm-item-options" ${ioSelectionComplete() ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Add${io.qty > 1 ? ` ×${io.qty}` : ''}</span></button>` : ''}
       </div>
@@ -33064,6 +33049,31 @@ function renderItemOptionsPop() {
 
 // §§ Choosing sizes, options and seats
 function closeItemOptions() { state.itemOptions = null; render(); }
+// The popup's steps in order: size, then every group that asks while ordering,
+// then the seat. ONE list — the pane draws the step it is on and Back walks the
+// same list backwards, so the two can never disagree about where you are.
+function ioSteps(io) {
+  const item = io && state.menu.find(m => m.id === io.itemId);
+  if (!item) return [];
+  const steps = [];
+  if (item.variants.length > 0) steps.push({ kind: 'variant', label: 'Size' });
+  ioGroups(io).forEach(g => steps.push({ kind: 'mods', g, label: g.name }));
+  if (itemAddNeedsSeatPrompt() && !(state.activeSeat === 'all' || (state.activeSeat && state.activeSeat <= state.covers))) steps.push({ kind: 'seat', label: 'Seat' });
+  return steps;
+}
+function ioStepAt(io) { return Math.max(0, Math.min((io && io.step) || 0, ioSteps(io).length - 1)); }
+// BACK GOES BACK ONE STEP. It used to bin the whole add: pick the wrong size,
+// tap Back to change it, and the item was gone — start again from the tile
+// (owner's walk, Sep '26). From the first step there is nowhere back to, so
+// there it is still the way out of the popup.
+function ioBack() {
+  const io = state.itemOptions;
+  if (!io) return;
+  const cur = ioStepAt(io);
+  if (cur <= 0) { closeItemOptions(); return; }
+  io.step = cur - 1;
+  render();
+}
 function ioGroups(io) {
   const item = io && state.menu.find(m => m.id === io.itemId);
   // 'Added later' groups never prompt while ordering — they live in the
@@ -41144,6 +41154,7 @@ function handleActClick(el, e) {
       else if (act === 'io-go-step') { state.itemOptions.step = parseInt(el.dataset.idx); render(); }
       else if (act === 'confirm-item-options') { if (ioSelectionComplete()) confirmItemOptions(); }
       else if (act === 'close-item-options') { closeItemOptions(); }
+      else if (act === 'io-back') { ioBack(); }
       else if (act === 'add-category') { quickAddCategory(); }
       else if (act === 'delete-category') {
         const cat = state.categories.find(c => c.id === el.dataset.id);

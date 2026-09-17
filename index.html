@@ -8720,21 +8720,6 @@ app.put('/api/settings', (req, res) => {
       // ids = only dishes from those sections may file under this course.
       sections: Array.isArray(c.sections) ? c.sections.map(s => String(s)).slice(0, 64) : null,
     }));
-    // THE FOOD MOVES WITH THE LIST, IN THE SAME WRITE. courseMap[oldN-1] is
-    // where food sitting on old course N belongs now. Without it a shorter
-    // list left every open ticket pointing at a course that no longer
-    // existed, and the waiter's docket grew a page called "Course 5" with
-    // the dessert still on it (owner, Sep '26). Done here, not on the till
-    // that made the change, so a second till's tickets are right too.
-    if (Array.isArray(req.body.courseMap) && req.body.courseMap.length) {
-      const map = req.body.courseMap.map(n => parseInt(n, 10) || 1);
-      const to = (n) => map[(parseInt(n, 10) || 1) - 1] || (parseInt(n, 10) || 1);
-      (data.orders || []).forEach(o => {
-        if (o.status !== 'open') return;
-        (o.items || []).forEach(it => { if (it && it.course !== undefined) it.course = to(it.course); });
-        (o.rounds || []).forEach(r => (r.items || []).forEach(it => { if (it && it.course !== undefined) it.course = to(it.course); }));
-      });
-    }
   }
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
@@ -9309,6 +9294,17 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
     if (table.type === 'table') {
       const clash = tableLabelClash(data, label, table.id, floorPlan);
       if (clash) return res.status(400).json({ error: clash });
+    }
+    // A RENAME CARRIES THE BILL. An open ticket points at its table by NAME,
+    // so renaming the table under it left the money behind: the ticket stayed
+    // open on a name the floor no longer had, and the table itself went green
+    // — so the next party was sat on an unpaid bill (owner's walk, Sep '26).
+    // Done here, in the same write, so every till sees it at once.
+    const was = String(table.label);
+    if (table.type === 'table' && String(label) !== was) {
+      (data.orders || []).forEach(o => {
+        if (o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === was) o.table = label;
+      });
     }
     table.label = label;
   }
@@ -34047,9 +34043,31 @@ function toggleTableMultiSelect(tableId) {
   render();
 }
 function clearTableSelection() { state.selectedAdminTableId = null; state.selectedAdminTableIds = []; state.linkTapFrom = null; state.floorLinkMode = null; render(); }
+// YOU CANNOT REMOVE WHAT SERVICE IS USING — the same sentence the courses
+// use. A table carrying an unpaid bill has nowhere to hand its money to, so
+// deleting it stranded the bill: still open, nothing on the floor reaching
+// it, and invisible to every screen a waiter has (owner's walk, Sep '26).
+// ONE guard for both doors — the single delete and the selected ones.
+function tableBillInTheWay(ids) {
+  for (const id of ids) {
+    const t = findTableById(id);
+    if (!t || t.type !== 'table') continue;
+    const o = tableOpenOrder(t.label);
+    if (o) return { table: t, order: o };
+  }
+  return null;
+}
+function refuseDeleteWithBill(ids) {
+  const hit = tableBillInTheWay(ids);
+  if (!hit) return false;
+  state.toast = toastFail(`Table ${hit.table.label} has an unpaid bill of ${money(hit.order.total || 0)}. Settle or move it first.`);
+  render(); armToastTimer(4000);
+  return true;
+}
 function deleteSelectedTables() {
   const n = (state.selectedAdminTableIds || []).length;
   if (!n) return;
+  if (refuseDeleteWithBill(state.selectedAdminTableIds || [])) return;
   openConfirm({ message: `Delete ${n} table${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, () => deleteSelectedTablesNow());
 }
 async function deleteSelectedTablesNow() {
@@ -36685,6 +36703,8 @@ function tablesOnCourse(n) {
     const lines = (o.items || []).concat((o.rounds || []).flatMap(r => r.items || []));
     if (lines.some(it => (parseInt(it.course, 10) || 1) === n)) seen.add(String(o.table));
   });
+  // A half-rung round on THIS till is food in a waiter's hand — it counts.
+  if ((state.cart || []).some(c => (parseInt(c.course, 10) || 1) === n)) seen.add(String(state.tableLabel || 'this till'));
   return seen.size;
 }
 // A DELETED COURSE TAKES ITS FOOD WITH IT (owner, Sep '26). The list shrank
@@ -36698,42 +36718,32 @@ function deleteSelectedCourses() {
   const sel = new Set(state.selectedCourseIdxs || []);
   if (!sel.size) return;
   const all = state.settings.courses;
+  // YOU CANNOT REMOVE WHAT SERVICE IS USING (owner, Sep '26). Deleting a
+  // course the floor is mid-meal on used to leave the food pointing at a
+  // course that no longer existed — a docket page named after a number. The
+  // first answer here MOVED the food to the course before it, which looked
+  // tidy and was not: a ticket remembers per COURSE, not just per dish (what
+  // was called away, and when), so moved dessert could land on a course the
+  // kitchen had already been called for and read as on its way. There is
+  // nothing to get wrong in a refusal, and it is the same sentence the floor
+  // uses for a table with money on it.
+  const busy = [...sel].map(i => ({ name: all[i].name, tables: tablesOnCourse(i + 1) })).filter(x => x.tables);
+  if (busy.length) {
+    const b = busy[0];
+    state.toast = toastFail(`${b.name} has food on ${b.tables} table${b.tables === 1 ? '' : 's'}. Move or serve it first.`);
+    render(); armToastTimer(4000); return;
+  }
   const keep = all.map((_, i) => i).filter(i => !sel.has(i));
   const mapN = n => sel.has(n - 1) ? null : keep.indexOf(n - 1) + 1;
-  // Where food on old course n ends up: its own new place if it survived,
-  // otherwise the nearest surviving course before it, else the first left.
-  const landing = (n) => {
-    const own = mapN(n);
-    if (own) return own;
-    for (let i = n - 1; i >= 1; i--) { const k = mapN(i); if (k) return k; }
-    for (let i = n + 1; i <= all.length; i++) { const k = mapN(i); if (k) return k; }
-    return 1;
-  };
-  const courseMap = all.map((_, i) => landing(i + 1));
   const refs = [...sel].map(i => { const r = courseRefLabel(i + 1); return r ? `${r} default to ${all[i].name}` : ''; }).filter(Boolean);
-  // What is on a table right now, named plainly: "2 tables have food on
-  // Dessert — it moves to 3rd."
-  const moves = [...sel].map(i => {
-    const t = tablesOnCourse(i + 1);
-    if (!t || !keep.length) return '';
-    const to = all[keep[courseMap[i] - 1]];
-    return `${t} table${t === 1 ? '' : 's'} ${t === 1 ? 'has' : 'have'} food on ${all[i].name} — it moves to ${to ? to.name : 'the first course'}`;
-  }).filter(Boolean);
   const proceed = () => {
     const courses = keep.map(i => all[i]);
     state.selectedCourseIdxs = [];
-    // The map rides with the save, so the food and the list move in ONE write
-    // — every till sees the same thing, whichever one made the change.
-    saveTicketSetting({ courses, courseMap });
-    // This till's own half-rung round moves with it.
-    (state.cart || []).forEach(c => { c.course = courseMap[(parseInt(c.course, 10) || 1) - 1] || 1; });
-    if (state.activeCourse) state.activeCourse = courseMap[(parseInt(state.activeCourse, 10) || 1) - 1] || 1;
+    saveTicketSetting({ courses });
     remapCourseRefs(mapN);
-    refreshOrders().then(render).catch(() => {});
   };
   const n = sel.size;
-  const say = moves.concat(refs.length ? [`${refs.join('; ')} — they'll go back to no course`] : []);
-  openConfirm({ message: `Delete ${n} course${n === 1 ? '' : 's'}?${say.length ? ' ' + say.join('. ') + '.' : ''}`, confirmLabel: 'Delete', danger: true }, proceed);
+  openConfirm({ message: refs.length ? `Delete ${n} course${n === 1 ? '' : 's'}? ${refs.join('; ')} — they'll go back to no course.` : `Delete ${n} course${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, proceed);
 }
 function deleteSelectedVoidReasons() {
   const sel = new Set(state.selectedVoidReasonIdxs || []);
@@ -41704,6 +41714,7 @@ function handleActClick(el, e) {
         // did it — the same key, two different promises (Sep '26).
         const t = findTableById(el.dataset.id);
         const id = el.dataset.id, fp = el.dataset.fp;
+        if (refuseDeleteWithBill([id])) return;
         openConfirm({ message: t && t.type === 'table' ? `Delete table ${t.label}?` : 'Delete this?', confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
       }
       else if (act === 'delete-selected-tables') { deleteSelectedTables(); }

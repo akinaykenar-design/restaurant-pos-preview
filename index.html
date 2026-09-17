@@ -8720,6 +8720,21 @@ app.put('/api/settings', (req, res) => {
       // ids = only dishes from those sections may file under this course.
       sections: Array.isArray(c.sections) ? c.sections.map(s => String(s)).slice(0, 64) : null,
     }));
+    // THE FOOD MOVES WITH THE LIST, IN THE SAME WRITE. courseMap[oldN-1] is
+    // where food sitting on old course N belongs now. Without it a shorter
+    // list left every open ticket pointing at a course that no longer
+    // existed, and the waiter's docket grew a page called "Course 5" with
+    // the dessert still on it (owner, Sep '26). Done here, not on the till
+    // that made the change, so a second till's tickets are right too.
+    if (Array.isArray(req.body.courseMap) && req.body.courseMap.length) {
+      const map = req.body.courseMap.map(n => parseInt(n, 10) || 1);
+      const to = (n) => map[(parseInt(n, 10) || 1) - 1] || (parseInt(n, 10) || 1);
+      (data.orders || []).forEach(o => {
+        if (o.status !== 'open') return;
+        (o.items || []).forEach(it => { if (it && it.course !== undefined) it.course = to(it.course); });
+        (o.rounds || []).forEach(r => (r.items || []).forEach(it => { if (it && it.course !== undefined) it.course = to(it.course); }));
+      });
+    }
   }
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
   if (ticketFooter !== undefined) data.settings.ticketFooter = ticketFooter;
@@ -12706,7 +12721,6 @@ let state = {
   discountModal: null, // { type, value, reason }
   activeCourse: 1,
   autoCourseOverride: null, // waiter's mid-order Auto toggle (null = follow the admin default)
-  courseCount: 1,
   firedCourses: {}, // { courseNumber: timestamp }
   callAway: false, // when true, the call-away middle pane covers the menu
   editLine: null, // { idx } when editing a cart line in the middle pane
@@ -16156,7 +16170,6 @@ async function loadInitial() {
     resnapFloorPlans(); // heal old 5%-Y layouts onto the square grid so spacing is even
     state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
     state.pickerFloorPlanId = state.adminFloorPlanId;
-    state.courseCount = state.settings.courses.length || 1;
     state.activeCourse = firstEnabledCourseNumber();
     // Judged AFTER the trip: on a slow load the waiter may have already
     // picked a table while data was still coming in — don't bounce them
@@ -17576,7 +17589,6 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
   // course pages this is not optional: the paged docket shows ONLY the active
   // course, so an item landing on another course would vanish on add.
   if (autoCourseOn() || state.settings.coursePagedDocket === true) state.activeCourse = course;
-  if (course > state.courseCount) state.courseCount = course;
   const modList = modifiers || [];
   const variantId = variant ? variant.id : null;
   const modSelections = {};
@@ -17842,7 +17854,6 @@ function clearCart() {
   state.notes = (findTableById(state.table) || {}).notes || [];
   state.discount = null;
   state.activeCourse = firstEnabledCourseNumber();
-  state.courseCount = state.settings.courses.length || 1;
   state.firedCourses = {};
   // Keep the waiter's mid-order Auto-course toggle across a discard — they
   // turned it off on purpose; wiping unsent items shouldn't silently flip it
@@ -17858,7 +17869,7 @@ function discardCartUndoable() {
     cart: state.cart.map(c => ({ ...c, modSelections: c.modSelections ? { ...c.modSelections } : c.modSelections, removed: c.removed ? [...c.removed] : c.removed })),
     activeSeat: state.activeSeat, covers: state.covers,
     notes: state.notes, discount: state.discount,
-    activeCourse: state.activeCourse, courseCount: state.courseCount, firedCourses: state.firedCourses,
+    activeCourse: state.activeCourse, firedCourses: state.firedCourses,
     callAway: state.callAway,
   };
   clearCart();
@@ -17867,7 +17878,7 @@ function discardCartUndoable() {
     state.activeSeat = snap.activeSeat; state.covers = snap.covers;
     state.notes = snap.notes;
     state.discount = snap.discount;
-    state.activeCourse = snap.activeCourse; state.courseCount = snap.courseCount;
+    state.activeCourse = snap.activeCourse;
     state.firedCourses = snap.firedCourses; state.callAway = snap.callAway;
   });
 }
@@ -17882,7 +17893,7 @@ function toggleAutoCourseOrder() {
   if (next) state.cart.forEach(c => {
     const item = state.menu.find(m => m.id === c.menuItemId);
     const def = item && itemDefaultCourse(item);
-    if (def && c.course !== def) { c.course = def; if (def > state.courseCount) state.courseCount = def; moved++; }
+    if (def && c.course !== def) { c.course = def; moved++; }
   });
   state.toast = next ? (moved ? `Auto course on — ${moved} item${moved === 1 ? '' : 's'} coursed` : 'Auto course on') : 'Auto course off';
   render(); armToastTimer(2000);
@@ -19222,7 +19233,6 @@ async function sendToKitchen() {
     state.cart = [];
     state.sendKey = null; state.sendFailed = null;
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
-    state.courseCount = state.settings.courses.length || 1;
     // The staged call-away goes out WITH the round it was staged behind.
     if (state.stagedCallAway) { const n0 = state.stagedCallAway; state.stagedCallAway = null; fireCourse(n0); }
     // Keep any called-away courses (and their timers) — sending a round must not
@@ -19412,8 +19422,7 @@ async function confirmPaymentInner() {
   state.notes = (findTableById(state.table) || {}).notes || [];
       state.discount = null;
       state.activeCourse = firstEnabledCourseNumber();
-      state.courseCount = state.settings.courses.length || 1;
-      state.firedCourses = {};
+        state.firedCourses = {};
       state.showCheckout = false;
       state.customerName = '';
       state.attachedCustomerId = null;
@@ -19474,7 +19483,6 @@ async function confirmPaymentInner() {
   state.notes = (findTableById(state.table) || {}).notes || [];
     state.discount = null;
     state.activeCourse = firstEnabledCourseNumber();
-    state.courseCount = state.settings.courses.length || 1;
     state.firedCourses = {};
     state.showCheckout = false;
     state.customerName = '';
@@ -21213,7 +21221,6 @@ async function doMoveSent(match, patch) {
     if (patch.course !== undefined) {
       next.course = patch.course;
       state.activeCourse = patch.course;
-      if (patch.course > state.courseCount) state.courseCount = patch.course;
     }
     state.cart.forEach(c => { if (sentItemMatches(c, match)) {
       if (patch.seat !== undefined) c.seat = patch.seat;
@@ -21862,7 +21869,13 @@ function renderTicketPanel() {
       else bucket[key] = { ...it };
     }));
   }
-  const courseTabCount = Math.max(state.settings.courses.length || 1, state.courseCount || 1);
+  // THE TAB ROW IS THE COURSE LIST. It used to be the list OR a running count
+  // (state.courseCount) that only ever went up — so a venue that deleted a
+  // course kept a tab for it, named after its number ("Course 5"), until the
+  // till was reloaded. Two things doing one job, and the second one went
+  // stale. The union below already adds a tab for any course a line really
+  // sits on, which is the only thing that count was ever for.
+  const courseTabCount = state.settings.courses.length || 1;
   const courseNumbers = [...new Set([...state.cart.map(c => c.course), ...Object.keys(sentByCourse).map(Number), ...Array.from({ length: courseTabCount }, (_, i) => i + 1)])].sort((a, b) => a - b);
 
   // While paying, this panel stops being a working docket and becomes the
@@ -27710,7 +27723,6 @@ async function setVenueType(key) {
   const untouched = cur.length <= 1;
   if (!untouched) delete patch.courses;
   await saveVenueSettings(patch);
-  state.courseCount = (state.settings.courses || []).length || 1;
   state.activeCourse = 1;
   state.toast = `Set up for a ${t.name.toLowerCase()}`;
   render();
@@ -36663,21 +36675,65 @@ async function duplicateSelectedCombos() {
 // re-files every default that pointed past it (dropping "1st" moved the
 // dessert dishes to "3rd" until Sep '26). The dishes filed on a removed course
 // go back to no course, and the owner is told how many before it happens.
+// TABLES THAT ALREADY HAVE FOOD ON A COURSE. Counted across every open
+// ticket, sent rounds included, so the warning can say how many sittings a
+// delete is about to touch.
+function tablesOnCourse(n) {
+  const seen = new Set();
+  (state.orders || []).forEach(o => {
+    if (o.status !== 'open') return;
+    const lines = (o.items || []).concat((o.rounds || []).flatMap(r => r.items || []));
+    if (lines.some(it => (parseInt(it.course, 10) || 1) === n)) seen.add(String(o.table));
+  });
+  return seen.size;
+}
+// A DELETED COURSE TAKES ITS FOOD WITH IT (owner, Sep '26). The list shrank
+// and the food stayed pointing at a course number that no longer existed, so
+// the waiter's docket grew a page called "Course 5" with the dessert still
+// sitting on it — a page nobody named, holding food nobody could see coming.
+// The food now lands on the course BEFORE the deleted one (the first one
+// after it if the deleted one was first), and the warning says so before it
+// happens, counting the tables it will move.
 function deleteSelectedCourses() {
   const sel = new Set(state.selectedCourseIdxs || []);
   if (!sel.size) return;
   const all = state.settings.courses;
   const keep = all.map((_, i) => i).filter(i => !sel.has(i));
   const mapN = n => sel.has(n - 1) ? null : keep.indexOf(n - 1) + 1;
+  // Where food on old course n ends up: its own new place if it survived,
+  // otherwise the nearest surviving course before it, else the first left.
+  const landing = (n) => {
+    const own = mapN(n);
+    if (own) return own;
+    for (let i = n - 1; i >= 1; i--) { const k = mapN(i); if (k) return k; }
+    for (let i = n + 1; i <= all.length; i++) { const k = mapN(i); if (k) return k; }
+    return 1;
+  };
+  const courseMap = all.map((_, i) => landing(i + 1));
   const refs = [...sel].map(i => { const r = courseRefLabel(i + 1); return r ? `${r} default to ${all[i].name}` : ''; }).filter(Boolean);
+  // What is on a table right now, named plainly: "2 tables have food on
+  // Dessert — it moves to 3rd."
+  const moves = [...sel].map(i => {
+    const t = tablesOnCourse(i + 1);
+    if (!t || !keep.length) return '';
+    const to = all[keep[courseMap[i] - 1]];
+    return `${t} table${t === 1 ? '' : 's'} ${t === 1 ? 'has' : 'have'} food on ${all[i].name} — it moves to ${to ? to.name : 'the first course'}`;
+  }).filter(Boolean);
   const proceed = () => {
     const courses = keep.map(i => all[i]);
     state.selectedCourseIdxs = [];
-    saveTicketSetting({ courses });
+    // The map rides with the save, so the food and the list move in ONE write
+    // — every till sees the same thing, whichever one made the change.
+    saveTicketSetting({ courses, courseMap });
+    // This till's own half-rung round moves with it.
+    (state.cart || []).forEach(c => { c.course = courseMap[(parseInt(c.course, 10) || 1) - 1] || 1; });
+    if (state.activeCourse) state.activeCourse = courseMap[(parseInt(state.activeCourse, 10) || 1) - 1] || 1;
     remapCourseRefs(mapN);
+    refreshOrders().then(render).catch(() => {});
   };
   const n = sel.size;
-  openConfirm({ message: refs.length ? `Delete ${n} course${n === 1 ? '' : 's'}? ${refs.join('; ')} — they'll go back to no course.` : `Delete ${n} course${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, proceed);
+  const say = moves.concat(refs.length ? [`${refs.join('; ')} — they'll go back to no course`] : []);
+  openConfirm({ message: `Delete ${n} course${n === 1 ? '' : 's'}?${say.length ? ' ' + say.join('. ') + '.' : ''}`, confirmLabel: 'Delete', danger: true }, proceed);
 }
 function deleteSelectedVoidReasons() {
   const sel = new Set(state.selectedVoidReasonIdxs || []);

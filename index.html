@@ -1778,11 +1778,29 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 #print-area{display:none;}
 /* Print keeps its own literal fonts — the screen palette must never change what
    the thermal printer puts on paper. */
-.print-doc{font-family:'IBM Plex Mono',monospace;font-size:var(--fs-md);color:#000;}
-/* Paper roll width (also used at real size in the on-screen preview). */
-.print-doc.pw80{width:80mm;}
-.print-doc.pw58{width:58mm;}
-.print-doc.pw76{width:76mm;}
+/* THE PAPER IS TWO NUMBERS: how wide the roll is, and how many characters the
+   printer fits across it. The text size is DERIVED from them, so a line holds
+   exactly as many characters on screen as it does on paper, at any roll width,
+   in either letter, at any size. It used to be screen text on a paper-width
+   box: 25 characters where the printer prints 42, and a divider that ran off
+   the edge (owner's walk, Sep '26). --mono-adv is IBM Plex Mono's own advance
+   (a character is 0.6 of its size wide). */
+.print-doc{font-family:'IBM Plex Mono',monospace;color:#000;
+  --paper-w:80mm; --paper-cols:42; --paper-base:1; --mono-adv:0.6;
+  width:var(--paper-w);
+  font-size:calc(var(--paper-w) / var(--paper-cols) / var(--mono-adv) * var(--paper-base));}
+/* Paper roll width, and the printer's column count at that width. */
+.print-doc.pw80{--paper-w:80mm;--paper-cols:42;}
+.print-doc.pw58{--paper-w:58mm;--paper-cols:32;}
+.print-doc.pw76{--paper-w:76mm;--paper-cols:33;}
+/* The narrow letter: same paper, more characters across it. */
+.print-doc.pw80.dk-font-b{--paper-cols:56;}
+.print-doc.pw58.dk-font-b{--paper-cols:42;}
+.print-doc.pw76.dk-font-b{--paper-cols:40;}
+/* KNOWN LIE, left alone on purpose: the receipt's own "Large" is a typed size,
+   and printing.js never reads printFontScale at all — so this bumps the
+   preview and changes nothing on paper. Wiring it or deleting it is the
+   owner's call; it is not the docket's paper (Sep '26). */
 .print-doc.fs-large{font-size:var(--fs-lg);}
 .print-doc.fs-large .print-sub{font-size:var(--fs-md);}
 /* One font on paper. The printer owns a single mono face — the preview must
@@ -1858,12 +1876,10 @@ body.sorting,body.sorting *{cursor:grabbing !important;user-select:none !importa
 /* §§ Customisable kitchen docket (Settings → Printers → Kitchen dockets) */
 .print-doc .print-dockmini{text-align:center;font-size:0.8em;letter-spacing:.08em;text-transform:uppercase;margin-bottom:3px;opacity:.85;}
 .print-doc .print-coursename{text-align:left;}
-/* Text size — scales the whole docket via em-based children. */
-.print-doc.dk{font-size:var(--fs-md);}
-/* The printer's own multiples: Large IS 2x, Huge IS 3x — 15.5/19px understated
-   what comes off the roll (screen-vs-paper hunt, Aug '26). */
-.print-doc.dk.dk-fs-large{font-size:var(--fs-num);}
-.print-doc.dk.dk-fs-xlarge{font-size:var(--fs-num);}
+/* Text size — the printer's own multiples: Large IS 2x, Huge IS 3x. Both used
+   to land on the same screen size, so the two choices drew the same paper. */
+.print-doc.dk.dk-fs-large{--paper-base:2;}
+.print-doc.dk.dk-fs-xlarge{--paper-base:3;}
 .print-doc.dk .print-line{font-size:1em;}
 /* Big-font dockets wrap by WHOLE words — never split a word mid-letters onto
    the next line (owner: "a word gets halved"). A long word drops whole to the
@@ -2010,8 +2026,9 @@ body[data-theme="dark"]{--mk-bezel:#55555e;}
 .dk-gap.on span{color:var(--orange);}
 .dk-gap:after{content:'';position:absolute;left:0;right:0;top:50%;height:1px;
   background:repeating-linear-gradient(90deg,var(--steel-300) 0 4px,transparent 4px 8px);opacity:0;}
-/* Compact printer Font B: smaller, narrower glyphs — more per line. */
-.print-doc.dk-font-b{font-size:0.82em;letter-spacing:-0.02em;}
+/* Compact printer Font B: smaller, narrower glyphs — more per line. It is a
+   COLUMN COUNT, not a nudged font size — see --paper-cols above; a typed size
+   and a letter-spacing would both break the count. */
 /* Editable print sample: the paper is the form. Tappable bits get a dashed
    underline; hidden lines stay visible but struck through and dimmed. */
 .pp-edit{cursor:pointer;padding-bottom:1px;}
@@ -13222,13 +13239,24 @@ function dkPickOrder(slip) {
 const DK_RULE_CHAR = { dashed: '-', dotted: '\u00b7', solid: '\u2500', bold: '\u2500' };
 function dkRuleStyle(v) { return v === 'bold' ? 'solid' : (DK_RULE_CHAR[v] ? v : 'dashed'); }
 // Same characters the printer lays down, across the same column count.
+// HOW MANY CHARACTERS THE PRINTER PUTS ON A LINE — one table, mirroring
+// printing.js's own: 80mm 42 (56 narrow), 58mm 32 (42), 76mm 33 (40). It had
+// been written out by hand in four places here, and the paper preview used
+// none of them: it sized its text like screen text, so the designer showed 25
+// characters a line where the printer prints 42 (owner's walk, Sep '26).
+function paperCols(fontB, pw) {
+  const w = pw || (state.settings || {}).paperWidth;
+  return fontB ? (w === '58' ? 42 : w === '76' ? 40 : 56)
+    : (w === '58' ? 32 : w === '76' ? 33 : 42);
+}
 function dkRuleHtml(style, cls, attrs, colsOverride) {
-  // The paper's REAL column count — narrow letters and 76mm rolls draw wider
-  // rules than the 42 this hard-coded (screen-vs-paper hunt, Aug '26).
-  const pw = (state.settings || {}).paperWidth;
-  const fontB = (docketCfg().font || 'A') === 'B';
-  const cols = colsOverride || (fontB ? (pw === '58' ? 42 : pw === '76' ? 40 : 56)
-    : (pw === '58' ? 32 : pw === '76' ? 33 : 42));
+  // A divider is a ROW OF CHARACTERS, so it is exactly as long as a line is
+  // wide — and a bigger letter means FEWER of them (printing.js lays down
+  // cols / size). This drew the full 42 whatever the size, so a Large docket
+  // painted a divider twice the width of its own paper and it ran 189px off
+  // the edge (owner's walk, Sep '26).
+  const d = docketCfg();
+  const cols = colsOverride || Math.max(1, Math.floor(paperCols((d.font || 'A') === 'B') / dkBaseSize(d)));
   const ch = DK_RULE_CHAR[style] || '-';
   return `<div class="print-rule${cls ? ' ' + cls : ''}"${attrs || ''}>${ch.repeat(cols)}</div>`;
 }
@@ -13561,9 +13589,7 @@ function buildReceiptDoc(order, edit) {
   const layout = ['express', 'grouped', 'bigtotal'].includes(r.layout) ? r.layout : 'classic';
   // The paper's real column count (paperCols in printing.js) — the rules are
   // CHARACTER rows like the docket's, and the big total sizes itself to fit.
-  const pw = (s || {}).paperWidth;
-  const rcCols = r.font === 'B' ? (pw === '58' ? 42 : pw === '76' ? 40 : 56)
-    : (pw === '58' ? 32 : pw === '76' ? 33 : 42);
+  const rcCols = paperCols(r.font === 'B', (s || {}).paperWidth);
   const ruleHtml = dkRuleHtml('dashed', '', '', rcCols);
   const rcPct = () => Math.round(taxCfg().ratePercent * 10) / 10;
   const coversOn = s.showCoversOnTicket !== false;
@@ -13889,12 +13915,7 @@ function buildDocketDoc(ctx, edit) {
   // spread anything, while the printer quietly gave up and printed the row as
   // one run (owner, Aug '26: "inconsistent especially when changing
   // alignment").
-  const dkCols = (() => {
-    const pw = (state.settings || {}).paperWidth;
-    const a = pw === '58' ? 32 : pw === '76' ? 33 : 42;
-    const bCols = pw === '58' ? 42 : pw === '76' ? 40 : 56;
-    return d.font === 'B' ? bCols : a;
-  })();
+  const dkCols = paperCols(d.font === 'B');
   const rowFits = (g) => {
     const n = (d.sizes || {})[g[0].k] || (d.fontScale === 'xlarge' ? 3 : d.fontScale === 'large' ? 2 : 1);
     const plain = g.map(({ seg }) => String(seg.html || '').replace(/<[^>]*>/g, '')).filter(Boolean).join(' \u00b7 ');
@@ -14144,7 +14165,7 @@ function buildDocketDoc(ctx, edit) {
     return (g || blocks[k]) ? g + (blocks[k] || '') : '';
   }).filter(Boolean).join('\n      ');
   return `
-    <div class="${docketDocClasses(null)}" style="font-size:${(13 * (DK_SIZE_MULT[dkBaseSize(d)] || 1)).toFixed(1)}px;">
+    <div class="${docketDocClasses(null)}" style="--paper-base:${DK_SIZE_MULT[dkBaseSize(d)] || 1};">
       ${edit ? '<div class="pp-railgap"></div>' : ''}
       ${body}
       ${d.showFootRule === false ? '' : dkRuleHtml(dkRuleStyle(d.footRuleStyle || d.ruleStyle),
@@ -14385,7 +14406,7 @@ function buildCallAwaySample() {
     if (ex) {
       if (ex.kind === 'rule') return dkRuleHtml(ex.style || 'dashed',
         'dk-part' + (dkIsSelected(k) ? ' dk-sel' : ''), ` data-act="dk-pick-part" data-part="${k}" data-slip="1"`,
-        (() => { const pw = (state.settings || {}).paperWidth; return c.font === 'B' ? (pw === '58' ? 42 : pw === '76' ? 40 : 56) : (pw === '58' ? 32 : pw === '76' ? 33 : 42); })());
+        Math.max(1, Math.floor(paperCols(c.font === 'B') / (DK_SIZE_MULT[caBaseSize(c)] || 1))));
       const inner = sampleEditable('caText:' + k, ex.text || '', '', '', true);
       return inner ? row(k, inner) : `<div class="print-gap dk-part${dkIsSelected(k) ? ' dk-sel' : ''}" data-act="dk-pick-part" data-part="${k}" data-slip="1"></div>`;
     }
@@ -14396,7 +14417,7 @@ function buildCallAwaySample() {
   // The slip's own scale on the container: its default is Large, which the
   // printer doubles — the preview drew every line at HALF the printed size
   // (screen-vs-paper hunt, Aug '26).
-  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : ' pw80'}${c.font === 'B' ? ' dk-font-b' : ''}" style="font-size:${(13 * (DK_SIZE_MULT[caBaseSize(c)] || 1)).toFixed(1)}px;">
+  return `<div class="print-doc dk mode-thermal${state.settings.paperWidth === '58' ? ' pw58' : state.settings.paperWidth === '76' ? ' pw76' : ' pw80'}${c.font === 'B' ? ' dk-font-b' : ''}" style="--paper-base:${DK_SIZE_MULT[caBaseSize(c)] || 1};">
     <div class="pp-railgap"></div>
     ${body}
   </div>`;
@@ -25590,7 +25611,7 @@ function dkToolbar(dIn, opts) {
   // built where the return assembles the cards. "Normal letters" told nobody
   // anything: the width choice says how many characters fit (owner, Aug '26).
   const pw = (state.settings || {}).paperWidth === '58' ? '58' : (state.settings || {}).paperWidth === '76' ? '76' : '80';
-  const cols = (fb) => fb ? (pw === '58' ? 42 : pw === '76' ? 40 : 56) : (pw === '58' ? 32 : pw === '76' ? 33 : 42);
+  const cols = (fb) => paperCols(fb, pw);
 
   // Row 2: the picked line. Inserted lines aren't in DK_PARTS, so they are
   // read from the selection itself rather than from `p`.

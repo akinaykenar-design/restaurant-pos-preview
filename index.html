@@ -8112,6 +8112,9 @@ app.put('/api/theme', (req, res) => {
     if (nv !== undefined) data.theme[f] = nv;
   }
   if (Number.isFinite(Number(tktWidth))) data.theme.tktWidth = Math.max(260, Math.min(560, Math.round(Number(tktWidth))));
+  // The menu nav's own px width. 0 puts it back on the size step.
+  const railWidth = Number(req.body.railWidth);
+  if (Number.isFinite(railWidth)) data.theme.railWidth = railWidth <= 0 ? 0 : Math.max(56, Math.min(168, Math.round(railWidth)));
   // Docket width as a share of the screen (0.15–0.55); overrides tktWidth when set.
   const tktShare = Number(req.body.tktShare);
   if (Number.isFinite(tktShare) && tktShare >= 0.15 && tktShare <= 0.55) data.theme.tktShare = Math.round(tktShare * 1000) / 1000;
@@ -12929,7 +12932,7 @@ let state = {
   recipeCosts: null, // { costOfGoods, grossProfit, profitMargin, ingredients }
 
   // Theme
-  theme: { accent: '#3692E7', mode: 'auto', itemSize: 'md', fontSize: 'md', tktFontSize: 'md', tktWidth: 360, subcatSize: 'md', railSize: 'md', railHeight: 'md', tileGap: 'sm', tktGap: 'md', tileHeight: 'md' },
+  theme: { accent: '#3692E7', mode: 'auto', itemSize: 'md', fontSize: 'md', tktFontSize: 'md', tktWidth: 360, subcatSize: 'md', railSize: 'md', railWidth: 0, railHeight: 'md', tileGap: 'sm', tktGap: 'md', tileHeight: 'md' },
   mockDevice: 'pc', // Screen-designer mockup frame: pc | tablet | mobile (not persisted)
 
   // Settings
@@ -15371,6 +15374,34 @@ function themeSizePatch(field, val) {
 const GRID_DIM_MIN = 2, GRID_DIM_MAX = 12, GRID_ROW_MIN_H = 44;
 // Docket width steps in 20px - a whole tap of the + is a change you can see.
 const DKW_MIN = 240, DKW_MAX = 560, DKW_STEP = 20;
+// THE MENU NAV HAS A WIDTH IN PIXELS TOO (owner, Sep '26: "there is no
+// option to change px for order rail like there is for docket panel"). The
+// rail only ever had the five size steps, and one of them moved its width,
+// its text and its icons together — so nudging the width a little meant
+// resizing the letters as well. It is the docket's arrangement now: a px
+// width of its own, and the size step left doing the text and the icons.
+// 0 means "however wide the size step makes it" — nothing moves until the
+// stepper is touched. 8px a tap, the spacing scale, across the range the
+// five steps already covered.
+const RLW_MIN = 56, RLW_MAX = 168, RLW_STEP = 8;
+// ONE COPY OF THE RAIL'S SIZE LADDER. The percentages and the floors were
+// typed out in the stylesheet and again in two places here; the design page
+// and the till drifted the moment one was edited.
+const RAIL_PCT = { xs: 5, sm: 6.11, md: 7.22, lg: 9.17, xl: 10.83 };
+const RAIL_FLOOR = { xs: 56, sm: 64, md: 72, lg: 84, xl: 96 };
+// How wide the rail actually is, in px: the owner's own number when they have
+// set one, otherwise the size step's, read exactly the way the stylesheet
+// reads it (max(floor, percent of the screen)).
+function railWidthPx(dev, frameW) {
+  const w = Math.round(state.theme.railWidth || 0);
+  if (w >= RLW_MIN && w <= RLW_MAX) return w;
+  const step = themeSizeFor('railSize', dev);
+  const span = frameW || window.innerWidth || 1080;
+  return Math.max(RAIL_FLOOR[step] || 72, Math.round(span * (RAIL_PCT[step] || 7.22) / 100));
+}
+function setRailWidth(v) {
+  setThemeDraft({ railWidth: Math.max(RLW_MIN, Math.min(RLW_MAX, parseInt(v, 10) || RLW_MIN)) });
+}
 // The Design page's four-decision geometry: the menu panel's box for a
 // device, and from it the grid's computed limits. The 44px law sets the
 // ceiling; GRID_DIM_MIN the floor; "Auto" no longer exists as a mode — an
@@ -15396,11 +15427,10 @@ function designFrame(dev) {
 }
 function designMenuBox(dev) {
   const f = designFrame(dev);
-  const railPct = { xs: 5, sm: 6.11, md: 7.22, lg: 9.17, xl: 10.83 }[themeSizeFor('railSize', dev)] || 7.22;
   const share = (state.theme.tktShare > 0.14 && state.theme.tktShare < 0.56) ? state.theme.tktShare : (state.theme.tktWidth || 360) / 1440;
   const bottomDock = dev !== 'mobile' && (state.settings.ticketPos || {})[dev] === 'bottom';
   const tkt = dev === 'mobile' ? 0 : f.w * share;
-  return { w: f.w - f.w * railPct / 100 - (bottomDock ? 0 : tkt) - 36, h: f.h - 150 - (bottomDock ? f.h * 0.3 : 0) };
+  return { w: f.w - railWidthPx(dev, f.w) - (bottomDock ? 0 : tkt) - 36, h: f.h - 150 - (bottomDock ? f.h * 0.3 : 0) };
 }
 function gridDimMax(field, dev) {
   const box = designMenuBox(dev);
@@ -15587,6 +15617,12 @@ function applyTheme() {
   const tktShare = (state.theme.tktShare > 0.14 && state.theme.tktShare < 0.56)
     ? state.theme.tktShare : (state.theme.tktWidth || 360) / 1440;
   root.style.setProperty('--ticket-w', `clamp(260px, ${(tktShare * 100).toFixed(2)}vw, 55vw)`);
+  // The rail's own px width, when the owner has set one. It goes on BODY,
+  // not the root: the size steps write --rail-w on body too, and a value on
+  // the root would lose to them.
+  const rlw = Math.round(state.theme.railWidth || 0);
+  if (rlw >= RLW_MIN && rlw <= RLW_MAX) document.body.style.setProperty('--rail-w', rlw + 'px');
+  else document.body.style.removeProperty('--rail-w');
   // Remember what was applied: the next load dresses in these sizes BEFORE
   // the theme fetch returns, so the top band never renders thin (default md)
   // on a fresh open — and never sticks thin if that fetch hiccups.
@@ -30034,7 +30070,6 @@ function renderScreenMockup() {
   // Panel widths are shares of the screen — pin the mock's copies to the
   // FRAME width so the preview shows the real proportions, not the editing
   // machine's viewport.
-  const railPct = { xs: 5, sm: 6.11, md: 7.22, lg: 9.17, xl: 10.83 }[themeSizeFor('railSize', dev)] || 7.22;
   const mkTktShare = (state.theme.tktShare > 0.14 && state.theme.tktShare < 0.56)
     ? state.theme.tktShare : (state.theme.tktWidth || 360) / 1440;
   // "Tiles down" mirrors too: fixed rows pin the mock tile height the same
@@ -30058,7 +30093,7 @@ function renderScreenMockup() {
       ? `<div class="mk-sizer mk-duo-in">${arr.map(m => `<div class="mk-cell"><div class="scrmock">${m}</div></div>`).join('')}</div>`
       : `<div class="mk-sizer"><div class="scrmock">${arr[0]}</div></div>`;
     return `
-    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-mk-rows="${mkRows || 0}" data-fw="${frame.w}" data-cap="${frame.cap}" data-fh="${frame.h}" data-frames="${arr.length}" ${sizeAttrs} data-fixed-cols="${mkCols ? '1' : '0'}" data-fixed-rows="${mkRows ? '1' : '0'}" style="--mkn:${arr.length};--mkfit:${_mkFitScale || MK_SCALE};--mks:${(_mkFitScale || MK_SCALE) * (window.innerWidth <= 768 ? _mkZoom : 1)};--mkw:${frame.w}px;--mkh:${frame.h}px;--rail-w:${Math.round(frame.w * railPct / 100)}px;--ticket-w:${Math.round(frame.w * mkTktShare)}px;${mkCols ? `--grid-cols:${mkCols};` : ''}${mkRows ? `--mk-row-h:${mkRowH}px;` : ''}">
+    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-mk-rows="${mkRows || 0}" data-fw="${frame.w}" data-cap="${frame.cap}" data-fh="${frame.h}" data-frames="${arr.length}" ${sizeAttrs} data-fixed-cols="${mkCols ? '1' : '0'}" data-fixed-rows="${mkRows ? '1' : '0'}" style="--mkn:${arr.length};--mkfit:${_mkFitScale || MK_SCALE};--mks:${(_mkFitScale || MK_SCALE) * (window.innerWidth <= 768 ? _mkZoom : 1)};--mkw:${frame.w}px;--mkh:${frame.h}px;--rail-w:${railWidthPx(dev, frame.w)}px;--ticket-w:${Math.round(frame.w * mkTktShare)}px;${mkCols ? `--grid-cols:${mkCols};` : ''}${mkRows ? `--mk-row-h:${mkRowH}px;` : ''}">
       ${body}
     </div>`;
   };
@@ -30157,18 +30192,26 @@ function renderScreenAdmin() {
     </div>
     <div class="ts" style="margin-top:8px;">Peek pins the money row.</div>`}
   </div>
+  ${dev !== 'mobile' ? `
+  <div class="settings-card" id="ctl-rail">
+    <div class="th">5 · Menu nav — ${devName}</div>
+    <div class="th">Width</div>
+    ${(() => {
+      const w = railWidthPx(dev, designFrame(dev).w);
+      return stepper('rlw-step', 'railWidth', w + 'px', w <= RLW_MIN, w >= RLW_MAX);
+    })()}
+    <div class="ts" style="margin:2px 0 14px;">Follows the preview's rail edge too.</div>
+    <div class="th">Icons only</div>
+    <div class="pay-options">
+      ${togglePill(state.settings.catIconsOnly === true, 'set-cat-icons-only')}
+    </div>
+  </div>` : ''}
   ${fold('extras', 'Extras', 'Icon pack · item icons · prices on tiles · subsection style · icon-only bar · tiles start at the bottom', `
     <div id="ctl-subcat">
     <div class="th">Subsection style</div>
     <div class="pay-options">
       <div class="pay-opt ${(state.settings.subcatStyle || 'bar') === 'bar' ? 'active' : ''}" data-act="set-subcat-style" data-val="bar">Bar</div>
       <div class="pay-opt ${state.settings.subcatStyle === 'tiles' ? 'active' : ''}" data-act="set-subcat-style" data-val="tiles">Tiles</div>
-    </div>
-    <div id="ctl-rail">
-    <div class="th">Icon-only menu nav</div>
-    <div class="pay-options">
-      ${togglePill(state.settings.catIconsOnly === true, 'set-cat-icons-only')}
-    </div>
     </div>
     <div class="th">Tiles start at the bottom</div>
     <div class="pay-options">
@@ -37441,7 +37484,7 @@ async function saveTicketSetting(patch) {
 
 async function saveAppearance() {
   try {
-    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth, tktShare: state.theme.tktShare, subcatSize: state.theme.subcatSize, railSize: state.theme.railSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, gridCols: state.theme.gridCols, gridRows: state.theme.gridRows, lockStyle: state.theme.lockStyle }) });
+    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, tktWidth: state.theme.tktWidth, tktShare: state.theme.tktShare, railWidth: state.theme.railWidth, subcatSize: state.theme.subcatSize, railSize: state.theme.railSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, gridCols: state.theme.gridCols, gridRows: state.theme.gridRows, lockStyle: state.theme.lockStyle }) });
     state.theme = theme;
     applyTheme();
   } catch (e) {
@@ -39136,24 +39179,30 @@ document.addEventListener('pointerdown', (e) => {
   const wrap = document.querySelector('.mk-wrap');
   const scale = parseFloat(grip.dataset.scale) || 1;
   const dev = state.mockDevice || 'pc';
-  const start = Math.max(0, SIZE_STEPS.indexOf(themeSizeFor('railSize', dev)));
+  // ONE NUMBER, TWO WAYS IN — the same arrangement the docket's edge has:
+  // drag the rail's edge and the px stepper follows, type on the stepper and
+  // the rail follows. It used to step the S/M/L size, which moved the text
+  // and the icons with it; those stay where the size step put them.
+  const start = railWidthPx(dev, designFrame(dev).w);
   const startX = e.clientX;
   let cur = start;
   state._mockDragging = true;
   const onMove = (ev) => {
-    const idx = Math.max(0, Math.min(SIZE_STEPS.length - 1, start + Math.round((ev.clientX - startX) / (30 * scale))));
-    if (idx === cur) return;
-    cur = idx;
-    document.body.setAttribute('data-rail-size', SIZE_STEPS[idx]);
-    if (wrap) wrap.setAttribute('data-rail-size', SIZE_STEPS[idx]);
-    syncSegbar('railSize', SIZE_STEPS[idx]);
+    const w = Math.max(RLW_MIN, Math.min(RLW_MAX, Math.round(start + (ev.clientX - startX) / scale)));
+    if (w === cur) return;
+    cur = w;
+    state.theme.railWidth = w;
+    document.body.style.setProperty('--rail-w', w + 'px');
+    if (wrap) wrap.style.setProperty('--rail-w', w + 'px');
+    const lab = document.querySelector('[data-step-val="railWidth"]');
+    if (lab) lab.textContent = w + 'px';
   };
   const onUp = () => {
     document.removeEventListener('pointermove', onMove);
     document.removeEventListener('pointerup', onUp);
     document.removeEventListener('pointercancel', onUp);
     state._mockDragging = false;
-    if (cur !== start) setThemeDraft({ railSize: themeSizePatch('railSize', SIZE_STEPS[cur]) });
+    if (cur !== start) setRailWidth(cur);
     else render();
   };
   document.addEventListener('pointermove', onMove);
@@ -41472,6 +41521,13 @@ function handleActClick(el, e) {
       else if (act === 'dkw-step') {
         const w = Math.round(state.theme.tktWidth || 360);
         setDocketWidth(Math.max(DKW_MIN, Math.min(DKW_MAX, w + parseInt(el.dataset.d, 10) * DKW_STEP)));
+      }
+      else if (act === 'rlw-step') {
+        const dev = state.mockDevice === 'mobile' ? 'mobile' : 'pc';
+        // The first tap starts from however wide the size step has it, so the
+        // rail never jumps when the owner first reaches for the stepper.
+        const w = railWidthPx(dev, designFrame(dev).w);
+        setRailWidth(w + parseInt(el.dataset.d, 10) * RLW_STEP);
       }
       else if (act === 'set-mock-device') { state.mockDevice = el.dataset.val; render(); }
       else if (act === 'save-appearance') { saveAppearance(); }

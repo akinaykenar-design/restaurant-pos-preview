@@ -1527,10 +1527,18 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
    its side draws every table at 28) they step fully OUTSIDE, or they meet in
    the middle and a finger on the table resizes it instead of moving it
    (Sep '26). .mk-small is measured after every render, in fitAdminFloorCanvas. */
+/* THE HANDLES ARE 32 ON GLASS, WHATEVER THE ZOOM (Sep '26). They live inside
+   the room, so the room's zoom multiplied them: at the 1.9x the editor opens
+   at on a phone on its side, a 32px handle drew 61 and the two of them met
+   over the middle of a 76px table — no table could be picked up at all. Each
+   sits centred on its corner, so shrinking it about its own centre leaves the
+   corner where it was. On a table too small to hold them they step OUTSIDE,
+   by 16 more on glass — which is 16/zoom in here. */
+.fp-handle{ scale: calc(1 / var(--fp-zoom, 1)); }
 .rotate-handle{ top:-16px; left:-16px; }
 .resize-handle{ bottom:-16px; right:-16px; }
-.mk-small .rotate-handle{ top:-32px; left:-32px; }
-.mk-small .resize-handle{ bottom:-32px; right:-32px; }
+.mk-small .rotate-handle{ top:calc(-16px - 16px / var(--fp-zoom, 1)); left:calc(-16px - 16px / var(--fp-zoom, 1)); }
+.mk-small .resize-handle{ bottom:calc(-16px - 16px / var(--fp-zoom, 1)); right:calc(-16px - 16px / var(--fp-zoom, 1)); }
 /* Editor markers let the browser pan the page vertically (native scroll past
    the floor); only a horizontal/diagonal drag or a hold grabs the table —
    see startFloorDrag's touch gate. */
@@ -2966,11 +2974,31 @@ button, .item-card, .floor-marker, .simple-table-btn, .covers-pad-key,
   .seg button, .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
   .order-row, .subcat-seg button){
   transition: scale .06s ease, translate .06s ease, filter .06s ease, box-shadow .06s ease; }
-:is(.floor-marker, .simple-table-btn, .covers-pad-key,
-  .btn-add, .btn-secondary, .pay-opt, .cat-btn, .tab-btn, .course-tab, .seg button,
-  .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
-  .subcat-seg button):active{
-  scale: .965; filter: brightness(.94); }
+/* THE PRESS LOOK IS FOR A PRESS, NOT FOR A SWIPE PAST (owner, Sep '26). A
+   mouse keeps plain :active — it cannot slide without a button held down. A
+   FINGER has to earn it: the page adds body.mk-tap once the finger has been
+   still for 150ms, and takes it away the moment it slides, so a swipe down a
+   list of buttons lights nothing. .mk-hit is the same look flashed on the way
+   out of a quick tap that lifted before the wait was up. Rules in CLAUDE.md
+   § Tile press — a button now follows the tile. */
+@media (hover: hover) {
+  :is(.floor-marker, .simple-table-btn, .covers-pad-key,
+    .btn-add, .btn-secondary, .pay-opt, .cat-btn, .tab-btn, .course-tab, .seg button,
+    .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
+    .subcat-seg button):active{
+    scale: .965; filter: brightness(.94); }
+}
+@media (hover: none) {
+  body.mk-tap :is(.floor-marker, .simple-table-btn, .covers-pad-key,
+    .btn-add, .btn-secondary, .pay-opt, .cat-btn, .tab-btn, .course-tab, .seg button,
+    .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
+    .subcat-seg button):active,
+  :is(.floor-marker, .simple-table-btn, .covers-pad-key,
+    .btn-add, .btn-secondary, .pay-opt, .cat-btn, .tab-btn, .course-tab, .seg button,
+    .staff-tile, .pin-pad button, .icon-sq, .icon-action, .sort-btn,
+    .subcat-seg button).mk-hit{
+    scale: .965; filter: brightness(.94); }
+}
 /* A row full of buttons only sinks when the ROW is what's pressed — :active
    also marks ancestors, so without the :has guard a tap on "+ Set up" (or
    Test, or an edit pencil) dragged the whole row down with it. */
@@ -43308,6 +43336,52 @@ function renderWhenStill() { if (gestureLive()) { _bgRenderQueued = true; return
 document.addEventListener('touchstart', (e) => { _fingersDown = e.touches.length; }, { passive: true, capture: true });
 document.addEventListener('touchend', (e) => { _fingersDown = e.touches.length; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
 document.addEventListener('touchcancel', (e) => { _fingersDown = e.touches.length; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
+// A BUTTON LIGHTS UP WHEN YOU PRESS IT, NOT WHEN YOU SLIDE PAST IT (owner,
+// Sep '26: "any way of avoiding the button press animation when you're
+// dragging or swiping? button animation only happens if you click"). The
+// browser hands out :active the instant a finger lands, and it only takes it
+// back once the page decides the gesture was a scroll — which it reports
+// about 100ms in. So every swipe down a list of buttons lit whatever it
+// started on, and let it go again a moment later. The item tiles solved this
+// in Sep '26 by waiting for a STILL finger; this is the same answer for every
+// other button in the app.
+//   - a finger that lands and stays: the press look after 150ms, an iPad's
+//     own wait, which is past the first movement of a real scroll;
+//   - a finger that slides: nothing, ever;
+//   - a quick tap that lifts before 150ms: the look flashes as it lifts, so
+//     a fast hand still sees it (the tiles' rule, owner Sep '26).
+// A mouse keeps plain :active — it cannot slide without a button down.
+const TAP_STILL = 150, TAP_SLOP = 8, TAP_FLASH = 120;
+let _tapTimer = 0, _tapFrom = null, _tapEl = null, _tapFlash = 0;
+function _tapOff() {
+  clearTimeout(_tapTimer); _tapTimer = 0; _tapFrom = null;
+  document.body.classList.remove('mk-tap');
+}
+document.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1) { _tapOff(); return; }
+  const t = e.touches[0];
+  _tapFrom = { x: t.clientX, y: t.clientY, at: Date.now() };
+  _tapEl = e.target && e.target.closest ? e.target.closest('button, [data-act]') : null;
+  clearTimeout(_tapTimer);
+  _tapTimer = setTimeout(() => { _tapTimer = 0; if (_tapFrom) document.body.classList.add('mk-tap'); }, TAP_STILL);
+}, { passive: true, capture: true });
+document.addEventListener('touchmove', (e) => {
+  const t = e.touches[0]; if (!t || !_tapFrom) return;
+  if (Math.hypot(t.clientX - _tapFrom.x, t.clientY - _tapFrom.y) > TAP_SLOP) _tapOff();
+}, { passive: true, capture: true });
+document.addEventListener('touchend', () => {
+  // Lifted before the wait was up and never slid: show the press on the way
+  // out, so a fast tap is not silent.
+  const quick = _tapFrom && _tapTimer;
+  const el = _tapEl;
+  _tapOff(); _tapEl = null;
+  if (quick && el) {
+    el.classList.add('mk-hit');
+    clearTimeout(_tapFlash);
+    _tapFlash = setTimeout(() => el.classList.remove('mk-hit'), TAP_FLASH);
+  }
+}, { passive: true, capture: true });
+document.addEventListener('touchcancel', () => { _tapOff(); _tapEl = null; }, { passive: true, capture: true });
 document.addEventListener('scroll', () => { _scrollUntil = Date.now() + 240; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
 
 // THE POLL ASKS BEFORE IT FETCHES. It used to pull every order (1.3MB here)

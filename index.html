@@ -3357,6 +3357,41 @@ body[data-tiles-bottom] .menu-scroll{ display:flex; flex-direction:column-revers
   outline:var(--tbl-sel-ring) solid var(--orange);
   outline-offset:var(--tbl-sel-gap); }
 .simple-table-btn{ isolation:isolate; }
+
+/* A TABLE IN THE AIR: THE WHOLE SCREEN STEPS BACK, THE LANDING GROUND LIGHTS
+   UP (owner, Sep '26: "dim the floor while we are dragging and light up with
+   a glow of available tables to drag to", then "make it white or white like.
+   dim everything the whole screen").
+   Three states, one gesture: the bar, the strip, the ground and every table
+   you cannot use all fade; anything you can land on holds its colour and
+   wears a white glow; and the one you would land on ALSO wears the ordinary
+   picked ring — so the last thing seen before letting go is the same blue
+   that means "this one" everywhere else in the app.
+   WHY FOUR RULES AND NOT ONE FILTER ON THE PAGE: a filter rasterises its
+   whole subtree, so a lit table inside a dimmed parent cannot be lit again.
+   Everything that holds no table is dimmed as a block; the tables are dimmed
+   one by one, and the lit ones are simply left out. */
+:root{
+  --drop-fade:grayscale(.55) brightness(.72);
+  --drop-ground:color-mix(in srgb, var(--steel-100) 72%, #000);
+  --drop-wash:rgba(0,0,0,.30);
+  /* white, not the accent: the glow is "you can land here", and it has to
+     read on a dimmed floor in both themes (owner: "white or white like") */
+  --drop-glow:0 0 0 2px rgba(255,255,255,.95), 0 0 18px 6px rgba(255,255,255,.45);
+}
+body.mk-dragging .topbar,
+body.mk-dragging .fp-band,
+body.mk-dragging .fp-float{ filter:var(--drop-fade); transition:filter var(--t-state) ease; }
+/* The room's own floor is painted INLINE (the venue picks its colour), so the
+   dim cannot be a background rule — it is a wash laid over the canvas, under
+   every table: the markers stack from 44 up, this sits at 1. */
+.tp-canvas-wrap.mk-dragging .floor-canvas::after{
+  content:''; position:absolute; inset:0; z-index:1; pointer-events:none;
+  background:var(--drop-wash); }
+.tp-canvas-wrap.mk-dragging .floor-marker{ filter:var(--drop-fade); transition:filter var(--t-state) ease; }
+.tp-canvas-wrap.mk-dragging .floor-marker.mk-can{ filter:none; box-shadow:var(--drop-glow); }
+/* the copy riding the finger is never dimmed — it is the thing being moved */
+.mk-drag-ghost{ filter:none !important; }
 /* Hold-drag transfer (till floor): the TABLE lifts and rides the finger
    with the drawer's shadow (a still hold moves nothing — the lift is the
    first news); the spot it left dims until the move settles; the table
@@ -34929,6 +34964,37 @@ document.addEventListener('pointerdown', (e) => {
 // counts and all, so nothing moves un-asked. A finger that moves BEFORE the
 // hold still pans the map; a release over nothing floats the table home.
 let _tblGrab = null, _tblDropAt = 0;
+// WHILE A TABLE IS IN THE AIR, THE ROOM STEPS BACK (owner, Sep '26: "dim the
+// floor while we are dragging and light up with a glow of available tables to
+// drag to"). Painted BY HAND, never through render(): a rebuild under a live
+// touch makes Chromium fire pointercancel and kills the drag on its first
+// frame (the same lesson as the peek's pop).
+function paintDropRoom(srcId) {
+  const wrap = document.querySelector('.middle-view .tp-canvas-wrap');
+  if (wrap) {
+    wrap.classList.add('mk-dragging');
+    // The room's own floor colour is written INLINE (the venue picks it), so
+    // no stylesheet can dim the band of it that shows beside a narrow room.
+    // Swap it here and put the venue's colour back on release.
+    wrap.dataset.bg0 = wrap.style.background || '';
+    wrap.style.background = 'var(--drop-ground)';
+  }
+  document.body.classList.add('mk-dragging');   // the bar and the strip fade too
+  document.querySelectorAll('[data-act="pick-table"]').forEach(m => {
+    if (m.dataset.id === srcId) return;
+    const t = findTableById(m.dataset.id);
+    if (t && t.type !== 'decor' && !(t.mergedInto && t.mergedInto !== t.id)) m.classList.add('mk-can');
+  });
+}
+function clearDropRoom() {
+  const wrap = document.querySelector('.middle-view .tp-canvas-wrap');
+  if (wrap) {
+    wrap.classList.remove('mk-dragging');
+    if (wrap.dataset.bg0 !== undefined) { wrap.style.background = wrap.dataset.bg0; delete wrap.dataset.bg0; }
+  }
+  document.body.classList.remove('mk-dragging');
+  document.querySelectorAll('.mk-can').forEach(m => m.classList.remove('mk-can'));
+}
 function _tblGrabCancel() {
   const g = _tblGrab; if (!g) return;
   clearTimeout(g.timer);
@@ -34942,6 +35008,7 @@ function _tblGrabCancel() {
   const src = document.querySelector(`[data-act="pick-table"][data-id="${g.id}"]`);
   if (src) src.classList.remove('mk-drag-src');
   if (g.overEl) g.overEl.classList.remove('mk-drop', 'mk-sel');
+  clearDropRoom();
   const was = g.dragging;
   _tblGrab = null;
   if (was) { state._sortDragging = false; render(); }
@@ -35048,6 +35115,7 @@ document.addEventListener('pointerdown', (e) => {
       document.body.appendChild(gh);
       g.ghost = gh;
       src.classList.add('mk-drag-src');
+      paintDropRoom(g.id);
     }
     if (!g.dragging) return;
     // One paint per frame: fingers report faster than the screen draws, and
@@ -35090,6 +35158,7 @@ document.addEventListener('pointerdown', (e) => {
     document.removeEventListener('pointercancel', g.pc);
     if (g.blockTouch) document.removeEventListener('touchmove', g.blockTouch);
     if (g.overEl) g.overEl.classList.remove('mk-drop', 'mk-sel');
+    clearDropRoom();
     state._sortDragging = false;
     _tblDropAt = Date.now();
     _tblGrab = null;

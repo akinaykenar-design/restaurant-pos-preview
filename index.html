@@ -9440,6 +9440,18 @@ function tableLabelOwner(data, label, excludeId) {
   const normalized = String(label).trim().toLowerCase();
   return (data.floorPlans || []).find(fp => fp.tables.some(t => t.type === 'table' && t.id !== excludeId && t.label.trim().toLowerCase() === normalized)) || null;
 }
+// A RENAME CARRIES THE BILL. An open ticket points at its table by NAME, so
+// renaming the table under it left the money behind: the ticket stayed open on
+// a name the floor no longer had, and the table itself went green — so the
+// next party was sat on an unpaid bill (owner's walk, Sep '26). Both halves of
+// a swap need it, so it is one function, and the moves are read from the
+// BEFORE picture: doing them one at a time dragged the second table's tickets
+// back onto the first.
+function carryBills(data, moves) {
+  (data.orders || []).forEach(o => {
+    if (o.status === 'open' && o.orderType === 'dine-in' && moves.has(String(o.table))) o.table = moves.get(String(o.table));
+  });
+}
 function tableLabelClash(data, label, excludeId, here) {
   const owner = tableLabelOwner(data, label, excludeId);
   if (!owner) return null;
@@ -9488,24 +9500,35 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
-  const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, color, decorType, icon, prevX, prevY, discount } = req.body;
+  const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, color, decorType, icon, prevX, prevY, discount, swap } = req.body;
   if (label !== undefined) {
-    if (table.type === 'table') {
-      const clash = tableLabelClash(data, label, table.id, floorPlan);
-      if (clash) return res.status(400).json({ error: clash });
-    }
-    // A RENAME CARRIES THE BILL. An open ticket points at its table by NAME,
-    // so renaming the table under it left the money behind: the ticket stayed
-    // open on a name the floor no longer had, and the table itself went green
-    // — so the next party was sat on an unpaid bill (owner's walk, Sep '26).
-    // Done here, in the same write, so every till sees it at once.
     const was = String(table.label);
-    if (table.type === 'table' && String(label) !== was) {
-      (data.orders || []).forEach(o => {
-        if (o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === was) o.table = label;
-      });
+    // TWO TABLES CAN TRADE NUMBERS (owner, Sep '26: "make it so i can swap").
+    // Numbers are unique across every layout, so a swap could not be done one
+    // table at a time — each step collided with the table it was trying to
+    // trade with, and the only way through was parking one on a scratch
+    // number nobody wanted. Asking for the trade does both ends in THIS
+    // write, so no till ever sees two tables wearing one number.
+    if (table.type === 'table') {
+      const ownerPlan = tableLabelOwner(data, label, table.id);
+      if (ownerPlan && !swap) {
+        return res.status(400).json({ error: tableLabelClash(data, label, table.id, floorPlan), clash: true });
+      }
+      if (ownerPlan) {
+        const norm = String(label).trim().toLowerCase();
+        const other = ownerPlan.tables.find(t => t.type === 'table' && t.id !== table.id && t.label.trim().toLowerCase() === norm);
+        if (other) {
+          carryBills(data, new Map([[was, String(label)], [String(other.label), was]]));
+          other.label = was;
+          table.label = label;
+        }
+      } else {
+        if (String(label) !== was) carryBills(data, new Map([[was, String(label)]]));
+        table.label = label;
+      }
+    } else {
+      table.label = label;
     }
-    table.label = label;
   }
   if (x !== undefined) table.x = x;
   if (y !== undefined) table.y = y;
@@ -34036,6 +34059,29 @@ async function patchFloorObject(fpId, id, patch) {
   }
 }
 
+// TWO TABLES TRADE NUMBERS INSTEAD OF ONE BEING REFUSED (owner, Sep '26:
+// "make it so i can swap"). Numbers are unique, so renaming 42 to 16 while a
+// 16 exists was simply turned away — and so was every other step of the same
+// swap, because each one collided with the table it was trying to trade with.
+// The only way round it was parking a table on a number nobody wanted, which
+// is where a table called 222 came from. The clash now offers the trade, and
+// the server does both ends in one write so no till sees two tables wearing
+// one number. A rename onto a FREE number is untouched: it just saves.
+function tableWearingLabel(label, exceptId) {
+  const norm = String(label).trim().toLowerCase();
+  return allTables().find(t => t.type === 'table' && t.id !== exceptId && String(t.label).trim().toLowerCase() === norm) || null;
+}
+function saveTableNumber(fpId, id, label) {
+  const other = tableWearingLabel(label, id);
+  if (!other) return patchFloorObject(fpId, id, { label });
+  const mine = findTableById(id);
+  const otherPlan = findFloorPlanForTable(other.id);
+  const where = otherPlan && otherPlan.id !== fpId ? ' on ' + otherPlan.name : '';
+  openConfirm({
+    message: `Table ${label} already exists${where}. Swap it with ${mine ? mine.label : 'this one'}?`,
+    confirmLabel: 'Swap',
+  }, () => patchFloorObject(fpId, id, { label, swap: true }));
+}
 async function saveFloorPlanGrid(fpId, patch) {
   const fp = state.floorPlans.find(f => f.id === fpId);
   if (fp) Object.assign(fp, patch);
@@ -42057,7 +42103,7 @@ function handleActClick(el, e) {
         const p = state.tableNumPad;
         state.tableNumPad = null;
         if (typeof oskHide === 'function') oskHide();
-        if (p && p.buf) patchFloorObject(p.fp, p.id, { label: p.buf });
+        if (p && p.buf) saveTableNumber(p.fp, p.id, p.buf);
         render();
       }
       else if (act === 'set-table-mode') { setTableMode(el.dataset.val); } /* one caller now: the options column's named pair, which writes data-val */

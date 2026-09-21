@@ -7088,6 +7088,24 @@ function loadAndMigrate() {
     data.floorPlans.forEach(fp => { if (fp.bgColor === undefined) fp.bgColor = null; });
     writeData(data);
   }
+  // A STRUCTURE'S SHAPE IS ITS TYPE. The wall shapes were saved through a
+  // door that only knew the four table shapes, so every corner, alcove, tee,
+  // cut corner and round end came back a plain square. The door is fixed; this
+  // puts the rooms already drawn back the way the venue drew them.
+  const STRUCTURE_SHAPE_BY_TYPE = {
+    rectangle: 'rect', square: 'square', circle: 'round', line: 'rect',
+    'round-end': 'half-round', 'cut-corner': 'corner-cut', corner: 'corner',
+    alcove: 'arch', tee: 'tee',
+  };
+  if (data.floorPlans.some(fp => fp.tables.some(t => t.type === 'decor' && STRUCTURE_SHAPE_BY_TYPE[t.decorType] && t.shape !== STRUCTURE_SHAPE_BY_TYPE[t.decorType]))) {
+    data.floorPlans.forEach(fp => {
+      fp.tables.forEach(t => {
+        const want = t.type === 'decor' ? STRUCTURE_SHAPE_BY_TYPE[t.decorType] : null;
+        if (want && t.shape !== want) t.shape = want;
+      });
+    });
+    writeData(data);
+  }
   if (data.floorPlans.some(fp => fp.tables.some(t => !t.type))) {
     data.floorPlans.forEach(fp => {
       fp.tables.forEach(t => {
@@ -9494,9 +9512,16 @@ function tableLabelClash(data, label, excludeId, here) {
     : `Table ${String(label).trim()} is already on ${owner.name}`;
 }
 
-// The four shapes a table can be (square, round, rectangle, oval) — anything
+// The four shapes a TABLE can be (square, round, rectangle, oval) — anything
 // else is stored as a square.
 const TABLE_SHAPE_KEYS = ['square', 'round', 'rect', 'oval'];
+// A STRUCTURE IS NOT A TABLE, AND THE SERVER HAS TO KNOW (Sep '26). The wall
+// shapes went in on the floor and the palette but never here, so every corner,
+// alcove, tee, cut corner and round end was saved as a plain square: it looked
+// right until the page reloaded, then the whole room went back to blocks.
+// A shape sent for a decor object is checked against this list instead.
+const DECOR_SHAPE_KEYS = ['rect', 'square', 'round', 'half-round', 'corner-cut', 'corner', 'arch', 'tee'];
+const shapeOk = (shape, type) => (type === 'decor' ? DECOR_SHAPE_KEYS : TABLE_SHAPE_KEYS).includes(shape);
 app.post('/api/floorplans/:fpId/tables', (req, res) => {
   const data = readData();
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
@@ -9512,7 +9537,7 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
     label,
     x: x !== undefined ? x : 50,
     y: y !== undefined ? y : 50,
-    shape: TABLE_SHAPE_KEYS.includes(shape) ? shape : 'square',
+    shape: shapeOk(shape, type) ? shape : 'square',
     width: width || 7.5,
     height: height || 12.05,
     seats: seats !== undefined ? seats : 4,
@@ -9570,7 +9595,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   // unlink puts it back there.
   if (prevX !== undefined) table.prevX = prevX === null ? null : parseFloat(prevX) || 0;
   if (prevY !== undefined) table.prevY = prevY === null ? null : parseFloat(prevY) || 0;
-  if (shape !== undefined) table.shape = TABLE_SHAPE_KEYS.includes(shape) ? shape : table.shape;
+  if (shape !== undefined) table.shape = shapeOk(shape, table.type) ? shape : table.shape;
   if (width !== undefined) table.width = width;
   if (height !== undefined) table.height = height;
   if (seats !== undefined) table.seats = seats;
@@ -12840,11 +12865,9 @@ const DECOR_TEMPLATES = [
   // The rest of the room (owner, Sep '26: "add these styles as well"). Same
   // one mechanism as the four above — a coloured box with a shape — so each
   // resizes, turns, recolours and draws itself exactly like them.
-  { key: 'soft-block', label: 'Soft block', icon: '', width: 12, height: 12, shape: 'rounded', color: '#7a7f86', group: 'structure' },
   { key: 'round-end', label: 'Round end', icon: '', width: 14, height: 8, shape: 'half-round', color: '#7a7f86', group: 'structure' },
   { key: 'cut-corner', label: 'Cut corner', icon: '', width: 12, height: 12, shape: 'corner-cut', color: '#7a7f86', group: 'structure' },
   { key: 'corner', label: 'Corner', icon: '', width: 14, height: 14, shape: 'corner', color: '#7a7f86', group: 'structure' },
-  { key: 'corner-soft', label: 'Round corner', icon: '', width: 14, height: 14, shape: 'corner-round', color: '#7a7f86', group: 'structure' },
   { key: 'alcove', label: 'Alcove', icon: '', width: 16, height: 12, shape: 'arch', color: '#7a7f86', group: 'structure' },
   { key: 'tee', label: 'Tee', icon: '', width: 16, height: 12, shape: 'tee', color: '#7a7f86', group: 'structure' },
 ];
@@ -12884,7 +12907,13 @@ const WALL_ARM = '14px';
 const STRUCTURE_SHAPES = {
   rect:        { label: 'Bar',            css: {} },
   square:      { label: 'Block',          css: {} },
-  rounded:     { label: 'Soft block',     css: { borderRadius: '14%' } },
+  // SHARP UNLESS THE SHAPE IS ROUND BY NATURE (owner, Sep '26: "And sharp
+  // corners for non round shapes"). A rounded corner leaves a gap where two
+  // walls meet, which is the same complaint as the borders. Only the circle
+  // and the round end keep a curve — that curve IS what they are for. Soft
+  // block and Round corner went with the curve: sharpened they were the Block
+  // and the Corner exactly, and a palette with the same shape twice tells you
+  // nothing about which to pick. Added this morning, never used.
   round:       { label: 'Round',          css: { borderRadius: '50%' } },
   'half-round':{ label: 'Round end',      css: { borderRadius: '999px 999px 0 0' } },
   // A WALL'S THICKNESS IS A THICKNESS, NOT A SHARE OF ITS LENGTH (owner, Sep
@@ -12897,7 +12926,6 @@ const STRUCTURE_SHAPES = {
   // thins with the zoom rather than sitting on top of it.
   'corner-cut':{ label: 'Cut corner',     css: { clipPath: `polygon(0 0, calc(100% - ${WALL_ARM}) 0, 100% ${WALL_ARM}, 100% 100%, 0 100%)` } },
   corner:      { label: 'Corner',         css: { clipPath: `polygon(0 0, 100% 0, 100% ${WALL_ARM}, ${WALL_ARM} ${WALL_ARM}, ${WALL_ARM} 100%, 0 100%)` } },
-  'corner-round': { label: 'Round corner', css: { clipPath: `polygon(0 0, 100% 0, 100% ${WALL_ARM}, ${WALL_ARM} ${WALL_ARM}, ${WALL_ARM} 100%, 0 100%)`, borderRadius: `0 ${WALL_ARM} 0 0` } },
   arch:        { label: 'Alcove',         css: { clipPath: `polygon(0 0, 100% 0, 100% 100%, calc(100% - ${WALL_ARM}) 100%, calc(100% - ${WALL_ARM}) ${WALL_ARM}, ${WALL_ARM} ${WALL_ARM}, ${WALL_ARM} 100%, 0 100%)` } },
   tee:         { label: 'Tee',            css: { clipPath: `polygon(0 0, 100% 0, 100% ${WALL_ARM}, calc(50% + ${WALL_ARM} / 2) ${WALL_ARM}, calc(50% + ${WALL_ARM} / 2) 100%, calc(50% - ${WALL_ARM} / 2) 100%, calc(50% - ${WALL_ARM} / 2) ${WALL_ARM}, 0 ${WALL_ARM})` } },
 };
@@ -27281,14 +27309,17 @@ integrations:
  +'<path d="M5.6 7.4h4v3.6a6.4 6.4 0 0 0 2.1 4.7 6.4 6.4 0 0 1-6.1-4.7z" fill="#5C6E8C"/>'
  +'<path d="M10.8 16.4h2.4V19a1.2 1.2 0 0 1-2.4 0z" fill="#33415A"/>'
  +'<rect x="10.8" y="18.4" width="2.4" height="3.6" rx="1.2" fill="#2F74C9"/>',
+// The owner's own cog (Sep '26), FILLED rather than drawn in line. It arrived
+// as a 1.5 stroke, and a stroke cannot join this rail: its nine are flat
+// colour in two or three shades, by the owner's call — "i dont want rail icon
+// to look like tile icons" — and the icon gate fails a stroke in this set.
+// The silhouette is theirs, path for path; only the ink is the rail's. The
+// old cog was four crossed bars under a disc, which read as a flower at rail
+// size.
 settings:
-  '<g fill="#6E7886"><rect x="10" y="2" width="4" height="20" rx="1.7"/>'
- +'<rect x="10" y="2" width="4" height="20" rx="1.7" transform="rotate(45 12 12)"/>'
- +'<rect x="10" y="2" width="4" height="20" rx="1.7" transform="rotate(90 12 12)"/>'
- +'<rect x="10" y="2" width="4" height="20" rx="1.7" transform="rotate(135 12 12)"/></g>'
- +'<circle cx="12" cy="12" r="7.6" fill="#AEB8C4"/>'
- +'<path d="M12 4.4a7.6 7.6 0 0 0-5.4 13 7.6 7.6 0 0 1 10.8-10.8A7.6 7.6 0 0 0 12 4.4z" fill="#DCE2E9"/>'
- +'<circle cx="12" cy="12" r="3.4" fill="#2F74C9"/>',
+  '<path d="M21.84 10.2A10 10 0 0 1 21.84 13.8L19.08 14.3A7.447 7.447 0 0 1 18.64 15.38L20.23 17.68A10 10 0 0 1 17.68 20.23L15.38 18.64A7.447 7.447 0 0 1 14.3 19.08L13.8 21.84A10 10 0 0 1 10.2 21.84L9.7 19.08A7.447 7.447 0 0 1 8.62 18.64L6.32 20.23A10 10 0 0 1 3.77 17.68L5.36 15.38A7.447 7.447 0 0 1 4.92 14.3L2.16 13.8A10 10 0 0 1 2.16 10.2L4.92 9.7A7.447 7.447 0 0 1 5.36 8.62L3.77 6.32A10 10 0 0 1 6.32 3.77L8.62 5.36A7.447 7.447 0 0 1 9.7 4.92L10.2 2.16A10 10 0 0 1 13.8 2.16L14.3 4.92A7.447 7.447 0 0 1 15.38 5.36L17.68 3.77A10 10 0 0 1 20.23 6.32L18.64 8.62A7.447 7.447 0 0 1 19.08 9.7L21.84 10.2Z" fill="#6E7886"/>'
+ +'<path d="M12 4.6A7.4 7.4 0 0 0 4.6 12L7 12A5 5 0 0 1 12 7Z" fill="#AEB8C4"/>'
+ +'<circle cx="12" cy="12" r="3.11" fill="#2F74C9"/>',
 };
 function adminGroupGlyph(key) {
   const d = ADMIN_GROUP_ART[key];
@@ -29530,10 +29561,13 @@ function renderFloorPlanAdmin() {
             // nine identical chips, so the palette said nothing about what it
             // was about to drop. It reads the SAME one map the floor reads,
             // so a shape added there shows up here with nothing to remember.
-            const sq = ['round', 'square', 'rounded', 'corner', 'corner-round', 'corner-cut'].includes(t.shape);
+            const sq = ['round', 'square', 'corner', 'corner-cut'].includes(t.shape);
             const [sw, sh] = sq ? [20, 20] : thin ? [20, 4] : [20, 12];
             const cs = structureShapeCss(t.shape);
-            const rad = cs.borderRadius !== undefined ? cs.borderRadius : (t.shape === 'round' ? '50%' : '3px');
+            // THE CHIP IS SHARP BECAUSE THE WALL IS. It carried a 3px corner of
+            // its own while the floor drew the same shape square, so the palette
+            // promised a softer piece than it dropped.
+            const rad = cs.borderRadius !== undefined ? cs.borderRadius : (t.shape === 'round' ? '50%' : '0');
             const cl = cs.clipPath ? `clip-path:${cs.clipPath};` : '';
             return `<button class="decor-chip shape-only${on ? ' active' : ''}" data-act="palette-place" data-val="${val}" title="${esc(t.label)}" aria-label="${esc(t.label)}" ${pick ? `data-id="${pick.id}" data-fp="${fp.id}"` : ''}><span class="decor-chip-block" style="width:${sw}px;height:${sh}px;border-radius:${rad};${cl}background:${t.color || 'var(--steel-300)'};"></span></button>`;
           }).join('')}</div>`;
@@ -31622,7 +31656,13 @@ function shapeStyle(t, selected) {
   const bg = isDecor ? (t.color || (isStructure ? 'var(--steel-400, #7a7f86)' : 'transparent'))
     : (t.color ? t.color : 'var(--table-plain)');
   const textColor = isDecor ? (t.color ? contrastTextColor(t.color) : 'var(--text-primary)') : (t.color ? contrastTextColor(t.color) : 'var(--text-primary)');
-  const border = isDecor ? (selected ? '1.5px dashed var(--orange)' : ((t.color || isStructure) ? `1px solid ${borderColor}` : 'none')) : `1px solid ${borderColor}`;
+  // A STRUCTURE HAS NO EDGE OF ITS OWN (owner, Sep '26: "I dont want borders
+  // for structures so they can join easily"). Two walls pushed together drew
+  // two hairlines down the join, so a long wall built from three pieces read
+  // as three pieces. Nothing between them now: they meet and become one wall.
+  // A picked one still shows its dashed outline, because that is selection,
+  // not the wall.
+  const border = isDecor ? (selected ? '1.5px dashed var(--orange)' : (isStructure ? 'none' : (t.color ? `1px solid ${borderColor}` : 'none'))) : `1px solid ${borderColor}`;
   // Both tables and decor can be angled. The marker rotates, but for tables the
   // label is counter-rotated in floorMarkerInner so the number stays upright.
   const rot = t.rotation || 0;
@@ -42359,7 +42399,10 @@ function handleActClick(el, e) {
           if (tpl && t) {
             pushFloorHistory();
             const u = decorUnits(t);
-            patchFloorObject(el.dataset.fp, t.id, { decorType: tpl.key, icon: tpl.icon, label: tpl.label,
+            // THE SHAPE GOES WITH THE CHIP. It sent the new type, icon and
+            // name but not the SHAPE, so tapping Corner on a picked block lit
+            // the chip and left a block on the floor.
+            patchFloorObject(el.dataset.fp, t.id, { decorType: tpl.key, icon: tpl.icon, label: tpl.label, shape: tpl.shape || 'square',
               width: Math.round(u.w * FLOOR_GRID * 100) / 100, height: Math.round(u.h * FLOOR_GRID_Y * 100) / 100 });
           }
           return;

@@ -34276,12 +34276,6 @@ window.addEventListener('resize', remeasureFloorDrag);
 document.addEventListener('scroll', remeasureFloorDrag, { passive: true, capture: true });
 
 function startFloorDrag(e, tableId) {
-  // Ctrl/⌘-click toggles a table in the multi-select set instead of dragging.
-  if (e.ctrlKey || e.metaKey) {
-    e.preventDefault();
-    toggleTableMultiSelect(tableId);
-    return;
-  }
   const markerEl = e.currentTarget;
   const canvasEl = markerEl.closest('.floor-canvas');
   floorDrag = { tableId, canvasEl, markerEl, moved: false, rect: canvasEl.getBoundingClientRect() }; // the box read ONCE — a layout per move stuttered on a phone
@@ -34309,18 +34303,6 @@ function startFloorDrag(e, tableId) {
   // ctrl-click, and a mouse already has ctrl-click; bound for the mouse too,
   // a press that paused half a second silently added the table to a
   // multi-pick, and the next drag moved a table nobody had touched (Sep '26).
-  floorDrag.holdTimer = !isTouch ? null : setTimeout(() => {
-    if (!floorDrag || floorDrag.moved) return;
-    floorDrag.holdTimer = null; floorDrag.holdFired = true;
-    state.selectedAdminTableId = null;
-    const i = state.selectedAdminTableIds.indexOf(tableId);
-    if (i !== -1) { state.selectedAdminTableIds.splice(i, 1); floorDrag = null; render(); return; } // held OFF the selection: nothing to carry
-    state.selectedAdminTableIds.push(tableId);
-    markerEl.classList.add('mk-sel');
-    try { navigator.vibrate && navigator.vibrate(20); } catch (err) {}
-    floorDrag.pending = false; // picked up: it goes where the finger goes, on the phone too
-    floorDrag.group = floorDragGroup(canvasEl, tableId);
-  }, 450);
   // Dragging a table that's PART of the multi-selection moves the whole group.
   floorDrag.group = floorDragGroup(canvasEl, tableId);
   // LINKED tables are physically one unit — dragging any member moves the
@@ -34357,11 +34339,18 @@ function floorDragGroup(canvasEl, tableId) {
     return t && el ? { id, startX: t.x, startY: t.y, el } : null;
   }).filter(Boolean);
 }
+// A TAP PICKS A TABLE, AND TAPS IT AGAIN TO LET IT GO (owner, Sep '26). Tap
+// another and you have two. That is the whole rule — there is no hold, no
+// ctrl-click and no "multi-select mode" to be in or out of; a hold is not a
+// thing anyone discovers, and two ways to do one job is a bug. Picked wears
+// the same ring every picked thing in the app wears.
+// selectedAdminTableId is not a second selection: it is "exactly one is
+// picked", which is what the card full of that table's own settings needs.
 function toggleTableMultiSelect(tableId) {
-  state.selectedAdminTableId = null;
   const i = state.selectedAdminTableIds.indexOf(tableId);
   if (i === -1) state.selectedAdminTableIds.push(tableId);
   else state.selectedAdminTableIds.splice(i, 1);
+  state.selectedAdminTableId = state.selectedAdminTableIds.length === 1 ? state.selectedAdminTableIds[0] : null;
   render();
 }
 function clearTableSelection() { state.selectedAdminTableId = null; state.selectedAdminTableIds = []; state.linkTapFrom = null; state.floorLinkMode = null; render(); }
@@ -34587,13 +34576,11 @@ function moveFloorDrag(clientX, clientY) {
     const picked = state.selectedAdminTableId === floorDrag.tableId
       || (state.selectedAdminTableIds || []).includes(floorDrag.tableId);
     if (!picked) {
-      if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer);
       floorDrag = null;
       return;
     }
     floorDrag.pending = false;
   }
-  if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const rect = floorDrag.rect;
   let x = ((clientX - rect.left) / rect.width) * 100;
   let y = ((clientY - rect.top) / rect.height) * 100;
@@ -34650,7 +34637,6 @@ function moveFloorDrag(clientX, clientY) {
 function endFloorDrag() {
   if (!floorDrag) return;
   clearFloorGuides(); // the lines live only under a finger
-  if (floorDrag.holdTimer) { clearTimeout(floorDrag.holdTimer); floorDrag.holdTimer = null; }
   const { tableId, moved, lastX, lastY } = floorDrag;
   if (floorDrag.overEl) floorDrag.overEl.classList.remove('link-target');
   // Link tool: dropping the table on (or a whisker from) another WELDS them.
@@ -34665,7 +34651,7 @@ function endFloorDrag() {
   }
   // "Link to…" tap flow: a table is armed — a plain tap on ANOTHER table welds
   // them; tapping the armed table again cancels.
-  if (!moved && state.linkTapFrom && !floorDrag.holdFired) {
+  if (!moved && state.linkTapFrom) {
     const from = state.linkTapFrom;
     state.linkTapFrom = null; state.floorLinkMode = null;
     if (String(from) !== String(tableId)) linkTables(from, tableId);
@@ -34674,13 +34660,12 @@ function endFloorDrag() {
     return;
   }
   // Unlink tool: a plain tap on a table unlinks it (drag still moves).
-  if (!moved && state.floorLinkMode === 'unlink' && !floorDrag.holdFired) {
+  if (!moved && state.floorLinkMode === 'unlink') {
     unlinkTapTable(tableId);
     floorDrag = null;
     return;
   }
   // A hold that never moved already did its picking; the screen catches up now.
-  if (!moved && floorDrag.holdFired) { floorDrag = null; render(); return; }
   if (moved && floorDrag.group) {
     // Group move: the members moved rigidly together, so they may not veto
     // each other — but they may not park on a table OUTSIDE the group
@@ -34718,15 +34703,9 @@ function endFloorDrag() {
     }
     pushFloorHistory();
     saveTablePosition(tableId, Math.round(lastX * 10) / 10, Math.round(lastY * 10) / 10);
-  } else if (state.selectedAdminTableIds.length) {
-    // A hold started a multi-selection — while it exists, taps toggle tables
-    // in and out of it (✕ Done or emptying the selection ends the mode).
-    toggleTableMultiSelect(tableId);
   } else {
-    // No real movement - treat as a tap: select this table for editing.
-    state.selectedAdminTableId = state.selectedAdminTableId === tableId ? null : tableId;
-    state.selectedAdminTableIds = [];
-    render();
+    // No real movement — a tap. Every tap is the same door: in, or out.
+    toggleTableMultiSelect(tableId);
   }
   floorDrag = null;
 }
@@ -34899,7 +34878,7 @@ document.addEventListener('touchend', () => { endFloorDrag(); endRotateDrag(); e
 // Browser took the gesture for a native scroll: drop a still-pending drag so it
 // never lands as a stray tap/select; commit a drag that had already started.
 document.addEventListener('touchcancel', () => {
-  if (floorDrag && floorDrag.pending) { if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer); floorDrag = null; }
+  if (floorDrag && floorDrag.pending) floorDrag = null;
   else endFloorDrag();
   endRotateDrag(); endResizeDrag();
 });
@@ -36354,7 +36333,6 @@ document.addEventListener('touchstart', (e) => {
   // rebuilding the page would swap the box this pinch has just measured.
   if (editor && (floorDrag || floorResizeDrag || floorRotateDrag)) {
     if (floorDrag) {
-      if (floorDrag.holdTimer) clearTimeout(floorDrag.holdTimer);
       const fpD = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
       const home = (id, el) => { const t = fpD && fpD.tables.find(x => x.id === id); if (t && el) { el.style.left = t.x + '%'; el.style.top = t.y + '%'; } };
       if (floorDrag.group) floorDrag.group.forEach(g => home(g.id, g.el));

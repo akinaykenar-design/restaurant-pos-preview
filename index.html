@@ -15217,9 +15217,22 @@ function colorDotButton(kind, id, color, opts) {
   if (opts.pencil) {
     return `<button type="button" class="icon-sq" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="" data-image="" data-photo="0" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" aria-label="${opts.title || 'Set colour for selected'}">${ACT_PENCIL_SVG}</button>`;
   }
-  return `<button type="button" class="color-dot-btn ${(color || img || opts.bg) ? '' : 'empty'}" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="${color || ''}" data-image="${esc(img)}" data-photo="${opts.photo ? '1' : '0'}" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" style="background:${bg};vertical-align:middle;" aria-label="${opts.title || 'Change colour or photo'}"></button>`;
+  // PHOTO ONLY (owner, Sep '26: note presets take the type's colour, so the
+  // dot on a preset row has no colour left to set — but it is also where a
+  // picture goes, and nobody asked to lose that). The popover drops its
+  // swatches and wheel and becomes what it is: a photo.
+  return `<button type="button" class="color-dot-btn ${(color || img || opts.bg) ? '' : 'empty'}" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="${color || ''}" data-image="${esc(img)}" data-photo="${(opts.photo || opts.photoOnly) ? '1' : '0'}" data-photo-only="${opts.photoOnly ? '1' : '0'}" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" style="background:${bg};vertical-align:middle;" aria-label="${opts.title || (opts.photoOnly ? 'Change photo' : 'Change colour or photo')}"></button>`;
 }
-function colorPopoverInnerHTML(color, allowClear, palette, photo, image) {
+function colorPopoverInnerHTML(color, allowClear, palette, photo, image, photoOnly) {
+  if (photoOnly) return `
+      <div class="color-popover-photo">
+        <div class="color-popover-photo-row">
+          ${image ? `<img src="${image}" alt="" class="cp-photo-thumb">` : `<span class="cp-photo-icon">${SYS_IMAGE_SVG}</span>`}
+          <input type="text" class="color-popover-photo-url" value="${esc(image || '')}" placeholder="Photo URL">
+        </div>
+        <label class="color-popover-photo-upload">${SYS_CAMERA_SVG} Upload photo<input type="file" accept="image/*" class="color-popover-photo-file"></label>
+        ${image ? `<button type="button" class="color-popover-photo-clear">Remove photo</button>` : ''}
+      </div>`;
   palette = palette || PRESET_COLORS;
   // Custom colours picked with the wheel/hex input are remembered as recents
   // and offered as extra swatches on every popover.
@@ -15324,13 +15337,14 @@ function openColorPopover(btn) {
   const color = btn.dataset.color || '';
   const allowClear = btn.dataset.allowClear !== '0';
   const photo = btn.dataset.photo === '1';
+  const photoOnly = btn.dataset.photoOnly === '1';
   const image = btn.dataset.image || '';
   _cpCtx = { kind: btn.dataset.kind, id: btn.dataset.id, btn };
   const palette = PRESET_COLORS;
   const el = document.createElement('div');
   el.className = 'cp-wrap';
   // Standard pad grammar: scrim + centred box + title + square X (owner, Aug '26)
-  el.innerHTML = `<div class="pop-scrim cp-scrim"></div><div class="color-popover"><div class="covers-hd" style="margin:0 0 4px;">Colour</div>${colorPopoverInnerHTML(color, allowClear, palette, photo, image)}<div class="qp-row qp-actions" style="display:flex;justify-content:flex-end;margin-top:2px;"><button type="button" class="icon-action discard cp-close" style="flex:0 0 76px;width:76px;min-width:0;padding:0;" aria-label="Close">${ACT_CROSS_SVG}</button></div></div>`;
+  el.innerHTML = `<div class="pop-scrim cp-scrim"></div><div class="color-popover"><div class="covers-hd" style="margin:0 0 4px;">${photoOnly ? 'Photo' : 'Colour'}</div>${colorPopoverInnerHTML(color, allowClear, palette, photo, image, photoOnly)}<div class="qp-row qp-actions" style="display:flex;justify-content:flex-end;margin-top:2px;"><button type="button" class="icon-action discard cp-close" style="flex:0 0 76px;width:76px;min-width:0;padding:0;" aria-label="Close">${ACT_CROSS_SVG}</button></div></div>`;
   document.body.appendChild(el);
   _cpEl = el;
   el.querySelector('.cp-scrim').addEventListener('click', (e) => { e.stopPropagation(); closeColorPopover(); });
@@ -15521,8 +15535,6 @@ function applyColorForKind(kind, id, color) {
   else if (kind === 'quicknote-preset') saveQuickNotePresets(state.quickNotePresets.map((p, i) => i === parseInt(id) ? { ...p, color: color || null } : p));
   else if (kind === 'discount-preset') updateDiscountPresetField(id, { color: color || null });
   else if (kind === 'bulk-discount-preset') bulkSetDiscountPresetColor(color);
-  else if (kind === 'note-preset') setNotePresetColor(id, color);
-  else if (kind === 'bulk-note-preset') bulkSetNotePresetColor(color);
   else if (kind === 'note-type') setNoteTypeColor(id, color);
   else if (kind === 'bulk-note-type') bulkSetNoteTypeColor(color);
   else if (kind === 'table-status') setTableStatusColor(id, color);
@@ -15541,22 +15553,6 @@ function bulkSetNoteTypeColor(color) {
   saveNoteCategories(state.noteCategories.map(c => sel.includes(c.id) ? { ...c, color: color || null } : c));
 }
 // Preset-button colours: the waiter-facing buttons inside a type.
-function setNotePresetColor(ref, color) {
-  const [catId, idx] = String(ref).split(':');
-  const cats = state.noteCategories.map(c => c.id !== catId ? c : {
-    ...c, presets: (c.presets || []).map((p, i) => i === parseInt(idx) ? { ...p, color: color || null } : p),
-  });
-  saveNoteCategories(cats);
-}
-function bulkSetNotePresetColor(color) {
-  const sel = new Set(state.selectedNotePresetIdxs || []);
-  const catId = state.notesOpenId;
-  if (!sel.size || !catId) return;
-  const cats = state.noteCategories.map(c => c.id !== catId ? c : {
-    ...c, presets: (c.presets || []).map((p, i) => sel.has(i) ? { ...p, color: color || null } : p),
-  });
-  saveNoteCategories(cats);
-}
 async function quickUpdateComboColor(id, color) {
   try {
     await api(`/api/combos/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ color: color || null }) });
@@ -18511,11 +18507,17 @@ async function saveTableCovers(tableId, covers) {
 }
 
 // Preset picker cards: photo wins over colour (photo sets clear the colour).
-function presetCardStyle(p) {
+// ONE COLOUR, FROM THE TYPE (owner, Sep '26: "do the note colours, one colour
+// from the type"). A preset used to carry its own, which meant Allergies could
+// be red while Peanuts under it was pink — and a TABLE can only wear one
+// colour, so the chip and the floor disagreed on a safety mark. The type owns
+// the colour; a preset owns its name, its station, its kinds and its picture.
+function presetCardStyle(p, cat) {
   if (p.image) return `style="background:center/cover no-repeat url('${p.image}');"`;
-  // Coloured presets wear the colour exactly like a coloured ORDER tile does:
-  // full background, contrast-picked text. No tint, no left accent bar.
-  return p.color ? `style="background:${p.color};color:${contrastTextColor(p.color)};"` : '';
+  // With a type, the type's colour. Without one this is a QUICK note — its own
+  // list, its own colours, and nobody asked to change those.
+  const c = cat ? (cat.color || noteTypeColour(cat.id)) : p.color;
+  return c ? `style="background:${c};color:${contrastTextColor(c)};"` : '';
 }
 // The built-in VIP / Allergies note sections can be renamed in admin.
 // The item flag picker's tie: '' = the Allergies builtin, else a custom note
@@ -22543,8 +22545,11 @@ function renderTicketPanel() {
           })() : ''}
           ${state.notes.map((n, idx) => {
             const cat = state.noteCategories.find(c => c.id === n.categoryId);
-            const preset0 = cat && (cat.presets || []).find(p => p.name === n.text && p.color);
-            const style = preset0 ? `background:${preset0.color};color:${contrastTextColor(preset0.color)};border-color:${preset0.color};` : '';
+            // The chip wears the TYPE's colour, same as the table does — it
+            // used to take the preset's own, so a note could be pink on the
+            // docket and red on the floor (owner, Sep '26).
+            const cc = cat && (cat.color || noteTypeColour(cat.id));
+            const style = cc ? `background:${cc};color:${contrastTextColor(cc)};border-color:${cc};` : '';
             const held = state.notesPanel && state.customNoteDraft && state.customNoteDraft.editIdx === idx ? ' chip-held' : '';
             return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}">${cat ? esc(cat.name) + ', ' : ''}${esc(n.text)}${n.note ? ' (' + esc(n.note) + ')' : ''}, (${n.seat ? esc(seatText(n.seat)).toUpperCase() : 'ALL'}) <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
           }).join('')}
@@ -22853,7 +22858,7 @@ function renderCustomNoteTabContent(categoryId) {
   return `
   ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
   <div class="grid note-preset-grid fixed4" style="margin-bottom:8px;">
-      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(m.picks || []).includes(p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
+      ${cat ? cat.presets.map(p => `<button type="button" class="item-card allergy-item-card ${(m.picks || []).includes(p.name) ? 'selected' : ''}" data-act="pick-note-preset" data-val="${esc(p.name)}" ${presetCardStyle(p, cat)}><div class="item-name${p.image ? ' on-photo' : ''}">${esc(p.name)}</div></button>`).join('') : ''}
       <div class="item-card allergy-item-card note-add-cell"><input id="custom-note-text-input" type="text" value="${esc(m.text)}" placeholder="+ ${cat ? esc(cat.name) : 'Note'}"></div>
   </div>
   ${/* ONE LINE OF WORDS THAT RIDES WITH THE PICKS (owner, Sep '26: "one setup
@@ -27982,7 +27987,6 @@ function renderNotePresetList(cat, selP) {
   const rows = applyListSort(listId, presets.map((p, idx) => ({ p, idx })));
   return `
   ${listToolbar({ list: 'note-preset', keys: presets.map((_, i) => i), sort: listId,
-    editHtml: `<span style="display:inline-flex;align-items:center;gap:4px;" data-stop="1">${colorDotButton('bulk-note-preset', 'x', null, { pencil: true, allowClear: true })}</span>`,
     copy: 'duplicate-selected-note-presets', del: 'delete-selected-note-presets',
     clear: 'clear-note-preset-selection',
     add: { act: 'add-note-preset', label: '+ Note' } })}
@@ -27994,7 +27998,7 @@ function renderNotePresetList(cat, selP) {
       <div class="menu-item-expandable note-preset-drag${selected ? ' selected' : ''}${(state.expandedNotePresetIdxs || []).includes(pIdx) ? ' open' : ''}" data-idx="${pIdx}"${sorted ? '' : ''} style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;margin-bottom:var(--list-gap);">
         <div class="menu-item-header sel-head" data-act="notepreset-toggle-open" data-idx="${pIdx}" data-sellist="note-preset" data-selkey="${pIdx}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="note-preset" data-key="${pIdx}" ${selected ? 'checked' : ''}>
-          ${colorDotButton('note-preset', `${cat.id}:${pIdx}`, p.color, { size: 20, photo: true, image: p.image })}
+          ${colorDotButton('note-preset', `${cat.id}:${pIdx}`, null, { photoOnly: true, image: p.image, bg: cat.color || noteTypeColour(cat.id) })}
           <span class="t1" style="font-weight:700;font-size:var(--fs-md);">${esc(p.name)}</span>
           <span style="flex:1;"></span>
           ${(p.subTypes || []).length ? `<span class="ts" style="flex-shrink:0;">${(p.subTypes || []).length} kind${(p.subTypes || []).length > 1 ? 's' : ''}</span>` : ''}

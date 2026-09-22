@@ -18013,6 +18013,7 @@ function nearestAllowedCourse(intended, item) {
 // never shifts under the kitchen.
 function cascadeAutoCourses(openOrder) {
   if (!autoCourseOn() || openOrder || Object.keys(state.firedCourses || {}).length || !state.cart.length) return;
+  if (state.cart.some(l => l.courseByHand)) return; // somebody placed a line by hand — leave the cart alone
   const present = [...new Set(state.cart.map(c => c.course || 1))].sort((a, b) => a - b);
   const map = {};
   let next = 1;
@@ -18207,6 +18208,19 @@ function editLineSetModifier(gid, oid) {
   }
   line.modSelections = { ...(line.modSelections || {}), [gid]: arr };
   editLineRecompose(line); render();
+}
+// A hand-picked course STAYS. Auto files dishes by section; once somebody has
+// placed a line themselves, Auto stops re-filing this cart (cascadeAutoCourses)
+// so the pick is not slid back under them on the next tap.
+function editLineSetCourse(n) {
+  const line = state.cart[state.editLine ? state.editLine.idx : -1];
+  if (!line || line.course === n) return;
+  line.course = n;
+  line.courseByHand = true;
+  // With course PAGES the docket shows one course at a time, so follow the
+  // line — otherwise Save drops you on a page the dish has just left.
+  if (state.settings.coursePagedDocket === true) { state.activeCourse = n; state.docketShowAll = false; }
+  render();
 }
 function editLineSetSeat(seat) {
   const line = state.cart[state.editLine ? state.editLine.idx : -1];
@@ -34056,6 +34070,18 @@ function renderLineEditMiddle() {
       ${recipeBuild.length ? leRow('Build <span class="le-dim">· tap to remove</span>', `<div class="grid">
           ${recipeBuild.map(c => { const off = line.removed.includes(c.id); return `<button class="item-card allergy-item-card build-comp ${off ? 'removed' : ''}" data-act="edit-line-remove-comp" data-inv="${esc(c.id)}"><div class="item-name">${off ? 'No ' : ''}${esc(c.label)}</div></button>`; }).join('')}
         </div>`) : ''}
+      ${(() => {
+        // WHICH COURSE THIS DISH FILES ON (owner, Sep '26). Unsent lines only
+        // — the editor never opens on a sent one — so moving it just re-groups a
+        // round that has not gone to the kitchen yet. The list is the venue's
+        // enabled courses that take this dish's section, plus whatever course
+        // the line is already on, so a line is never stranded.
+        const cur = line.course || 1;
+        const nums = state.settings.courses.map((_, i) => i + 1).filter(n =>
+          (state.settings.courses[n - 1].enabled !== false && courseAllowsItem(n, item)) || n === cur);
+        return nums.length > 1 ? leRow('Course', nums.map(n =>
+          `<div class="pay-opt sm ${cur === n ? 'active' : ''}" data-act="edit-line-course" data-val="${n}">${esc(courseInfo(n).name)}</div>`).join('')) : '';
+      })()}
       ${seatEnabled && state.covers > 1 ? leRow('Seat', `
           <div class="pay-opt sm ${line.seat === 'all' || !line.seat ? 'active' : ''}" data-act="edit-line-seat" data-seat="all">${esc(state.settings.sharedSeatLabel || 'All')}${seatAvoidTag(item, 'all')}</div>
           ${Array.from({ length: state.covers }, (_, i) => i + 1).map(n => `<div class="pay-opt sm ${line.seat === n ? 'active' : ''}" data-act="edit-line-seat" data-seat="${n}">${n}${seatAvoidTag(item, n)}</div>`).join('')}`) : ''}
@@ -41843,6 +41869,7 @@ function handleActClick(el, e) {
       else if (act === 'split-line') { splitCartLine(); }
       else if (act === 'edit-line-variant') { editLineSetVariant(el.dataset.variant); }
       else if (act === 'edit-line-modifier') { editLineSetModifier(el.dataset.group, el.dataset.option); }
+      else if (act === 'edit-line-course') { editLineSetCourse(parseInt(el.dataset.val)); }
       else if (act === 'edit-line-seat') { editLineSetSeat(el.dataset.seat === 'all' ? 'all' : (el.dataset.seat ? parseInt(el.dataset.seat) : null)); }
       else if (act === 'edit-line-remove-comp') { editLineToggleComponent(el.dataset.inv); }
       else if (act === 'undo-remove') { undoRemoveLine(); }

@@ -9787,6 +9787,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
   const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, color, decorType, icon, prevX, prevY, discount, swap } = req.body;
+  let traded = null; // the OTHER table, when two of them trade numbers
   if (label !== undefined) {
     const was = String(table.label);
     // TWO TABLES CAN TRADE NUMBERS (owner, Sep '26: "make it so i can swap").
@@ -9807,6 +9808,13 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
           carryBills(data, new Map([[was, String(label)], [String(other.label), was]]));
           other.label = was;
           table.label = label;
+          // A SWAP CHANGES TWO TABLES, SO THE REPLY SAYS SO. It used to hand
+          // back only the table that was asked about, and the screen applied
+          // its own one-table patch — so the trade landed on disk and the
+          // editor sat there showing BOTH tables wearing the new number until
+          // something reloaded the plan (owner, Sep '26: "i say yes, it
+          // doesn't swap over... it doesn't save properly").
+          traded = { id: other.id, label: other.label, fpId: ownerPlan.id };
         }
       } else {
         if (String(label) !== was) carryBills(data, new Map([[was, String(label)]]));
@@ -9851,7 +9859,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   }
   if (mergedInto !== undefined) table.mergedInto = mergedInto || null;
   writeData(data);
-  res.json(table);
+  res.json(traded ? { ...table, traded } : table);
 });
 
 // MOVING A SITTING IS ONE CALL (owner, Aug '26: "table transfer is slow").
@@ -34646,7 +34654,19 @@ async function patchFloorObject(fpId, id, patch) {
   if (t) Object.assign(t, patch);
   render();
   try {
-    await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    const saved = await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+    // THE SERVER IS THE TRUTH ABOUT WHO WEARS WHICH NUMBER. A swap changes
+    // TWO tables; this function only ever knew about the one it was asked
+    // for, so the other kept its old number on screen and the editor showed
+    // both of them wearing the new one until something reloaded the plan.
+    if (saved && saved.traded) {
+      // By ID, across every layout — the table it traded with can be on
+      // another floor, and looking it up by plan first only found it when the
+      // two happened to share one.
+      const other = (state.floorPlans || []).flatMap(f => f.tables || []).find(x => x.id === saved.traded.id);
+      if (other) other.label = saved.traded.label;
+      render();
+    }
   } catch (e) {
     if (t && previous) Object.assign(t, previous);
     state.toast = toastFail(e.message || 'Could not save that change.');

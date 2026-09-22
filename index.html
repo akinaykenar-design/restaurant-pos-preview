@@ -30952,7 +30952,12 @@ function floorStatusOn() { return !!state.floorStatusView; }
 // WHICH READING THE SETUP CARD IS SHOWING when the floor itself has none
 // picked — the venue's FIRST reading, not a hard-coded one. It used to name
 // 'sitting', which is how deleting that lens would have left the card blank.
-function previewLens() { return state.floorStatusView || (floorLenses()[0] || ['course'])[0]; }
+// NOTHING PICKED IS A READING (owner, Sep '26: "add default"). The floor opens
+// with no key lit and the tables still wear the plain status — open tab, bill
+// printed, in use — so the setup card has to be able to show that too. It used
+// to fall back to the venue's FIRST lens, which meant the one thing a floor
+// actually opens on was the one thing this card could not draw.
+function previewLens() { return state.floorStatusView || null; }
 function floorLensesOn() {
   const off = floorLensOff();
   const on = floorLenses().filter(l => !off.includes(l[0]));
@@ -31061,14 +31066,60 @@ function renderTableStatusPreview() {
   const cell = (inner, name) => `<div class="ts-sample"><div class="floor-canvas ts-sample-floor">${inner}</div><div class="ts-sample-name">${esc(name)}</div></div>`;
 
   // 1 — THE TABLES: their paint, no pill on them.
-  const stateTables = TABLE_STATE_SAMPLES.map(([, s], i) => ({ id: 'sample-t' + i, type: 'table', label: 'ABCD'[i], shape: i % 2 ? 'round' : 'square', x: 50, y: 50, width: 60, height: 60, seats: 4, covers: s.open ? 2 : 0, color: real.color }));
-  const tables = _withSampleFloor(
+  // THE TABLES FOLLOW THE PICK (owner, Sep '26: "then change what tables look
+  // like when you change to other options"). The four samples only ever drew
+  // the plain status, whichever key was lit — so picking Course or Notes
+  // changed the PILLS underneath and left the tables saying something else,
+  // which is the one thing the floor never does. With a key lit the samples
+  // are that key's own readings, washed the way the floor washes them; with
+  // nothing picked they are the plain status, which is what the floor opens
+  // on. Same renderer either way, so the card cannot drift from the floor.
+  const shape = (i) => (i % 2 ? 'round' : 'square');
+  const box = (extra, i) => ({ id: 'sample-t' + i, type: 'table', label: 'ABCDEFGH'[i] || 'A', shape: shape(i),
+    x: 50, y: 50, width: 60, height: 60, seats: 4, color: real.color, ...extra });
+  // A ROW OF THE SAME TABLE TWICE IS A LIE. Some readings paint the table
+  // (Course gives each course its colour), some only write a pill (Spend
+  // leaves the plain status underneath). Drawn blind, Spend showed two
+  // identical blue tables labelled Medium and High. So: the samples are
+  // deduped on the paint, and a reading that turns out not to paint at all
+  // falls back to the plain status — which is what its tables really wear.
+  const washOf = (html) => String(html)
+    .replace(/<span class="fm-num[\s\S]*?<\/span>/g, '')
+    .replace(/(data-id|aria-label|title)="[^"]*"/g, '');
+  const tables = lens ? (() => {
+    const ss = pillSamplesFor(lens);
+    const seen = new Set(); const out = [];
+    const drawn = ss.map((sp, i) => {
+      const sampleCat = sp.markKey ? (String(sp.markKey).indexOf('note:') === 0 ? String(sp.markKey).slice(5) : String(sp.markKey)) : null;
+      // ONE SHAPE across a reading's row, so the only thing that differs
+      // between two samples is the paint — which is what the dedupe below
+      // has to be able to see. (The plain row keeps its square/round mix:
+      // there the shapes ARE the point, four different tables.)
+      const t = { ...box({ covers: 2, notes: sampleCat ? [{ categoryId: sampleCat, text: sp.name }] : [] }, i), shape: 'square' };
+      const ago = sp.mins != null ? now - sp.mins * 60000 : now - 30 * 60000;
+      const each = sp.spendVal != null ? (spendPillMode() === 'total' ? sp.spendVal / 2 : sp.spendVal) : 30;
+      const line = [{ name: 'Sample', price: each, qty: 2, course: sp.courseN }];
+      const order = { id: 'sample-order-' + t.label, status: 'open', orderType: 'dine-in', table: t.label, covers: 2,
+        items: line, rounds: [{ items: line, at: ago, sentAt: ago }], createdAt: ago };
+      return _withSampleFloor([order], {},
+        sp.res ? [{ id: 'sample-res', tableId: t.id, time: new Date(now + 30 * 60000).toISOString(), status: 'booked' }] : [],
+        () => { state.settings.floorPillEnabled = false; return { mk: floorTableMarker(t, { height: STD_FLOOR_H }), name: sp.name }; });
+    });
+    for (const d of drawn) {
+      const key = washOf(d.mk);
+      if (seen.has(key)) continue;
+      seen.add(key); out.push(cell(d.mk, d.name));
+    }
+    return out.length > 1 ? out.join('') : null;
+  })() : null;
+  const plainTables = tables !== null ? null : _withSampleFloor(
     TABLE_STATE_SAMPLES.map(([, s], i) => _sampleOrder('ABCD'[i], s, now, warn, over)).filter(Boolean),
     { 'sample-t3': { staff: 'Sam', device: 'another-till' } }, [],
-    () => { state.settings.floorPillEnabled = false; return stateTables.map((t, i) => cell(floorTableMarker(t, { height: STD_FLOOR_H }), TABLE_STATE_SAMPLES[i][0])).join(''); });
+    () => { state.settings.floorPillEnabled = false;
+      return TABLE_STATE_SAMPLES.map(([name, s], i) => cell(floorTableMarker(box({ covers: s.open ? 2 : 0 }, i), { height: STD_FLOOR_H }), name)).join(''); });
 
   // 2 — THE PILLS the chosen lens draws, plus the marks that ride every table.
-  const samples = pillSamplesFor(lens);
+  const samples = lens ? pillSamplesFor(lens) : [];
   const pills = samples.map((s, i) => {
     const label = String.fromCharCode(80 + (i % 20));
     const sampleCat = s.markKey ? (String(s.markKey).indexOf('note:') === 0 ? String(s.markKey).slice(5) : String(s.markKey)) : null;
@@ -31101,11 +31152,14 @@ function renderTableStatusPreview() {
     return `<div class="ts-sample"><div class="ts-pill-box">${inner}</div><div class="ts-sample-name">${esc(s.name)}</div></div>`;
   }).join('');
 
+  // NOTHING PICKED, NO PILLS. The pill IS the reading, so a floor with no key
+  // lit draws none — and the card was drawing a row of empty ones with their
+  // names underneath, which is the opposite of what the floor does.
   return `
     <div class="ts-group-name">Tables</div>
-    <div class="ts-samples ts-samples-4">${tables}</div>
-    <div class="ts-group-name">Pills</div>
-    <div class="ts-samples">${pills}</div>`;
+    <div class="ts-samples ts-samples-4">${tables || plainTables}</div>
+    ${lens ? `<div class="ts-group-name">Pills</div>
+    <div class="ts-samples">${pills}</div>` : ''}`;
 }
 function renderTableStatusAdmin() {
   const sc = state.settings.tableStatusColors || {};
@@ -31129,9 +31183,13 @@ function renderTableStatusAdmin() {
       ${/* The floor's own lens chips: the preview's pills follow the lens the
             same way the floor's do, through the same handler. */ ''}
       <div class="seg seg-scroll ts-lens-row" style="width:fit-content;max-width:100%;">
-        ${floorLenses().map(([v, l]) => `<button class="ts-lens-chip${previewLens() === v ? ' active' : ''}${floorLensOff().includes(v) ? ' ts-lens-hidden' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
+        ${[['', 'Default'], ...floorLenses()].map(([v, l]) => `<button class="ts-lens-chip${(previewLens() || '') === v ? ' active' : ''}${v && floorLensOff().includes(v) ? ' ts-lens-hidden' : ''}" data-act="fp-view-pick" data-val="${v}">${l}</button>`).join('')}
       </div>
-      ${(() => { const cur = previewLens(); const l = floorLenses().find(l => l[0] === cur) || floorLenses()[0];
+      ${/* Default has nothing to switch off — it is what is left when every
+            key is off, so a switch there would be a control that turns off
+            the absence of a control. */ ''}
+      ${(() => { const cur = previewLens(); if (!cur) return `<div class="ts ts-lens-switch">Nothing picked on the floor.</div>`;
+        const l = floorLenses().find(l => l[0] === cur) || floorLenses()[0];
         return `<div class="pay-options ts-lens-switch">${togglePill(!floorLensOff().includes(l[0]), 'set-floor-lens-on', `data-key="${l[0]}"`)}<div style="font-weight:700;font-size:var(--fs-md);">${esc(l[1])} on the floor</div></div>`; })()}
       ${renderTableStatusPreview()}
       <div class="ts" style="text-align:center;margin-top:8px;">what the floor shows on a table</div>
@@ -42736,7 +42794,10 @@ function handleActClick(el, e) {
         // A TAP ON THE LIT ONE TURNS IT OFF (owner, Sep '26). Picking was a
         // one-way door: once the tables were reading something there was no
         // way back to reading nothing.
-        state.floorStatusView = state.floorStatusView === el.dataset.val ? null : el.dataset.val;
+        // …and the setup card's Default chip says the same thing out loud, so
+        // an empty value here means nothing picked rather than a lens named ''.
+        const want = el.dataset.val || null;
+        state.floorStatusView = state.floorStatusView === want ? null : want;
         render();
       }
       else if (act === 'add-object') { addObject(el.dataset.fp); }

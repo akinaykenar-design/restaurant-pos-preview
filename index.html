@@ -4062,6 +4062,15 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 .fp-sub:first-of-type{ margin-top:0; }
 .fp-sub-flat{ margin:0; }
 .fp-inline-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; min-height:44px; margin-top:12px; }
+/* A COMBINATION ROW is the whole row, tapped to change it — a name on the
+   left, what it seats on the right. It carries no key of its own: the row IS
+   the door, the way every other list in the editor works. */
+.fp-join-row{ flex:1 1 auto; display:flex; align-items:center; justify-content:space-between; gap:8px;
+  min-height:44px; padding:0 12px; background:var(--surface); color:var(--text-primary);
+  border:1px solid var(--steel-200); border-radius:var(--btn-radius); cursor:pointer; text-align:left; }
+.fp-join-name{ font-size:var(--fs-md); font-weight:700; }
+.fp-join-seats{ font-size:var(--fs-md); color:var(--charcoal-soft); }
+
 /* The buttons for the picked table sit on the SAME 4-wide grid as the shapes
    above them, so the card is one column of squares rather than a wrapping row
    that left a lone bin on a line of its own. */
@@ -9898,12 +9907,87 @@ app.post('/api/tables/move-sitting', (req, res) => {
   res.json({ from: from || null, to });
 });
 
+// ---------- Table combinations ----------
+// A COMBINATION IS A JOIN THE VENUE MEANT (owner, Sep '26: "isn't the
+// combination same as the link icon? ... should that just be merged"). There is
+// no second list and no second control: joining tables with the chain records
+// what the pair seats, and that record is what the front desk reads when it
+// places a party. The live weld stays where it was — `mergedInto` on the table.
+function joinKey(ids) { return [...ids].sort().join('|'); }
+function joinSeats(floorPlan, ids) {
+  const ts = ids.map(id => floorPlan.tables.find(t => t.id === id)).filter(Boolean);
+  const seats = ts.map(t => Math.max(0, parseInt(t.seats) || 0));
+  const max = seats.reduce((a, b) => a + b, 0);
+  // Nobody sits four at two tables pushed together — they take one table. So
+  // the smallest party a combination is for is one more than its biggest
+  // table on its own.
+  const min = Math.min(max, Math.max(...seats, 0) + 1);
+  return { min, max };
+}
+app.get('/api/floorplans/:fpId/joins', (req, res) => {
+  const data = readData();
+  const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
+  if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
+  res.json(floorPlan.joins || []);
+});
+app.post('/api/floorplans/:fpId/joins', (req, res) => {
+  const data = readData();
+  const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
+  if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
+  const ids = Array.isArray(req.body.tables) ? [...new Set(req.body.tables.map(String))] : [];
+  const live = ids.filter(id => (floorPlan.tables || []).some(t => t.id === id && t.type !== 'decor'));
+  if (live.length < 2) return res.status(400).json({ error: 'A combination needs two tables or more' });
+  floorPlan.joins = floorPlan.joins || [];
+  const def = joinSeats(floorPlan, live);
+  const min = req.body.min !== undefined ? Math.max(1, parseInt(req.body.min) || 1) : def.min;
+  const max = req.body.max !== undefined ? Math.max(min, parseInt(req.body.max) || min) : Math.max(def.max, min);
+  // The same tables twice is the same combination — change it, never double it.
+  const was = floorPlan.joins.find(c => joinKey(c.tables) === joinKey(live));
+  const combo = was || { id: 'cb' + Date.now() + Math.floor(Math.random() * 1000), tables: live };
+  combo.tables = live; combo.min = min; combo.max = max;
+  if (!was) floorPlan.joins.push(combo);
+  logAudit(data, staffFromReq(req), `${was ? 'Changed' : 'Added'} table combination ${joinName(floorPlan, combo)} on ${floorPlan.name}`);
+  writeData(data);
+  res.json(combo);
+});
+app.put('/api/floorplans/:fpId/joins/:id', (req, res) => {
+  const data = readData();
+  const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
+  if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
+  const combo = (floorPlan.joins || []).find(c => c.id === req.params.id);
+  if (!combo) return res.status(404).json({ error: 'Combination not found' });
+  if (req.body.min !== undefined) combo.min = Math.max(1, parseInt(req.body.min) || 1);
+  if (req.body.max !== undefined) combo.max = Math.max(combo.min, parseInt(req.body.max) || combo.min);
+  logAudit(data, staffFromReq(req), `Changed table combination ${joinName(floorPlan, combo)} on ${floorPlan.name}`);
+  writeData(data);
+  res.json(combo);
+});
+app.delete('/api/floorplans/:fpId/joins/:id', (req, res) => {
+  const data = readData();
+  const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
+  if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
+  const combo = (floorPlan.joins || []).find(c => c.id === req.params.id);
+  floorPlan.joins = (floorPlan.joins || []).filter(c => c.id !== req.params.id);
+  if (combo) logAudit(data, staffFromReq(req), `Removed table combination ${joinName(floorPlan, combo)} from ${floorPlan.name}`);
+  writeData(data);
+  res.json({ ok: true });
+});
+function joinName(floorPlan, combo) {
+  return combo.tables
+    .map(id => (floorPlan.tables.find(t => t.id === id) || {}).label)
+    .filter(Boolean).join(' + ');
+}
+
 app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
   const data = readData();
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   floorPlan.tables = floorPlan.tables.filter(t => t.id !== req.params.id);
+  // A combination is its tables. Lose one and the combination is not a
+  // combination any more — it goes, rather than sitting in the desk's list
+  // pointing at a table nobody can seat.
+  if (floorPlan.joins) floorPlan.joins = floorPlan.joins.filter(c => !c.tables.includes(req.params.id));
   if (table) logAudit(data, staffFromReq(req), `Removed ${table.type === 'decor' ? 'floor object' : 'table'} "${table.label}" from ${floorPlan.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -20399,6 +20483,7 @@ function render() {
     ${state.coversPad && !state.confirmDialog ? renderCoversPop() : ''}
     ${state.datePad ? renderDatePad() : ''}
     ${state.tableNumPad ? renderTableNumPop() : ''}
+    ${state.tableJoinPad ? renderJoinPop() : ''}
     ${state.itemOptions && state.itemOptions.seatOnly && !state.allergenWarnModal ? renderSeatPop() : ''}
     ${state.itemOptions && !state.itemOptions.seatOnly && !state.allergenWarnModal ? renderItemOptionsPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
@@ -29897,7 +29982,7 @@ function renderFloorPlanAdmin() {
         </div>` : ''}
       </div>`;
       };
-      return tableCard + decorCard('structure', 'Structure', selStructure) + decorCard('label', 'Label', selLabel);
+      return tableCard + tableJoinCard(fp) + decorCard('structure', 'Structure', selStructure) + decorCard('label', 'Label', selLabel);
     })()}
     ${/* THE COLOUR A NEW TABLE GETS BELONGS WITH ADDING ONE, not in a card of
           its own between Add and the floor's settings (owner, Aug '26:
@@ -33879,6 +33964,18 @@ async function linkTables(fromId, intoId, drop, opts) {
     }
   } catch (e) { render(); return false; }
   const n = allTables().filter(t => t.mergedInto === main.id).length;
+  // THE CHAIN IS THE COMBINATION (owner, Sep '26). In the LAYOUT EDITOR,
+  // joining tables is the venue saying "these go together" — so it asks what
+  // the run seats and writes that down for the front desk. On the floor,
+  // joining is just tonight's weld and asks nothing.
+  const inEditor = state.view === 'admin' && state.adminTab === 'floorplan';
+  const group = [main.id, ...allTables().filter(t => t.mergedInto === main.id && t.id !== main.id).map(t => t.id)];
+  const fpMain = findFloorPlanForTable(main.id);
+  if (inEditor && fpMain && group.length > 1) {
+    // One piece of news at a time: the pad IS the confirmation here.
+    openJoinPad(fpMain.id, group);
+    return true;
+  }
   // Plain words: "runs the group of 2" is not how anyone says it (Sep '26).
   state.toast = `${n + 1} tables are one now — order on ${String(main.label)}`;
   render();
@@ -34595,6 +34692,144 @@ function floorUndo() {
   if (floorHistory.redo.length > FLOOR_HISTORY_CAP) floorHistory.redo.shift();
   applyFloorSnapshot(state.adminFloorPlanId, floorHistory.undo.pop());
 }
+// §§ Table combinations: the join the venue meant
+// ONE DOOR (owner, Sep '26: "isn't the combination same as the link icon?
+// ... should that just be merged"). Joining tables with the chain IS making a
+// combination: the same key, the same gesture, one record. The chain asks what
+// the joined tables seat, the answer sits on the layout, and the front desk
+// reads it to place a party. A live weld is still `mergedInto` on the table —
+// the combination is what the venue MEANT, the weld is what is true right now.
+function joinTables(fp, combo) {
+  return (combo.tables || []).map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
+}
+function joinLabel(fp, combo) {
+  return joinTables(fp, combo).map(t => String(t.label)).join(' + ');
+}
+// THE RUN'S OWN LINE (owner, Sep '26: "those tables are aligned diagonally
+// along an imaginary line"). Order the tables the way they actually sit —
+// along the line through the two furthest apart — so "every run inside"
+// means runs of NEIGHBOURS, not every combination of numbers.
+function joinRunOrder(fp, ids) {
+  const ts = ids.map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
+  if (ts.length < 3) return ts.map(t => t.id);
+  let a = ts[0], b = ts[1], far = -1;
+  for (const p of ts) for (const q of ts) {
+    const d = Math.hypot(p.x - q.x, p.y - q.y);
+    if (d > far) { far = d; a = p; b = q; }
+  }
+  const ux = (b.x - a.x) / (far || 1), uy = (b.y - a.y) / (far || 1);
+  return ts.slice().sort((p, q) => (p.x * ux + p.y * uy) - (q.x * ux + q.y * uy)).map(t => t.id);
+}
+// Every run of neighbours two long or more, the whole set included.
+function joinRuns(ordered) {
+  const out = [];
+  for (let i = 0; i < ordered.length; i++)
+    for (let j = i + 2; j <= ordered.length; j++) out.push(ordered.slice(i, j));
+  return out;
+}
+function openJoinPad(fpId, ids, joinId) {
+  const fp = (state.floorPlans || []).find(f => f.id === fpId);
+  if (!fp) return;
+  const was = joinId ? (fp.joins || []).find(c => c.id === joinId) : null;
+  const ordered = joinRunOrder(fp, was ? was.tables : ids);
+  const seats = ordered.map(id => Math.max(0, parseInt((fp.tables.find(t => t.id === id) || {}).seats) || 0));
+  const max = seats.reduce((x, y) => x + y, 0);
+  state.tableJoinPad = {
+    fpId, id: was ? was.id : null, tables: was ? joinRunOrder(fp, was.tables) : ordered,
+    min: was ? was.min : Math.min(max, Math.max(...seats, 0) + 1),
+    max: was ? was.max : max,
+    every: 'these',
+  };
+  render();
+}
+function renderJoinPop() {
+  const p = state.tableJoinPad;
+  const fp = (state.floorPlans || []).find(f => f.id === p.fpId);
+  if (!fp) return '';
+  const names = joinLabel(fp, { tables: p.tables });
+  const step = (k, val, low) => `<div class="grid-stepper" style="margin:0;">
+    <button class="btn-secondary sm" data-act="join-step" data-k="${k}" data-d="-1"${val <= low ? ' disabled style="opacity:var(--dim);"' : ''}>−</button>
+    <span class="grid-step-val">${val}</span>
+    <button class="btn-secondary sm" data-act="join-step" data-k="${k}" data-d="1">+</button>
+  </div>`;
+  return `
+  <div class="modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>${esc(names)}</h2>
+      <div class="sub">Joined. How many does it seat?</div>
+      <div class="fp-inline-row"><span class="fp-sub fp-sub-flat">Seats from</span>${step('min', p.min, 1)}</div>
+      <div class="fp-inline-row"><span class="fp-sub fp-sub-flat">up to</span>${step('max', p.max, p.min)}</div>
+      ${p.tables.length > 2 && !p.id ? `<div class="fp-sub">Also make</div>
+        ${optionPair(p.every, 'join-every', [['these', 'Just these'], ['all', 'Every run inside']])}` : ''}
+      <div class="modal-actions">
+        <button class="icon-action neutral" data-act="join-cancel">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        ${p.id ? `<button type="button" class="icon-action discard btn-modal-delete" data-act="join-delete">${ACT_TRASH_SVG}<span class="ia-label">Delete</span></button>` : ''}
+        <button class="icon-action send" data-act="join-save">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+function joinStep(k, d) {
+  const p = state.tableJoinPad;
+  if (!p) return;
+  if (k === 'min') p.min = Math.max(1, p.min + d);
+  else p.max = Math.max(1, p.max + d);
+  if (p.max < p.min) { if (k === 'min') p.max = p.min; else p.min = p.max; }
+  render();
+}
+async function joinSave() {
+  const p = state.tableJoinPad;
+  if (!p) return;
+  const sets = p.every === 'all' && !p.id ? joinRuns(p.tables) : [p.tables];
+  try {
+    for (const tables of sets) {
+      await api(`/api/floorplans/${p.fpId}/joins`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tables, min: tables.length === p.tables.length ? p.min : undefined, max: tables.length === p.tables.length ? p.max : undefined }),
+      });
+    }
+  } catch (e) {
+    state.toast = toastFail('Could not save the combination.');
+    render(); armToastTimer(2500); return;
+  }
+  const fp = (state.floorPlans || []).find(f => f.id === p.fpId);
+  const name = fp ? joinLabel(fp, { tables: p.tables }) : '';
+  state.floorPlans = await api('/api/floorplans');
+  state.tableJoinPad = null;
+  state.toast = sets.length > 1 ? `${sets.length} combinations saved` : `${name} seats ${p.min}–${p.max}`;
+  render(); armToastTimer(2500);
+}
+async function joinDelete() {
+  const p = state.tableJoinPad;
+  if (!p || !p.id) return;
+  try {
+    await api(`/api/floorplans/${p.fpId}/joins/${p.id}`, { method: 'DELETE' });
+  } catch (e) {
+    state.toast = toastFail('Could not remove the combination.');
+    render(); armToastTimer(2500); return;
+  }
+  state.floorPlans = await api('/api/floorplans');
+  state.tableJoinPad = null;
+  state.toast = 'Combination removed';
+  render(); armToastTimer(2200);
+}
+// The list, on the page the tables live on — never a second screen.
+function tableJoinCard(fp) {
+  const joins = fp.joins || [];
+  if (!joins.length) return '';
+  return `
+  <div class="pp-group">
+    <div class="pp-label" data-sub="Tap one to change it.">Combinations</div>
+    ${joins.map(c => `
+      <div class="fp-inline-row">
+        <button class="fp-join-row" data-act="join-edit" data-id="${c.id}" data-fp="${fp.id}">
+          <span class="fp-join-name">${esc(joinLabel(fp, c))}</span>
+          <span class="fp-join-seats">${c.min}–${c.max}</span>
+        </button>
+      </div>`).join('')}
+  </div>`;
+}
+
 // §§ Floor editor: undo, marquee, resize
 function floorRedo() {
   if (!floorEditorActive() || floorHistory.fpId !== state.adminFloorPlanId || !floorHistory.redo.length) return;
@@ -42913,6 +43148,12 @@ function handleActClick(el, e) {
       else if (act === 'table-size') { stepTableSize(el.dataset.dim, parseInt(el.dataset.d, 10)); }
       else if (act === 'table-seats') { stepTableSeats(parseInt(el.dataset.d, 10)); }
       else if (act === 'unlink-table') { unlinkTapTable(el.dataset.id); }
+      else if (act === 'join-edit') { openJoinPad(el.dataset.fp, [], el.dataset.id); }
+      else if (act === 'join-step') { joinStep(el.dataset.k, parseInt(el.dataset.d)); }
+      else if (act === 'join-every') { state.tableJoinPad.every = el.dataset.val; render(); }
+      else if (act === 'join-cancel') { state.tableJoinPad = null; render(); }
+      else if (act === 'join-save') { joinSave(); }
+      else if (act === 'join-delete') { joinDelete(); }
       else if (act === 'toggle-floor-snap') { saveFloorPlanGrid(el.dataset.fp, { snapToGrid: el.dataset.val === 'true' }); }
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }

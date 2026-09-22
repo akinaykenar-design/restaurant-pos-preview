@@ -5213,6 +5213,30 @@ select.ie-field{font-weight:700;}
    card, so it stays behind them all and a tap on bare screen still closes. */
 .fp-float-card{ position:relative; z-index:var(--z-menu); }
 
+/* THE ROW ARRIVES ONCE, WHEN IT OPENS (owner, Sep '26, picked from three
+   laid side by side: "I like b too. I like slow"). The bubble GROWS out of
+   the key that was pressed — a clip, so nothing reflows and the card never
+   changes height — and each key slides its last few pixels into place just
+   behind the opening edge, rightmost first, so they read as coming out of
+   that key. It is slower than --t-move on purpose: the stagger is the whole
+   point of this one and at 280ms nobody can see it.
+   The class is put on for the ONE render after the tap and comes straight
+   off; left on the row it replays on every pick, which is the flash the
+   owner sent back. */
+.fp-float-keys{ --t-dock:.45s; }
+.fp-keys-in{ animation:fp-keys-grow var(--t-dock) cubic-bezier(.2,.8,.25,1) both; }
+@keyframes fp-keys-grow{ from{ clip-path:inset(0 0 0 calc(100% - 60px)); } to{ clip-path:inset(0 0 0 0); } }
+.fp-keys-in .fp-chip:not(:last-child){ animation:fp-keys-slide calc(var(--t-dock) * .5) cubic-bezier(.2,.8,.25,1) both; }
+@keyframes fp-keys-slide{ from{ transform:translateX(26px); } to{ transform:none; } }
+.fp-keys-in .fp-chip:nth-child(6){ animation-delay:0s; }
+.fp-keys-in .fp-chip:nth-child(5){ animation-delay:calc(var(--t-dock) * .07); }
+.fp-keys-in .fp-chip:nth-child(4){ animation-delay:calc(var(--t-dock) * .14); }
+.fp-keys-in .fp-chip:nth-child(3){ animation-delay:calc(var(--t-dock) * .21); }
+.fp-keys-in .fp-chip:nth-child(2){ animation-delay:calc(var(--t-dock) * .28); }
+.fp-keys-in .fp-chip:nth-child(1){ animation-delay:calc(var(--t-dock) * .35); }
+@media (prefers-reduced-motion: reduce){
+  .fp-keys-in, .fp-keys-in .fp-chip{ animation:none; }
+}
 .fp-float .fp-chip{ font-size:var(--fs-md); }
 .fp-float-rooms .fp-chip{ min-width:84px; }
 @media (max-width: 768px){
@@ -13225,7 +13249,12 @@ let state = {
   pickFlashId: null, // table showing the green pick sweep (held while the covers pad asks)
   floorLinkMode: null, // Table Layout linking tool: null | 'link' | 'unlink'
   linkTapFrom: null, // "Link to…" armed from a selected table — tap a target (drag still works)
-  floorStatusView: 'sitting', // picker lens: 'sitting' time or 'course' wait
+  // NOTHING IS PICKED TO BEGIN WITH (owner, Sep '26: "by default nothing is
+  // selected and possible to deselect a table status"). The floor opened
+  // already reading one thing about every table, which nobody had asked it
+  // to, and there was no way to ask it to stop. null means the tables say
+  // nothing; tapping the key that is lit puts it back to null.
+  floorStatusView: null, // which lens the pill follows — null is none of them
   detailOrder: null,
   toast: null,
   online: true,
@@ -24219,7 +24248,9 @@ async function seatBookingFromFloor(tableId) {
   if (!r) { pickTable(tableId); return; }
   await markReservationSeated(r.id);
   await saveTableCovers(tableId, r.partySize || 1);
-  state.floorStatusView = 'sitting';
+  // Seating a booking moves OFF the booked lens — it does not choose one for
+  // you. A floor set to read nothing stays reading nothing.
+  if (state.floorStatusView === 'booked') state.floorStatusView = 'sitting';
   state._pickResuming = true;
   try { pickTable(tableId); } finally { state._pickResuming = false; }
 }
@@ -32159,6 +32190,10 @@ function floorPillHtml(t, cs) {
   };
   const pill = (style, inner, title) => `<span class="tbl-cpill" style="${style}">${inner}</span>`;
   const lens = floorStatusOn() ? state.floorStatusView : 'course';
+  // NOTHING PICKED, NOTHING SAID. Every branch below is a lens, and the last
+  // one is the course — so a floor with nothing picked would have fallen
+  // through to it and gone on talking.
+  if (floorStatusOn() && !lens) return '';
   const o = tableOpenOrder(t.label);
   // A called-away course outranks every lens: show how long the kitchen's
   // been firing it, danger-scaled against the course-wait cap.
@@ -32697,8 +32732,11 @@ function fpFloatHtml(fp) {
   // siblings all stand the same height, so the strip is one height whatever
   // is open and the room never moves.
   const lensOpts = floorStatusOn() ? floorLensesOn() : null;
-  const lensCur = lensOpts && (lensOpts.some(o => o[0] === (state.floorStatusView || 'sitting'))
-    ? (state.floorStatusView || 'sitting') : lensOpts[0][0]);
+  // What is really picked, which may be nothing at all. It used to fall back
+  // to the first lens, so the row always had one key lit whether or not the
+  // floor was actually reading anything.
+  const lensCur = lensOpts && lensOpts.some(o => o[0] === state.floorStatusView)
+    ? state.floorStatusView : null;
   const scrim = lensOpts && state.fpViewOpen ? `<div class="fp-dd-scrim" data-act="fp-view-toggle"></div>` : '';
   // ONE BUBBLE THAT GROWS, NOT A SECOND ONE BESIDE IT (owner, Sep '26: "I
   // don't want it to be separate either... just flow out of the other
@@ -32713,8 +32751,19 @@ function fpFloatHtml(fp) {
     ? lensOpts.map(([v, l]) =>
         `<button class="fp-chip icon-only${v === lensCur ? ' active' : ''}" data-act="fp-view-pick" data-val="${v}" aria-label="${esc(l)}" title="${esc(l)}">${FP_LENS_SVG[v] || FP_LENS_SVG.sitting}</button>`).join('')
     : '';
+  // THE ROW ARRIVES ONCE, WHEN IT OPENS (owner, Sep '26, picked from three
+  // laid side by side: "I like b too. I like slow"). The bubble grows out of
+  // the key you pressed and each key slides its last few pixels into place
+  // just behind the opening edge, so they read as coming OUT of that key.
+  // The flag is read and cleared in the same breath, so the class lands on
+  // the one render that follows the tap and on no other — which is the whole
+  // trick. Left on the row it replayed on every pick, and that is the flash
+  // the owner sent back ("clicking on status makes it flash leave it
+  // static"). Same one-render pattern as the floor's own entrance.
+  const keysIn = state._fpKeysIn ? ' fp-keys-in' : '';
+  state._fpKeysIn = false;
   const stackKey = lensOpts
-    ? `<div class="fp-float-card fp-float-keys">${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
+    ? `<div class="fp-float-card fp-float-keys${keysIn}">${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
     : '';
   // ONE LINE (owner, Sep '26: "one line. not two"): rooms, then the six when
   // they are out, then the keys — all along the same strip, right to left in
@@ -42410,14 +42459,20 @@ function handleActClick(el, e) {
       else if (act === 'picker-floorplan-tab') { state.pickerFloorPlanId = el.dataset.id; render(); }
       else if (act === 'fp-view-toggle') {
         if (state.fpViewOpen) state.fpViewOpen = null;
-        else { const r = el.getBoundingClientRect(); state.fpViewOpen = { right: Math.round(window.innerWidth - r.right), top: Math.round(r.bottom + 4) }; }
+        else { const r = el.getBoundingClientRect(); state.fpViewOpen = { right: Math.round(window.innerWidth - r.right), top: Math.round(r.bottom + 4) }; state._fpKeysIn = true; }
         render();
       }
       // THE MENU STAYS UP UNTIL YOU CLICK AWAY (owner, Sep '26: "keep dropdown
       // expanded until I click away so I can quickly navigate all the different
       // table states"). The tap lights the choice and the floor behind changes
       // at once; the way out is the scrim, the chip, or a pick on the map.
-      else if (act === 'fp-view-pick') { state.floorStatusView = el.dataset.val; render(); }
+      else if (act === 'fp-view-pick') {
+        // A TAP ON THE LIT ONE TURNS IT OFF (owner, Sep '26). Picking was a
+        // one-way door: once the tables were reading something there was no
+        // way back to reading nothing.
+        state.floorStatusView = state.floorStatusView === el.dataset.val ? null : el.dataset.val;
+        render();
+      }
       else if (act === 'add-object') { addObject(el.dataset.fp); }
       else if (act === 'floor-undo') { floorUndo(); }
       else if (act === 'floor-redo') { floorRedo(); }

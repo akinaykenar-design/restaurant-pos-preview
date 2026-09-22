@@ -5280,19 +5280,33 @@ select.ie-field{font-weight:700;}
    The class is put on for the ONE render after the tap and comes straight
    off; left on the row it replays on every pick, which is the flash the
    owner sent back. */
-.fp-float-keys{ --t-dock:.45s; }
+/* THE CARD GROWS. IT IS NOT A CARD WITH A HOLE CUT IN IT (owner, Sep '26:
+   "shadow gets activated once expanded... idk shadow look unpolished").
+   It used to open by clip-path, and a clip cuts the box SHADOW with
+   everything else: for the whole .45s the bubble was a hard-edged white slab
+   with no shadow and square corners, and the shadow switched on in one frame
+   at the end. Widening the clip to let the shadow through did not fix it —
+   a clipped element sits on its own compositing layer, so RELEASING the clip
+   re-rasterised the card and moved ~10k pixels by up to 37/255. That repaint
+   is the jitter, and a hover lands the same one.
+   So nothing is cut. The card's own WIDTH opens, from the stack key (44 + the
+   card's 16 of padding) out to the width it measured before it started, with
+   the keys held against its right edge and hidden while they are outside it.
+   Every frame is a real card: real corners, real edge, real shadow, growing.
+   The end IS the resting card, so letting the class go changes no pixel. */
+.fp-float-keys{ --t-dock:.45s; overflow:hidden; justify-content:flex-end; }
 .fp-keys-in{ animation:fp-keys-grow var(--t-dock) cubic-bezier(.2,.8,.25,1) both; }
-@keyframes fp-keys-grow{ from{ clip-path:inset(0 0 0 calc(100% - 60px)); } to{ clip-path:inset(0 0 0 0); } }
-.fp-keys-in .fp-chip:not(:last-child){ animation:fp-keys-slide calc(var(--t-dock) * .5) cubic-bezier(.2,.8,.25,1) both; }
-@keyframes fp-keys-slide{ from{ transform:translateX(26px); } to{ transform:none; } }
-.fp-keys-in .fp-chip:nth-child(6){ animation-delay:0s; }
-.fp-keys-in .fp-chip:nth-child(5){ animation-delay:calc(var(--t-dock) * .07); }
-.fp-keys-in .fp-chip:nth-child(4){ animation-delay:calc(var(--t-dock) * .14); }
-.fp-keys-in .fp-chip:nth-child(3){ animation-delay:calc(var(--t-dock) * .21); }
-.fp-keys-in .fp-chip:nth-child(2){ animation-delay:calc(var(--t-dock) * .28); }
-.fp-keys-in .fp-chip:nth-child(1){ animation-delay:calc(var(--t-dock) * .35); }
+@keyframes fp-keys-grow{
+  from{ width:calc(var(--sq-ctl) + 16px); }
+  to{ width:var(--dock-w); } }
+/* THE KEYS DO NOT MOVE. THE EDGE MOVES PAST THEM (owner, Sep '26: "why are
+   they stuck together?"). Each key also slid 26px on a stagger, and the gap
+   between keys is 8 — so mid-open a key had caught the one in front and the
+   row read as one welded lump. Two things were doing one job: the card's
+   edge already uncovers them one by one, which IS the key sliding out from
+   behind it. The stagger stays, because it is the edge's own travel. */
 @media (prefers-reduced-motion: reduce){
-  .fp-keys-in, .fp-keys-in .fp-chip{ animation:none; }
+  .fp-keys-in{ animation:none; }
 }
 .fp-float .fp-chip{ font-size:var(--fs-md); }
 .fp-float-rooms .fp-chip{ min-width:84px; }
@@ -20862,17 +20876,26 @@ const _fitCache = new Map();
 // THE ONE LIST of scrollers that fade at a cut end (DESIGN.md § Fade law).
 // The stylesheet keys on data-more alone, so joining is one entry here.
 const RAIL_ENDS = '.catrail, .seat-pop .seat-grid, .date-pad .hist-days, .fp-band, .fp-float, .admin-sidebar, .subcat-seg, .ticket-items, .bill-lines, .middle-view:has(> .pay-pane), .admin-content, .fp-rail-side, .paper-desk, .screen-ctl-scroll, .roster-scroll';
-// THE ENTRANCE LETS GO WHEN IT IS DONE (owner, Sep '26: "status icons in
-// floor jitter after expansion... when you hover over them"). The row kept
-// fp-keys-in for as long as it was open, so six animations sat there FINISHED
-// with fill:both — a held clip-path on the row and a held translate on every
-// key. A finished animation still owns the element: the browser keeps it on
-// its own layer, and any style change touching it (a hover is one) re-lands
-// the paint a hair off. Measured: the hovered key's transform flipped from
-// matrix(1,0,0,1,0,0) to none the moment the mouse arrived.
-// The class comes off the moment the last animation ends. The entrance has
-// already played by then, so nothing moves — it just stops being held.
+// THE ENTRANCE IS MEASURED, THEN IT LETS GO (owner, Sep '26: "status icons in
+// floor jitter after expansion... when you hover over them", then "shadow gets
+// activated once expanded"). Two halves of one fault.
+// The row kept fp-keys-in for as long as it was open, so six animations sat
+// there FINISHED with fill:both. A finished animation still owns the element:
+// the browser keeps it on its own layer and any style change touching it (a
+// hover is one) re-lands the paint a hair off. So the class comes off the
+// moment the last animation ends — the entrance has already played by then.
+// And the entrance itself now opens the card's WIDTH, which CSS cannot read
+// off an auto-width box. So the width is measured HERE, on the render that
+// follows the tap, and the class goes on in the same breath — one task, so
+// the full-width card is never painted. render() writes data-dock-in instead
+// of the class for exactly that reason.
 function settleDockEntrance() {
+  const arm = document.querySelector('.fp-float-keys[data-dock-in]');
+  if (arm) {
+    delete arm.dataset.dockIn;
+    arm.style.setProperty('--dock-w', arm.getBoundingClientRect().width + 'px');
+    arm.classList.add('fp-keys-in');
+  }
   const row = document.querySelector('.fp-float-keys.fp-keys-in');
   if (!row || row.dataset.settling === '1') return;
   const anims = [row, ...row.querySelectorAll('.fp-chip')].flatMap(e => e.getAnimations());
@@ -20881,6 +20904,7 @@ function settleDockEntrance() {
   Promise.all(anims.map(a => a.finished.catch(() => {}))).then(() => {
     if (!row.isConnected) return;
     row.classList.remove('fp-keys-in');
+    row.style.removeProperty('--dock-w');
     delete row.dataset.settling;
   });
 }
@@ -32550,8 +32574,14 @@ function floorPillHtml(t, cs) {
     return pill('background:var(--orange);color:#fff;', `<b>${hh}:${mm} · ${rel}</b>`, `${esc(r.name)} · ${r.partySize}`);
   }
   // Course lens: the course's own dot + a danger-scaled wait.
-  if (!cs) return '';
-  if (cs.courseN && coursePillOff(cs.courseN)) return ''; // this course switched off
+  // NO COURSE, NOTHING TO SAY (owner, Sep '26: "why is this purple?"). A round
+  // with nothing on it that belongs to a course — a gift voucher was the one
+  // they caught — left courseN empty, and the dot borrowed the ROUND's own
+  // colour instead, so a table read as a course nobody had sent. The WASH has
+  // always wanted a real course here; the pill did not, so the two disagreed
+  // on the same table. Same rule now, one reading.
+  if (!cs || !cs.courseN) return '';
+  if (coursePillOff(cs.courseN)) return ''; // this course switched off
   const cap = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
   const mins = Math.max(0, Math.floor((Date.now() - cs.sentAt) / 60000));
   // The course rides the pill by NAME, not just its colour dot — a casual
@@ -33054,10 +33084,15 @@ function fpFloatHtml(fp) {
   // trick. Left on the row it replayed on every pick, and that is the flash
   // the owner sent back ("clicking on status makes it flash leave it
   // static"). Same one-render pattern as the floor's own entrance.
-  const keysIn = state._fpKeysIn ? ' fp-keys-in' : '';
+  // ARMED, NOT STARTED: the card is written at its natural width and marked,
+  // and settleDockEntrance measures it and starts the grow before the frame
+  // is painted. The mark is read and cleared in the same breath, so it lands
+  // on the one render that follows the tap and on no other — which is the
+  // whole trick.
+  const keysIn = state._fpKeysIn ? ' data-dock-in="1"' : '';
   state._fpKeysIn = false;
   const stackKey = lensOpts
-    ? `<div class="fp-float-card fp-float-keys${keysIn}">${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
+    ? `<div class="fp-float-card fp-float-keys"${keysIn}>${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
     : '';
   // ONE LINE (owner, Sep '26: "one line. not two"): rooms, then the six when
   // they are out, then the keys — all along the same strip, right to left in

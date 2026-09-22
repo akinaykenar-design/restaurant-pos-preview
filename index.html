@@ -12069,7 +12069,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
-  const { key, label, amount, method, staffName, parts, cardType, tip } = req.body || {};
+  const { key, label, amount, method, staffName, parts, cardType, tip, giftCardCode } = req.body || {};
   const k = String(key || '').slice(0, 40);
   if (!k) return res.status(400).json({ error: 'That part has no name' });
   order.splitPaid = order.splitPaid || [];
@@ -12096,8 +12096,24 @@ app.post('/api/orders/:id/split-part', (req, res) => {
     })).filter(p => p.key);
   }
   const m = ['card', 'cash', 'giftcard', 'account'].includes(String(method)) ? String(method) : 'card';
+  // A GIFT CARD PAYS WHAT IT CAN (owner, Sep '26). It used to have to cover
+  // the whole bill or be refused, so a $50 card on a $62 bill was dead money.
+  // Here it is a PART like any other — the difference is that the money comes
+  // off the card, and that has to happen on the server, in the same write
+  // that records the part, or a lost reply would spend a card twice.
+  let gcard = null;
+  if (m === 'giftcard') {
+    const code = String(giftCardCode || '').trim();
+    if (!code) return res.status(400).json({ error: 'That gift card has no code' });
+    gcard = (data.giftCards || []).find(g => g.code.toLowerCase() === code.toLowerCase());
+    if (!gcard) return res.status(404).json({ error: 'Gift card not found' });
+    if (!gcard.active) return res.status(400).json({ error: 'This gift card is inactive' });
+    if (gcard.balance + 0.005 < amt) return res.status(400).json({ error: `Only $${gcard.balance.toFixed(2)} left on that gift card` });
+  }
   const by = String(staffName || 'Unknown').slice(0, 40);
+  if (gcard) gcard.balance = Math.round((gcard.balance - amt) * 100) / 100;
   order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
+    giftCardCode: gcard ? gcard.code : null,
     cardType: CARD_TYPE_KEYS.includes(String(cardType)) ? String(cardType) : null,
     tip: tipNow,
     at: Date.now(), staffName: by });
@@ -23084,7 +23100,7 @@ function payConfirmLabel() {
 // now — the same parts the split screen uses, so the table still cannot close
 // a dollar short.
 async function takeCardPart(amount) { return takePart(amount, 'card'); }
-async function takePart(amount, method) {
+async function takePart(amount, method, giftCardCode) {
   const order = activeOpenOrder();
   if (!order) { state.toast = toastFail('Send the order first.'); render(); return; }
   if (method === 'card' && terminalActive() && !state._terminalApproved) {
@@ -23096,15 +23112,18 @@ async function takePart(amount, method) {
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: method + n, label: method === 'cash' ? 'Cash' : cardTypeLabel(state.cardType), amount,
-        method, cardType: method === 'card' ? state.cardType : null, tip: cardTipPending(), staffName }),
+      body: JSON.stringify({ key: method + n,
+        label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
+        amount, method, giftCardCode: giftCardCode || null,
+        cardType: method === 'card' ? state.cardType : null,
+        tip: method === 'giftcard' ? 0 : cardTipPending(), staffName }),
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
   } catch (e) {
-    state.toast = toastFail(e.message || 'Could not record that card.');
+    state.toast = toastFail(e.message || (method === 'giftcard' ? 'Could not take that gift card.' : 'Could not record that card.'));
     render();
-    return;
+    return false;
   }
   state.cardAmount = '';
   state.cashGiven = '';
@@ -23114,10 +23133,11 @@ async function takePart(amount, method) {
     state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
     state.splitMode = true;
     await confirmPaymentNow();
-    return;
+    return true;
   }
   state.toast = `${money(amount)} taken — ${money(amountOwing())} still to pay`;
   render();
+  return true;
 }
 
 // The two actions that end a payment. ONE definition: on a phone they ride
@@ -27069,7 +27089,32 @@ async function applyGiftCardCode() {
   try {
     const card = await api(`/api/gift-cards/lookup/${encodeURIComponent(code)}`);
     if (!card.active) { state.toast = toastFail('This gift card is inactive.'); render(); return; }
-    if (card.balance < amountOwing() - 0.01) { state.toast = toastFail(`Gift card balance (${money(card.balance)}) is less than the total due.`); render(); return; }
+    // A GIFT CARD PAYS WHAT IT CAN (owner, Sep '26: a $50 card on a $62 bill
+    // was refused outright — "Gift card balance is less than the total due" —
+    // so the money on it was unspendable). Short of the bill, it goes on as a
+    // PART, through the same door cash and card use, and what is left stays
+    // owing for the next way to pay. The card is emptied on the server in the
+    // same write that records the part.
+    if (card.balance < amountOwing() - 0.01) {
+      // AN EMPTY CARD IS NOT A PART. Spent down to nothing it still looked up
+      // fine, so it went through as a $0 part: the server refused it and the
+      // screen said "paid $0.00" over the top of the refusal (caught here,
+      // Sep '26).
+      if (card.balance <= 0.005) { state.toast = toastFail('There is no money left on that gift card.'); render(); return; }
+      const owed = amountOwing();
+      const took = await takePart(card.balance, 'giftcard', card.code);
+      if (!took) return; // takePart has already said why
+      state.checkoutGiftCardCode = '';
+      state.payRailVouchers = false;
+      // takePart closes the bill itself if the parts now cover it.
+      if (state.openOrderId) {
+        state.paymentMethod = 'card';
+        state.toast = `Gift card ${card.code} paid ${money(card.balance)} — ${money(Math.max(0, Math.round((owed - card.balance) * 100) / 100))} still owing`;
+        render();
+        armToastTimer(3500);
+      }
+      return;
+    }
     state.paymentMethod = 'giftcard';
     state.giftCardAppliedCode = card.code;
     // THE PANE'S JOB IS DONE. A gift card covers the whole bill, so there is

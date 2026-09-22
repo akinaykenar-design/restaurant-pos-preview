@@ -13342,9 +13342,7 @@ let state = {
   activeShift: null,
   shifts: [],
   reservations: [],
-  reservationModal: null, // { mode, id, name, phone, partySize, time, tableId, notes, status }
   customers: [],
-  customerModal: null, // { mode, id, name, phone, email }
   customerSearch: '',
   customerSearchResults: [],
   attachedCustomerId: null,
@@ -13456,7 +13454,6 @@ let state = {
   expandedDiscountPresetIds: [], // Finance preset tiles open for inline edit
   selectedDiscountPresetIds: [], // bulk-select on the discount/surcharge tiles
   expandedHappyHourIds: [], selectedHappyHourIds: [],       // Promotions tiles
-  expandedCustomerIds: [], selectedCustomerIds: [],         // Customers tiles
   expandedInventoryItemIds: [], selectedInventoryItemIds: [], // Stock tiles
   selectedTimeoffIds: [], // bulk-select: time off list
   selectedExpenseIds: [], // bulk-select: expenses list
@@ -15270,8 +15267,6 @@ function editIconButton(act, id, title) {
 const ROW_EDIT_ACTIONS = {
   'edit-combo': (id) => openEditCombo(id),
   'edit-modifier-group': (id) => openEditModifierGroup(id),
-  'edit-reservation': (id) => openEditReservation(id),
-  'edit-customer': (id) => openEditCustomer(id),
   'edit-printer-station': (id) => openEditPrinterStation(id),
   'edit-happy-hour': (id) => openEditHappyHour(id),
 };
@@ -15281,8 +15276,6 @@ function deleteIconButton(act, id, title, extraAttrs) {
 // Deleting an entity that has an edit view happens INSIDE that view (with a
 // confirm), never from its list row: [modal state key, delete fn, confirm text].
 const MODAL_DELETE_ACTIONS = {
-  'modal-delete-reservation': ['reservationModal', (id) => deleteReservationAction(id), 'Delete this booking?'],
-  'modal-delete-customer': ['customerModal', (id) => deleteCustomerAction(id), 'Delete this customer?'],
   'modal-delete-supplier': ['supplierModal', (id) => deleteSupplier(id), 'Delete this supplier?'],
   'modal-delete-inventory-item': ['inventoryItemModal', (id) => deleteInventoryItem(id), 'Delete this inventory item?'],
   'modal-delete-happy-hour': ['happyHourModal', (id) => deleteHappyHourAction(id), 'Delete this promotion?'],
@@ -20340,8 +20333,6 @@ function render() {
     ${state.bulkCategoryModal ? renderBulkCategoryModal() : ''}
     ${state.bulkColorModal ? renderBulkColorModal() : ''}
     ${state.bulkStaffModal ? renderBulkStaffModal() : ''}
-    ${state.reservationModal ? renderReservationModal() : ''}
-    ${state.customerModal ? renderCustomerModal() : ''}
     ${state.printerStationModal && !state.printerStationModal.inline ? renderPrinterStationModal() : ''}
     ${state.happyHourModal ? renderHappyHourModal() : ''}
     ${state.giftCardModal ? renderGiftCardModal() : ''}
@@ -23264,7 +23255,7 @@ function renderCheckoutMiddle() {
         <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)})${discountScopeText(state.discount) ? ' on ' + esc(discountScopeText(state.discount)) : ''} ${isManager || state.discount.voucherCode ? `<button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button>` : ''}</div>
       ` : ''}
       ${!(state.customers || []).length && !attachedCustomer ? '' : `
-      <label>Customer (optional)</label>
+      <label>Guest (optional)</label>
       ${attachedCustomer ? `
         <div class="seat-chip" style="margin-bottom:10px;">${esc(attachedCustomer.name)} — ${attachedCustomer.points || 0} pts <button data-act="detach-customer" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button></div>
         ${!state.discount && (attachedCustomer.points || 0) >= loyaltyPointsPerDollar() ? `
@@ -24421,39 +24412,6 @@ async function loadReservations() {
   try { state.reservations = await api('/api/reservations'); } catch (e) {}
   render();
 }
-function openAddReservation() {
-  state.reservationModal = withDirtyCheck({ mode: 'add', id: null, name: '', phone: '', partySize: 2, time: '', tableId: '', notes: '' });
-  state.adminError = '';
-  render();
-}
-function openEditReservation(id) {
-  const r = state.reservations.find(x => x.id === id);
-  state.reservationModal = withDirtyCheck({ mode: 'edit', id: r.id, name: r.name, phone: r.phone, partySize: r.partySize, time: r.time, tableId: r.tableId || '', notes: r.notes, status: r.status });
-  state.adminError = '';
-  render();
-}
-function closeReservationModal() { if (!confirmDiscard(state.reservationModal)) return; state.reservationModal = null; state.adminError = ''; render(); }
-async function saveReservationModal() {
-  const m = state.reservationModal;
-  // Half a when is not a when: the date and the clock live in one value, so a
-  // date with no time reads as truthy and used to save as an invalid booking.
-  if (!m.name.trim() || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(m.time || '')) { state.adminError = 'Name and time are required.'; render(); return; }
-  const payload = { name: m.name, phone: m.phone, partySize: m.partySize, time: m.time, tableId: m.tableId || null, notes: m.notes };
-  try {
-    if (m.mode === 'add') await api('/api/reservations', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    else await api(`/api/reservations/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    state.reservations = await api('/api/reservations');
-    state.reservationModal = null;
-    state.adminError = '';
-    render();
-  } catch (e) {
-    state.adminError = e.message || 'Could not save the booking.';
-    render();
-  }
-}
-async function deleteReservationAction(id) {
-  try { await api(`/api/reservations/${id}`, { method: 'DELETE' }); state.reservations = await api('/api/reservations'); render(); } catch (e) {}
-}
 // Floor Booked mode → tap the table → the booking is seated: reservation
 // marked, party size becomes covers, straight onto the order screen.
 async function seatBookingFromFloor(tableId) {
@@ -24474,191 +24432,29 @@ async function markReservationSeated(id) {
     render();
   } catch (e) {}
 }
-function renderReservationsAdmin() {
-  // WHAT IS COMING SITS AT THE TOP, AND A BOOKING THAT HAS BEEN AND GONE
-  // SAYS SO (Sep '26). Every booking was sorted oldest-first and every one
-  // still read BOOKED with a Seat key beside it, so a list of last month's
-  // tables looked like tonight's.
-  const now = Date.now();
-  const past = (r) => r.status === 'booked' && new Date(r.time).getTime() < now - 2 * 3600 * 1000; // two hours' grace: a late table is still tonight's
-  const list = state.reservations.slice().sort((a, b) => {
-    const pa = past(a), pb = past(b);
-    if (pa !== pb) return pa ? 1 : -1;        // coming up first, gone last
-    return pa ? b.time.localeCompare(a.time)  // among the gone, the most recent first
-              : a.time.localeCompare(b.time); // among the coming, the soonest first
-  });
-  return `
-  <div style="display:flex;justify-content:flex-end;max-width:var(--admin-list-w,600px);margin-bottom:14px;"><button class="btn-add inline" data-act="add-reservation">+ Booking</button></div>
-  <div style="max-width:var(--admin-list-w,600px);">
-    ${list.length === 0 ? `<div class="empty-ticket"><div class="empty-ticket-icon">${SYS_CALENDAR_SVG}</div><div class="empty-ticket-msg">No bookings yet.</div></div>` : list.map(r => `
-      <div class="order-row">
-        <div class="order-info">
-          <div class="t1">${esc(r.name)} ${editIconButton('edit-reservation', r.id, 'Edit')} <span class="status-chip ${past(r) || r.status === 'cancelled' ? 'void' : r.status === 'seated' ? 'paid' : 'course'}">${past(r) ? 'gone' : r.status}</span></div>
-          <div class="t2">${fmtDate(r.time)} ${fmtTime(r.time)} · ${r.partySize} guests${r.phone ? ' · ' + esc(r.phone) : ''}${r.notes ? ' · ' + esc(r.notes) : ''}</div>
-        </div>
-        ${r.status === 'booked' && !past(r) ? `<button class="btn-cancel" style="flex:none;padding:8px 12px;" data-act="seat-reservation" data-id="${r.id}">Seat</button>` : ''}
-        
-      </div>
-    `).join('')}
-  </div>
-  `;
-}
-function renderReservationModal() {
-  const m = state.reservationModal;
-  return `
-  <div class="modal-bg">
-    <div class="modal" data-stop="1">
-      <h2>${m.mode === 'add' ? 'Add booking' : 'Edit booking'}</h2>
-      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-      <label>Guest name</label>
-      <input id="reservation-name-input" type="text" value="${esc(m.name)}" placeholder="e.g. Smith">
-      <label>Phone</label>
-      <input id="reservation-phone-input" type="text" value="${esc(m.phone)}" placeholder="Optional">
-      <label>Party size</label>
-      <input id="reservation-party-input" type="number" min="1" value="${m.partySize}">
-      ${/* THE APP'S OWN CALENDAR, LIKE EVERY OTHER DATE BOX (owner's walk,
-            Sep '26). This one box was the last browser date picker left — it
-            wore the OS glyph and opened the phone's spinner while Table
-            history, the Sales window and a rule's when all opened our pad.
-            Date and clock are two boxes now: the date is the same key the
-            rest of the app uses, the clock is the same time box as shifts and
-            happy hours. Both halves still live in one value, so nothing that
-            reads a booking changed. */ ''}
-      <label>Date &amp; time</label>
-      <div class="res-when">
-        ${dateKey('reservation-date-input', (m.time || '').slice(0, 10))}
-        <input id="reservation-clock-input" type="time" value="${esc((m.time || '').slice(11, 16))}">
-      </div>
-      <label>Table (optional)</label>
-      <select id="reservation-table-input">
-        <option value="">Not assigned</option>
-        ${allTables().map(t => `<option value="${t.id}" ${m.tableId === t.id ? 'selected' : ''}>${tableDisplayLabel(t.id)}</option>`).join('')}
-      </select>
-      <label>Notes</label>
-      <input id="reservation-notes-input" type="text" value="${esc(m.notes)}" placeholder="e.g. window seat, allergy">
-      <div class="modal-actions">
-        <button class="icon-action neutral" data-act="close-reservation-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.reservationModal && state.reservationModal.id ? `<button type="button" class="icon-action discard btn-modal-delete" data-act="modal-delete-reservation">${ACT_TRASH_SVG}<span class="ia-label">Delete</span></button>` : ''}
-        <button class="icon-action send" data-act="save-reservation-modal">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
-      </div>
-    </div>
-  </div>`;
-}
 
 // §§ Customers & loyalty
 async function loadCustomers() {
   try { state.customers = await api('/api/customers'); } catch (e) {}
   render();
 }
-function openAddCustomer() {
-  state.customerModal = withDirtyCheck({ mode: 'add', id: null, name: '', phone: '', email: '' });
-  state.adminError = '';
+// PUTTING A GUEST ON THE TAB IS ONE MECHANISM. Picking one from the search
+// and adding a new one both come here, so they can never drift. The toast
+// escapes the name for you (escaping law) — escaping it again turns
+// O'Donnell into O&#39;Donnell on the floor.
+function attachCustomer(id) {
+  state.attachedCustomerId = id;
+  const c = (state.customers || []).find(x => x.id === id);
+  state.customerPane = null;
+  state.toast = c ? `${c.name} on the tab.` : 'Guest attached.';
+  if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: state.attachedCustomerId }) }).catch(() => {});
   render();
+  armToastTimer(2200);
 }
-function openEditCustomer(id) {
-  const c = state.customers.find(x => x.id === id);
-  state.customerModal = withDirtyCheck({ mode: 'edit', id: c.id, name: c.name, phone: c.phone, email: c.email });
-  state.adminError = '';
-  render();
-}
-function closeCustomerModal() { if (!confirmDiscard(state.customerModal)) return; state.customerModal = null; state.adminError = ''; render(); }
-async function saveCustomerModal() {
-  const m = state.customerModal;
-  if (!m.name.trim()) { state.adminError = 'Name is required.'; render(); return; }
-  const payload = { name: m.name, phone: m.phone, email: m.email };
-  try {
-    if (m.mode === 'add') await api('/api/customers', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    else await api(`/api/customers/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-    state.customers = await api('/api/customers');
-    state.customerModal = null;
-    state.adminError = '';
-    render();
-  } catch (e) {
-    state.adminError = e.message || 'Could not save the customer.';
-    render();
-  }
-}
-async function deleteCustomerAction(id) {
-  try { await api(`/api/customers/${id}`, { method: 'DELETE' }); state.customers = await api('/api/customers'); render(); } catch (e) {}
-}
-// Customers wear the Items uniform too: tiles, checkbox select with bulk
-// delete, expand for the inline name/phone/email editor. Spend on the right
-// is the number an owner scans for. (No duplicate — two of a person is a
-// data bug, not a convenience.)
-function renderCustomersAdmin() {
-  const sel = state.selectedCustomerIds || [];
-  const list = applyListSort('customers', state.customers);
-  return `
-  <div style="max-width:var(--admin-list-w,600px);">
-    <div class="settings-card" style="margin-bottom:12px;">
-      <div class="th">Loyalty</div>
-      ${numSettingRow('Points for $1 off', 'loyaltyPointsPerDollar', loyaltyPointsPerDollar(), 'pts', 1, 10000)}
-    </div>
-    ${listToolbar({ list: 'customer', keys: list.map(c => c.id), sort: 'customers',
-      del: 'delete-selected-customers', clear: 'clear-customer-selection',
-      add: { act: 'add-customer', label: '+ Customer' } })}
-    ${list.length === 0 ? `<div class="empty-hist">No customers yet.</div>` : ''}
-    ${list.map(c => `
-      <div class="menu-item-expandable customer-row${sel.includes(c.id) ? ' selected' : ''}${(state.expandedCustomerIds || []).includes(c.id) ? ' open' : ''}" data-id="${c.id}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;margin-bottom:var(--list-gap);">
-        <div class="menu-item-header sel-head" data-act="customer-toggle-open" data-id="${c.id}" data-sellist="customer" data-selkey="${c.id}" style="display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;">
-          <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="customer" data-key="${c.id}" ${sel.includes(c.id) ? 'checked' : ''}>
-          <span style="min-width:0;">
-            <span class="t1" style="display:block;font-weight:700;font-size:var(--fs-md);">${esc(c.name)}</span>
-            <span class="t2" style="display:block;">${esc(c.phone || '')}${c.phone && c.email ? ' · ' : ''}${esc(c.email || '')}${(c.phone || c.email) ? ' · ' : ''}${c.visits || 0} visits · ${c.points || 0} pts</span>
-          </span>
-          <span style="flex:1;"></span>
-          <span class="t1" style="font-weight:700;font-size:var(--fs-md);font-family:var(--font-mono);">${money(c.totalSpent || 0)}</span>
-        </div>
-        ${(state.expandedCustomerIds || []).includes(c.id) ? `
-        <div style="padding:0 12px 12px 40px;">
-          <div style="display:flex;flex-direction:column;max-width:280px;">
-            <label class="field-label">Name</label>
-            <input type="text" value="${esc(c.name)}" onblur="updateCustomerField('${c.id}', { name: this.value })" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-            <label class="field-label" style="margin-top:10px;">Phone</label>
-            <input type="text" value="${esc(c.phone || '')}" onblur="updateCustomerField('${c.id}', { phone: this.value })" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-            <label class="field-label" style="margin-top:10px;">Email</label>
-            <input type="text" value="${esc(c.email || '')}" onblur="updateCustomerField('${c.id}', { email: this.value })" style="width:100%;box-sizing:border-box;padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
-          </div>
-        </div>` : ''}
-      </div>
-    `).join('')}
-  </div>
-  `;
-}
-function renderCustomerModal() {
-  const m = state.customerModal;
-  return `
-  <div class="modal-bg">
-    <div class="modal" data-stop="1">
-      <h2>${m.mode === 'add' ? 'Add customer' : 'Edit customer'}</h2>
-      ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
-      <label>Name</label>
-      <input id="customer-name-input" type="text" value="${esc(m.name)}" placeholder="Full name">
-      <label>Phone</label>
-      <input id="customer-phone-input" type="text" value="${esc(m.phone)}" placeholder="Optional">
-      <label>Email</label>
-      <input id="customer-email-input" type="text" value="${esc(m.email)}" placeholder="Optional">
-      <div class="modal-actions">
-        <button class="icon-action neutral" data-act="close-customer-modal">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        ${state.customerModal && state.customerModal.id ? `<button type="button" class="icon-action discard btn-modal-delete" data-act="modal-delete-customer">${ACT_TRASH_SVG}<span class="ia-label">Delete</span></button>` : ''}
-        <button class="icon-action send" data-act="save-customer-modal">${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
-      </div>
-    </div>
-  </div>`;
-}
-// Inline tile edits for the converted admin lists (Promotions, Customers) —
-// save one field, refresh the list, keep going.
 async function updateHappyHourField(id, patch) {
   try {
     await api(`/api/happy-hours/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     state.happyHours = await api('/api/happy-hours');
-  } catch (e) { state.toast = toastFail('Could not save that change.'); armToastTimer(2500); }
-  render();
-}
-async function updateCustomerField(id, patch) {
-  try {
-    await api(`/api/customers/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
-    state.customers = await api('/api/customers');
   } catch (e) { state.toast = toastFail('Could not save that change.'); armToastTimer(2500); }
   render();
 }
@@ -27075,6 +26871,10 @@ async function deleteVoucherAction(id) {
 function renderGiftCardsSettingsAdmin() {
   return `
   <div class="settings-card">
+    <div class="th">Loyalty</div>
+    ${numSettingRow('Points for $1 off', 'loyaltyPointsPerDollar', loyaltyPointsPerDollar(), 'pts', 1, 10000)}
+  </div>
+  <div class="settings-card">
     <div class="th">Gift cards</div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:14px;"><button class="btn-add inline" data-act="issue-gift-card">+ Gift card</button></div>
     ${state.giftCards.length === 0 ? `<div class="ts">No gift cards issued yet.</div>` : state.giftCards.map(g => `
@@ -27384,10 +27184,6 @@ const ADMIN_SECTIONS = [
     { key: 'table-history', label: 'Table History' },
     { key: 'kitchen', label: 'Kitchen' },
   ] },
-  { group: 'Bookings', children: [
-    { key: 'reservations', label: 'Bookings' },
-    { key: 'customers', label: 'Customers' },
-  ] },
   { group: 'Menu', children: [
     { key: 'sales-categories', label: 'Sales groups' },
     { key: 'categories', label: 'Sections' },
@@ -27648,7 +27444,6 @@ function rememberAdminTab(key) {
 const ADMIN_GROUP_SOLID = {
   service: '<path d="M12 7.5a8 8 0 0 1 8 8H4a8 8 0 0 1 8 -8z" fill="currentColor"/><path d="M12 7.5V5"/><path d="M10 5h4"/><path d="M2 19h20"/>',
   dashboard: '<rect x="2" y="2" width="7.78" height="10" rx="1.56" fill="currentColor"/><rect x="14.22" y="2" width="7.78" height="5.56" rx="1.56" fill="currentColor"/><rect x="14.22" y="12" width="7.78" height="10" rx="1.56" fill="currentColor"/><rect x="2" y="16.44" width="7.78" height="5.56" rx="1.56" fill="currentColor"/>',
-  bookings: '<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" fill="currentColor"/><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" stroke="var(--icon-cut)"/>',
   menu: '<path d="M6.5 2v6a2 2 0 0 0 4 0V2" fill="currentColor"/><path d="M8.5 2v5" stroke="var(--icon-cut)"/><path d="M8.5 8v14"/><path d="M17.5 2c-1.5 1.2 -2.4 3.6 -2.4 6.4V12H17.5z" fill="currentColor"/><path d="M17.5 12v10"/>',
   inventory: '<path d="M11 21.73 a2 2 0 0 0 2 0 l7.001 -4 A2 2 0 0 0 21.001 15.999 V7.999 a2 2 0 0 0 -1 -1.73 l-7.001 -4 a2 2 0 0 0 -2 0 l-7.001 4 A2 2 0 0 0 2.999 7.999 v8.001 a2 2 0 0 0 1 1.73 z" fill="currentColor"/><path d="M12 22 V11.999" stroke="var(--icon-cut)"/><polyline points="3.289 6.998 12 11.999 20.711 6.998" stroke="var(--icon-cut)"/>',
   staff: '<path d="M2.92 22 v-7.853 a6.871 6.871 0 0 1 4.54 -6.503 L12 14.883 l4.54 -7.239 a6.871 6.871 0 0 1 4.54 6.503 V22 Z" fill="currentColor"/><path d="M8.074 2 12 3.84 8.074 5.681 Z" fill="currentColor"/><path d="M15.926 2 12 3.84 l3.926 1.84 Z" fill="currentColor"/>',
@@ -27664,7 +27459,6 @@ function adminGroupGlyph(key, on) {
   return `<svg class="ang-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
 }
 const ADMIN_GROUP_ICON = {
-  bookings: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
   service: '<path d="M12 7.5a8 8 0 0 1 8 8H4a8 8 0 0 1 8 -8z"/><path d="M12 7.5V5"/><path d="M10 5h4"/><path d="M2 19h20"/>',
   dashboard: '<rect x="2" y="2" width="7.78" height="10" rx="1.56"/><rect x="14.22" y="2" width="7.78" height="5.56" rx="1.56"/><rect x="14.22" y="12" width="7.78" height="10" rx="1.56"/><rect x="2" y="16.44" width="7.78" height="5.56" rx="1.56"/>',
   menu: '<path d="M6.5 2v6a2 2 0 0 0 4 0V2"/><path d="M8.5 8v14"/><path d="M17.5 2c-1.5 1.2 -2.4 3.6 -2.4 6.4V12H17.5z"/><path d="M17.5 12v10"/>',
@@ -27754,8 +27548,6 @@ function renderAdminView() {
         : state.adminTab === 'stock-count' ? renderHouseAdmin('stock')
         : state.adminTab === 'stale' ? renderStaleAccounts()
         : state.adminTab === 'register' ? renderRegisterAdmin()
-        : state.adminTab === 'reservations' ? renderReservationsAdmin()
-        : state.adminTab === 'customers' ? renderCustomersAdmin()
         : state.adminTab === 'expenses' ? renderExpensesAdmin()
         : (typeof state.adminTab === 'string' && state.adminTab.endsWith('-hub')) ? renderAdminGroupHub(state.adminTab.slice(0, -4))
         : state.adminTab === 'menu' ? renderMenuAdmin()
@@ -40830,7 +40622,6 @@ const SEL_LISTS = {
   'discount-preset': { arr: 'selectedDiscountPresetIds' },
   'price-rule': { arr: 'selectedPriceRuleIds' },
   'happy-hour': { arr: 'selectedHappyHourIds' },
-  customer: { arr: 'selectedCustomerIds' },
   'inventory-item': { arr: 'selectedInventoryItemIds' },
   station: { arr: 'selectedStationIds' },
 };
@@ -41810,32 +41601,6 @@ function bindEvents() {
     el.addEventListener('input', (e) => { state.modifierGroupModal.options[parseInt(el.dataset.oidx)].priceDelta = e.target.value; });
   });
 
-  const reservationNameInput = document.getElementById('reservation-name-input');
-  if (reservationNameInput) reservationNameInput.addEventListener('input', (e) => { state.reservationModal.name = e.target.value; });
-  const reservationPhoneInput = document.getElementById('reservation-phone-input');
-  if (reservationPhoneInput) reservationPhoneInput.addEventListener('input', (e) => { state.reservationModal.phone = e.target.value; });
-  const reservationPartyInput = document.getElementById('reservation-party-input');
-  if (reservationPartyInput) reservationPartyInput.addEventListener('input', (e) => { state.reservationModal.partySize = parseInt(e.target.value) || 1; });
-  // The two halves write back into the one value the booking is saved from.
-  const resDate = document.getElementById('reservation-date-input');
-  const resClock = document.getElementById('reservation-clock-input');
-  const joinWhen = () => {
-    const m = state.reservationModal; if (!m) return;
-    m.time = `${resDate ? resDate.value : ''}T${resClock ? resClock.value : ''}`;
-  };
-  if (resDate) { resDate.addEventListener('input', joinWhen); resDate.addEventListener('change', joinWhen); }
-  if (resClock) resClock.addEventListener('input', joinWhen);
-  const reservationTableInput = document.getElementById('reservation-table-input');
-  if (reservationTableInput) reservationTableInput.addEventListener('change', (e) => { state.reservationModal.tableId = e.target.value; });
-  const reservationNotesInput = document.getElementById('reservation-notes-input');
-  if (reservationNotesInput) reservationNotesInput.addEventListener('input', (e) => { state.reservationModal.notes = e.target.value; });
-
-  const customerNameInput = document.getElementById('customer-name-input');
-  if (customerNameInput) customerNameInput.addEventListener('input', (e) => { state.customerModal.name = e.target.value; });
-  const customerPhoneInput = document.getElementById('customer-phone-input');
-  if (customerPhoneInput) customerPhoneInput.addEventListener('input', (e) => { state.customerModal.phone = e.target.value; });
-  const customerEmailInput = document.getElementById('customer-email-input');
-  if (customerEmailInput) customerEmailInput.addEventListener('input', (e) => { state.customerModal.email = e.target.value; });
   const customerSearchInput = document.getElementById('customer-search-input');
   if (customerSearchInput) customerSearchInput.addEventListener('input', (e) => {
     searchCustomers(e.target.value);
@@ -42684,15 +42449,7 @@ function handleActClick(el, e) {
           else { state.moveItems = { sel: [] }; render(); }
         }
       }
-      else if (act === 'attach-customer') {
-        state.attachedCustomerId = el.dataset.id;
-        const c = state.customers.find(x => x.id === el.dataset.id);
-        state.customerPane = null;
-        state.toast = c ? `${esc(c.name)} on the tab.` : 'Customer attached.';
-        if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: state.attachedCustomerId }) }).catch(() => {});
-        render();
-        armToastTimer(2200);
-      }
+      else if (act === 'attach-customer') { attachCustomer(el.dataset.id); }
       else if (act === 'detach-customer') {
         state.attachedCustomerId = null;
         if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: null }) }).catch(() => {});
@@ -43889,20 +43646,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'bump-item') { bumpItemStatus(parseInt(el.dataset.order), parseInt(el.dataset.idx), el.dataset.status); }
       else if (act === 'apply-happy-hour') { applyHappyHour(el.dataset.id); }
-      else if (act === 'add-reservation') { openAddReservation(); }
-      else if (act === 'edit-reservation') { openEditReservation(el.dataset.id); }
-      else if (act === 'delete-reservation') { openConfirm({ message: 'Delete this booking?', confirmLabel: 'Delete', danger: true }, () => deleteReservationAction(el.dataset.id)); }
-      else if (act === 'seat-reservation') { markReservationSeated(el.dataset.id); }
-      else if (act === 'close-reservation-modal') { closeReservationModal(); }
-      else if (act === 'save-reservation-modal') { saveReservationModal(); }
-      else if (act === 'add-customer') { openAddCustomer(); }
-      else if (act === 'customer-toggle-open') {
-        const id = el.dataset.id, open = state.expandedCustomerIds || [];
-        state.expandedCustomerIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
-        render();
-      }
-      else if (act === 'delete-selected-customers') { deleteSelectedByIds('selectedCustomerIds', '/api/customers', async () => { state.customers = await api('/api/customers'); }, 'customer'); }
-      else if (act === 'clear-customer-selection') { state.selectedCustomerIds = []; render(); }
       else if (act === 'happy-hour-toggle-open') {
         const id = el.dataset.id, open = state.expandedHappyHourIds || [];
         state.expandedHappyHourIds = open.includes(id) ? open.filter(x => x !== id) : [...open, id];
@@ -43925,10 +43668,6 @@ function handleActClick(el, e) {
       }
       else if (act === 'delete-selected-inventory-items') { deleteSelectedByIds('selectedInventoryItemIds', '/api/inventory-items', loadInventoryData, 'ingredient'); }
       else if (act === 'clear-inventory-item-selection') { state.selectedInventoryItemIds = []; render(); }
-      else if (act === 'edit-customer') { openEditCustomer(el.dataset.id); }
-      else if (act === 'delete-customer') { openConfirm({ message: 'Delete this customer?', confirmLabel: 'Delete', danger: true }, () => deleteCustomerAction(el.dataset.id)); }
-      else if (act === 'close-customer-modal') { closeCustomerModal(); }
-      else if (act === 'save-customer-modal') { saveCustomerModal(); }
       else if (act === 'redeem-loyalty-points') { redeemLoyaltyPoints(); }
       else if (act === 'submit-expense') { submitExpense(); }
       else if (act === 'open-adjust-stock') { openAdjustStock(el.dataset.id); }

@@ -1640,8 +1640,15 @@ body.fp-sizing .tp-canvas-wrap, body.fp-sizing .floor-canvas, body.fp-sizing .fp
    (owner, Sep '26). It was a mesh of lines in two weights, which fought the
    guide lines a dragged table draws; a dot marks exactly where a table
    lands and gets out of the way. */
+/* THE GRID IS CHROME, NOT THE ROOM (owner, Sep '26: "the floor plan dots are
+   quite huge ... it should suit the mobile layout"). The editor's room is a
+   transform, so everything painted inside it is magnified with it — and the
+   phone magnifies 3x to keep tables readable, which turned 2px dots into fat
+   blobs. The SPACING stays a share of the room, because that is the room's own
+   grid; the dot's own size is divided by the zoom, so it lands the same size
+   on a phone, a tablet and a till. */
 .floor-canvas.snap-grid{
-  background-image:radial-gradient(circle, var(--steel-300) 1px, transparent 1.6px);
+  background-image:radial-gradient(circle, var(--steel-300) calc(1px / var(--fp-zoom, 1)), transparent calc(1.6px / var(--fp-zoom, 1)));
   background-size:2.5% 4.0179%;
   background-position:0 0;
 }
@@ -3481,6 +3488,15 @@ body[data-tiles-bottom] .menu-scroll{ display:flex; flex-direction:column-revers
 .floor-marker.mk-sel{
   outline:var(--tbl-sel-ring) solid var(--orange);
   outline-offset:var(--tbl-sel-gap); }
+/* AND IN THE EDITOR IT IS ONE THICKNESS ON THE GLASS (owner, Sep '26: "the
+   outline is just ridiculously large"). The picked ring is drawn inside the
+   room, which the editor magnifies — 3x on a phone — so a 3px band landed as
+   9 and swamped a 28px table. Divided by the zoom it is 3px on every screen,
+   and it agrees with the drag guides, which are painted on a layer OUTSIDE
+   the room and were the true 3 all along. */
+#admin-floor-canvas .floor-marker.mk-sel{
+  outline-width:calc(var(--tbl-sel-ring) / var(--fp-zoom, 1));
+  outline-offset:calc(var(--tbl-sel-gap) / var(--fp-zoom, 1)); }
 .simple-table-btn{ isolation:isolate; }
 
 /* A TABLE IN THE AIR: EVERYTHING FADES, THE ONE IT WOULD LAND ON COMES BACK
@@ -37273,6 +37289,24 @@ function tpApply() {
   if (!canvas || !canvas.isConnected) return;
   if (canvas.style.willChange !== 'transform') canvas.style.willChange = 'transform';
   const z = w.z, old = _tpPinch.shown || 1;
+  // WHAT IS UNDER THE FINGERS STAYS UNDER THE FINGERS — measured, never
+  // worked out from the scroll alone (owner, Sep '26: "I pinch zoom over a
+  // table and it just zooms in from a different position ... it's not really
+  // selective in where I'm pinching"). The old maths read the finger's spot
+  // as `scrollLeft + mid`, which is only true when the room's top-left IS the
+  // top-left of the scrolling box. It never is: the room is CENTRED in its
+  // box, and since Sep '26 it also carries half a room of slack on every side
+  // — so the reading was out by all of that, and the zoom flew off toward a
+  // corner. Worse, each frame worked from the last frame's answer, so the
+  // browser clamping a scroll at the end of the room left an error that the
+  // next frame built on: the drift people read as jitter.
+  // Now: read where the room actually is, in real pixels, work out the point
+  // under the fingers in the room's own coordinates, scale, read where it
+  // landed, and shove the scroll by the difference. Nothing is remembered
+  // between frames, so a clamp costs one frame instead of the whole gesture.
+  const before = canvas.getBoundingClientRect();
+  const px = (w.cx - before.left) / old;
+  const py = (w.cy - before.top) / old;
   // Scale from the TOP-LEFT: the default centre origin, with the margins
   // compensating only right and bottom, pushed the drawing off-centre — a
   // huge dead space grew on the right when zoomed out (owner, Sep '26) and
@@ -37283,10 +37317,9 @@ function tpApply() {
   canvas.style.transform = 'scale(' + z + ')';
   canvas.style.marginRight = (baseW * (z - 1)) + 'px';
   canvas.style.marginBottom = (baseH * (z - 1)) + 'px';
-  // Keep the point between the fingers under the fingers.
-  const ox = wrap.scrollLeft + w.midX, oy = wrap.scrollTop + w.midY;
-  wrap.scrollLeft = ox * (z / old) - w.midX;
-  wrap.scrollTop = oy * (z / old) - w.midY;
+  const after = canvas.getBoundingClientRect();
+  wrap.scrollLeft += (after.left + px * z) - w.cx;
+  wrap.scrollTop += (after.top + py * z) - w.cy;
   _tpPinch.shown = z;
 }
 // A poll can rebuild the map mid-pinch; the rebuilt node has no inline zoom.
@@ -37355,8 +37388,10 @@ function _tpPinchMove(e) {
   const [a, b] = e.touches;
   const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
   const z = Math.min(3, Math.max(_tpPinch.minZ, _tpPinch.zoom * d / _tpPinch.dist));
-  const r = _tpPinch.rect;
-  _tpWant = { z, midX: (a.clientX + b.clientX) / 2 - r.left, midY: (a.clientY + b.clientY) / 2 - r.top };
+  // The midpoint is kept in the screen's own coordinates: the painter reads
+  // the room's real position each frame, so nothing has to be relative to a
+  // box measured when the fingers landed.
+  _tpWant = { z, cx: (a.clientX + b.clientX) / 2, cy: (a.clientY + b.clientY) / 2 };
   if (!_tpFrame) _tpFrame = requestAnimationFrame(tpApply);
   _tpPinchGuard = Date.now() + 600;
 }

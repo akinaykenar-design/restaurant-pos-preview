@@ -33849,6 +33849,27 @@ function transferFxHtml(t) {
 // joined group — everyone else re-points to it and fades. The dragged table
 // snaps against the one it was dropped on (same layout only), remembering its
 // old spot so unlink puts it back.
+// THE IMAGINARY LINE a row of tables sits on. Read off the table's nearest
+// neighbour — the one it was laid out beside — so a joined table can travel
+// along the row instead of being yanked square to it. Nothing here turns
+// anything: it is a direction, not an angle to wear.
+// It answers nothing for a table standing on its own, and nothing for a row
+// that is already straight, because a square snap is already right there.
+function runDirection(fp, table, skip) {
+  const others = (fp.tables || []).filter(t => t.type !== 'decor' && t.id !== table.id && (!skip || t.id !== skip.id));
+  if (!others.length) return null;
+  const reach = Math.max(table.width, table.height) * 3;
+  let near = null, best = Infinity;
+  for (const o of others) {
+    const d = Math.hypot(o.x - table.x, o.y - table.y);
+    if (d < best) { best = d; near = o; }
+  }
+  if (!near || best > reach || best < 0.001) return null;
+  const ux = (table.x - near.x) / best, uy = (table.y - near.y) / best;
+  // A straight row or column is already what a square snap gives.
+  if (Math.abs(ux) < 0.12 || Math.abs(uy) < 0.12) return null;
+  return { x: ux, y: uy };
+}
 async function linkTables(fromId, intoId, drop, opts) {
   opts = opts || {};
   const a = findTableById(fromId);
@@ -33905,8 +33926,27 @@ async function linkTables(fromId, intoId, drop, opts) {
     const taken = (cx, cy) => others.some(o =>
       Math.abs(cx - o.x) < (a.width + o.width) / 2 - 0.5 &&
       Math.abs(cy - o.y) < (a.height + o.height) / 2 - 0.5);
+    // THE RUN'S OWN LINE COMES FIRST (owner, Sep '26: "those tables are
+    // aligned diagonally along an imaginary line ... is there any way of
+    // programming it that way?"). A square snap yanks a table off a diagonal
+    // row and the room stops reading as a room. So the joined table slides
+    // ALONG the line its partner already sits on, and NOTHING TURNS (owner:
+    // "I don't want the table to be rotated ... it doesn't have to be one
+    // side complete with another side, it could be half of one side"): it
+    // travels far enough to touch on the longer axis, and the line's slope
+    // carries it across the other one, so the two meet along part of a side
+    // and the row keeps its angle.
+    const lined = (() => {
+      const u = runDirection(fpB, b, a);
+      if (!u) return null;
+      // Far enough that the edges meet on the axis the line mostly runs along.
+      const t = Math.abs(u.x) >= Math.abs(u.y) ? halfW / Math.abs(u.x) : halfH / Math.abs(u.y);
+      // Which way along the line: toward where the table is coming from.
+      const way = ((fromX - b.x) * u.x + (fromY - b.y) * u.y) >= 0 ? 1 : -1;
+      return { x: b.x + u.x * t * way, y: b.y + u.y * t * way };
+    })();
     let cs = null;
-    for (const c of cands) {
+    for (const c of (lined ? [lined, ...cands] : cands)) {
       const cl = clampToFloor(c.x, c.y, a.width, a.height, a.rotation, fpB.height);
       // Accept only if the wall didn't shove it (clamp unmoved) and no other
       // table already occupies the spot.

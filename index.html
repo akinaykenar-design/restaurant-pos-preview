@@ -8567,6 +8567,9 @@ app.put('/api/settings', (req, res) => {
   }
   if (req.body.askVoidReason !== undefined) data.settings.askVoidReason = !!req.body.askVoidReason; // off by default: a removal just goes (owner, Sep '26)
   if (req.body.washOpacity !== undefined) { const w = parseFloat(req.body.washOpacity); data.settings.washOpacity = (w > 0 && w <= 1) ? w : null; }
+  // Which set of words paints the tables: the till's or the front desk's.
+  // Anything else is the till, so a bad value can never blank the floor.
+  if (req.body.tableColourSource !== undefined) data.settings.tableColourSource = req.body.tableColourSource === 'desk' ? 'desk' : 'till';
   if (req.body.askSeatOff !== undefined) {
     const o = req.body.askSeatOff || {};
     const ids = (v) => Array.isArray(v) ? v.filter(x => typeof x === 'string').slice(0, 2000) : [];
@@ -31028,9 +31031,16 @@ function renderTableStatusAdmin() {
             colours"); the pill's minutes sit beside the pill's colours. */ ''}
       <div class="settings-card">
         <div class="th">1 · Table colours</div>
-        ${row('occupied', '#34C759', 'Open tab — active')
-        + row('billPrinted', 'var(--blue)', 'Bill printed')
-        + row('locked', '#FF9500', 'In use — another till')}
+        ${/* TWO SETS OF WORDS, ONE TABLE (owner, Sep '26: "do a split. I
+              analyse which colours belong in till or desk"). The till knows
+              open tab / bill printed; the front desk knows booked / seated /
+              done / no-show. A table wears one reading, never both, so this
+              is a CHOICE — named buttons, never On/Off. */ ''}
+        ${optionPair(tableColourSource(), 'set-table-colour-source', [['till', 'Till'], ['desk', 'Front desk']])}
+        ${tableColourSource() === 'desk'
+          ? DESK_STATES.map(([k, def, label]) => row('desk-' + k, def, label)).join('')
+          : row('occupied', '#34C759', 'Open tab — active') + row('billPrinted', 'var(--blue)', 'Bill printed')}
+        ${row('locked', '#FF9500', 'In use — another till')}
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <div style="font-weight:700;font-size:var(--fs-md);">Wash strength</div>
           <div class="seg">
@@ -32001,6 +32011,37 @@ function washOpacity() {
   const v = parseFloat(state.settings.washOpacity);
   return v > 0 && v <= 1 ? v : 0.78;
 }
+// WHERE THE TABLE'S COLOUR COMES FROM (owner, Sep '26: "add option for table
+// status to take colours from reservations app. As in seated, paid etc" →
+// "do a split"). Two tills' worth of language, and they are not the same
+// language: the POS knows open tab / bill printed / free, the front desk
+// knows booked / seated / done / no-show. A table wears ONE of those
+// readings, chosen here, so the floor never mixes two vocabularies on one
+// square. Each set keeps its own colours on the Table status page.
+const DESK_STATES = [
+  ['booked', '#FF9500', 'Booked'],
+  ['seated', '#34C759', 'Seated'],
+  ['done', '#8E8E93', 'Done'],
+  ['no-show', '#FF3B30', 'No-show'],
+];
+function tableColourSource() { return state.settings.tableColourSource === 'desk' ? 'desk' : 'till'; }
+// The booking that OWNS this table right now: the one already seated, else
+// the next one due today. A cancelled booking owns nothing.
+function deskBookingFor(tableId) {
+  const now = Date.now();
+  const mine = (state.reservations || []).filter(r => r.tableId === tableId && r.status !== 'cancelled');
+  const seated = mine.find(r => r.status === 'seated');
+  if (seated) return seated;
+  const soon = mine.filter(r => r.status !== 'done' && new Date(r.time).getTime() > now - 15 * 60000)
+    .sort((a, b) => new Date(a.time) - new Date(b.time))[0];
+  if (soon) return soon;
+  // A booking that just finished still owns the table for an hour, so "Done"
+  // is a colour someone can act on (clear it, turn it) rather than a flash.
+  // After that the table is simply free again — a lunch booking must not grey
+  // out the same table all evening.
+  return mine.filter(r => r.status === 'done' && new Date(r.time).getTime() > now - 60 * 60000)
+    .sort((a, b) => new Date(b.time) - new Date(a.time))[0] || null;
+}
 function tableStatusFx(t, cs, lock) {
   const glow = (c) => ({ wash: '', glow: `--glow-c:${c};--glow-soft:color-mix(in srgb, ${c} 55%, transparent);` });
   const op = washOpacity();
@@ -32008,6 +32049,14 @@ function tableStatusFx(t, cs, lock) {
   const none = { wash: '', glow: '' };
   if (lock) return wash(statusColor('locked', '#FF9500'), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
   if (!floorStatusOn()) return none;
+  // THE FRONT DESK'S READING. Same wash, same strength, different words: the
+  // booking's own state, straight off the reservations list.
+  if (tableColourSource() === 'desk') {
+    const r = t.type === 'decor' ? null : deskBookingFor(t.id);
+    if (!r) return none;
+    const st = DESK_STATES.find(d => d[0] === r.status);
+    return st ? wash(statusColor('desk-' + st[0], st[1])) : none;
+  }
   // Semantic layers, the owner's way round: NATURAL WOOD = empty table (its
   // regular state), GREEN = open tab running fine, BLUE = bill printed
   // (matches the blue Bill button), RED = needs you (ignored or over time).
@@ -42879,6 +42928,7 @@ function handleActClick(el, e) {
       else if (act === 'set-floor-lens-on') { toggleFloorLens(el.dataset.key || state.floorStatusView || 'sitting'); }
       else if (act === 'set-ask-void-reason') { saveTicketSetting({ askVoidReason: el.dataset.val === 'true' }); }
       else if (act === 'set-wash-opacity') { saveTicketSetting({ washOpacity: parseFloat(el.dataset.val) }); }
+      else if (act === 'set-table-colour-source') { saveTicketSetting({ tableColourSource: el.dataset.val }); }
       else if (act === 'set-spend-style') { saveTicketSetting({ spendPillStyle: el.dataset.val }); }
       else if (act === 'set-spend-format') { saveTicketSetting({ spendPillFormat: el.dataset.val }); }
       else if (act === 'set-spend-level-on') { toggleSpendLevel(el.dataset.key); }

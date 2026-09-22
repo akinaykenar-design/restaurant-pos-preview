@@ -31046,8 +31046,8 @@ function renderTableStatusAdmin() {
         ${optionPair(tableColourSource(), 'set-table-colour-source', [['till', 'Till'], ['desk', 'Front desk']])}
         ${tableColourSource() === 'desk'
           ? DESK_STATES.map(([k, def, label]) => row('desk-' + k, def, label)).join('')
-          : row('occupied', '#34C759', 'Open tab — active') + row('billPrinted', 'var(--blue)', 'Bill printed')}
-        ${row('locked', '#FF9500', 'In use — another till')}
+          : row('occupied', PLAIN_STATUS.occupied, 'Seated — open tab') + row('billPrinted', PLAIN_STATUS.billPrinted, 'Bill printed')}
+        ${row('locked', PLAIN_STATUS.locked, 'In use — another till')}
         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
           <div style="font-weight:700;font-size:var(--fs-md);">Wash strength</div>
           <div class="seg">
@@ -32031,6 +32031,33 @@ const DESK_STATES = [
   ['done', '#8E8E93', 'Done'],
   ['no-show', '#FF3B30', 'No-show'],
 ];
+// WHICH NOTE A TABLE IS SHOWING — asked once, answered once (owner, Sep '26:
+// "notes should match the table colour we selected for the notes in admin").
+// The FIRST switched-on type the table carries, in the order the venue's own
+// card lists them, because a table can only be one colour and a pill can only
+// say one thing. The wash takes VIP as well; the PILL does not, because VIP
+// already rides the corner star and a second star read as two guests.
+function tableNoteMark(t, includeVip) {
+  if (!t || t.type === 'decor') return null;
+  for (const g of guestMarks()) {
+    if (guestMarkIsOff(g.key)) continue;
+    if (g.id === 'vip' && !includeVip) continue;
+    const hit = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
+    if (hit) return g;
+  }
+  return null;
+}
+// THE PLAIN STATUS, AND ITS COLOURS (owner, Sep '26: "change default colour
+// to blue as seated and red in use and green as bill printed"). One place,
+// read by the floor that paints them and the admin rows that let a venue
+// change them — they were typed out twice and drifted the first time they
+// moved. A venue that has already painted its own keeps them: these are what
+// a fresh till starts with.
+const PLAIN_STATUS = {
+  occupied: '#0A84FF',    // someone is at the table
+  billPrinted: '#34C759', // the bill has gone out
+  locked: '#FF3B30',      // another till has it
+};
 function tableColourSource() { return state.settings.tableColourSource === 'desk' ? 'desk' : 'till'; }
 // The booking that OWNS this table right now: the one already seated, else
 // the next one due today. A cancelled booking owns nothing.
@@ -32054,7 +32081,7 @@ function tableStatusFx(t, cs, lock) {
   const op = washOpacity();
   const wash = (bg, o2) => ({ glow: '', wash: `<span class="tbl-wash" style="background:${bg};opacity:${o2 || op};"></span>` });
   const none = { wash: '', glow: '' };
-  if (lock) return wash(statusColor('locked', '#FF9500'), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
+  if (lock) return wash(statusColor('locked', PLAIN_STATUS.locked), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
   // NOTHING PICKED IS ITSELF A READING (owner, Sep '26: "default status
   // nothing selected should have the table status active in use bill printed
   // etc"). With no key lit the tables wear the plain status every till has —
@@ -32072,6 +32099,12 @@ function tableStatusFx(t, cs, lock) {
     if (!cs || !cs.courseN || coursePillOff(cs.courseN)) return none;
     return wash(cs.color || 'var(--teal)');
   }
+  // Notes, the same way: the table wears the colour the venue painted that
+  // note type in admin, so the floor and the setup card never disagree.
+  if (state.floorStatusView === 'guests') {
+    const g = tableNoteMark(t, true);
+    return g ? wash(guestMarkColor(g)) : none;
+  }
   // THE FRONT DESK'S READING. Same wash, same strength, different words: the
   // booking's own state, straight off the reservations list.
   if (tableColourSource() === 'desk') {
@@ -32084,14 +32117,14 @@ function tableStatusFx(t, cs, lock) {
   // regular state), GREEN = open tab running fine, BLUE = bill printed
   // (matches the blue Bill button), RED = needs you (ignored or over time).
   const st = tableStatus(t.label);
-  if (st === 'billPrinted') return wash(statusColor('billPrinted', 'var(--blue)'), Math.min(op + 0.13, 0.8));
+  if (st === 'billPrinted') return wash(statusColor('billPrinted', PLAIN_STATUS.billPrinted), Math.min(op + 0.13, 0.8));
   const o = tableOpenOrder(t.label);
   // GREEN = your active open table. Urgency never recolours the table — it
   // lives in the pill alone (dark → yellow → red), so nothing mashes.
-  if (o) return wash(statusColor('occupied', '#34C759'));
+  if (o) return wash(statusColor('occupied', PLAIN_STATUS.occupied));
   // Seated counts as active: covers entered but nothing ordered yet wears the
   // same green — a seated party must never read as a free table (owner, Aug '26).
-  if (t.covers > 0) return wash(statusColor('occupied', '#34C759'));
+  if (t.covers > 0) return wash(statusColor('occupied', PLAIN_STATUS.occupied));
   return none; // empty — a table at rest is just a table
 }
 // The little pill under the table number follows the lens: course dot +
@@ -32398,21 +32431,17 @@ function floorPillHtml(t, cs) {
   if (lens === 'guests') {
     // On SYMBOLS the corner marks say it all — no pill (tableMarksHtml).
     if (guestPillFormat() === 'symbol') return '';
-    // VIP already rides the corner star — echoing it here put two stars on the
-    // table, so it never takes the pill.
-    // The pill takes the FIRST switched-on thing the table carries, in the
-    // order the card lists them: the pill can only say one thing.
-    for (const g of guestMarks()) {
-      if (g.id === 'vip' || guestMarkIsOff(g.key)) continue;
-      if (g.id === 'allergy') {
-        const al = notesOfType('allergy', t.notes).filter(n => String(n.text || '').trim());
-        if (al.length) return pill(tint(guestMarkColor(g)), `<b>! ${esc(al[0].text)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, g.name);
-        continue;
-      }
-      const n = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
-      if (n) return pill(tint(guestMarkColor(g)), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
+    // ONE CHOICE, TWO PLACES: the same mark the wash paints (tableNoteMark)
+    // writes the pill, so the words under a table can never name a different
+    // note from the colour on it.
+    const g = tableNoteMark(t, false);
+    if (!g) return '';
+    if (g.id === 'allergy') {
+      const al = notesOfType('allergy', t.notes).filter(n => String(n.text || '').trim());
+      return pill(tint(guestMarkColor(g)), `<b>! ${esc(al[0].text)}${al.length > 1 ? ' +' + (al.length - 1) : ''}</b>`, g.name);
     }
-    return '';
+    const n = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
+    return pill(tint(guestMarkColor(g)), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
   }
   if (lens === 'booked') {
     const r = upcomingBookingFor(t.id, 180);

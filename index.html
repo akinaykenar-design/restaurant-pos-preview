@@ -8560,20 +8560,20 @@ app.put('/api/settings', (req, res) => {
   if (req.body.floorControls !== undefined) data.settings.floorControls = req.body.floorControls === 'float' ? 'float' : 'band';
   if (req.body.floorPillEnabled !== undefined) data.settings.floorPillEnabled = !!req.body.floorPillEnabled;
   // Each pill clock keeps its own two minutes.
-  for (const k of ['seatedWarnMinutes', 'idleWarnMinutes', 'idleOverMinutes']) {
+  for (const k of ['seatedWarnMinutes']) {
     if (req.body[k] !== undefined) { const n = parseInt(req.body[k], 10); if (!isNaN(n)) data.settings[k] = Math.max(0, Math.min(600, n)); }
   }
   // The floor's lens menu, in the venue's own order. Only the lenses the app
   // knows, each once — a typo can never hide one.
   if (req.body.floorLensOff !== undefined) {
-    const known = ['booked', 'guests', 'course', 'sitting', 'attention', 'spend'];
+    const known = ['booked', 'guests', 'course', 'spend'];
     const seen = new Set();
     const off = (Array.isArray(req.body.floorLensOff) ? req.body.floorLensOff : [])
       .map(String).filter(k => known.includes(k) && !seen.has(k) && seen.add(k));
     data.settings.floorLensOff = off.length < known.length ? off : off.slice(0, known.length - 1); // never all of them
   }
   if (req.body.floorLensOrder !== undefined) {
-    const known = ['booked', 'guests', 'course', 'sitting', 'attention', 'spend'];
+    const known = ['booked', 'guests', 'course', 'spend'];
     const seen = new Set();
     const order = (Array.isArray(req.body.floorLensOrder) ? req.body.floorLensOrder : [])
       .map(String).filter(k => known.includes(k) && !seen.has(k) && seen.add(k));
@@ -8629,14 +8629,14 @@ app.put('/api/settings', (req, res) => {
     data.settings.spendLevelOff = (Array.isArray(req.body.spendLevelOff) ? req.body.spendLevelOff : []).filter(k => known.includes(k));
   }
   // Which of the three waits a venue has switched off, per clock — "seated:long",
-  // "attention:late" and so on. Anything not of that shape is dropped.
+  // "course:late" and so on. Anything not of that shape is dropped.
   // Which note types a venue has taken off the floor's Guests view.
   if (req.body.guestMarkOff !== undefined) {
     data.settings.guestMarkOff = (Array.isArray(req.body.guestMarkOff) ? req.body.guestMarkOff : [])
       .filter(k => typeof k === 'string' && k.length < 64).slice(0, 60);
   }
   if (req.body.pillLevelOff !== undefined) {
-    const clocks = ['course', 'sitting', 'attention'], levels = ['short', 'long', 'late'];
+    const clocks = ['course'], levels = ['short', 'long', 'late'];
     data.settings.pillLevelOff = (Array.isArray(req.body.pillLevelOff) ? req.body.pillLevelOff : [])
       .filter(k => { const p = String(k).split(':'); return p.length === 2 && clocks.includes(p[0]) && levels.includes(p[1]); });
   }
@@ -22285,7 +22285,6 @@ const FP_LENS_SVG = {
   // and the bar ended up with two of them. Same path as DKT_FLAME_SVG, in
   // the dock's own stroke shell.
   course: `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.32 14.11A2.63 2.63 0 0 0 10.95 11.47c0 -1.45 -0.53 -2.11 -1.05 -3.16 -1.13 -2.25 -0.23 -4.26 2.11 -6.32 0.53 2.63 2.11 5.16 4.21 6.84 2.11 1.68 3.16 3.68 3.16 5.79a7.37 7.37 0 1 1 -14.74 0c0 -1.21 0.45 -2.41 1.05 -3.16a2.63 2.63 0 0 0 2.63 2.63z"/></svg>`,
-  attention: `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 3"/></svg>`,
   // A DOLLAR SIGN, NOT A BANKNOTE (owner, Sep '26: "dollar sign for spend").
   // The banknote read as "cash" beside a key that is really about how much is
   // on the bill, whatever it gets paid with.
@@ -30929,7 +30928,12 @@ function renderScreenAdmin() {
 // the owner could not tell which one was being talked about. The key asks HOW
 // LONG they have been there, so it says that; "Seated" now belongs to the
 // table colour alone.
-const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Notes'], ['course', 'Course'], ['attention', 'Idle'], ['spend', 'Spend']];
+// IDLE IS GONE (owner, Sep '26: "bin it"). It counted from the last round
+// that went to the kitchen — which is the number the COURSE key already
+// shows, on the same table, in the same minute: measured on all six tables
+// with an open bill and it matched every time, the only difference being
+// that Course also says WHICH course. Two keys doing one job.
+const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Notes'], ['course', 'Course'], ['spend', 'Spend']];
 // TIME AT TABLE IS GONE (owner, Sep '26: "delete seated status"). It counted
 // from the moment the party sat down — but the table already SAYS somebody is
 // sitting there, in colour, with nothing picked at all. What a waiter actually
@@ -32102,10 +32106,6 @@ function tableCourseStatus(tableLabel) {
 function tableOpenOrder(label) {
   return (state.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(label));
 }
-function tableIdleMins(o) {
-  const last = Math.max(o.createdAt || 0, o.calledAwayAt || 0, ...(o.rounds || []).map(r => r.sentAt || 0));
-  return Math.max(0, Math.floor((Date.now() - last) / 60000));
-}
 // A booking on this table starting within the next hour (or up to 15 min
 // overdue) — the Booked lens highlights these so walk-ins don't get seated.
 function upcomingBookingFor(tableId, aheadMin) {
@@ -32379,7 +32379,6 @@ function pillDur(mins) {
 // they shared one pair of numbers, with Idle's fixed at 15 in the code.
 const PILL_CLOCKS = [
   { key: 'course', name: 'Course', what: 'Since the kitchen was told to fire.', warn: 'pillWarnMinutes', over: 'courseWaitMinutes', warnDef: 10, overDef: 15 },
-  { key: 'attention', name: 'Idle', what: 'Since their last order.', warn: 'idleWarnMinutes', over: 'idleOverMinutes', warnDef: 10, overDef: 15 },
 ];
 function pillClockMins(key) {
   const c = PILL_CLOCKS.find(c => c.key === key);
@@ -32544,12 +32543,6 @@ function floorPillHtml(t, cs) {
     const style = sevAt(mins, 'course');
     const cn = cs && cs.courseName ? esc(String(cs.courseName).slice(0, 8)) + ' · ' : '';
     return pill(style, `<b>⏱ ${cn}${pillDur(mins)}</b>`, 'Called away — being fired');
-  }
-  if (lens === 'attention') {
-    if (!o) return '';
-    const idle = tableIdleMins(o);
-    if (pillLevelIsOff('attention', pillClockLevel(idle, 'attention'))) return ''; // this level switched off
-    return pill(sevAt(idle, 'attention'), `<b>⏱ ${pillDur(idle)}</b>`, 'Since last activity');
   }
   if (lens === 'spend') {
     // What the table has rung up, weighed against the venue's two numbers

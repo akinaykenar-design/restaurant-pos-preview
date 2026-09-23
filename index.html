@@ -13178,6 +13178,12 @@ function rungUnits(i) { return TABLE_UNITS[Math.max(0, Math.min(TABLE_UNITS.leng
 function unitLabel(n) { return unitRung(n) + 1; }
 // A step moves ONE RUNG, never one square.
 function symmetricalTable(t) { return !!t && !!(TABLE_SHAPES[t.shape] || {}).sym; }
+// WHAT CAN TURN IS EVERYTHING BUT A ROUND (owner, Sep '26: "you should be
+// able to rotate a square table"). The Turn key asked whether a table was
+// SYMMETRICAL, and a square is — so it went dim, though a square on its point
+// is a real layout. A round one still has nothing to turn ("round tables
+// should not be able to rotate thats weird").
+function turnableTable(t) { return !!t && t.type !== 'decor' && t.shape !== 'round'; }
 function tableOneNumber(shape) { return !!(TABLE_SHAPES[shape] || TABLE_SHAPES.square).sym; } // one size, or length + height
 // The layout bar's own marks. ONE arrow, turned by CSS for the four nudge
 // keys — a turn is not a resize, so the drawing stays one drawing and the
@@ -13510,7 +13516,7 @@ function tableWouldOverlap(fp, x, y, w, h, excludeId, rot) {
   const aL = x - a.hw, aR = x + a.hw, aT = y - a.hh, aB = y + a.hh;
   const pad = 0.5; // let edges touch without counting as overlap
   return fp.tables.some(t => {
-    if (t.type !== 'table' || t.id === excludeId) return false;
+    if (t.type !== 'table' || (excludeId instanceof Set ? excludeId.has(t.id) : t.id === excludeId)) return false;
     const b = tableHalfExtents(t.width, t.height, t.rotation, fp.height);
     const bL = t.x - b.hw, bR = t.x + b.hw, bT = t.y - b.hh, bB = t.y + b.hh;
     return aL < bR - pad && aR > bL + pad && aT < bB - pad && aB > bT + pad;
@@ -29837,7 +29843,7 @@ function renderFloorPlanAdmin() {
   const pickedIds = state.selectedAdminTableIds.length ? state.selectedAdminTableIds
     : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
   const pickedTables = pickedIds.map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
-  const canTurn = pickedTables.some(t => !symmetricalTable(t));
+  const canTurn = pickedTables.some(turnableTable);
   const sizeTables = pickedTables.filter(t => t.type !== 'decor');
   const sameVal = (vals) => vals.length && vals.every(v => v === vals[0]) ? vals[0] : null;
   // One number for a square or a circle, two for a rectangle or an oval —
@@ -29999,7 +30005,7 @@ function renderFloorPlanAdmin() {
       // with one picked it edits that table. Same controls either way.
       // A ROUND table shows no Turn button - there is nothing to turn (owner:
       // "round tables should not be able to rotate thats weird").
-      const allRound = selTable ? symmetricalTable(selTable) : (selMany.length ? selMany.every(symmetricalTable) : true);
+      const allRound = selTable ? !turnableTable(selTable) : (selMany.length ? !selMany.some(turnableTable) : true);
       // THE HEADING NEVER MOVES. The Turn key used to appear when you picked
       // a square table and vanish on a round one, pushing the caption under it
       // down 38 each time — on the card that is meant never to move. A key at
@@ -34697,21 +34703,43 @@ async function nudgeSelectedTables(dx, dy) {
   if (!fp) return;
   const ids = state.selectedAdminTableIds.length ? state.selectedAdminTableIds.slice()
     : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
-  if (!ids.length) return;
+  const picked = ids.map(id => fp.tables.find(x => x.id === id)).filter(Boolean);
+  if (!picked.length) return;
+  // THE PICK MOVES AS ONE (owner, Sep '26: "selecting all and pressing the
+  // arrows shift them one at a time instead of all together"). Each table was
+  // saved and redrawn in turn, so the group crept across one table at a time,
+  // and a table in a row bumped into its own neighbour — still sitting where
+  // it was — and stayed behind. Every landing is worked out first, against
+  // the tables that are NOT moving; if the wall or a neighbour stops any one
+  // of them, none move, so the shape never breaks up. Then one redraw, one
+  // undo step, and the saves go out together.
   // One grid square, in the room's own numbers — the same square the
   // snap-to-grid uses, so a nudged table lands where a dragged one would.
-  pushFloorHistory();
-  for (const id of ids) {
-    const t = fp.tables.find(x => x.id === id);
-    if (!t) continue;
-    const at = clampToFloor(t.x + dx * FLOOR_GRID, t.y + dy * FLOOR_GRID_Y, t.width, t.height, t.rotation, fp.height);
-    if (at.x === t.x && at.y === t.y) continue;
+  const stay = new Set(picked.map(t => t.id));
+  const moves = [];
+  for (const t of picked) {
+    const wantX = t.x + dx * FLOOR_GRID, wantY = t.y + dy * FLOOR_GRID_Y;
+    const at = clampToFloor(wantX, wantY, t.width, t.height, t.rotation, fp.height);
+    // The clamp rounds a spot to the room's own grain, so "stopped" means it
+    // fell short by more than half a step, not by a rounding.
+    if (Math.abs(at.x - wantX) > FLOOR_GRID / 2 || Math.abs(at.y - wantY) > FLOOR_GRID_Y / 2) return; // the wall stops the group
     // A NUDGE LANDS ON NOBODY, same as a drag — the arrows are a slower hand,
     // not a way round the rule.
-    if (tableWouldOverlap(fp, at.x, at.y, t.width, t.height, t.id, t.rotation)) continue;
-    await patchFloorObject(fp.id, id, { x: at.x, y: at.y });
+    if (t.type === 'table' && tableWouldOverlap(fp, at.x, at.y, t.width, t.height, stay, t.rotation)) return;
+    // Every table takes the SAME step — the clamp's rounding would have moved
+    // one of them a hair less than its neighbour.
+    moves.push({ t, from: { x: t.x, y: t.y }, to: { x: wantX, y: wantY } });
   }
+  pushFloorHistory();
+  moves.forEach(m => Object.assign(m.t, m.to));
   render();
+  try {
+    await Promise.all(moves.map(m => api(`/api/floorplans/${fp.id}/tables/${m.t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m.to) })));
+  } catch (e) {
+    moves.forEach(m => Object.assign(m.t, m.from));
+    state.toast = toastFail(e.message || 'Could not save that change.');
+    render();
+  }
 }
 function stepTableSize(dim, d) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
@@ -35792,12 +35820,24 @@ async function rotateSelectedTables() {
   if (!fp) return;
   const ids = state.selectedAdminTableIds.length ? state.selectedAdminTableIds.slice()
     : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
-  for (const id of ids) {
-    const t = fp.tables.find(x => x.id === id);
-    if (!t || t.type === 'decor') continue;
+  // Every picked table turns in the same frame, one undo step — the same as
+  // the arrows (they turned one after another, each saved before the next).
+  const turns = ids.map(id => fp.tables.find(x => x.id === id)).filter(turnableTable).map(t => {
     const rotation = ((t.rotation || 0) + 45) % 360;
     const cr = clampToFloor(t.x, t.y, t.width, t.height, rotation, fp.height);
-    await patchFloorObject(fp.id, id, { rotation, ...(cr && (cr.x !== t.x || cr.y !== t.y) ? { x: cr.x, y: cr.y } : {}) });
+    const to = { rotation, ...(cr && (cr.x !== t.x || cr.y !== t.y) ? { x: cr.x, y: cr.y } : {}) };
+    return { t, to, from: { rotation: t.rotation || 0, x: t.x, y: t.y } };
+  });
+  if (!turns.length) return;
+  pushFloorHistory();
+  turns.forEach(m => Object.assign(m.t, m.to));
+  render();
+  try {
+    await Promise.all(turns.map(m => api(`/api/floorplans/${fp.id}/tables/${m.t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(m.to) })));
+  } catch (e) {
+    turns.forEach(m => Object.assign(m.t, m.from));
+    state.toast = toastFail(e.message || 'Could not save that change.');
+    render();
   }
 }
 

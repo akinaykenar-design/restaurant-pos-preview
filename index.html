@@ -3569,7 +3569,7 @@ body.mk-dragging .fp-float,
    and on the ones where it still does something it stops a TRANSFORMED child
    scrolling at all — which is exactly what the map is now (owner, Aug '26:
    "I can't move side to side while zoomed in"). */
-.tp-canvas-wrap{ overflow:auto; touch-action:pan-x pan-y;
+.tp-canvas-wrap{ overflow:auto; touch-action:pan-x pan-y; overscroll-behavior:contain; /* a pan that hits the room's edge stops there — it never carries on into the page */
   border-radius:var(--r-control); display:flex; align-items:safe center; justify-content:safe center; }
 .tp-canvas-wrap .floor-canvas{ flex:none;
   /* THE WHOLE ROOM, not a cropped one (owner, Sep '26: "tablet mode floor is
@@ -4022,7 +4022,7 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    places and 20 in others (owner, Aug '26: "icons ... all diff shapes and
    sizes"). The square-controls rule says 20. */
 .seg-icon svg, .icon-sq svg, .sort-btn svg, .delete-icon-btn svg{ width:20px; height:20px; }
-.fp-main{order:1;flex:1;min-width:0;overflow:auto;-webkit-overflow-scrolling:touch;position:relative;} /* positioned: the guide layer lays itself over the room inside this frame */
+.fp-main{order:1;flex:1;min-width:0;overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;position:relative;} /* positioned: the guide layer lays itself over the room inside this frame */
 /* THE LINE THAT SAYS TWO TABLES ARE JOINED (owner, Sep '26: "maybe a line to
    draw between the two tables, like a blue line or something, the same colour
    as the highlighted colour"). It lives inside the room so it pans and zooms
@@ -36832,6 +36832,13 @@ let _tpDragOwned = false;
     return { el, w, base: -w, rest: 0, kind: 'map-in', slop: -10 };
   };
   document.addEventListener('touchstart', (e) => {
+    // A SECOND FINGER MAKES IT A PINCH, NEVER A SWIPE (owner, Sep '26: "the
+    // whole screen sometimes moves" on a pinch). Every touchstart re-armed
+    // this from the FIRST finger, and the move below never counted fingers —
+    // so the first finger sliding outward in a pinch-out read as a swipe and
+    // carried the whole floor off toward the order screen. A panel already
+    // taken goes back on its own timing; nothing else is armed.
+    if (e.touches.length > 1) { if (pane) onCancel(); armed = false; return; }
     armed = false; onPeekStrip = false; dktAtTop = false; mapUnder = null; mapWasAtEnd = false;
     _tpDragOwned = false;
     letGo();
@@ -36919,6 +36926,7 @@ let _tpDragOwned = false;
   // sees that and does not judge it a second time.
   function onMove(e) {
     if (!once(e)) return;
+    if (e.touches.length > 1) { if (pane) onCancel(); armed = false; return; } // a pinch, not a swipe
     if (!armed || !e.touches[0]) return;
     const t = e.touches[0], dx = t.clientX - sx, dy = t.clientY - sy;
     if (!pane) {
@@ -37304,7 +37312,7 @@ function tpApply() {
 // A poll can rebuild the map mid-pinch; the rebuilt node has no inline zoom.
 function tpRepaintAfterRender() { if (_tpPinch && _tpWant) { _tpPinch.canvas = document.querySelector('.floor-canvas'); _tpPinch.shown = 1; tpApply(); } }
 document.addEventListener('touchstart', (e) => {
-  if (e.touches.length !== 2) { _tpPinch = null; return; }
+  if (e.touches.length !== 2) { if (_tpPinch && _tpPinch.wrap) _tpPinch.wrap.style.overflow = ''; _tpPinch = null; return; }
   if (state.frozen) { _tpPinch = null; return; } // locked screen: no gestures
   // THE LAYOUT EDITOR PINCHES TOO (owner, Sep '26: the phone's editor had no
   // zoom at all, so 46px tables wore three 44px handles). Same gesture, same
@@ -37340,6 +37348,14 @@ document.addEventListener('touchstart', (e) => {
   const zoom = editor ? fpZoom() : tpZoom();
   const cs = getComputedStyle(wrap);
   const inner = wrap.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
+  // THE BROWSER KEEPS ITS HANDS OFF WHILE TWO FINGERS ARE DOWN (owner, Sep
+  // '26: "very snappy"). A first finger that had already started to pan made
+  // the browser commit to a native scroll, and a scroll under way cannot be
+  // cancelled — so the browser kept panning the room while the pinch set the
+  // scroll itself every frame, and the two fought: the room jerked, and a
+  // flung pan carried on after the fingers lifted. Hidden overflow stops the
+  // browser's scroll (and its fling) dead while the script's still works.
+  wrap.style.overflow = 'hidden';
   _tpPinch = { wrap, canvas, baseW, baseH, rect: r, shown: zoom, editor,
     dist: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), zoom,
     minZ: editor ? fpZoomFloor(wrap, canvas) : Math.min(1, inner / baseW) };
@@ -37397,6 +37413,7 @@ document.addEventListener('touchend', () => {
     _tpPinch.canvas.style.marginRight = '';
     _tpPinch.canvas.style.marginBottom = '';
   }
+  if (_tpPinch.wrap) _tpPinch.wrap.style.overflow = '';   // the room pans again
   _tpPinch = null; _tpWant = null; _tpPinchGuard = Date.now() + 400;
 }, { passive: true });
 document.addEventListener('click', (e) => {

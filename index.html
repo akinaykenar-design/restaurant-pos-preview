@@ -18330,7 +18330,16 @@ function nearestAllowedCourse(intended, item) {
 function cascadeAutoCourses(openOrder) {
   if (!autoCourseOn() || openOrder || Object.keys(state.firedCourses || {}).length || !state.cart.length) return;
   if (state.cart.some(l => l.courseByHand)) return; // somebody placed a line by hand — leave the cart alone
-  const present = [...new Set(state.cart.map(c => c.course || 1))].sort((a, b) => a - b);
+  // EVERY PASS STARTS FROM WHERE AUTO FILED EACH DISH, never from where the
+  // last pass slid it (owner, Sep '26: "I see 1st course items in 2nd
+  // course"). This ran on every render and wrote the slide back onto the
+  // line, so the dish forgot its own course: ring a main alone and it slid
+  // into 1st; ring a starter next and the starter filed into 1st beside it —
+  // mains and starters on one docket course. The filed course is kept on the
+  // line and the slide is worked out fresh each time, so adding the starter
+  // moves the main back up where it belongs.
+  const filed = l => l.filedCourse || l.course || 1;
+  const present = [...new Set(state.cart.map(filed))].sort((a, b) => a - b);
   const map = {};
   let next = 1;
   // Same name heuristic as the one-tap default fill: a course is drinks,
@@ -18346,15 +18355,16 @@ function cascadeAutoCourses(openOrder) {
       if (!tpl || tpl.enabled === false) return false;
       const src = state.settings.courses[n - 1];
       if (!Array.isArray(tpl.sections) && src && kindOf(tpl) !== kindOf(src)) return false;
-      return state.cart.every(l => (l.course || 1) !== n || courseAllowsItem(t, (state.menu || []).find(m => m.id === l.menuItemId)));
+      return state.cart.every(l => filed(l) !== n || courseAllowsItem(t, (state.menu || []).find(m => m.id === l.menuItemId)));
     };
     while (target < n && !groupFits(target)) target++;
     map[n] = target;
     next = target + 1;
   });
-  if (present.every(n => map[n] === n)) return;
-  state.cart.forEach(l => { l.course = map[l.course || 1] || l.course; });
-  if (map[state.activeCourse]) state.activeCourse = map[state.activeCourse];
+  state.cart.forEach(l => { l.course = map[filed(l)] || filed(l); });
+  // The tab follows the dish just rung — by its FILED course too, or a second
+  // pass would slide the tab a second time.
+  if (state.activeCourseFiled && map[state.activeCourseFiled]) state.activeCourse = map[state.activeCourseFiled];
 }
 // §§ Adding to the docket
 function pushCartLine(item, variant, modifiers, seat, qty, note) {
@@ -18364,6 +18374,7 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
   // course pages this is not optional: the paged docket shows ONLY the active
   // course, so an item landing on another course would vanish on add.
   if (autoCourseOn() || state.settings.coursePagedDocket === true) state.activeCourse = course;
+  state.activeCourseFiled = autoCourseOn() ? course : null;
   const modList = modifiers || [];
   const variantId = variant ? variant.id : null;
   const modSelections = {};
@@ -18379,10 +18390,12 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
     // 'later' groups start empty — added from the line editor.
   });
   const composed = composeCartLine(item, variantId, modSelections);
-  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
+  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, filedCourse: course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
   // A noted line never merges into a differently-noted one — the note is
-  // part of what the kitchen reads.
-  const existing = state.cart.find(c => c.id === line.id && c.course === course && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
+  // part of what the kitchen reads. Under Auto the same dish meets itself by
+  // the course it was FILED under, since the slide may have moved the first.
+  const sameCourse = c => autoCourseOn() && !c.courseByHand ? (c.filedCourse || c.course) === course : c.course === course;
+  const existing = state.cart.find(c => c.id === line.id && sameCourse(c) && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
   // A line that already went out (sentQty) is never grown — the server would
   // skip its key and the extra would vanish. The extra becomes its own line.
   if (existing && existing.sentQty == null) existing.qty += qty;
@@ -18533,6 +18546,7 @@ function editLineSetCourse(n) {
   if (!line || line.course === n) return;
   line.course = n;
   line.courseByHand = true;
+  state.activeCourseFiled = null;
   // With course PAGES the docket shows one course at a time, so follow the
   // line — otherwise Save drops you on a page the dish has just left.
   if (state.settings.coursePagedDocket === true) { state.activeCourse = n; state.docketShowAll = false; }
@@ -18671,7 +18685,7 @@ function discardCartUndoable() {
   });
 }
 
-function setActiveCourse(n) { state.activeCourse = n; render(); }
+function setActiveCourse(n) { state.activeCourse = n; state.activeCourseFiled = null; render(); }
 // One auto-coursing toggle for every entry point (account tile, docket icon):
 // flipping it ON re-courses the unsent cart to the items' defaults.
 function toggleAutoCourseOrder() {
@@ -22838,7 +22852,7 @@ function renderTicketPanel() {
             ${DKT_USER_SVG}
             <span class="gnum cov">${state.covers || '—'}</span>
           </button>` : ''}
-          ${sc.notes !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.notesPanel ? 'active held-open' : ''}" data-act="toggle-notes-panel" aria-label="Notes">${DKT_POSTIT_SVG}</button>` : ''}
+          ${sc.notes !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.notesPanel ? 'active held-open' : ''}" data-act="toggle-notes-panel" aria-label="Order notes">${DKT_POSTIT_SVG}</button>` : ''}
           ${sc.quickNote !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.quickNotePad ? 'active held-open' : ''}" data-act="toggle-quick-note" aria-label="Quick note">${DKT_BOLT_SVG}</button>` : ''}
           ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active held-open' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" data-act="toggle-callaway" aria-label="Call away">${DKT_FLAME_SVG}</button>` : ''}
           ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" data-act="toggle-auto-course-order" aria-label="Auto course">${DKT_AUTO_SVG}</button>` : ''}
@@ -27394,7 +27408,7 @@ const ADMIN_SECTIONS = [
     { key: 'modifiers', label: 'Modifiers' },
     { key: 'menu', label: 'Items' },
     { key: 'combos', label: 'Set Menus' },
-    { key: 'settings-notes', label: 'Order Notes' },
+    { key: 'settings-notes', label: 'Order notes' },
     { key: 'settings-quicknotes', label: 'Quick Notes' },
     { key: 'menu-import', label: 'Import' },
   ] },
@@ -30941,7 +30955,7 @@ function renderScreenAdmin() {
 // shows, on the same table, in the same minute: measured on all six tables
 // with an open bill and it matched every time, the only difference being
 // that Course also says WHICH course. Two keys doing one job.
-const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Notes'], ['course', 'Course'], ['spend', 'Spend']];
+const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Order notes'], ['course', 'Course'], ['spend', 'Spend']];
 // TIME AT TABLE IS GONE (owner, Sep '26: "delete seated status"). It counted
 // from the moment the party sat down — but the table already SAYS somebody is
 // sitting there, in colour, with nothing picked at all. What a waiter actually
@@ -31288,8 +31302,8 @@ function renderTableStatusAdmin() {
               panel, simple, just make it similar to the others"). One row per
               note type, the same row as Spend and the courses. */ ''}
         <div class="ts-clock">
-          <div style="font-weight:700;font-size:var(--fs-md);">Notes</div>
-          <div class="ts" style="margin-bottom:10px;">What a table's notes show.</div>
+          <div style="font-weight:700;font-size:var(--fs-md);">Order notes</div>
+          <div class="ts" style="margin-bottom:10px;">What a table's order notes show.</div>
           <div class="pay-options" style="margin-bottom:12px;">
             ${[['text', 'Words'], ['symbol', 'Symbols']].map(([v, l]) => `<div class="pay-opt ${guestFmt === v ? 'active' : ''}" data-act="set-guest-format" data-val="${v}">${l}</div>`).join('')}
           </div>
@@ -32925,7 +32939,7 @@ function renderAccountMiddle() {
   // bar and on the docket head.
   const sc = [
     ['open-covers-pad', DKT_USER_SVG, 'Covers', state.settings.coversEnabled ? (state.covers ? String(state.covers) : '—') : ''],
-    ['toggle-notes-panel', DKT_POSTIT_SVG, 'Notes', ''],
+    ['toggle-notes-panel', DKT_POSTIT_SVG, 'Order notes', ''],
     ['toggle-quick-note', DKT_BOLT_SVG, 'Quick note', ''],
     ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
     ['toggle-auto-course-order', DKT_AUTO_SVG, 'Auto course', autoCourseOn() ? 'On' : 'Off'],
@@ -43651,7 +43665,7 @@ function handleActClick(el, e) {
         }
         else if (m === 'addback' && v.startsWith('notetype:')) {
           const id = v.slice(9);
-          if (id === 'none') { state.toast = toastFail('Add note types in Settings'); render(); armToastTimer(2400); return; }
+          if (id === 'none') { state.toast = toastFail('Add note types in Order notes'); render(); armToastTimer(2400); return; }
           dkToggleNoteType(id);
         }
         else if (m === 'addback') {

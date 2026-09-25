@@ -12506,10 +12506,19 @@ app.post('/api/orders/:id/call-away', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  const course = parseInt(req.body && req.body.course, 10);
+  // TAKING IT BACK is the same stamp, removed — so every till and the pass
+  // agree it is held again (Sep '26: the take-back only cleared the till it
+  // was pressed on, and the pass kept saying Away).
+  if (req.body && req.body.undo) {
+    if (course > 0 && order.firedCourses) delete order.firedCourses[course];
+    logAudit(data, staffFromReq(req), `Took back the call-away on ${order.orderType === 'dine-in' ? 'Table ' + order.table : 'order #' + order.id}`);
+    writeData(data);
+    return res.json(order);
+  }
   order.calledAwayAt = Date.now();
   // A course named here is stamped like a printed call-away, so every till
   // (and the pass) agrees it has gone — printing on or off.
-  const course = parseInt(req.body && req.body.course, 10);
   if (course > 0) { order.firedCourses = order.firedCourses || {}; order.firedCourses[course] = order.calledAwayAt; }
   logAudit(data, staffFromReq(req), `Called away ${order.orderType === 'dine-in' ? 'Table ' + order.table : 'order #' + order.id}`);
   writeData(data);
@@ -18455,6 +18464,13 @@ function itemAddNeedsSeatPrompt(item) {
 // Human label for a line/allergy/note seat value. A number → the configurable
 // prefix + number ("Seat 3" or just "3"); 'all' → the shared label ("Share");
 // null/blank → empty.
+// A seat in brackets after a dish's name — or nothing at all when the seat
+// has no words (a venue that blanked "All" got "1× Pita ()" on the kitchen
+// screen, Sep '26).
+function seatTag(seat) {
+  const t = seat ? seatText(seat) : '';
+  return t ? ` <span style="white-space:nowrap;">(${esc(t)})</span>` : '';
+}
 function seatText(seat) {
   // BLANK MEANS NOTHING (owner, Sep '26: "if I leave the text blank that
   // solves the problem"). A shared item wrote "All" on the docket panel and
@@ -19202,6 +19218,12 @@ function closeCallAwayPane() {
 function clearFiredCourse(n) {
   delete state.firedCourses[n];
   render();
+  // …and on the ticket, so every till and the pass see it held again.
+  const o = activeOpenOrder();
+  if (!o) return;
+  api(`/api/orders/${o.id}/call-away`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course: n, undo: true }) })
+    .then(updated => { const i = state.orders.findIndex(x => x.id === updated.id); if (i >= 0) state.orders[i] = updated; renderWhenStill(); })
+    .catch(() => { state.toast = toastFail('Could not take back the call-away on the other tills.'); render(); armToastTimer(3000); });
 }
 // One-tap call-away straight from the floor map: stamp the order and reset its
 // table-map timer. Optimistically updates locally, then confirms with the server.
@@ -25125,7 +25147,7 @@ function renderKitchenAdmin() {
                   <div class="order-row kds-item" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-uid="${esc(r.item.uid || '')}" data-status="${col.next}">
                     ${col.prev ? `<button class="kds-back" data-stop="1" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-uid="${esc(r.item.uid || '')}" data-status="${col.prev}" aria-label="Recall to ${esc(col.prevLabel)}">‹</button>` : ''}
                     <div class="order-info">
-                      <div class="t1">${r.item.qty}× ${esc(r.item.name)}${r.item.seat ? ' <span style="white-space:nowrap;">(' + esc(seatText(r.item.seat)) + ')</span>' : ''}</div>
+                      <div class="t1">${r.item.qty}× ${esc(r.item.name)}${seatTag(r.item.seat)}</div>
                       ${r.item.note ? `<div class="t2">${esc(r.item.note)}</div>` : ''}
                     </div>
                     <span class="kds-advance">${col.next === 'served' ? SYS_TICK_SVG + ' Serve' : esc(col.nextLabel)} ›</span>
@@ -27844,7 +27866,7 @@ function renderDetailModal() {
       ${state.settings.ticketHeader ? `<div class="ticket-custom-header" style="text-align:left;padding:0 0 8px;">${esc(state.settings.ticketHeader)}</div>` : ''}
       <h2>Order #${o.id}</h2>
       <div class="sub">${fmtDate(o.createdAt)} · ${fmtTime(o.createdAt)} · ${o.orderType === 'dine-in' ? 'Table ' + esc(o.table) : esc(o.customerName || o.orderType)}${o.covers ? ' · ' + o.covers + ' covers' : ''}</div>
-      ${o.items.map(i => `<div class="detail-line"><span>${i.qty}× ${esc(i.name)}${i.seat ? ' <span style="white-space:nowrap;">(' + esc(seatText(i.seat)) + ')</span>' : ''}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`).join('')}
+      ${o.items.map(i => `<div class="detail-line"><span>${i.qty}× ${esc(i.name)}${seatTag(i.seat)}${i.note ? ' — ' + esc(i.note) : ''}</span><span>${money(i.price * i.qty)}</span></div>`).join('')}
       <div class="detail-line" style="border-top:1px dashed var(--chit-line);margin-top:6px;padding-top:8px;"><span>Subtotal</span><span>${money(o.subtotal)}</span></div>
       ${o.discount ? `<div class="detail-line"><span>${o.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${o.discount.reason ? ' (' + esc(o.discount.reason) + ')' : ''}</span><span>${o.discount.amount < 0 ? '+' : '-'}${money(Math.abs(o.discount.amount))}</span></div>` : ''}
       ${o.tax ? `<div class="detail-line"><span>${esc(taxLabel())}</span><span>${money(o.tax)}</span></div>` : ''}

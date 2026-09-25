@@ -6130,6 +6130,29 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .tl-tick{ position:absolute; top:4px; bottom:4px; border-left:1px solid var(--charcoal-soft); }
 .tl-tick.seat{ top:0; bottom:0; border-color:var(--text-primary); }
 .tl-wait{ position:absolute; top:8px; bottom:8px; display:flex; gap:4px; padding-left:8px; }
+/* THE SITTING'S END AND WHO IS NEXT (owner, Sep '26). The end is a line
+   across the lane, ink while there is time and red once it is late; what has
+   run past it is a red wash that grows with the clock; the next booking is a
+   dashed slot — a table held for someone — in the RES chip's blue. */
+.tl-end{ position:absolute; top:4px; bottom:4px; width:2px; margin-left:-1px; background:var(--text-primary); z-index:2; }
+.tl-end.late{ background:var(--red); }
+.tl-late{ position:absolute; top:0; bottom:0; background:color-mix(in srgb, var(--red) 18%, transparent); }
+.tl-res{ position:absolute; top:12px; bottom:12px; z-index:2; display:flex; align-items:center; gap:4px; padding:0 8px; overflow:hidden; white-space:nowrap;
+  border:1px dashed var(--blue); border-radius:var(--btn-radius); background:color-mix(in srgb, var(--blue) 8%, var(--surface));
+  font-size:var(--fs-chip); font-weight:700; color:var(--text-primary); }
+.tl-res b{ font-weight:800; }
+.tl-res.clash{ border-color:var(--red); background:color-mix(in srgb, var(--red) 10%, var(--surface)); }
+.tl-due{ font-style:normal; font-size:var(--fs-chip); font-weight:800; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text-primary); }
+/* The level is a DOT, as on the pass — the words stay ink, because gold and
+   dark-mode red both fail contrast as small text. */
+.tl-due.close::before, .tl-due.late::before{ content:''; display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; vertical-align:1px; }
+.tl-due.close::before{ background:var(--gold); }
+.tl-due.late::before{ background:var(--red); }
+/* The Timeline key's count of tables running late — a pill on the key's
+   corner, over it, so the key never changes size. */
+.fp-float-views .fp-chip{ position:relative; }
+.fp-late{ position:absolute; top:-6px; right:-6px; min-width:20px; height:20px; padding:0 4px; border-radius:10px; background:var(--red); color:#fff;
+  font-size:var(--fs-chip); font-weight:800; display:flex; align-items:center; justify-content:center; box-shadow:var(--lift-1); }
 .tl-chip{ position:relative; display:flex; align-items:center; gap:4px; padding:0 8px; border-radius:var(--btn-radius); background:var(--surface);
   border:1px solid var(--gold); font-size:var(--fs-chip); font-weight:700; color:var(--text-primary); white-space:nowrap; }
 .tl-chip i{ font-style:normal; font-weight:800; letter-spacing:.04em; text-transform:uppercase; }
@@ -11114,6 +11137,8 @@ app.delete('/api/printer-stations/:id', (req, res) => {
 });
 
 // ---------- Reservations ----------
+// A booking's length in minutes, or null for "the venue's sitting length".
+function cleanDuration(v) { const n = parseInt(v, 10); return n >= 15 && n <= 600 ? n : null; }
 app.get('/api/reservations', (req, res) => {
   res.json(readData().reservations || []);
 });
@@ -11122,6 +11147,9 @@ app.post('/api/reservations', (req, res) => {
   const data = readData();
   const { name, phone, partySize, time, tableId, notes } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Guest name is required' });
+  // How long the desk holds the table for this booking. The desk owns it; the
+  // till only reads it, to draw when the sitting should end (Sep '26).
+  const durationMin = cleanDuration(req.body.durationMin);
   if (!time) return res.status(400).json({ error: 'Reservation time is required' });
   const reservation = {
     id: 'rv' + Date.now(),
@@ -11132,6 +11160,7 @@ app.post('/api/reservations', (req, res) => {
     tableId: tableId || null,
     notes: String(notes || '').trim(),
     status: 'booked',
+    durationMin,
     createdAt: Date.now(),
   };
   data.reservations = [...(data.reservations || []), reservation];
@@ -11151,6 +11180,7 @@ app.put('/api/reservations/:id', (req, res) => {
   if (time !== undefined) r.time = time;
   if (tableId !== undefined) r.tableId = tableId || null;
   if (notes !== undefined) r.notes = String(notes).trim();
+  if (req.body.durationMin !== undefined) r.durationMin = cleanDuration(req.body.durationMin);
   if (status !== undefined) {
     if (!['booked', 'seated', 'done', 'cancelled', 'no-show'].includes(status)) return res.status(400).json({ error: 'Unknown reservation status' });
     r.status = status;
@@ -28296,6 +28326,17 @@ function renderCoversSettingsAdmin() {
       </div>
     </div>` : ''}
   </div>
+  ${/* THE SITTING LENGTH (owner, Sep '26): how long a walk-in holds a table,
+        drawn as the end of its sitting on the timeline. A booking brings its
+        own length from the desk; the desk reads this one for its default. */ ''}
+  <div class="settings-card">
+    <div class="th">Sitting length</div>
+    <div class="grid-stepper">
+      <button class="btn-secondary sm" data-act="sitting-step" data-d="-1" ${sittingMinutesDefault() <= 30 ? 'disabled' : ''}>−</button>
+      <span class="grid-step-val">${pillDur(sittingMinutesDefault())}</span>
+      <button class="btn-secondary sm" data-act="sitting-step" data-d="1" ${sittingMinutesDefault() >= 300 ? 'disabled' : ''}>+</button>
+    </div>
+  </div>
   ${/* ONE CARD FOR SEATS (owner, Sep '26: "these two should be merged, the
         one below should just be options"). It was three cards deep — the
         feature, the asking, and the exceptions — each a card of its own, so
@@ -31413,8 +31454,8 @@ const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Order notes'], ['course'
 // sitting there, in colour, with nothing picked at all. What a waiter actually
 // needs is the table nobody has been to, and that is Idle. Two clocks were
 // answering one question; the sharper one stayed.
-// A venue that wants a sitting LENGTH still sets it in Table setup — that is
-// seatingMinutes, and it belongs to the covers chip, not to this row.
+// A venue that wants a sitting LENGTH sets it in Settings › Covers — that is
+// seatingMinutes, and the timeline draws it as the end of each sitting.
 // THE ORDER IS THE VENUE'S (owner, Sep '26: drag the chips, and the floor's
 // menu follows). A saved order is honoured, anything it doesn't name keeps
 // its place at the end — so a lens added later still appears.
@@ -32649,7 +32690,12 @@ function tableResChip(t) {
   const r = upcomingBookingFor(t.id, 180);
   if (!r) return '';
   const d = new Date(r.time), hh = (d.getHours() % 12) || 12, mm = String(d.getMinutes()).padStart(2, '0');
-  return `<span class="tbl-res">RES ${hh}:${mm}</span>`;
+  // A TURNED TABLE KEEPS ITS CHIP UPRIGHT (Sep '26): the chip rode the
+  // table's turn, so a table set at 180° read "RES 4:20" upside down. It sits
+  // in the same turned-back anchor the table's pill uses.
+  const rot = ((t.rotation || 0) % 360 + 360) % 360;
+  const chip = `<span class="tbl-res">RES ${hh}:${mm}</span>`;
+  return rot ? `<span class="tbl-badges" style="transform:rotate(${-rot}deg);">${chip}</span>` : chip;
 }
 // Two-tier status grammar (owner-picked, Aug 2026): a GLOW HALO means "this
 // table needs a human" — locked, bill printed, ignored past the cap, over
@@ -33127,7 +33173,7 @@ function floorPillHtml(t, cs) {
   return pill(sevAt(mins, 'course'), `<i style="background:${cs.color || 'var(--teal)'};"></i><b>${cn}${pillDur(mins)}</b>`, 'Course wait');
 }
 // Table-turn dwell: compact "42m" / "1h 25m" since the party was seated.
-// With a Sitting length set (Table setup), the chip counts DOWN instead:
+// With a Sitting length set (Settings › Covers), the chip counts DOWN instead:
 // "25m left" → gold inside the last 15 → red "10m over".
 function dwellLabel(seatedAt) {
   const total = state.settings.seatingMinutes;
@@ -33746,6 +33792,51 @@ function renderBills() {
     ${closed.length ? head('Closed today', closed) + `<div class="bl-cols">${closed.map(o => billDocket(o, true)).join('')}</div>` : ''}
   </div>`;
 }
+// §§ The sitting: how long a table is held, and who is next
+// WHEN EACH TABLE SHOULD FINISH (owner, Sep '26: "what i want to see is the
+// sitting length, depending on the venue settings or the bookings. i want
+// the pos to get that from the desk"). The desk owns bookings, so a table
+// seated from one is held for THAT booking's length (durationMin, which the
+// desk sends with the booking). A walk-in is held for the venue's sitting
+// length — the one number the desk already reads from the till. The till
+// never asks the desk anything: it reads what the desk has sent.
+function sittingMinutesDefault() { const n = parseInt(state.settings.seatingMinutes, 10); return n > 0 ? n : 90; }
+function sittingBooking(t, o) {
+  const sat = (o && o.createdAt) || Date.now();
+  return (state.reservations || []).filter(r => r.tableId === t.id && r.status === 'seated')
+    .filter(r => Math.abs(new Date(r.time).getTime() - sat) < 3 * 3600000)
+    .sort((a, b) => Math.abs(new Date(a.time) - sat) - Math.abs(new Date(b.time) - sat))[0] || null;
+}
+function sittingEnd(t, o) {
+  const sat = (o && o.createdAt) || Date.now();
+  const r = sittingBooking(t, o);
+  const mins = r && r.durationMin > 0 ? r.durationMin : sittingMinutesDefault();
+  return sat + mins * 60000;
+}
+// The next booking on this table, still to arrive (15 minutes late counts).
+function nextBookingFor(t) {
+  const now = Date.now();
+  return (state.reservations || []).filter(r => r.tableId === t.id && (r.status === 'booked' || !r.status))
+    .filter(r => new Date(r.time).getTime() > now - 15 * 60000)
+    .sort((a, b) => new Date(a.time) - new Date(b.time))[0] || null;
+}
+// RUNNING BEHIND (owner, Sep '26: "warnings for tables running behind"): a
+// table is LATE once it is past its end, or once its next booking is due
+// before that end — either way someone is about to wait. It is CLOSE inside
+// the last quarter hour. The timeline says it on the row, and its key on the
+// dock counts the late ones so it is seen from the map too.
+function sittingState(t, o) {
+  if (!o) return null;
+  const now = Date.now(), end = sittingEnd(t, o), next = nextBookingFor(t);
+  const nextAt = next ? new Date(next.time).getTime() : null;
+  const clash = nextAt != null && nextAt < end;
+  const level = now >= end || (clash && nextAt - now < 30 * 60000) ? 'late' : end - now <= 15 * 60000 ? 'close' : 'ok';
+  return { end, next, nextAt, clash, level };
+}
+function tablesRunningLate() {
+  const pool = state.settings.tableMode === 'simple' ? allTables() : state.floorPlans.flatMap(f => (f.tables || []).filter(t => t.type !== 'decor'));
+  return pool.filter(t => { const s = sittingState(t, tableOpenOrder(t.label)); return s && s.level === 'late'; }).length;
+}
 // §§ The timeline: every table's courses across the night
 // THE TIMELINE (owner, Sep '26: "timeline view we see the courses and the
 // current time as a vertical line moving"). The pass says WHERE each course
@@ -33799,7 +33890,20 @@ function renderTimeline(fp) {
     const held = passCells(o, courses).filter(c => c.kind === 'hold');
     const wait = held.length ? `<div class="tl-wait" style="left:${at(now)}">${held.map(c => `
         <span class="tl-chip${c.next ? ' is-next' : ''}"><i>Held</i>${esc(courseInfo(c.n).name)}${c.since ? ` <em>${pillDur(mins(now - c.since))}</em>` : ''}<button class="pass-go" data-act="pass-callaway" data-order="${o.id}" data-course="${c.n}" aria-label="Call away ${esc(courseInfo(c.n).name)}">${DKT_FLAME_SVG}</button></span>`).join('')}</div>` : '';
-    return ticks + bars + wait;
+    // The sitting's end, what has run past it, and who is next on the table.
+    const ss = sittingState(t, o);
+    const endMark = `<span class="tl-end${ss.level === 'late' ? ' late' : ''}" style="left:${at(ss.end)}"></span>`;
+    const late = now > ss.end ? `<span class="tl-late" data-grow="${ss.end}" style="left:${at(ss.end)};width:${len(ss.end, now)}"></span>` : '';
+    const nx = ss.next ? `<div class="tl-res${ss.clash ? ' clash' : ''}" style="left:${at(ss.nextAt)};width:${len(ss.nextAt, ss.nextAt + (ss.next.durationMin > 0 ? ss.next.durationMin : sittingMinutesDefault()) * 60000)}"><b>${esc(clock(ss.nextAt))}</b>${esc(ss.next.name || '')}${ss.next.partySize ? ` · ${ss.next.partySize}` : ''}</div>` : '';
+    return ticks + late + endMark + bars + nx + wait;
+  };
+  // What the row's lead says under the covers: when the table should be done.
+  const due = ({ t, o }) => {
+    const ss = sittingState(t, o);
+    if (!ss) return '';
+    const left = Math.round((ss.end - now) / MIN);
+    const word = left < 0 ? `${pillDur(-left)} over` : ss.clash ? `booked ${clock(ss.nextAt)}` : `ends ${clock(ss.end)}`;
+    return `<em class="tl-due ${ss.level}">${esc(word)}</em>`;
   };
   return `
   <div class="tline" data-t0="${t0}" data-span="${span}">
@@ -33810,7 +33914,7 @@ function renderTimeline(fp) {
         <div class="tl-over"><span class="tl-now" style="left:${at(now)}"><b>${esc(clock(now))}</b></span></div>
         ${rows.map(r => `
         <div class="tl-row${state.pickFlashId === r.t.id ? ' picking' : ''}" data-act="pick-table" data-id="${r.t.id}">
-          <div class="pass-lead"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} covers` : ''}</small></div>
+          <div class="pass-lead"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} covers` : ''}</small>${due(r)}</div>
           <div class="tl-lane">${lane(r)}</div>
         </div>`).join('')}
       </div>
@@ -33942,8 +34046,12 @@ function fpFloatHtml(fp) {
   // day"). It is every bill of the day, not one room's, so the rooms stand
   // down while it is up — a room key there would do nothing.
   const pass = passOn() || timelineOn() || billsOn();
+  // The Timeline key counts the tables running late, so a manager on the
+  // map sees it without opening the timeline.
+  const lateN = tablesRunningLate();
   const viewKey = (v, label) => { const on = floorView() === v && pass;
-    return `<button class="fp-chip${on ? ' active' : ''}" data-act="floor-view" data-view="${v}" data-val="${on ? 'map' : v}">${label}</button>`; };
+    const badge = v === 'timeline' && lateN ? `<span class="fp-late" aria-label="${lateN} running late">${lateN}</span>` : '';
+    return `<button class="fp-chip${on ? ' active' : ''}" data-act="floor-view" data-view="${v}" data-val="${on ? 'map' : v}">${label}${badge}</button>`; };
   const views = state.moveItemsPicking || state.transferFrom ? '' :
     `<div class="fp-float-card fp-float-views">${viewKey('pass', 'Pass')}${viewKey('timeline', 'Timeline')}${viewKey('bills', 'Bills')}</div>`;
   if (!stackKey && !rooms && !views) return '';
@@ -43489,6 +43597,11 @@ function handleActClick(el, e) {
         state.activeSeat = (activeSeatNow() === v && v !== 'all') ? 'all' : v;
         state.seatRowPop = false; render();
       }
+      else if (act === 'sitting-step') {
+        const v = Math.max(30, Math.min(300, sittingMinutesDefault() + (parseInt(el.dataset.d, 10) || 0) * 15));
+        state.settings = { ...state.settings, seatingMinutes: v }; render();
+        saveTicketSetting({ seatingMinutes: v });
+      }
       else if (act === 'set-seat-row') {
         const v = ['slide', 'wrap', 'pad'].includes(el.dataset.val) ? el.dataset.val : null;
         state.settings = { ...state.settings, seatRow: v }; render();
@@ -43698,6 +43811,11 @@ function handleActClick(el, e) {
         try { localStorage.setItem('pos.floorView', state.floorView); } catch (e) {}
         state.fpViewOpen = null;
         render();
+        // BACK ON THE MAP, BACK IN THE MIDDLE (Sep '26): the map is drawn
+        // fresh when a view is left, and a fresh map sits at its top-left
+        // corner — 12 of 30 tables on screen, the rest a pan away. It lands
+        // mid-room like every other road onto the floor.
+        tpCentreOnOpen();
       }
       else if (act === 'peek-callaway-next') {
         // Hold a table → its order pop → one tap calls away the NEXT course that

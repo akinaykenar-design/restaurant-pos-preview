@@ -9921,9 +9921,57 @@ app.post('/api/menu/reorder', (req, res) => {
 });
 
 // ---------- Floor plans (multiple table layouts, e.g. Main / Patio / Bar) ----------
+// WHAT THE DESK CANNOT KNOW, ON THE TABLE IT ALREADY READS. The bill, the
+// payment and the course all happen here, on the open ORDER; the desk
+// (Reservations) reads this call every few seconds and nothing else on the
+// pass, so they ride on each table as READ-ONLY copies — worked out on the
+// way out, never stored, and no table route accepts them back (SUITE.md: one
+// writer per field; the till writes these by selling, the desk only reads).
+//   billPrinted  the open order's bill is printed
+//   paid         the table's last order today was paid and nothing has been
+//                opened on it since — the party may still be sitting there
+//   paidAt       when it was paid, so the desk never takes a payment for the
+//                party who sat down AFTER it
+//   course       { name, color, at } of the open order's latest round
+function tableServiceState(data) {
+  const byTable = new Map();
+  // TODAY IS THE TRADING DAY (4am by default, Settings › Venue) — the one
+  // rule everywhere money is summed. Midnight filed a 1am payment under the
+  // wrong night.
+  const dayStart = tradingDayStart(Date.now(), data.settings);
+  for (const o of (data.orders || [])) {
+    if (o.orderType !== 'dine-in' || o.practice || o.table == null) continue;
+    const key = String(o.table);
+    const at = o.status === 'open' ? Infinity : (o.closedAt || 0);
+    const cur = byTable.get(key);
+    if (!cur || at > cur.at) byTable.set(key, { o, at });
+  }
+  const courses = (data.settings && data.settings.courses) || [];
+  const pills = (data.settings && data.settings.coursePillLevels) || [];
+  const out = new Map();
+  for (const [key, { o }] of byTable) {
+    if (o.status === 'open') {
+      const last = (o.rounds || [])[o.rounds.length - 1];
+      const ns = last ? (last.items || []).map(i => i.course).filter(c => c != null) : [];
+      const n = ns.length ? Math.max(...ns) : null;
+      const info = n ? (courses[n - 1] || { name: 'Course ' + n }) : null;
+      out.set(key, {
+        billPrinted: !!o.billPrinted, paid: false, paidAt: null,
+        course: info ? { name: info.name, color: (pills[n - 1] || {}).color || info.color || null, at: Math.max((last && last.sentAt) || 0, o.calledAwayAt || 0) || null } : null,
+      });
+    } else if (o.status === 'paid' && (o.closedAt || 0) >= dayStart) {
+      out.set(key, { billPrinted: false, paid: true, paidAt: o.closedAt || null, course: null });
+    }
+  }
+  return out;
+}
 app.get('/api/floorplans', (req, res) => {
   const data = readData();
-  res.json(data.floorPlans);
+  const live = tableServiceState(data);
+  res.json((data.floorPlans || []).map(fp => Object.assign({}, fp, {
+    tables: (fp.tables || []).map(t => t.type === 'decor' ? t
+      : Object.assign({}, t, live.get(String(t.label)) || { billPrinted: false, paid: false, paidAt: null, course: null })),
+  })));
 });
 
 app.post('/api/floorplans', (req, res) => {

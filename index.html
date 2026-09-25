@@ -17747,12 +17747,16 @@ function cardTakenAmount() {
 }
 function cardOver() { return Math.round((cardTakenAmount() - amountOwing()) * 100) / 100; }
 // Cash reads the same way, except money over the bill is change, not a tip.
+// What the cash is FOR: the share picked on the split screen, else the bill.
+// A guest handing $20 for a $14 share was told "$8 left after this" and got
+// no change, because every cash sum ran off the whole table (auto-improve).
+function cashDue() { return state.payShare ? state.payShare.amount : amountOwing(); }
 function cashTakenAmount() {
   const v = String(state.cashGiven || '');
-  if (v === '') return amountOwing();
+  if (v === '') return cashDue();
   return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
 }
-function cashOver() { return Math.round((cashTakenAmount() - amountOwing()) * 100) / 100; }
+function cashOver() { return Math.round((cashTakenAmount() - cashDue()) * 100) / 100; }
 // The tip typed for THIS card — the running total less whatever earlier cards
 // already carried away, so each card shows the tip it actually took.
 // THE tip block: the field, and under it the presets that fill it (owner,
@@ -17806,6 +17810,9 @@ function openBillSplit() {
     picks: (plan && plan.picks) ? { ...plan.picks } : {},
     printed: {}, at: 0,
   };
+  const paid = splitPaidMap();
+  const firstOpen = billSplitParts().findIndex(p => !paid[p.key]);
+  if (firstOpen > 0) state.billSplit.at = firstOpen;
   openMobileCart(); // the split IS the docket panel — on a phone it has to be open
   render();
 }
@@ -17932,7 +17939,7 @@ function renderSplitPanel() {
     <div class="split-pager">
       <button class="sp-arrow" data-act="split-prev" ${at <= 0 ? 'disabled' : ''} aria-label="Previous part">${SYS_CHEV_L_SVG}</button>
       <div class="sp-now">
-        <div class="sp-now-name">${part ? esc(part.label) : 'Nothing to divide yet.'}${part && sp.printed[part.key] ? '<span class="sp-printed">printed</span>' : ''}</div>
+        <div class="sp-now-name">${part ? esc(part.label) : 'Nothing to divide yet.'}${part && splitPaidMap()[part.key] ? '<span class="sp-printed">paid</span>' : part && sp.printed[part.key] ? '<span class="sp-printed">printed</span>' : ''}</div>
       </div>
       <button class="sp-arrow" data-act="split-next" ${at >= parts.length - 1 ? 'disabled' : ''} aria-label="Next part">${SYS_CHEV_R_SVG}</button>
     </div>
@@ -19608,8 +19615,12 @@ function openCheckout() {
   state.showCheckout = true;
   maybeApplyAutoSurcharge();
   state.paymentMethod = 'card';
+  // A share picked on the split screen fills the amount; any other way in
+  // opens on the whole bill, as it always did.
+  state.payShare = state._payShareNext || null;
+  state._payShareNext = null;
   state.cashGiven = '';
-  state.cardAmount = '';
+  state.cardAmount = state.payShare ? state.payShare.amount.toFixed(2) : '';
   state.cardTip = 0;
   state.splitMode = false;
   state.payRailVouchers = false;
@@ -20457,8 +20468,8 @@ async function confirmPaymentInner() {
   if (state.paymentMethod === 'cash' && !state.splitMode && !nothingOwing) {
     const taken = cashTakenAmount();
     if (taken <= 0) return;
-    if (taken < amountOwing() - 0.005 || splitPaidList().length) {
-      await takePart(Math.min(taken, amountOwing()), 'cash');
+    if (state.payShare || taken < amountOwing() - 0.005 || splitPaidList().length) {
+      await takePart(Math.min(taken, cashDue()), 'cash');
       return;
     }
   }
@@ -23610,7 +23621,7 @@ function payConfirmLabel() {
   }
   if (state.paymentMethod === 'cash' && !state.splitMode) {
     const taken = cashTakenAmount();
-    return taken < amountOwing() - 0.005 ? `Take ${money(taken)}` : `Confirm ${money(taken)}`;
+    return state.payShare || taken < amountOwing() - 0.005 ? `Take ${money(Math.min(taken, cashDue()))}` : `Confirm ${money(taken)}`;
   }
   return `Confirm ${money(grand)}`;
 }
@@ -23628,10 +23639,15 @@ async function takePart(amount, method, giftCardCode) {
   }
   const n = (order.splitPaid || []).filter(p => String(p.key).indexOf(method) === 0).length + 1;
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
+  // Paying the share from the split screen marks THAT share paid, and the
+  // shares freeze as they were — so a three-way split stays three equal
+  // parts instead of dividing what is left by three again.
+  const share = state.payShare && Math.abs(amount - state.payShare.amount) < 0.005
+    && !(order.splitPaid || []).some(p => p.key === state.payShare.key) ? state.payShare : null;
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: method + n,
+      body: JSON.stringify({ key: share ? share.key : method + n, parts: share ? share.parts : undefined,
         label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
         amount, method, giftCardCode: giftCardCode || null,
         cardType: method === 'card' ? state.cardType : null,
@@ -23646,6 +23662,17 @@ async function takePart(amount, method, giftCardCode) {
   }
   state.cardAmount = '';
   state.cashGiven = '';
+  // The next share nobody has paid comes up on its own, so a three-way split
+  // is Take, Take, Take — not a trip back to the split screen for each guest.
+  // The last share needs nothing: what is owing IS that share.
+  const paidNow = splitPaidMap();
+  const next = share ? (((activeOpenOrder() || {}).splitParts || []).find(p => !paidNow[p.key]) || null) : null;
+  state.payShare = next && next.amount < amountOwing() - 0.005
+    ? { key: next.key, label: next.label, amount: next.amount, parts: share.parts } : null;
+  if (state.payShare) {
+    if (method === 'cash') state.cashGiven = state.payShare.amount.toFixed(2);
+    else state.cardAmount = state.payShare.amount.toFixed(2);
+  }
   if (amountOwing() <= 0.005) {
     // The parts add up to the bill — close it, each part its own payment.
     // A seat or even split ends here too, so its screen state goes first.
@@ -23754,7 +23781,7 @@ function renderCheckoutMiddle() {
           // then the next round-ups — $458 offers $460 / $500, never a $50
           // chip on a big table. Off in Admin → Payments for venues that
           // prefer a bare field.
-          const owe = amountOwing();
+          const owe = cashDue();
           if (owe <= 0.005) return '';
           const ups = [...new Set([5, 10, 50, 100].map(u => Math.ceil((owe + 0.005) / u) * u).filter(v => v > owe + 0.005))].sort((a, b) => a - b).slice(0, 3);
           return `<div class="pay-options" style="margin-bottom:8px;">
@@ -23767,7 +23794,7 @@ function renderCheckoutMiddle() {
         ${tipBlock()}
         ${cashOver() < -0.005 ? `
           <div class="card-owing">
-            <b>${money(amountOwing() - cashTakenAmount())} left after this</b>
+            <b>${money(cashDue() - cashTakenAmount())} left after this</b>
             <div class="co-sub">Take it, then take the rest however they want.</div>
           </div>` : ''}
       ` : ''}
@@ -42861,7 +42888,19 @@ function handleActClick(el, e) {
       else if (act === 'confirm-split-amt') { confirmSplitAmt(); }
       else if (act === 'split-prev') { state.billSplit.at = Math.max(0, (state.billSplit.at || 0) - 1); render(); }
       else if (act === 'split-next') { state.billSplit.at = Math.min(billSplitParts().length - 1, (state.billSplit.at || 0) + 1); render(); }
-      else if (act === 'split-then-pay') { closeBillSplit(); openCheckout(); }
+      // Pay takes THE SHARE ON SCREEN, not the whole table (auto-improve,
+      // Sep '26): it opened the pay screen on the full bill, so "Share 1 of 2
+      // · $14" then Visa, Confirm charged the first guest $28. The money is
+      // still taken on the pay screen — this only fills in how much.
+      else if (act === 'split-then-pay') {
+        const parts = billSplitParts();
+        const part = parts[Math.min(Math.max(0, state.billSplit.at || 0), parts.length - 1)];
+        if (part && splitPaidMap()[part.key]) { state.toast = toastFail(`${part.label} is paid.`); render(); armToastTimer(2200); return; }
+        state._payShareNext = part && part.amount > 0.005 && part.amount < amountOwing() - 0.005
+          ? { key: part.key, label: part.label, amount: part.amount, parts: parts.map(p => ({ key: p.key, label: p.label, amount: p.amount })) }
+          : null;
+        closeBillSplit(); openCheckout();
+      }
       else if (act === 'split-pick') {
         // Tapping the number a line is already on takes it back off, so a
         // mis-tap costs one tap, not a hunt for an "unassign" control.
@@ -42899,6 +42938,9 @@ function handleActClick(el, e) {
                   state.payRailVouchers = false;
           state.paymentMethod = k;
           state.cardAmount = '';
+          // The share rides across: card or cash, it is still that guest's part.
+          if (state.payShare && k === 'card') state.cardAmount = state.payShare.amount.toFixed(2);
+          if (state.payShare && k === 'cash') state.cashGiven = state.payShare.amount.toFixed(2);
           render();
         }
       }

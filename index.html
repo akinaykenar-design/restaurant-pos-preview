@@ -10251,7 +10251,11 @@ app.post('/api/tables/move-sitting', (req, res) => {
   const notes = Array.isArray(req.body.notes) ? req.body.notes.slice(0, 50) : (from ? (from.notes || []) : []);
   to.covers = combine ? (to.covers || 0) + covers : covers;
   to.notes = combine ? [...(to.notes || []), ...notes].slice(0, 50) : notes; // the notes go with the party (Sep '26)
-  if (from && from !== to) { from.covers = 0; from.notes = []; }
+  // …and so does the party's discount. It stayed on the old table, so the
+  // next party sat there got it and the party that moved lost it (Sep '26).
+  // Onto a table with a discount of its own, that one stands.
+  if (from && from !== to && from.discount && !to.discount) to.discount = from.discount;
+  if (from && from !== to) { from.covers = 0; from.notes = []; from.discount = null; }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -10343,6 +10347,11 @@ app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
 });
 
 // ---------- Staff ----------
+// A job title is one of the built-in six or one the venue added in Settings:
+// a venue's own "Sommelier" was saved as plain staff (Sep '26).
+function roleOk(data, role) {
+  return STAFF_ROLE_OPTIONS.includes(role) || ((data.settings && data.settings.staffRoles) || []).includes(role);
+}
 app.get('/api/staff', (req, res) => {
   const data = readData();
   // Never send PINs to the browser - only what's needed to show the login grid.
@@ -10429,7 +10438,7 @@ app.post('/api/staff', (req, res) => {
   if (data.staff.some(s => s.pin === pin)) {
     return res.status(400).json({ error: 'That PIN is already in use by another staff member' });
   }
-  const newStaff = { id: 'st' + Date.now(), name, pin, role: STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0), trainee: !!req.body.trainee };
+  const newStaff = { id: 'st' + Date.now(), name, pin, role: roleOk(data, role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0), trainee: !!req.body.trainee };
   data.staff.push(newStaff);
   logAudit(data, staffFromReq(req), `Added staff member: ${newStaff.name} (${newStaff.role})`);
   writeData(data);
@@ -10457,7 +10466,7 @@ app.put('/api/staff/:id', (req, res) => {
     if (staff.role === 'manager' && !data.staff.some(s => s.id !== staff.id && s.role === 'manager')) {
       return res.status(400).json({ error: 'Keep at least one manager' });
     }
-    changes.push(`role to ${role}`); staff.role = STAFF_ROLE_OPTIONS.includes(role) ? role : 'staff';
+    changes.push(`role to ${role}`); staff.role = roleOk(data, role) ? role : 'staff';
   }
   if (req.body.tipShare !== undefined && ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) && req.body.tipShare !== staff.tipShare) {
     changes.push(`tip share to ${req.body.tipShare}`); staff.tipShare = req.body.tipShare;
@@ -11181,6 +11190,16 @@ app.delete('/api/printer-stations/:id', (req, res) => {
   const data = readData();
   const station = (data.printerStations || []).find(s => s.id === req.params.id);
   data.printerStations = (data.printerStations || []).filter(s => s.id !== req.params.id);
+  // Nothing keeps pointing at a station that is gone: dishes, note types and
+  // presets fall back to their section's printer, and no station hands its
+  // jobs to it (Sep '26: a dish set to a deleted printer printed nowhere).
+  const gone = req.params.id;
+  (data.menu || []).forEach(m => { if (m.station === gone) m.station = null; });
+  (data.noteCategories || []).forEach(c => {
+    if (c.station === gone) c.station = null;
+    (c.presets || []).forEach(p => { if (p && p.station === gone) p.station = null; });
+  });
+  data.printerStations.forEach(s => { if (s.fallbackId === gone) s.fallbackId = null; });
   if (station) logAudit(data, staffFromReq(req), `Deleted printer station: ${station.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -11996,13 +12015,27 @@ function adjustStockForItems(data, items, sign, ref) {
   if (!ids.length) return;
   const stamp = Date.now();
   const log = [];
+  // A RETURN PUTS BACK WHAT THE SALE REALLY TOOK. A sale stops at zero, so
+  // 1kg on hand, 1.5kg sold, the whole ticket voided read 1.5kg (Sep '26).
+  // The log names the ticket on every row, so what it took is written down.
+  const ticket = (String(ref || '').match(/#(\d+)/) || [])[1];
+  const takenBy = (id) => {
+    if (sign < 0 || !ticket) return null;
+    // A combined ticket answers for the tickets folded into it too.
+    const nums = [ticket, ...(data.orders || []).filter(o => new RegExp('^Combined into Ticket #' + ticket + '\\b').test(o.voidReason || '')).map(o => String(o.id))];
+    const rows = (data.inventoryAdjustments || []).filter(r => r.inventoryItemId === id && nums.some(t => new RegExp('#' + t + '(\\D|$)').test(r.reason || '')));
+    return rows.length ? Math.max(0, -rows.reduce((a, r) => a + (r.change || 0), 0)) : null;
+  };
   ids.forEach((id, n) => {
     const inv = (data.inventoryItems || []).find(x => x.id === id);
     if (!inv) return;
     const before = round3(inv.currentStock || 0);
-    const change = round3(sign * used[id]);
+    const cap = takenBy(id);
+    const change = round3(sign * (cap === null ? used[id] : Math.min(used[id], cap)));
     const after = Math.max(0, round3(before + change));
-    if (after === before) return;
+    // A sale that found the shelf empty still leaves its row, so a void later
+    // knows it took nothing.
+    if (after === before && !(sign < 0 && ticket)) return;
     inv.currentStock = after;
     log.push({
       id: 'iadj' + stamp + '-' + n,
@@ -12295,6 +12328,22 @@ app.post('/api/orders', (req, res) => {
 // Every line on a ticket carries its OWN uid — two singles of one dish share
 // a composed id, so "move 1 item" moved both (Sep '26). The till's line key
 // is that uid when it has one.
+// The next round's number is one past the HIGHEST on the ticket, never the
+// count: once a move takes a round away, the count repeats a number already
+// used and "reprint round 2" can print the wrong round (Sep '26).
+function nextRoundId(order) { return (order.rounds || []).reduce((m, r) => Math.max(m, parseInt(r.id, 10) || 0), 0) + 1; }
+// Courses already called away go with the dishes: a combined ticket forgot
+// them, so the pass offered to call the mains a second time (Sep '26).
+// The earliest call stands; only the courses given (or all) are carried.
+function carryCallAways(dest, src, courses) {
+  const fired = src.firedCourses || {};
+  Object.keys(fired).forEach(c => {
+    if (courses && !courses.includes(parseInt(c, 10))) return;
+    dest.firedCourses = dest.firedCourses || {};
+    if (!dest.firedCourses[c] || fired[c] < dest.firedCourses[c]) dest.firedCourses[c] = fired[c];
+  });
+  if (dest.firedCourses && Object.keys(dest.firedCourses).length && src.calledAwayAt) dest.calledAwayAt = Math.max(dest.calledAwayAt || 0, src.calledAwayAt);
+}
 function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); }
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
@@ -12302,7 +12351,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   // and nothing else: the kitchen made it already, the stock already moved.
   const restore = !!(body && body.restore);
   const items = (rawItems || []).map(i => ({ ...i, uid: lineUid(i), status: i.status || 'ordered' }));
-  const roundNumber = (order.rounds || []).length + 1;
+  const roundNumber = nextRoundId(order);
   const quickNote = String(req.body.quickNote || '').trim().slice(0, 120) || null;
   const quickNoteStation = (data.printerStations || []).some(s => s.id === req.body.quickNoteStation) ? req.body.quickNoteStation : null;
   // Who rang the round rides with it — the order-history pop shows who sent
@@ -12749,7 +12798,25 @@ app.post('/api/orders/:id/void', (req, res) => {
   if (order.status === 'paid' && data.settings.managerApprovalForVoid && !managerFromReq(req, data)) {
     return res.status(403).json({ error: 'A manager PIN is needed to void a paid ticket' });
   }
+  // GIFT CARDS COME UNDONE WITH THE TICKET (Sep '26): a void left a voucher
+  // sold on it live at full value, and a card that paid it short. A voucher
+  // already spent cannot be unsold — that ticket is refunded, not voided.
+  const soldHere = order.status === 'paid' ? (data.giftCards || []).filter(g => g.soldOnOrder === order.id) : [];
+  if (soldHere.some(g => g.balance < (g.initialValue || 0) - 0.005)) {
+    return res.status(400).json({ error: 'A gift card sold on this ticket has been spent — refund instead' });
+  }
   const { reason, note } = req.body;
+  if (order.status === 'paid') {
+    const byName = req.body.staffName || 'Unknown';
+    soldHere.forEach(g => { g.active = false; g.balance = 0; logAudit(data, byName, `Gift card ${g.code} cancelled with void of #${order.id}`); });
+    const back = [];
+    if (order.paymentMethod === 'giftcard' && order.giftCardCode) back.push([order.giftCardCode, order.grandTotal || 0]);
+    (order.splitPaid || []).filter(p => p.method === 'giftcard' && p.giftCardCode).forEach(p => back.push([p.giftCardCode, p.amount || 0]));
+    back.forEach(([code, amt]) => {
+      const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
+      if (c && amt > 0) { c.balance = Math.round((c.balance + amt) * 100) / 100; logAudit(data, byName, `Put $${amt.toFixed(2)} back on gift card ${c.code} (void of #${order.id})`); }
+    });
+  }
   order.status = 'void';
   order.voidedBy = req.body.staffName || 'Unknown';
   order.voidReason = reason || null;
@@ -12798,7 +12865,9 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
   if (dest) {
     dest.items = [...(dest.items || []), ...(order.items || [])];
-    dest.rounds = [...(dest.rounds || []), ...(order.rounds || [])];
+    const base = nextRoundId(dest) - 1;
+    dest.rounds = [...(dest.rounds || []), ...(order.rounds || []).map((r, k) => ({ ...r, id: base + k + 1 }))];
+    carryCallAways(dest, order);
     if (order.covers) dest.covers = (dest.covers || 0) + order.covers;
     const sub = dest.items.reduce((s, i) => s + i.price * i.qty, 0);
     dest.subtotal = sub; dest.total = sub; dest.grandTotal = sub;
@@ -12832,6 +12901,21 @@ app.post('/api/orders/:id/add-tip', (req, res) => {
   if (!amt) return res.status(400).json({ error: 'Enter a tip amount.' });
   order.tip = Math.round(((order.tip || 0) + amt) * 100) / 100;
   order.grandTotal = Math.round(((order.total || 0) + order.tip) * 100) / 100;
+  // A split-paid ticket counts its money by its payments, so a tip added
+  // later must land on one or the cash-up never sees it (Sep '26). A tip
+  // after the fact is a card tip; with no card on the bill, the last share.
+  if (order.paymentMethod === 'split' && Array.isArray(order.payments) && order.payments.length) {
+    const cards = order.payments.filter(p => p.method === 'card');
+    const p = cards.length ? cards[cards.length - 1] : order.payments[order.payments.length - 1];
+    p.amount = Math.round(((p.amount || 0) + amt) * 100) / 100;
+  }
+  // …and on the part it rode on, since the cash-up counts a part-paid bill by its parts.
+  if (Array.isArray(order.splitPaid) && order.splitPaid.length) {
+    const cards = order.splitPaid.filter(p => p.method === 'card');
+    const p = cards.length ? cards[cards.length - 1] : order.splitPaid[order.splitPaid.length - 1];
+    p.amount = Math.round(((p.amount || 0) + amt) * 100) / 100;
+    p.tip = Math.round(((p.tip || 0) + amt) * 100) / 100;
+  }
   logAudit(data, staffFromReq(req), `Added tip $${amt.toFixed(2)} to Ticket #${order.id}`);
   writeData(data);
   res.json(order);
@@ -12889,7 +12973,8 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   let dest = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
   if (dest) {
     dest.items = (dest.items || []).concat(moving);
-    dest.rounds = [...(dest.rounds || []), { id: (dest.rounds || []).length + 1, sentAt: Date.now(), color: null, items: moving, moved: true }];
+    dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true }];
+    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
     retotal(dest);
   } else {
     dest = {
@@ -12908,6 +12993,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
       staffName: staffName || order.staffName || 'Unknown',
       customerId: null,
     };
+    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
     retotal(dest);
     data.orders.push(dest);
     data.ticketCounter += 1;
@@ -12958,7 +13044,9 @@ app.get('/api/summary', (req, res) => {
   const todaysOrders = data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) >= todayFrom);
   const salesToday = todaysOrders.reduce((s, o) => s + o.total, 0);
   const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0), 0);
-  const refundsToday = todaysOrders.reduce((s, o) => s + (o.refundedTotal || 0), 0);
+  // Refunds by when they were GIVEN, as on the Z (Sep '26).
+  const refundsToday = data.orders.filter(o => o.status === 'paid' && !o.practice)
+    .reduce((s, o) => s + (o.refunds || []).reduce((a, r) => a + ((r.timestamp || periodAt(o)) >= todayFrom ? (r.amount || 0) : 0), 0), 0);
   const avgTicket = todaysOrders.length ? salesToday / todaysOrders.length : 0;
   res.json({
     ordersToday: todaysOrders.length,
@@ -12986,13 +13074,21 @@ function computePeriodSummary(data, fromTs, toTs) {
   // paid at 11pm, after the 10pm close, was on no Z at all — Sep '26).
   const orders = data.orders.filter(o => periodAt(o) > fromTs && periodAt(o) <= toTs && !o.practice);
   const paid = orders.filter(o => o.status === 'paid');
+  // A REFUND belongs to the period it was GIVEN in, like a sale to the one it
+  // was paid in: a refund after the Z came off a ticket already on a closed
+  // period, so it was on no Z at all and the drawer was short by it (Sep '26).
+  const inWin = ts => ts > fromTs && ts <= toTs;
+  const refundIn = o => Array.isArray(o.refunds) && o.refunds.length
+    ? o.refunds.reduce((s, r) => s + ((r.timestamp ? inWin(r.timestamp) : inWin(periodAt(o))) ? (r.amount || 0) : 0), 0)
+    : (inWin(periodAt(o)) ? (o.refundedTotal || 0) : 0);
+  const refunded = data.orders.filter(o => o.status === 'paid' && !o.practice && refundIn(o) > 0);
   const voidCount = orders.filter(o => o.status === 'void' && (o.items || []).length && !/^Combined into/.test(o.voidReason || '') && !/^Nothing ordered/.test(o.voidReason || '')).length;
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0);
   const tips = paid.reduce((s, o) => s + (o.tip || 0), 0);
-  const refunds = paid.reduce((s, o) => s + (o.refundedTotal || 0), 0);
+  const refunds = refunded.reduce((s, o) => s + refundIn(o), 0);
   const grandTotal = paid.reduce((s, o) => s + (o.grandTotal !== undefined ? o.grandTotal : o.total), 0);
   const netTotal = grandTotal - refunds;
   let cashNet = 0;
@@ -13001,51 +13097,63 @@ function computePeriodSummary(data, fromTs, toTs) {
   // Who took what — the owner's per-terminal view: every order knows the
   // staff member who rang it.
   const byStaff = {};
-  paid.forEach(o => {
-    const gtS = (o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0);
-    const who = o.staffName || '—';
-    if (!byStaff[who]) byStaff[who] = { orders: 0, net: 0 };
-    byStaff[who].orders += 1; byStaff[who].net += gtS;
-  });
-  paid.forEach(o => {
+  const staffOf = o => { const who = o.staffName || '—'; return byStaff[who] || (byStaff[who] = { orders: 0, net: 0 }); };
+  paid.forEach(o => { const st = staffOf(o); st.orders += 1; st.net += o.grandTotal !== undefined ? o.grandTotal : o.total; });
+  refunded.forEach(o => { staffOf(o).net -= refundIn(o); });
+  // Each way of paying: the sales paid in the period, less the refunds given
+  // in it — a refund comes off each way in the share that way paid.
+  const takeBy = (o, sign, amt) => {
     const gt = o.grandTotal !== undefined ? o.grandTotal : o.total;
-    const refunded = o.refundedTotal || 0;
     if (o.paymentMethod === 'split' && Array.isArray(o.payments) && o.payments.length) {
       const gross = m => o.payments.filter(p => p.method === m).reduce((s, p) => s + p.amount, 0);
       const cashGross = gross('cash'), cardGross = gross('card'), giftGross = gross('giftcard');
       // A gift-card share is gift-card money: it was in no line at all, so a
-      // $40 card share went missing from the cash-up (Sep '26). A refund
-      // comes off each way of paying in the share it paid.
-      const share = v => gt > 0 ? v / gt : 0;
-      cashNet += cashGross - refunded * share(cashGross);
-      cardNet += cardGross - refunded * share(cardGross);
-      giftNet += giftGross - refunded * share(giftGross);
-    } else if (o.paymentMethod === 'cash') {
-      cashNet += gt - refunded;
-    } else if (o.paymentMethod === 'card') {
-      cardNet += gt - refunded;
-    } else if (o.paymentMethod === 'giftcard') {
-      giftNet += gt - refunded;
+      // $40 card share went missing from the cash-up (Sep '26).
+      const share = v => amt === null ? v : (gt > 0 ? amt * v / gt : 0);
+      cashNet += sign * share(cashGross);
+      cardNet += sign * share(cardGross);
+      giftNet += sign * share(giftGross);
+    } else {
+      const v = amt === null ? gt : amt;
+      if (o.paymentMethod === 'cash') cashNet += sign * v;
+      else if (o.paymentMethod === 'card') cardNet += sign * v;
+      else if (o.paymentMethod === 'giftcard') giftNet += sign * v;
     }
-  });
+  };
+  // Money taken in PARTS is in the drawer the moment it is taken, so it
+  // counts in the period it was taken in — a $40 cash part on a tab still
+  // open at the cash-up was in no count, and the drawer read $40 over, then
+  // $40 short the period the tab closed in (Sep '26).
+  const hasParts = o => Array.isArray(o.splitPaid) && o.splitPaid.length;
+  const partsIn = data.orders.filter(o => !o.practice && (o.status === 'paid' || o.status === 'open') && hasParts(o));
+  paid.forEach(o => { if (!hasParts(o)) takeBy(o, 1, null); });
+  partsIn.forEach(o => o.splitPaid.forEach(p => {
+    if (!inWin(p.at || periodAt(o))) return;
+    if (p.method === 'cash') cashNet += p.amount || 0;
+    else if (p.method === 'giftcard') giftNet += p.amount || 0;
+    else cardNet += p.amount || 0;
+  }));
+  refunded.forEach(o => takeBy(o, -1, refundIn(o)));
   // Which card — Visa / Mastercard / Amex / EFTPOS — so the night's card
   // takings can be matched against the terminal's own settlement report.
   const byCard = {};
   const addCard = (type, amount) => {
-    if (!(amount > 0)) return;
+    if (!amount) return; // a refund comes off as a minus
     const k = CARD_TYPE_KEYS.includes(String(type)) ? String(type) : 'other';
     byCard[k] = (byCard[k] || 0) + amount;
   };
-  paid.forEach(o => {
+  const cardBy = (o, sign, amt) => {
     const gt = o.grandTotal !== undefined ? o.grandTotal : o.total;
-    const refunded = o.refundedTotal || 0;
-    const kept = gt > 0 ? 1 - refunded / gt : 1;
+    const part = v => amt === null ? v : (gt > 0 ? amt * v / gt : 0);
     if (Array.isArray(o.splitPaid) && o.splitPaid.length) {
-      o.splitPaid.filter(p => p.method === 'card').forEach(p => addCard(p.cardType, p.amount * kept));
+      o.splitPaid.filter(p => p.method === 'card').forEach(p => addCard(p.cardType, sign * part(p.amount)));
     } else if (o.paymentMethod === 'card') {
-      addCard(o.cardType, gt - refunded);
+      addCard(o.cardType, sign * part(gt));
     }
-  });
+  };
+  paid.forEach(o => { if (!hasParts(o)) cardBy(o, 1, null); });
+  partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
+  refunded.forEach(o => cardBy(o, -1, refundIn(o)));
 
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
   // cash, the lime run) — logged, and owed against the expected count.
@@ -17687,6 +17795,7 @@ function logOut() {
   state.adminOpenGroups = [];
   try { localStorage.removeItem('pos-admin-group'); } catch (e) {}
   state.currentStaff = null;
+  state.activeSeat = null; // the next person starts on All
   state.loginSelectedId = null;
   state.loginPin = '';
   state.cart = [];
@@ -17983,6 +18092,12 @@ function tipBlock() {
 function cardTipPending() {
   const already = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
   return Math.max(0, Math.round(((parseFloat(state.cardTip) || 0) - already) * 100) / 100);
+}
+// Paying ONE share by card: the card takes the share AND the tip on it. The
+// amount stayed at the bare share, so the tip came out of the bill and the
+// last guest was asked for it again (Sep '26).
+function shareCardFollowsTip() {
+  if (state.payShare && state.paymentMethod === 'card') state.cardAmount = (state.payShare.amount + cardTipPending()).toFixed(2);
 }
 function cartGrandTotal() { return cartTotal() + cartTipAmount(); }
 
@@ -19883,7 +19998,11 @@ function openCheckout() {
   state._payShareNext = null;
   state.cashGiven = '';
   state.cardAmount = state.payShare ? state.payShare.amount.toFixed(2) : '';
-  state.cardTip = 0;
+  // A tip already taken on an earlier part — or typed on one and still
+  // waiting for the last — stays on the bill: back at 0, the bill forgot it
+  // and closed without it, tip $0 (Sep '26).
+  const kept = state._keptTip && state._keptTip.orderId === state.openOrderId ? state._keptTip.tip : 0;
+  state.cardTip = Math.round(Math.max(kept, splitPaidList().reduce((a, p) => a + (p.tip || 0), 0)) * 100) / 100;
   state.splitMode = false;
   state.payRailVouchers = false;
   state.splitTenders = [];
@@ -19898,7 +20017,12 @@ function openCheckout() {
   state.attachedCustomerId = state.attachedCustomerId || (openOrder && openOrder.customerId) || null;
   render();
 }
-function closeCheckout() { state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.cardAmount = ''; state.cardTip = 0; render(); }
+function closeCheckout() {
+  // A tip typed on a part-paid bill waits for the last part (the parts fill
+  // the bill first), so it is kept for this bill, not binned on the way out.
+  state._keptTip = splitPaidList().length && state.openOrderId ? { orderId: state.openOrderId, tip: parseFloat(state.cardTip) || 0 } : null;
+  state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.cardAmount = ''; state.cardTip = 0; render();
+}
 
 // How many of this dish the ingredients can still make — worked out by the
 // server off the recipe, null when the dish has no recipe.
@@ -20888,7 +21012,13 @@ async function voidOrder(id, reason, note, managerPin) {
     await refreshOrders();
     await refreshSummary();
     state.menu = await api('/api/menu');
-  } catch (e) {}
+  } catch (e) {
+    // A refusal says so and keeps the ticket open: it used to close the
+    // detail as if the void had gone through (Sep '26).
+    state.toast = toastFail(e.message || 'Could not void the ticket.');
+    render(); armToastTimer(3500);
+    return;
+  }
   state.detailOrder = null;
   render();
 }
@@ -23919,7 +24049,8 @@ async function takePart(amount, method, giftCardCode) {
   // Paying the share from the split screen marks THAT share paid, and the
   // shares freeze as they were — so a three-way split stays three equal
   // parts instead of dividing what is left by three again.
-  const share = state.payShare && Math.abs(amount - state.payShare.amount) < 0.005
+  const onTop = method === 'card' ? cardTipPending() : 0; // the share's own tip rides on its card
+  const share = state.payShare && Math.abs(amount - onTop - state.payShare.amount) < 0.005
     && !(order.splitPaid || []).some(p => p.key === state.payShare.key) ? state.payShare : null;
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
@@ -25014,19 +25145,20 @@ function kdsItemRows() {
   state.orders.forEach(o => {
     if (o.status === 'void') return;
     if (o.status !== 'open' && o.createdAt < cutoff) return;
-    // Map each item object back to the round it was sent in, so the KDS can
-    // show a live age timer from when the kitchen actually received it. Round
-    // items share object identity with order.items (see /api/orders/:id/rounds),
-    // so a reference lookup is exact.
+    // Map each item back to the round it was sent in, so the KDS can show a
+    // live age timer from when the kitchen actually received it. By the
+    // line's uid: object identity never survives the trip from the server,
+    // so every dish was timed from the table's first send (Sep '26).
+    const keyOf = it => it.uid || it.lineKey;
     const sentAtByItem = new Map();
-    (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { if (!sentAtByItem.has(it)) sentAtByItem.set(it, rd.sentAt); }));
+    (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { const k = keyOf(it); if (k && !sentAtByItem.has(k)) sentAtByItem.set(k, rd.sentAt); }));
     (o.items || []).forEach((item, idx) => {
       if (!item.status || item.status === 'served') return;
       rows.push({
         orderId: o.id,
         idx,
         item,
-        sentAt: sentAtByItem.get(item) || o.createdAt,
+        sentAt: sentAtByItem.get(keyOf(item)) || o.createdAt,
         // Called-away is the only fire state persisted on the order (order-level,
         // set by the floor-map "call away" action) — there is no per-course fire
         // flag in the order data, so the KDS surfaces it at the ticket level.
@@ -28839,16 +28971,18 @@ function renderSurchargesSettingsAdmin() {
 
 
 // Tips collected over a period, split among staff by their weighted share.
+// The trading day, like every other money total: from midnight, a 1am look
+// at "Tips today" read $0 for the night just worked (Sep '26).
 function tipPeriodStart(period) {
-  const now = new Date();
-  const d = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // local midnight
-  if (period === 'week') { const dow = (d.getDay() + 6) % 7; d.setDate(d.getDate() - dow); } // back to Monday
+  const start = tradingDayStart(Date.now());
+  if (period !== 'week') return start;
+  const d = new Date(start); d.setDate(d.getDate() - (d.getDay() + 6) % 7); // back to Monday
   return d.getTime();
 }
 function tipsCollected(period) {
   const start = tipPeriodStart(period);
   return (state.orders || [])
-    .filter(o => o.status !== 'void' && (o.createdAt || 0) >= start)
+    .filter(o => o.status === 'paid' && !o.practice && (o.closedAt || o.createdAt || 0) >= start)
     .reduce((s, o) => s + (o.tip || 0), 0);
 }
 function renderTipsSettingsAdmin() {
@@ -33804,6 +33938,28 @@ function billPaidBy(o) {
   if ((o.refundedTotal || 0) > 0.005) return `Refunded ${money(o.refundedTotal)}${at ? ' · ' + at : ''}`;
   return [how === 'Paid' ? 'Paid' : 'Paid · ' + how, at].filter(Boolean).join(' · ');
 }
+// What an open bill comes to, the pay screen's way: the table's discount or
+// surcharge and GST on top when it is added — the Bills card said $179 left
+// on a bill the pay screen owed $136.10 (Sep '26).
+function openBillTotal(o, t) {
+  const lines = (o.items || []).filter(i => i.qty > 0);
+  const sub = lines.reduce((a, i) => a + i.price * i.qty, 0);
+  const d = t && t.discount;
+  let off = 0;
+  if (d && d.value) {
+    const scope = Array.isArray(d.scope) ? d.scope.filter(Boolean) : [];
+    const base = !scope.length ? sub : lines.reduce((a, i) => {
+      const mi = state.menu.find(m => m.id === i.menuItemId);
+      return a + (mi && scope.includes(mi.category) ? i.price * i.qty : 0);
+    }, 0);
+    off = d.type === 'percent' ? base * (Math.min(100, Math.max(0, d.value)) / 100) : Math.max(0, d.value);
+    if (d.type === 'fixed' && (!d.kind || d.kind === 'discount')) off = Math.min(base, off);
+    if (d.kind === 'surcharge') off = -off;
+  }
+  const taxable = sub - off;
+  const vouchers = lines.reduce((a, i) => a + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
+  return taxCfg().mode === 'exclusive' ? taxable + taxOn(taxable - vouchers) : taxable;
+}
 function billDocket(o, closed) {
   const t = o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null;
   const name = o.orderType === 'dine-in' ? String(o.table == null ? '' : o.table) : (o.customerName || 'Takeaway');
@@ -33831,7 +33987,7 @@ function billDocket(o, closed) {
     return `${closed ? '' : `<div class="bl-co"><span>${esc(courseInfo(n).name)}</span>${WORD[st] ? `<i class="${st}">${WORD[st]}</i>` : ''}</div>`}
       ${lines.map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${(l.price * l.qty).toFixed(2)}</span></div>`).join('')}`;
   }).join('');
-  const total = closed ? (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0 : (o.items || []).reduce((a, i) => a + i.price * i.qty, 0);
+  const total = closed ? (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0 : openBillTotal(o, t);
   const paid = (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
   const foot = closed ? `<small>Total</small><b>${money(total)}</b>`
     : paid > 0.005 ? `<small>Paid ${money(paid)} · left</small><b>${money(Math.max(0, total - paid))}</b>`
@@ -33855,7 +34011,7 @@ function renderBills() {
     .sort((a, b) => histTime(b) - histTime(a));
   const sum = list => list.reduce((a, o) => a + (o.status === 'paid'
     ? ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0)
-    : (o.items || []).reduce((x, i) => x + i.price * i.qty, 0)), 0);
+    : openBillTotal(o, o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null)), 0);
   const head = (word, list) => `<div class="bl-hd"><b>${word}</b><span>${list.length} bill${list.length === 1 ? '' : 's'}</span><span class="bl-sum">${money(sum(list))}</span></div>`;
   if (!open.length && !closed.length) return `<div class="bills"><div class="pass-empty">No bills today</div></div>`;
   return `
@@ -34687,6 +34843,9 @@ function pickTable(id) {
     if (id !== state.table) releaseTableLock(state.table);
     const prevTable = state.table;
     const hadTable = !!prevTable;
+    // A new table starts on All: a seat lit on the last one rang the next
+    // table's dish onto a seat nobody picked, past its allergy (Sep '26).
+    if (prevTable !== id) state.activeSeat = null;
     state.table = id;
     const t = findTableById(id);
     // Keep an unsent cart when this is the FIRST table picked (fresh login has
@@ -34825,8 +34984,11 @@ async function doTransferToTable(newTableId) {
   // used to be written a field at a time to each table - six requests, six
   // whole-store rewrites - for a single tap.
   const oldT2 = findTableById(oldTableId);
-  const sit = (t) => t ? { covers: t.covers || 0, notes: (t.notes || []).slice() } : null;
+  const sit = (t) => t ? { covers: t.covers || 0, notes: (t.notes || []).slice(), discount: t.discount || null } : null;
   const wasOld = sit(oldT2), wasNew = sit(newTable); // to put back if the tab's move fails
+  // The party's discount goes with it; a discount already on the table stands.
+  if (oldT2 && oldT2 !== newTable && oldT2.discount && !newTable.discount) newTable.discount = oldT2.discount;
+  if (oldT2 && oldT2 !== newTable) oldT2.discount = null;
   if (oldT2) { oldT2.covers = 0; oldT2.notes = []; }
   newTable.covers = combined ? ((newTable.covers || 0) + covers) : covers;
   newTable.notes = combined ? [...(newTable.notes || []), ...notes] : notes;
@@ -34974,6 +35136,19 @@ async function linkTables(fromId, intoId, drop, opts) {
       });
       Object.assign(t, patch);
       done.add(t.id);
+    }
+    // The joined table's party joins too: its covers and notes (an allergy!)
+    // stayed on the faded table while the order ran on the main, so a dish
+    // went on with no warning (Sep '26). The same call a transfer makes.
+    for (const t of joining) {
+      if (t.id === main.id || !((t.covers || 0) > 0 || (t.notes || []).length || t.discount)) continue;
+      await api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fromId: t.id, toId: main.id, covers: t.covers || 0, notes: t.notes || [], combine: true }) });
+      main.covers = (main.covers || 0) + (t.covers || 0);
+      main.notes = [...(main.notes || []), ...(t.notes || [])];
+      if (t.discount && !main.discount) main.discount = t.discount;
+      t.covers = 0; t.notes = []; t.discount = null;
+      if (state.table === main.id) { state.covers = main.covers; state.notes = main.notes; }
     }
     // The dragged side won mainship — its tables aren't in the joining list
     // but still move to the weld spot.
@@ -41164,6 +41339,15 @@ async function saveBulkEditModal() {
       if (item && m.priceMode === 'set') payload.price = parseFloat(m.priceValue);
       else if (item && m.priceMode === 'increase') payload.price = Math.max(0, item.price * (1 + parseFloat(m.priceValue) / 100));
       else if (item && m.priceMode === 'decrease') payload.price = Math.max(0, item.price * (1 - parseFloat(m.priceValue) / 100));
+      // The SIZES move with the price — they are what the till charges, and a
+      // bulk rise left Half and Whole where they were (Sep '26). "Set to"
+      // moves each size by the same share the base moved.
+      if (payload.price !== undefined) {
+        const cents = v => Math.round(v * 100) / 100;
+        const ratio = item.price > 0 ? payload.price / item.price : null;
+        payload.price = cents(payload.price);
+        if (ratio !== null && (item.variants || []).length) payload.variants = item.variants.map(v => ({ ...v, price: cents(Math.max(0, (parseFloat(v.price) || 0) * ratio)) }));
+      }
       if (m.colorMode === 'set') payload.color = m.color;
       else if (m.colorMode === 'clear') payload.color = null;
       if (m.courseMode === 'set') payload.defaultCourse = m.defaultCourse || null;
@@ -41181,9 +41365,9 @@ async function saveBulkEditModal() {
       else if (m.modifierMode === 'add' && item) { const cur = item.modifierGroupIds || []; payload.modifierGroupIds = [...cur, ...m.modifierGroupIds.filter(gid => !cur.includes(gid))]; }
       else if (m.modifierMode === 'clear') payload.modifierGroupIds = [];
       if (item && (m.sizeMode === 'set' || m.sizeMode === 'add')) {
-        const cur = m.sizeMode === 'add' ? (item.variants || []) : [];
+        const cur = m.sizeMode === 'add' ? (payload.variants || item.variants || []) : [];
         const existing = cur.map(v => v.label);
-        const added = m.sizes.filter(l => !existing.includes(l)).map(label => ({ label, price: item.price || 0 }));
+        const added = m.sizes.filter(l => !existing.includes(l)).map(label => ({ label, price: (payload.price !== undefined ? payload.price : item.price) || 0 }));
         payload.variants = [...cur, ...added];
       } else if (m.sizeMode === 'clear') payload.variants = [];
       if (m.allergenMode === 'set') payload.allergens = m.allergens.map(n => ({ name: n, level: 'contains', note: '' }));
@@ -42322,6 +42506,7 @@ function bindEvents() {
       const v = Math.max(0, parseFloat(e.target.value) || 0);
       state.cardTip = Math.round((already + v) * 100) / 100;
       // The amount follows the tip unless they have typed their own number.
+      shareCardFollowsTip();
       render();
     });
   }
@@ -43441,7 +43626,7 @@ function handleActClick(el, e) {
       // on top of a tip an earlier part already carried away (the chips
       // stacked and never lit once a part had gone through, Sep '26). Tip
       // already taken cannot be un-taken, so the total never drops below it.
-      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round(Math.max(already, p ? cartTotal() * p / 100 : 0) * 100) / 100; render(); }
+      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); state.cardTip = Math.round(Math.max(already, p ? cartTotal() * p / 100 : 0) * 100) / 100; shareCardFollowsTip(); render(); }
       else if (act === 'ordertype') {
         // Mode chips live in the bar now — tapping one from ANY view lands on
         // the order screen in that mode. Dine-in has no chip: Order IS dine-in.

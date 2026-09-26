@@ -1049,6 +1049,10 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .ticket-line.sent{opacity:0.5;cursor:pointer;transition:opacity .12s ease,border-color .12s ease;}
 .ticket-line.new{cursor:pointer;transition:background-color .12s ease,border-color .12s ease;}
 .course-group{margin-bottom:6px;}
+/* Same again: one key at the foot of the tab's course (owner's trial, Sep '26). */
+.same-again{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;margin-top:8px;padding:0 12px;background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--btn-radius);color:var(--blue);font:inherit;font-size:var(--fs-md);font-weight:700;cursor:pointer;}
+.same-again .sys-i{width:20px;height:20px;flex:none;}
+.same-again small{margin-left:auto;font-size:var(--fs-md);font-weight:600;color:var(--text-secondary);}
 .course-group-head{display:flex;justify-content:space-between;align-items:center;padding:8px 0 4px;font-size:var(--fs-chip);font-weight:700;color:var(--charcoal-soft);text-transform:uppercase;letter-spacing:0.5px;}
 .fire-btn{background:var(--green-dim);color:var(--green);border:none;border-radius:var(--btn-radius);padding:4px 8px;font-size:var(--fs-chip);font-weight:700;cursor:pointer;text-transform:none;letter-spacing:0;}
 .ticket-items{flex:1;overflow-y:auto;padding:var(--hub-edge);}
@@ -8961,6 +8965,8 @@ app.put('/api/settings', (req, res) => {
   // Payments → Cash quick amounts: the switch was sent and never kept (Sep '26).
   // The seat row's style, while the owner tries the three (Sep '26). null = ask each dish.
   if (req.body.seatRow !== undefined) data.settings.seatRow = ['slide', 'wrap', 'pad'].includes(req.body.seatRow) ? req.body.seatRow : null;
+  // Same again: which docket tabs carry the key, while the owner tries it (Sep '26). null = off.
+  if (req.body.sameAgain !== undefined) data.settings.sameAgain = ['drinks', 'every'].includes(req.body.sameAgain) ? req.body.sameAgain : null;
   if (req.body.cashQuickTender !== undefined) data.settings.cashQuickTender = !!req.body.cashQuickTender;
   // Where the floor's own controls stand: the band across the top, or floating
   // over the floor at the bottom right. Two arrangements of the same controls.
@@ -18531,6 +18537,45 @@ async function toggleAskSeatOff(kind, id) {
 // slide (one row, swipe for more), wrap (more rows), pad (four seats, then
 // the seat pad for the rest). "Ask each dish" is how it always worked.
 function seatRowStyle() { const v = state.settings.seatRow; return ['slide', 'wrap', 'pad'].includes(v) ? v : null; }
+// SAME AGAIN (owner, Sep '26: "same again would be just drinks? or perhaps
+// course?" → "add as an admin option so I can play with it"). One key at the
+// foot of the course the docket's tab is showing: it puts that course's last
+// round back in the cart, seats and prices carried, and nothing goes until
+// Send. The setting says which tabs carry it: none, the drinks tab, or every
+// course. The All tab never does — there "again" could mean anything.
+function sameAgainMode() { const v = state.settings.sameAgain; return v === 'drinks' || v === 'every' ? v : null; }
+function sameAgainLines(n) {
+  const mode = sameAgainMode();
+  if (!mode || state.docketShowAll) return [];
+  if (mode === 'drinks' && !/drink|bar|bev/i.test(courseInfo(n).name || '')) return [];
+  const o = activeOpenOrder();
+  if (!o) return [];
+  const live = new Set((o.items || []).filter(i => i.qty > 0).map(i => i.uid || i.lineKey));
+  const last = [...(o.rounds || [])].reverse().find(r => (r.items || []).some(i => (i.course || 1) === n && live.has(i.uid || i.lineKey)));
+  return last ? last.items.filter(i => (i.course || 1) === n && live.has(i.uid || i.lineKey)) : [];
+}
+function sameAgainKey(n) {
+  const lines = sameAgainLines(n);
+  if (!lines.length) return '';
+  const q = lines.reduce((a, i) => a + (i.qty || 1), 0);
+  const word = /drink|bar|bev/i.test(courseInfo(n).name || '') ? (q === 1 ? 'drink' : 'drinks') : (q === 1 ? 'dish' : 'dishes');
+  return `<button class="same-again" data-act="same-again" data-course="${n}">${SYS_REPEAT_SVG}<span>Same again</span><small>${q} ${word}</small></button>`;
+}
+function doSameAgain(n) {
+  const lines = sameAgainLines(n);
+  if (!lines.length) return;
+  lines.forEach(item => {
+    const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.price, qty: item.qty || 1,
+      course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
+      variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
+    const twin = state.cart.find(c => c.sentQty == null && c.id === line.id && c.course === line.course
+      && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
+    if (twin) twin.qty += line.qty; else state.cart.push(line);
+  });
+  state.toast = 'Same again — press Send';
+  render();
+  armToastTimer(2000);
+}
 function seatRowOn() { return !!seatRowStyle() && !!state.settings.seatNumbersEnabled && state.covers > 1 && state.orderType === 'dine-in'; }
 // The seat every add goes to: the lit seat, or All while the row is up.
 function activeSeatNow() {
@@ -23160,6 +23205,7 @@ const SYS_CALENDAR_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" str
 const SYS_BAN_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M4.89 4.89l14.22 14.22"/></svg>`;
 const SYS_WARN_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.9 2.27 18.04a2.01 2.01 0 0 0 1.71 3.01h16.05a2.01 2.01 0 0 0 1.71 -3.01l-8.03 -14.15a2.01 2.01 0 0 0 -3.41 0z"/><path d="M12 9.01v5.02"/><path d="M12 17.54h0.01"/></svg>`;
 const SYS_LOCK_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4.22" y="10.89" width="15.56" height="11.11" rx="2.22"/><path d="M7.56 10.89V6.44a4.44 4.44 0 0 1 8.89 0v4.44"/></svg>`;
+const SYS_REPEAT_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 2l4 4-4 4"/><path d="M3 11V9a3 3 0 0 1 3-3h15"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a3 3 0 0 1-3 3H3"/></svg>`;
 const SYS_SWAP_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15.64 2l4.55 4.55 -4.55 4.55"/><path d="M20.18 6.55H3.82"/><path d="M8.36 12.91l-4.55 4.55 4.55 4.55"/><path d="M3.82 17.45h16.36"/></svg>`;
 // The band's Select tick: ACT_TICK's stroke (3.2) is drawn for big action
 // buttons — at chip size next to the stroke-2 swap arrows it needs 2.4 to
@@ -23667,6 +23713,7 @@ function renderTicketPanel() {
           <div class="course-group">
             ${head}
             ${orderedKeys.map(k => lineHtml(merged.get(k))).join('')}
+            ${sameAgainKey(n)}
           </div>`;
         }).join('');
       })()}
@@ -28546,6 +28593,10 @@ function renderCoversSettingsAdmin() {
         feature, the asking, and the exceptions — each a card of its own, so
         the page read as four unrelated settings instead of one with its
         options underneath. */ ''}
+  <div class="settings-card">
+    <div class="th">Same again</div>
+    ${optionPair(sameAgainMode() || 'off', 'set-same-again', [['off', 'Off'], ['drinks', 'Drinks tab'], ['every', 'Every course']])}
+  </div>
   <div class="settings-card">
     <div class="th">Seat numbers</div>
     <div class="ts" style="margin:0 0 12px;">Asked when you add an item.</div>
@@ -43865,6 +43916,13 @@ function handleActClick(el, e) {
         const v = Math.max(30, Math.min(300, sittingMinutesDefault() + (parseInt(el.dataset.d, 10) || 0) * 15));
         state.settings = { ...state.settings, seatingMinutes: v }; render();
         saveTicketSetting({ seatingMinutes: v });
+      }
+      else if (act === 'same-again') { doSameAgain(parseInt(el.dataset.course, 10) || 1); }
+      else if (act === 'set-same-again') {
+        const v = ['drinks', 'every'].includes(el.dataset.val) ? el.dataset.val : null;
+        state.settings = { ...state.settings, sameAgain: v }; render();
+        api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sameAgain: v }) })
+          .catch(() => { state.toast = toastFail('Could not save Same again.'); render(); });
       }
       else if (act === 'set-seat-row') {
         const v = ['slide', 'wrap', 'pad'].includes(el.dataset.val) ? el.dataset.val : null;

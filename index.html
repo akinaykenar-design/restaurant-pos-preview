@@ -6216,6 +6216,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .tl-row .pass-lead small{ display:none; }
   .tl-bar i{ display:none; } /* a phone's lane is too short for words; the colour is the reading */
   .tl-chip i{ display:none; }
+  .tl-row .tl-due{ font-size:0; } /* the end time ran off the screen; the dot stays */
 }
 </style>
 <div id="app">Loading…</div>
@@ -8185,6 +8186,10 @@ const PORT = 3000;
 // Cap request bodies so one device can't post a huge payload that bloats
 // store.json or spikes memory. Menu/order payloads are tiny; 1mb is generous.
 // (Uploaded photos are resized client-side to well under this before posting.)
+// The venue's own data file is the one big body: a busy fortnight of tickets is
+// past 8mb, and "Import data file" answered "Something went wrong" (Sep '26).
+// Parsed first here, so the everyday cap below leaves it alone.
+app.use('/api/import', express.json({ limit: '200mb' }));
 app.use(express.json({ limit: '8mb' }));
 // GZIP (owner, Aug '26: "a lot of lag on the first screen"). Measured: the
 // login screen waited on 286kb of menu JSON and a 1.5MB app.js, uncompressed,
@@ -8405,6 +8410,7 @@ function taxSettings(data) {
 }
 // For a taxable amount, how much tax is reported and how much gets ADDED to it.
 function computeTax(data, taxable) {
+  taxable = Math.max(0, taxable); // tax is never negative (Sep '26: a voucher bill showed Tax $-5.00)
   const t = taxSettings(data);
   const r = (parseFloat(t.ratePercent) || 0) / 100;
   if (t.mode === 'none' || r <= 0) return { tax: 0, add: 0 };
@@ -8499,7 +8505,11 @@ function normPresetObj(p, maxLen) {
   // A single preset may out-route its type ("Food Critic" -> Kitchen), the
   // same as a venue's own note preset has always been able to.
   const station = (p && typeof p === 'object' && p.station) ? String(p.station).slice(0, 60) : null;
-  return name ? { name, color, image, station } : null;
+  // A preset may split into kinds ("Nuts" -> Severe, Trace). They were dropped
+  // here, so a kind vanished the moment it was added (Sep '26).
+  const kinds = (p && typeof p === 'object' && Array.isArray(p.subTypes))
+    ? p.subTypes.map(k => String(k || '').trim().slice(0, 40)).filter(Boolean).slice(0, 15) : [];
+  return name ? { name, color, image, station, ...(kinds.length ? { subTypes: kinds } : {}) } : null;
 }
 
 // ---------- Quick note presets ----------
@@ -9951,6 +9961,14 @@ app.delete('/api/menu/:id', (req, res) => {
   const data = readData();
   const item = data.menu.find(m => m.id === req.params.id);
   data.menu = data.menu.filter(m => m.id !== req.params.id);
+  // A deleted dish leaves every set menu too — left behind, a group kept
+  // asking for a pick from dishes that no longer exist (Sep '26).
+  (data.combos || []).forEach(c => (c.groups || []).forEach(g => {
+    if (!(g.itemIds || []).includes(req.params.id)) return;
+    g.itemIds = g.itemIds.filter(id => id !== req.params.id);
+    if (g.min != null) g.min = Math.min(g.min, g.itemIds.length);
+    if (g.max != null) g.max = Math.max(1, g.min || 0, Math.min(g.max, g.itemIds.length));
+  }));
   if (item) logAudit(data, staffFromReq(req), `Deleted menu item: ${item.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -10065,6 +10083,11 @@ app.delete('/api/floorplans/:id', (req, res) => {
     return res.status(400).json({ error: 'You must keep at least one floor plan layout' });
   }
   const floorPlan = data.floorPlans.find(f => f.id === req.params.id);
+  // An area goes like a table goes: never out from under an unpaid bill, or
+  // that bill is on no floor and nobody can tap it to take payment (Sep '26).
+  const labels = new Set(((floorPlan && floorPlan.tables) || []).filter(t => t.type !== 'decor').map(t => String(t.label)));
+  const stuck = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && labels.has(String(o.table)));
+  if (stuck) return res.status(400).json({ error: `Table ${stuck.table} has an unpaid bill. Settle or move it first.` });
   data.floorPlans = data.floorPlans.filter(f => f.id !== req.params.id);
   if (floorPlan) logAudit(data, staffFromReq(req), `Deleted floor plan layout: ${floorPlan.name}`);
   writeData(data);
@@ -10662,6 +10685,10 @@ app.post('/api/gift-cards', (req, res) => {
 // is actually taken — never before, or vouchers would exist unpaid. The codes
 // are kept on the order so the receipt (and any reprint) carries them.
 function issueSoldVouchers(data, order, byName) {
+  // PRACTICE NEVER TOUCHES REAL MONEY (Sep '26): a trainee's voucher sale made
+  // a live card, their loyalty sale credited a real guest, their tab 86'd a
+  // real dish — and leaving practice undid none of it.
+  if (order.practice) return [];
   const codes = [];
   for (const it of order.items || []) {
     if (!it.giftcardSale) continue;
@@ -11991,7 +12018,7 @@ app.get('/api/orders/export.csv', (req, res) => {
   const fromTs = from ? new Date(from + 'T00:00:00').getTime() : null;
   const toTs = to ? new Date(to + 'T23:59:59').getTime() : null;
   const orders = data.orders
-    .filter(o => (fromTs === null || o.createdAt >= fromTs) && (toTs === null || o.createdAt <= toTs))
+    .filter(o => !o.practice && (fromTs === null || o.createdAt >= fromTs) && (toTs === null || o.createdAt <= toTs))
     .sort((a, b) => a.createdAt - b.createdAt);
 
   const header = ['Ticket #', 'Date', 'Time', 'Type', 'Table/Customer', 'Items', 'Subtotal', 'Discount', 'Tax', 'Total', 'Tip', 'Grand Total', 'Refunded', 'Net', 'Payment', 'Staff', 'Status'];
@@ -12112,11 +12139,14 @@ function round3(n) { return Math.round((parseFloat(n) || 0) * 1000) / 1000; }
 // deleted section can never silently widen a promotion.
 function discountBase(subtotal, discount, items, data) {
   const scope = discount && Array.isArray(discount.scope) ? discount.scope.filter(Boolean) : [];
-  if (!scope.length || !Array.isArray(items)) return subtotal;
+  // A GIFT VOUCHER BEING SOLD IS NEVER DISCOUNTED: 50% off a bill with a $100
+  // voucher on it charged $55 for a card worth $100, and drove tax below zero
+  // (Sep '26). The voucher is money changing form, not a sale.
+  if (!scope.length || !Array.isArray(items)) return Math.max(0, subtotal - voucherSaleTotal(items));
   const menu = (data && data.menu) || [];
   return items.reduce((sum, i) => {
     const mi = menu.find(m => m.id === i.menuItemId);
-    return sum + (mi && scope.includes(mi.category) ? i.price * i.qty : 0);
+    return sum + (!i.giftcardSale && mi && scope.includes(mi.category) ? i.price * i.qty : 0);
   }, 0);
 }
 function computeDiscount(subtotal, discount, items, data) {
@@ -12139,6 +12169,9 @@ function computeDiscount(subtotal, discount, items, data) {
       rawAmount = Math.round(rawAmount * 100) / 100; // cents, never fractions of one (Sep '26: a close stored 110.3228)
       discountAmount = kind === 'surcharge' ? -rawAmount : rawAmount;
       discountRecord = { type, value, reason: discount.reason || '', amount: discountAmount, kind };
+      // What the discount SPENT rides with it, so a void can give it back.
+      if (discount.voucherCode) discountRecord.voucherCode = String(discount.voucherCode).slice(0, 40);
+      if (discount.loyaltyPoints && discount.customerId) { discountRecord.loyaltyPoints = parseInt(discount.loyaltyPoints, 10) || 0; discountRecord.customerId = discount.customerId; }
       if (scope.length) discountRecord.scope = scope;
     }
   }
@@ -12185,18 +12218,19 @@ function checkDiscountExtras(data, discount) {
   return null;
 }
 function spendDiscountExtras(data, order, discount, staffName) {
-  if (!discount) return;
+  if (!discount || order.practice) return;
   if (discount.voucherCode) {
     const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
-    if (v) { v.used = true; v.usedAt = Date.now(); order.voucherCodes = [...new Set([...(order.voucherCodes || []), v.code])]; logAudit(data, staffName, `Redeemed voucher ${v.code} on Ticket #${order.id}`); }
+    if (v) { v.used = true; v.usedAt = Date.now(); order.redeemedVoucher = v.code; logAudit(data, staffName, `Redeemed voucher ${v.code} on Ticket #${order.id}`); }
   }
   if (discount.loyaltyPoints && discount.customerId) {
     const c = (data.customers || []).find(x => x.id === discount.customerId);
     if (c) { c.points = (c.points || 0) - discount.loyaltyPoints; logAudit(data, staffName, `Redeemed ${discount.loyaltyPoints} loyalty points on Ticket #${order.id} for ${c.name}`); }
   }
 }
-function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal) {
+function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal, practice) {
   if (paymentMethod !== 'giftcard') return { ok: true };
+  if (practice) return { error: 'A practice bill can’t take a real gift card' };
   if (!giftCardCode) return { error: 'Missing gift card code' };
   const card = (data.giftCards || []).find(g => g.code.toLowerCase() === String(giftCardCode).toLowerCase());
   if (!card) return { error: 'Gift card not found' };
@@ -12300,7 +12334,7 @@ app.post('/api/orders', (req, res) => {
       staffName: staffName || 'Unknown',
       customerId: customerId || null,
     };
-    adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
+    if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
@@ -12327,7 +12361,7 @@ app.post('/api/orders', (req, res) => {
   if (payKey) { const dup = (data.orders || []).find(o => o.payKey === payKey); if (dup) return res.json(dup); }
   const extrasError = checkDiscountExtras(data, discount);
   if (extrasError) return res.status(400).json({ error: extrasError });
-  const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
+  const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal, isPractice);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
 
   const order = {
@@ -12355,7 +12389,7 @@ app.post('/api/orders', (req, res) => {
     customerId: customerId || null,
   };
 
-  adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
+  if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
   spendDiscountExtras(data, order, discount, order.staffName);
   data.orders.push(order);
   data.ticketCounter += 1;
@@ -12364,7 +12398,7 @@ app.post('/api/orders', (req, res) => {
     logAudit(data, order.staffName, `Applied ${discountRecord.type === 'percent' ? discountRecord.value + '%' : '$' + discountRecord.value.toFixed(2)} ${label} ($${Math.abs(discountAmount).toFixed(2)}) to Ticket #${order.id}${discountRecord.reason ? ' — ' + discountRecord.reason : ''}`);
   }
   issueSoldVouchers(data, order, order.staffName);
-  creditLoyalty(data, customerId, order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(items));
+  if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(items); creditLoyalty(data, customerId, order.loyaltyCredited); }
   writeData(data);
   printing.printDocketsForRound(data, order, items.filter(i => !i.giftcardSale), 1);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
@@ -12413,7 +12447,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
-  if (!restore) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
+  if (!restore && !order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
   // A NEW ROUND UN-PRINTS THE BILL. The mark stayed lit after more was
   // ordered, so Bill looked done and the table kept its bill colour while
   // the guest held a total missing the last round (owner, Sep '26).
@@ -12533,7 +12567,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
         if (i.qty <= 0) r.items.splice(k, 1);
       }
     });
-    adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
+    if (!order.practice) adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
     const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
     const why = reason ? ` (${reason})` : '';
@@ -12687,7 +12721,7 @@ app.post('/api/orders/:id/close', (req, res) => {
     partTip = Math.round(order.splitPaid.reduce((a, p) => a + (p.tip || 0), 0) * 100) / 100;
   }
   // Spent LAST, after every check that can refuse: a refusal must leave the card whole.
-  const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal);
+  const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal, order.practice);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
 
   if (partTip !== null) { tipAmount = partTip; grandTotal = Math.round((total + tipAmount) * 100) / 100; }
@@ -12716,7 +12750,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   issueSoldVouchers(data, order, order.closedBy);
   // Points on what was BOUGHT: not the tip, not a gift card's face value (the
   // points came when it was bought, not again when it is spent) — Sep '26.
-  creditLoyalty(data, order.customerId, order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(order.items));
+  if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(order.items); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
   printing.drawerForSale(data, order);
@@ -12817,6 +12851,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // that records the part, or a lost reply would spend a card twice.
   let gcard = null;
   if (m === 'giftcard') {
+    if (order.practice) return res.status(400).json({ error: 'A practice bill can’t take a real gift card' });
     const code = String(giftCardCode || '').trim();
     if (!code) return res.status(400).json({ error: 'That gift card has no code' });
     gcard = (data.giftCards || []).find(g => g.code.toLowerCase() === code.toLowerCase());
@@ -12867,12 +12902,36 @@ app.post('/api/orders/:id/void', (req, res) => {
       const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
       if (c && amt > 0) { c.balance = Math.round((c.balance + amt) * 100) / 100; logAudit(data, byName, `Put $${amt.toFixed(2)} back on gift card ${c.code} (void of #${order.id})`); }
     });
+    // …AND SO DO THE POINTS AND THE VOUCHER CODE (Sep '26): a void left the
+    // guest's points earned, the points they spent gone, and a one-use code
+    // marked used.
+    const d = order.discount || {};
+    if (d.voucherCode) {
+      const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(d.voucherCode).toLowerCase());
+      if (v && v.used) { v.used = false; v.usedAt = null; logAudit(data, byName, `Voucher ${v.code} usable again (void of #${order.id})`); }
+    }
+    if (d.loyaltyPoints && d.customerId) {
+      const c = (data.customers || []).find(x => x.id === d.customerId);
+      if (c) { c.points = (c.points || 0) + d.loyaltyPoints; logAudit(data, byName, `Gave ${d.loyaltyPoints} loyalty points back to ${c.name} (void of #${order.id})`); }
+    }
+    const earned = order.loyaltyCredited !== undefined ? order.loyaltyCredited
+      : (order.paymentMethod === 'giftcard' ? 0 : (order.total || 0) - voucherSaleTotal(order.items));
+    const guest = order.customerId && (data.customers || []).find(x => x.id === order.customerId);
+    if (guest && earned > 0) {
+      guest.visits = Math.max(0, (guest.visits || 0) - 1);
+      guest.totalSpent = Math.max(0, (guest.totalSpent || 0) - earned);
+      guest.points = Math.max(0, (guest.points || 0) - Math.floor(earned));
+    }
+    // A PAID ticket voided after its period was closed is money handed back in
+    // THIS period: it counts on the next cash-up like a refund (Sep '26).
+    order.voidedPaid = true;
   }
+  order.voidedAt = Date.now();
   order.status = 'void';
   order.voidedBy = req.body.staffName || 'Unknown';
   order.voidReason = reason || null;
   order.voidNote = note || '';
-  adjustStockForItems(data, order.items, 1, `Void #${order.id}`);
+  if (!order.practice) adjustStockForItems(data, order.items, 1, `Void #${order.id}`);
   logAudit(data, order.voidedBy, `Voided order #${order.id} (${order.total.toFixed(2)})${reason ? ' — ' + reason : ''}${note ? ': ' + note : ''}`);
   writeData(data);
   res.json(order);
@@ -12895,6 +12954,37 @@ app.post('/api/orders/:id/refund', (req, res) => {
   const remaining = grandTotal - alreadyRefunded;
   if (value > remaining + 0.001) return res.status(400).json({ error: `Cannot refund more than the remaining ${remaining.toFixed(2)}` });
   const staff = staffName || 'Unknown';
+  const r2 = n => Math.round(n * 100) / 100;
+  // A REFUND THAT REACHES A VOUCHER SOLD ON THIS TICKET CANCELS IT (Sep '26):
+  // the guest had their $100 back and kept a working $100 card. The rest of
+  // the bill is refunded first; only the part past it comes off the voucher,
+  // and a voucher already spent cannot give back what it no longer holds.
+  const sold = (data.giftCards || []).filter(g => g.soldOnOrder === order.id && g.active !== false);
+  const soldValue = (data.giftCards || []).filter(g => g.soldOnOrder === order.id).reduce((a, g) => a + (g.initialValue || 0), 0);
+  const rest = grandTotal - soldValue;
+  const intoVouchers = r2(Math.max(0, alreadyRefunded + value - rest) - Math.max(0, alreadyRefunded - rest));
+  if (intoVouchers > 0.005) {
+    const left = sold.reduce((a, g) => a + (g.balance || 0), 0);
+    if (left + 0.005 < intoVouchers) {
+      const most = r2(Math.max(0, value - (intoVouchers - left)));
+      return res.status(400).json({ error: `A gift card sold on this ticket has been spent — refund at most $${most.toFixed(2)}` });
+    }
+    let need = intoVouchers;
+    sold.forEach(g => { if (need <= 0.005) return; const take = Math.min(g.balance || 0, need); g.balance = r2((g.balance || 0) - take); need = r2(need - take);
+      if (g.balance <= 0.005) { g.balance = 0; g.active = false; } logAudit(data, staff, `Gift card ${g.code} ${g.active ? 'reduced by $' + take.toFixed(2) : 'cancelled'} with refund on #${order.id}`); });
+  }
+  // A REFUND OF GIFT-CARD MONEY GOES BACK ON THE CARD (Sep '26): it went
+  // nowhere — the card stayed spent and the cash-up showed it handed back.
+  // A split bill gives the card back its share of the refund.
+  const cardBack = [];
+  if (order.paymentMethod === 'giftcard' && order.giftCardCode) cardBack.push([order.giftCardCode, value]);
+  else if ((order.splitPaid || []).some(p => p.method === 'giftcard' && p.giftCardCode) && grandTotal > 0) {
+    (order.splitPaid || []).filter(p => p.method === 'giftcard' && p.giftCardCode).forEach(p => cardBack.push([p.giftCardCode, r2(value * (p.amount || 0) / grandTotal)]));
+  }
+  cardBack.forEach(([code, amt]) => {
+    const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
+    if (c && amt > 0) { c.balance = r2((c.balance || 0) + amt); c.active = true; logAudit(data, staff, `Put $${amt.toFixed(2)} back on gift card ${c.code} (refund on #${order.id})`); }
+  });
   const refund = { amount: value, reason: reason || '', staffName: staff, timestamp: Date.now(), key: refundKey };
   order.refunds = [...(order.refunds || []), refund];
   order.refundedTotal = alreadyRefunded + value;
@@ -13133,13 +13223,18 @@ function computePeriodSummary(data, fromTs, toTs) {
     ? o.refunds.reduce((s, r) => s + ((r.timestamp ? inWin(r.timestamp) : inWin(periodAt(o))) ? (r.amount || 0) : 0), 0)
     : (inWin(periodAt(o)) ? (o.refundedTotal || 0) : 0);
   const refunded = data.orders.filter(o => o.status === 'paid' && !o.practice && refundIn(o) > 0);
-  const voidCount = orders.filter(o => o.status === 'void' && (o.items || []).length && !/^Combined into/.test(o.voidReason || '') && !/^Nothing ordered/.test(o.voidReason || '')).length;
+  // A PAID ticket voided after the period it was paid in closed is money out
+  // in the period of the void — like a refund (Sep '26: it was on no report).
+  const lateVoids = data.orders.filter(o => o.status === 'void' && o.voidedPaid && !o.practice && (o.closedAt || o.createdAt) <= fromTs && inWin(o.voidedAt || 0));
+  let voidCount = orders.filter(o => o.status === 'void' && (o.items || []).length && !/^Combined into/.test(o.voidReason || '') && !/^Nothing ordered/.test(o.voidReason || '')).length;
+  voidCount += lateVoids.length;
+  const lateVoidOut = o => Math.max(0, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0));
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0);
   const tips = paid.reduce((s, o) => s + (o.tip || 0), 0);
-  const refunds = refunded.reduce((s, o) => s + refundIn(o), 0);
+  const refunds = refunded.reduce((s, o) => s + refundIn(o), 0) + lateVoids.reduce((s, o) => s + lateVoidOut(o), 0);
   const grandTotal = paid.reduce((s, o) => s + (o.grandTotal !== undefined ? o.grandTotal : o.total), 0);
   const netTotal = grandTotal - refunds;
   let cashNet = 0;
@@ -13185,6 +13280,7 @@ function computePeriodSummary(data, fromTs, toTs) {
     else cardNet += p.amount || 0;
   }));
   refunded.forEach(o => takeBy(o, -1, refundIn(o)));
+  lateVoids.forEach(o => takeBy(o, -1, lateVoidOut(o)));
   // Which card — Visa / Mastercard / Amex / EFTPOS — so the night's card
   // takings can be matched against the terminal's own settlement report.
   const byCard = {};
@@ -13205,6 +13301,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   paid.forEach(o => { if (!hasParts(o)) cardBy(o, 1, null); });
   partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
   refunded.forEach(o => cardBy(o, -1, refundIn(o)));
+  lateVoids.forEach(o => cardBy(o, -1, lateVoidOut(o)));
 
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
   // cash, the lime run) — logged, and owed against the expected count.
@@ -18041,12 +18138,13 @@ function discountScopeText(d) {
 function cartDiscountBase() {
   const d = state.discount;
   const scope = d && Array.isArray(d.scope) ? d.scope.filter(Boolean) : [];
-  if (!scope.length) return cartSubtotal();
+  // A gift voucher being sold is never discounted — the server's own rule.
+  if (!scope.length) return Math.max(0, cartSubtotal() - cartVoucherSaleTotal());
   const openOrder = activeOpenOrder();
   const lines = [...(openOrder ? openOrder.items : []), ...state.cart];
   return lines.reduce((sum, i) => {
     const mi = state.menu.find(m => m.id === i.menuItemId);
-    return sum + (mi && scope.includes(mi.category) ? i.price * i.qty : 0);
+    return sum + (!i.giftcardSale && mi && scope.includes(mi.category) ? i.price * i.qty : 0);
   }, 0);
 }
 function cartDiscountAmount() {
@@ -18063,7 +18161,7 @@ function cartVoucherSaleTotal() {
   const open = activeOpenOrder();
   return [...(open ? open.items : []), ...state.cart].reduce((s, i) => s + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
 }
-function cartTax() { return taxOn(cartSubtotal() - cartDiscountAmount() - cartVoucherSaleTotal()); }
+function cartTax() { return taxOn(Math.max(0, cartSubtotal() - cartDiscountAmount() - cartVoucherSaleTotal())); }
 function cartTotal() {
   const taxable = cartSubtotal() - cartDiscountAmount();
   return taxCfg().mode === 'exclusive' ? taxable + cartTax() : taxable;
@@ -18597,7 +18695,9 @@ function sameAgainLines(n) {
   if (!o) return [];
   const live = new Set((o.items || []).filter(i => i.qty > 0).map(i => i.uid || i.lineKey));
   const last = [...(o.rounds || [])].reverse().find(r => (r.items || []).some(i => (i.course || 1) === n && live.has(i.uid || i.lineKey)));
-  return last ? last.items.filter(i => (i.course || 1) === n && live.has(i.uid || i.lineKey)) : [];
+  // A voucher sold is not a round to repeat — it has no course, so it read as
+  // Drinks and went out again as a plain $50 charge (Sep '26).
+  return last ? last.items.filter(i => (i.course || 1) === n && live.has(i.uid || i.lineKey) && !i.giftcardSale) : [];
 }
 function sameAgainKey(n) {
   const lines = sameAgainLines(n);
@@ -18610,7 +18710,8 @@ function doSameAgain(n) {
   const lines = sameAgainLines(n);
   if (!lines.length) return;
   lines.forEach(item => {
-    const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.price, qty: item.qty || 1,
+    // Another round is charged at the menu price — a comp was for the round it was given on.
+    const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: item.qty || 1,
       course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
       variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
     const twin = state.cart.find(c => c.sentQty == null && c.id === line.id && c.course === line.course
@@ -19243,10 +19344,17 @@ function toastFail(msg) { state.toastFailed = msg; return msg; }
 // (even ones set without a timer) auto-dismisses via ensureToastTimer(),
 // which render() calls on every pass.
 function armToastTimer(ms) {
-  _undoAction = null; // a fresh non-undo toast supersedes any pending Undo
+  // A fresh non-undo toast supersedes any pending Undo — its button AND what it
+  // would put back. A removed line left armed rode onto the next table's
+  // docket from a later toast's "Undo" (Sep '26).
+  _undoAction = null;
+  state.lastRemoved = null;
+  const hadAction = !!state.toastAction;
+  state.toastAction = null;
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
-  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; render(); }, ms);
+  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; render(); }, ms);
+  if (hadAction) render();
 }
 // Put back whatever the last admin delete took out. The server holds the
 // snapshot; this just asks for it and re-reads everything on screen.
@@ -19994,7 +20102,8 @@ function ruleAmountText(r) {
 }
 // Does this rule fit the bill on screen right now? Anything missing counts as
 // no — a rule can never throw and wedge the order screen.
-function ruleMatches(r, now) {
+// `bill` asks about another bill than the one on screen (the Bills cards).
+function ruleMatches(r, now, bill) {
   if (!r || r.enabled === false) return false;
   const cmp = (actual, want, op) => {
     const a = parseFloat(actual), w = parseFloat(want);
@@ -20008,12 +20117,12 @@ function ruleMatches(r, now) {
     return op === 'isnot' ? !hit : hit;
   };
   switch (r.field) {
-    case 'covers': return cmp(state.covers || 0, r.value1, r.op);
-    case 'subtotal': return cmp(cartSubtotal(), r.value1, r.op);
-    case 'orderType': return same(state.orderType, r.value1, r.op);
+    case 'covers': return cmp(bill ? bill.covers || 0 : state.covers || 0, r.value1, r.op);
+    case 'subtotal': return cmp(bill ? bill.subtotal : cartSubtotal(), r.value1, r.op);
+    case 'orderType': return same(bill ? bill.orderType : state.orderType, r.value1, r.op);
     case 'weekday': return same(now.getDay(), r.value1, r.op);
     case 'holiday': return same(publicHolidayToday(now) ? 'yes' : 'no', r.value1, 'is');
-    case 'table': return same(state.table || '', r.value1, r.op);
+    case 'table': return same(bill ? bill.table || '' : state.table || '', r.value1, r.op);
     case 'date': {
       const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
       const today = ruleDateKey(now);
@@ -20033,12 +20142,12 @@ function ruleMatches(r, now) {
 }
 // A preset that goes on by itself. One per bill: the first in the list that
 // fits. Stacking would mean surprises on the receipt, so it isn't offered.
-function matchingAutoPreset() {
+function matchingAutoPreset(bill) {
   const now = new Date();
   // NO WHEN = EVERY BILL. A self-applying preset with no condition fell
   // through the when-check to "no" and never landed on anything, while its
   // own card read "Every bill · goes on by itself" (owner's walk, Sep '26).
-  return (state.discountPresets || []).find(p => p.auto && p.enabled !== false && (!p.field || ruleMatches(p, now))) || null;
+  return (state.discountPresets || []).find(p => p.auto && p.enabled !== false && (!p.field || ruleMatches(p, now, bill))) || null;
 }
 // Is this preset offered to staff right now? One with a when is only offered
 // while that when is true — which is what "from 8 covers up" used to mean.
@@ -22812,7 +22921,7 @@ function doAddServing(match) {
   const o = activeOpenOrder();
   const item = (o && match) ? (o.items || []).find(i => sentItemMatches(i, match)) : null;
   if (!item) return false;
-  const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.price, qty: 1,
+  const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: 1,
     course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
     variantId: item.variantId, modSelections: item.modSelections, removed: [] };
   // ANOTHER ONE IS ANOTHER ONE, NOT ANOTHER LINE (owner, Sep '26: "adding a
@@ -27688,7 +27797,12 @@ function activeHappyHour() {
   const now = new Date();
   const day = now.getDay();
   const hhmm = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
-  return (state.happyHours || []).find(h => h.enabled && h.days.includes(day) && hhmm >= h.startTime && hhmm < h.endTime) || null;
+  // A window past midnight (22:00–02:00) wraps: before its end it belongs to
+  // the night it started, so it asks about yesterday (Sep '26: never came on).
+  const yday = (day + 6) % 7;
+  return (state.happyHours || []).find(h => h.enabled && (h.startTime < h.endTime
+    ? h.days.includes(day) && hhmm >= h.startTime && hhmm < h.endTime
+    : (h.days.includes(day) && hhmm >= h.startTime) || (h.days.includes(yday) && hhmm < h.endTime))) || null;
 }
 function applyHappyHour(id) {
   const hh = state.happyHours.find(h => h.id === id);
@@ -34042,21 +34156,23 @@ function billPaidBy(o) {
 function openBillTotal(o, t) {
   const lines = (o.items || []).filter(i => i.qty > 0);
   const sub = lines.reduce((a, i) => a + i.price * i.qty, 0);
-  const d = t && t.discount;
+  // A preset that goes on by itself is on this bill too — the card read $26
+  // while Pay asked $28.60 (Sep '26).
+  const d = (t && t.discount) || matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: sub, orderType: o.orderType, table: t ? t.id : '' });
+  const vouchers = lines.reduce((a, i) => a + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
   let off = 0;
   if (d && d.value) {
     const scope = Array.isArray(d.scope) ? d.scope.filter(Boolean) : [];
-    const base = !scope.length ? sub : lines.reduce((a, i) => {
+    const base = !scope.length ? Math.max(0, sub - vouchers) : lines.reduce((a, i) => {
       const mi = state.menu.find(m => m.id === i.menuItemId);
-      return a + (mi && scope.includes(mi.category) ? i.price * i.qty : 0);
+      return a + (!i.giftcardSale && mi && scope.includes(mi.category) ? i.price * i.qty : 0);
     }, 0);
     off = d.type === 'percent' ? base * (Math.min(100, Math.max(0, d.value)) / 100) : Math.max(0, d.value);
     if (d.type === 'fixed' && (!d.kind || d.kind === 'discount')) off = Math.min(base, off);
     if (d.kind === 'surcharge') off = -off;
   }
   const taxable = sub - off;
-  const vouchers = lines.reduce((a, i) => a + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
-  return taxCfg().mode === 'exclusive' ? taxable + taxOn(taxable - vouchers) : taxable;
+  return taxCfg().mode === 'exclusive' ? taxable + taxOn(Math.max(0, taxable - vouchers)) : taxable;
 }
 function billDocket(o, closed) {
   const t = o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null;
@@ -34190,7 +34306,10 @@ function renderTimeline(fp) {
   const t1 = Math.ceil(Math.max(t0 + 4 * 60 * MIN, now + 60 * MIN) / HALF) * HALF;
   const span = t1 - t0;
   const at = t => Math.max(0, Math.min(100, (t - t0) / span * 100)).toFixed(3) + '%';
-  const len = (a, b) => Math.max(0, (b - a) / span * 100).toFixed(3) + '%';
+  // A span is measured from where it becomes VISIBLE: `at` pins a start before
+  // the window to its left edge, so the width must start there too — a lunch
+  // tab seated 7h ago drew its sitting an hour too long (Sep '26).
+  const len = (a, b) => Math.max(0, (Math.min(b, t1) - Math.max(a, t0)) / span * 100).toFixed(3) + '%';
   const mins = ms => Math.max(0, Math.round(ms / MIN));
   const hours = [];
   for (let h = Math.ceil(t0 / (60 * MIN)) * 60 * MIN; h < t1; h += 60 * MIN) hours.push(h);
@@ -34265,7 +34384,7 @@ function tickTimeline() {
   if (now >= t0 + span) { renderWhenStill(); return; }
   const at = t => Math.max(0, Math.min(100, (t - t0) / span * 100)).toFixed(3) + '%';
   el.querySelectorAll('.tl-now, .tl-wait').forEach(n => { n.style.left = at(now); });
-  el.querySelectorAll('[data-grow]').forEach(b => { b.style.width = Math.max(0, (now - +b.dataset.grow) / span * 100).toFixed(3) + '%'; });
+  el.querySelectorAll('[data-grow]').forEach(b => { b.style.width = Math.max(0, (now - Math.max(t0, +b.dataset.grow)) / span * 100).toFixed(3) + '%'; });
   const lab = el.querySelector('.tl-now b');
   if (lab) lab.textContent = new Date(now).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
@@ -35695,7 +35814,11 @@ function renderComboBuilderMiddle() {
   if (!combo) return '';
   const satisfied = (g) => {
     if (comboGroupForced(g)) return true;
-    const { min, max } = comboGroupBounds(g);
+    // Only dishes still on the menu can be picked: a group whose dishes were
+    // deleted asked for a pick nobody could make, and Add stayed grey (Sep '26).
+    const live = (g.itemIds || []).filter(id => state.menu.some(m => m.id === id)).length;
+    if (!live) return true;
+    const { max } = comboGroupBounds(g), min = Math.min(comboGroupBounds(g).min, live);
     const n = (b.selections[g.id] || []).length;
     return n >= min && n <= max;
   };
@@ -36428,7 +36551,7 @@ async function deleteFloorPlanAction(id) {
     state.floorPlanModal = null;
     render();
   } catch (e) {
-    state.toast = toastFail('Could not delete that area.');
+    state.toast = toastFail(e.message || 'Could not delete that area.');
     render();
   }
 }
@@ -39403,6 +39526,18 @@ function addCourseTemplate(name) {
   saveTicketSetting({ courses });
 }
 function reorderCourseTemplates(fromIdx, toIdx) {
+  if (fromIdx === toIdx) return;
+  // A ticket files its food by course POSITION, so moving a course the floor
+  // is eating from relabels food already on tables — the beer read "Dessert"
+  // (Sep '26). The same refusal a delete gets, for every course that moves.
+  const lo = Math.min(fromIdx, toIdx), hi = Math.max(fromIdx, toIdx);
+  for (let i = lo; i <= hi; i++) {
+    const n = tablesOnCourse(i + 1);
+    if (n) {
+      state.toast = toastFail(`${state.settings.courses[i].name} has food on ${n} table${n === 1 ? '' : 's'}. Move or serve it first.`);
+      render(); armToastTimer(4000); return;
+    }
+  }
   const courses = state.settings.courses.slice();
   const [dragged] = courses.splice(fromIdx, 1);
   courses.splice(toIdx, 0, dragged);
@@ -45247,6 +45382,7 @@ function handleActClick(el, e) {
       else if (act === 'delete-floorplan') {
         const fpDel = state.floorPlans.find(f => f.id === el.dataset.id);
         const nT = fpDel ? fpDel.tables.filter(t => t.type !== 'decor').length : 0;
+        if (fpDel && refuseDeleteWithBill(fpDel.tables.map(t => t.id))) return;
         openConfirm({ message: `Delete area “${fpDel ? fpDel.name : ''}”${nT ? ` and its ${nT} table${nT === 1 ? '' : 's'}` : ''}? This can't be undone.`, confirmLabel: 'Delete', danger: true }, () => deleteFloorPlanAction(el.dataset.id));
       }
       else if (act === 'close-floorplan-modal') { closeFloorPlanModal(); }

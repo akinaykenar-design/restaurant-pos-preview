@@ -8431,6 +8431,35 @@ function creditLoyalty(data, customerId, amount) {
   customer.points = (customer.points || 0) + Math.floor(amount);
 }
 
+// WHAT A SALE GAVE, A VOID OR REFUND TAKES BACK — in the share of the money
+// returned (1 = all of it). The earned points, spend and visit come off; once
+// it is all returned, the points the guest SPENT on it and a one-use voucher
+// code come back. `order.loyaltyBack` remembers the share already taken, so
+// two part refunds never take more than the sale gave.
+function takeBackLoyalty(data, order, share, byName, why) {
+  const was = order.loyaltyBack || 0;
+  if (!(share > was)) return;
+  order.loyaltyBack = share;
+  const earned = order.loyaltyCredited !== undefined ? order.loyaltyCredited
+    : (order.paymentMethod === 'giftcard' ? 0 : (order.total || 0) - voucherSaleTotal(order.items));
+  const guest = order.customerId && (data.customers || []).find(x => x.id === order.customerId);
+  if (guest && earned > 0) {
+    guest.totalSpent = Math.max(0, (guest.totalSpent || 0) - earned * (share - was));
+    guest.points = Math.max(0, (guest.points || 0) - (Math.floor(earned * share) - Math.floor(earned * was)));
+    if (share >= 1) guest.visits = Math.max(0, (guest.visits || 0) - 1);
+  }
+  if (share < 1) return;
+  const d = order.discount || {};
+  if (d.voucherCode) {
+    const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(d.voucherCode).toLowerCase());
+    if (v && v.used) { v.used = false; v.usedAt = null; logAudit(data, byName, `Voucher ${v.code} usable again (${why} of #${order.id})`); }
+  }
+  if (d.loyaltyPoints && d.customerId) {
+    const c = (data.customers || []).find(x => x.id === d.customerId);
+    if (c) { c.points = (c.points || 0) + d.loyaltyPoints; logAudit(data, byName, `Gave ${d.loyaltyPoints} loyalty points back to ${c.name} (${why} of #${order.id})`); }
+  }
+}
+
 // 20 points = $1 off, redeemable as a discount at checkout.
 const LOYALTY_POINTS_PER_DOLLAR = 20;
 
@@ -12841,7 +12870,11 @@ app.post('/api/orders/:id/close', (req, res) => {
   issueSoldVouchers(data, order, order.closedBy);
   // Points on what was BOUGHT: not the tip, not a gift card's face value (the
   // points came when it was bought, not again when it is spent) — Sep '26.
-  if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : total - voucherSaleTotal(order.items); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
+  // Gift-card money earned its points when the card was bought — a whole bill
+  // on a card earns none, and neither does the gift-card PART of one (Sep '26:
+  // $60 card + $40 cash earned 100 points).
+  const giftParts = (order.splitPaid || []).filter(p => p.method === 'giftcard').reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
+  if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : Math.max(0, total - voucherSaleTotal(order.items) - giftParts); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
   writeData(data);
   if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
   printing.drawerForSale(data, order);
@@ -12998,26 +13031,8 @@ app.post('/api/orders/:id/void', (req, res) => {
       const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
       if (c && amt > 0) { c.balance = Math.round((c.balance + amt) * 100) / 100; logAudit(data, byName, `Put $${amt.toFixed(2)} back on gift card ${c.code} (void of #${order.id})`); }
     });
-    // …AND SO DO THE POINTS AND THE VOUCHER CODE (Sep '26): a void left the
-    // guest's points earned, the points they spent gone, and a one-use code
-    // marked used.
-    const d = order.discount || {};
-    if (d.voucherCode) {
-      const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(d.voucherCode).toLowerCase());
-      if (v && v.used) { v.used = false; v.usedAt = null; logAudit(data, byName, `Voucher ${v.code} usable again (void of #${order.id})`); }
-    }
-    if (d.loyaltyPoints && d.customerId) {
-      const c = (data.customers || []).find(x => x.id === d.customerId);
-      if (c) { c.points = (c.points || 0) + d.loyaltyPoints; logAudit(data, byName, `Gave ${d.loyaltyPoints} loyalty points back to ${c.name} (void of #${order.id})`); }
-    }
-    const earned = order.loyaltyCredited !== undefined ? order.loyaltyCredited
-      : (order.paymentMethod === 'giftcard' ? 0 : (order.total || 0) - voucherSaleTotal(order.items));
-    const guest = order.customerId && (data.customers || []).find(x => x.id === order.customerId);
-    if (guest && earned > 0) {
-      guest.visits = Math.max(0, (guest.visits || 0) - 1);
-      guest.totalSpent = Math.max(0, (guest.totalSpent || 0) - earned);
-      guest.points = Math.max(0, (guest.points || 0) - Math.floor(earned));
-    }
+    // …AND SO DO THE POINTS AND THE VOUCHER CODE (Sep '26).
+    takeBackLoyalty(data, order, 1, byName, 'void');
     // A PAID ticket voided after its period was closed is money handed back in
     // THIS period: it counts on the next cash-up like a refund (Sep '26).
     order.voidedPaid = true;
@@ -13084,6 +13099,9 @@ app.post('/api/orders/:id/refund', (req, res) => {
   const refund = { amount: value, reason: reason || '', staffName: staff, timestamp: Date.now(), key: refundKey };
   order.refunds = [...(order.refunds || []), refund];
   order.refundedTotal = alreadyRefunded + value;
+  // Money back is points back, in the same share (Sep '26: a full refund of
+  // $200 left the guest 200 points — $10 off next time — for nothing).
+  if (grandTotal > 0) takeBackLoyalty(data, order, Math.min(1, order.refundedTotal / grandTotal), staff, 'refund');
   logAudit(data, staff, `Refunded $${value.toFixed(2)} on Ticket #${order.id}${reason ? ' — ' + reason : ''}`);
   writeData(data);
   res.json(order);
@@ -13146,21 +13164,10 @@ app.post('/api/orders/:id/add-tip', (req, res) => {
   if (!amt) return res.status(400).json({ error: 'Enter a tip amount.' });
   order.tip = Math.round(((order.tip || 0) + amt) * 100) / 100;
   order.grandTotal = Math.round(((order.total || 0) + order.tip) * 100) / 100;
-  // A split-paid ticket counts its money by its payments, so a tip added
-  // later must land on one or the cash-up never sees it (Sep '26). A tip
-  // after the fact is a card tip; with no card on the bill, the last share.
-  if (order.paymentMethod === 'split' && Array.isArray(order.payments) && order.payments.length) {
-    const cards = order.payments.filter(p => p.method === 'card');
-    const p = cards.length ? cards[cards.length - 1] : order.payments[order.payments.length - 1];
-    p.amount = Math.round(((p.amount || 0) + amt) * 100) / 100;
-  }
-  // …and on the part it rode on, since the cash-up counts a part-paid bill by its parts.
-  if (Array.isArray(order.splitPaid) && order.splitPaid.length) {
-    const cards = order.splitPaid.filter(p => p.method === 'card');
-    const p = cards.length ? cards[cards.length - 1] : order.splitPaid[order.splitPaid.length - 1];
-    p.amount = Math.round(((p.amount || 0) + amt) * 100) / 100;
-    p.tip = Math.round(((p.tip || 0) + amt) * 100) / 100;
-  }
+  // A tip after the fact is a card tip, and the cash-up counts it by the
+  // time it was ADDED — a tip keyed after the Z was on no report, and one
+  // on a gift-card bill landed in the gift-card line (Sep '26).
+  order.lateTips = [...(order.lateTips || []), { amount: amt, at: Date.now() }];
   logAudit(data, staffFromReq(req), `Added tip $${amt.toFixed(2)} to Ticket #${order.id}`);
   writeData(data);
   res.json(order);
@@ -13322,7 +13329,13 @@ function computePeriodSummary(data, fromTs, toTs) {
   // A ticket belongs to the period it was PAID in (a tab opened at 9pm and
   // paid at 11pm, after the 10pm close, was on no Z at all — Sep '26).
   const orders = data.orders.filter(o => periodAt(o) > fromTs && periodAt(o) <= toTs && !o.practice);
-  const paid = orders.filter(o => o.status === 'paid');
+  // A TIP ADDED AFTER THE BILL belongs to the period it was ADDED in, and to
+  // the card (Sep '26): a $15 tip keyed after the Z was on no cash-up, and one
+  // on a gift-card bill went in the gift-card line. The bill counts here
+  // without its late tips; they are counted below, by their own time.
+  const lateOf = o => (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+  const paid = orders.filter(o => o.status === 'paid').map(o => lateOf(o) ? { ...o, tip: (o.tip || 0) - lateOf(o),
+    grandTotal: ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - lateOf(o) } : o);
   // A REFUND belongs to the period it was GIVEN in, like a sale to the one it
   // was paid in: a refund after the Z came off a ticket already on a closed
   // period, so it was on no Z at all and the drawer was short by it (Sep '26).
@@ -13341,9 +13354,12 @@ function computePeriodSummary(data, fromTs, toTs) {
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0);
-  const tips = paid.reduce((s, o) => s + (o.tip || 0), 0);
+  const lateTips = data.orders.filter(o => o.status === 'paid' && !o.practice)
+    .flatMap(o => (o.lateTips || []).filter(t => inWin(t.at || 0)).map(t => ({ o, amount: t.amount || 0 })));
+  const lateTipTotal = lateTips.reduce((a, t) => a + t.amount, 0);
+  const tips = paid.reduce((s, o) => s + (o.tip || 0), 0) + lateTipTotal;
   const refunds = refunded.reduce((s, o) => s + refundIn(o), 0) + lateVoids.reduce((s, o) => s + lateVoidOut(o), 0);
-  const grandTotal = paid.reduce((s, o) => s + (o.grandTotal !== undefined ? o.grandTotal : o.total), 0);
+  const grandTotal = paid.reduce((s, o) => s + (o.grandTotal !== undefined ? o.grandTotal : o.total), 0) + lateTipTotal;
   const netTotal = grandTotal - refunds;
   let cashNet = 0;
   let cardNet = 0;
@@ -13389,6 +13405,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   }));
   refunded.forEach(o => takeBy(o, -1, refundIn(o)));
   lateVoids.forEach(o => takeBy(o, -1, lateVoidOut(o)));
+  lateTips.forEach(t => { cardNet += t.amount; });
   // Which card — Visa / Mastercard / Amex / EFTPOS — so the night's card
   // takings can be matched against the terminal's own settlement report.
   const byCard = {};
@@ -13410,6 +13427,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
   refunded.forEach(o => cardBy(o, -1, refundIn(o)));
   lateVoids.forEach(o => cardBy(o, -1, lateVoidOut(o)));
+  lateTips.forEach(t => addCard(t.o.paymentMethod === 'card' ? t.o.cardType : null, t.amount));
 
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
   // cash, the lime run) — logged, and owed against the expected count.
@@ -19273,7 +19291,20 @@ function growCartLine(idx, delta) {
   }
   return false;
 }
+// A LINE CAUGHT IN A SEND THAT DID NOT GO HOLDS STILL until it goes (Sep '26).
+// The kitchen may already have it — only the reply was lost — and a retry
+// is recognised by the line's key, so a change made meanwhile (2 not 3, "NO
+// SESAME") was dropped without a word. Adding more is still fine: that
+// becomes its own new line.
+function lineWaitingToSend(idx) {
+  const l = state.cart[idx];
+  if (!(l && l.sentQty != null && (state.sendFailed || state.sending))) return false;
+  state.toast = toastFail('Waiting to reach the kitchen — change it once it is sent');
+  render(); armToastTimer(2800);
+  return true;
+}
 function changeQty(idx, delta) {
+  if (delta < 0 && lineWaitingToSend(idx)) return;
   if (!growCartLine(idx, delta)) state.cart[idx].qty += delta;
   if (state.cart[idx].qty <= 0) state.cart.splice(idx, 1);
   render();
@@ -19332,6 +19363,7 @@ function closeMobileCart() {
 
 function openLineEdit(idx) {
   if (isNaN(idx) || !state.cart[idx]) return;
+  if (lineWaitingToSend(idx)) return;
   keepMobileDrawer();
   state.editSent = null;
   // Cancel puts the line back exactly as it was (owner, Sep '26): the pane
@@ -19431,6 +19463,7 @@ function editLineToggleComponent(invId) {
   render();
 }
 function removeLine(idx) {
+  if (lineWaitingToSend(idx)) return;
   const line = state.cart[idx];
   state.cart.splice(idx, 1);
   _undoAction = null; // this row owns the undo toast now
@@ -19901,6 +19934,7 @@ async function saveTableNotes(tableId, notes) {
 function updateLineNote(idx, value) {
   const line = state.cart[idx];
   if (!line) return;
+  if (lineWaitingToSend(idx)) return;
   line.note = value;
 }
 

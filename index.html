@@ -10237,8 +10237,13 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
     const clash = tableLabelClash(data, label, null, floorPlan);
     if (clash) return res.status(400).json({ error: clash });
   }
+  // UNDO BRINGS THE SAME TABLE BACK (Sep '26): a deleted table re-made under a
+  // new id lost its combination and every booking made for it. The editor's
+  // undo sends the old id; it is kept if no table anywhere holds it now.
+  const want = typeof req.body.id === 'string' && /^t[\w-]{1,40}$/.test(req.body.id) ? req.body.id : null;
+  const taken = want && data.floorPlans.some(f => (f.tables || []).some(t => t.id === want));
   const table = {
-    id: 't' + Date.now(),
+    id: want && !taken ? want : 't' + Date.now(),
     label,
     x: x !== undefined ? x : 50,
     y: y !== undefined ? y : 50,
@@ -36213,7 +36218,14 @@ const FLOOR_HISTORY_CAP = 50;
 const floorHistory = { fpId: null, undo: [], redo: [] };
 let _floorHistBatch = false;
 function floorEditorActive() { return state.view === 'admin' && state.adminTab === 'floorplan'; }
-function _cloneTables(fp) { return fp ? fp.tables.map(t => ({ ...t })) : null; }
+// The snapshot carries the plan's combinations too: deleting a table takes
+// its combination with it, so undo has to be able to put that back as well.
+function _cloneTables(fp) {
+  if (!fp) return null;
+  const snap = fp.tables.map(t => ({ ...t }));
+  snap.joins = (fp.joins || []).map(j => ({ ...j, tables: [...j.tables] }));
+  return snap;
+}
 // Snapshot BEFORE a mutating action. Rapid calls in one tick (a bulk op that
 // patches many tables) collapse into a single history entry.
 function pushFloorHistory() {
@@ -36242,6 +36254,7 @@ function _floorPutBody(t) {
 }
 function _floorCreateBody(t) {
   return {
+    id: t.id, // the same table comes back, not a stranger with its number
     label: t.label, x: t.x, y: t.y, shape: t.shape, width: t.width, height: t.height,
     seats: t.seats, type: t.type, decorType: t.decorType || null, icon: t.icon || null,
     rotation: t.rotation || 0, color: t.color || null,
@@ -36286,6 +36299,21 @@ async function applyFloorSnapshot(fpId, target) {
       }
       _remapFloorId(fp, t.id, obj.id, obj);
     } catch (e) {}
+  }
+  // Combinations the snapshot had and the plan lost come back on their tables.
+  if (target.joins) {
+    const key = ids => [...ids].sort().join('+');
+    const have = new Set((fp.joins || []).map(j => key(j.tables)));
+    const ids = new Set(fp.tables.map(t => t.id));
+    for (const j of target.joins) {
+      if (have.has(key(j.tables)) || !j.tables.every(id => ids.has(id))) continue;
+      try {
+        const made = await api(`/api/floorplans/${fpId}/joins`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tables: j.tables, min: j.min, max: j.max }) });
+        fp.joins = (fp.joins || []).concat(made);
+      } catch (e) {}
+    }
+    // and ones the snapshot never had went with their table on the server
+    fp.joins = (fp.joins || []).filter(j => j.tables.every(id => ids.has(id)));
   }
   render();
 }
@@ -36608,12 +36636,19 @@ async function saveFloorPlanGrid(fpId, patch) {
   } catch (e) {}
 }
 
+// What the server did to a deleted table, done here too: the table goes and
+// so does any combination it was part of — left behind, undo thought the
+// combination was still there and never put it back (Sep '26).
+function dropTablesHere(fp, ids) {
+  if (!fp) return;
+  fp.tables = fp.tables.filter(t => !ids.includes(t.id));
+  if (fp.joins) fp.joins = fp.joins.filter(j => !j.tables.some(id => ids.includes(id)));
+}
 async function deleteTableAction(id, fpId) {
   pushFloorHistory();
   try {
     await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'DELETE' });
-    const fp = state.floorPlans.find(f => f.id === fpId);
-    if (fp) fp.tables = fp.tables.filter(t => t.id !== id);
+    dropTablesHere(state.floorPlans.find(f => f.id === fpId), [id]);
     state.selectedAdminTableId = null;
     offerUndo('Deleted', () => floorUndo());
   } catch (e) {
@@ -36962,7 +36997,7 @@ async function deleteSelectedTablesNow() {
   pushFloorHistory();
   try {
     for (const id of ids) await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'DELETE' });
-    if (fp) fp.tables = fp.tables.filter(t => !ids.includes(t.id));
+    dropTablesHere(fp, ids);
     state.selectedAdminTableIds = [];
     state.selectedAdminTableId = null;
     offerUndo('Deleted', () => floorUndo());

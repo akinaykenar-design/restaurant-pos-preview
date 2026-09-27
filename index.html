@@ -6593,10 +6593,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   expressShim.json = function () { return function () {}; };
   expressShim.static = function () { return function () {}; };
 
-  function jsonResponse(status, payload) {
+  function jsonResponse(status, payload, extra) {
     return new Response(JSON.stringify(payload), {
       status: status,
-      headers: { 'Content-Type': 'application/json' },
+      headers: Object.assign({ 'Content-Type': 'application/json' }, extra || {}),
     });
   }
 
@@ -6650,7 +6650,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
         setHeader: function (k, v) { resHeaders[k] = v; },
         json: function (obj) {
           if (done) return; done = true; res.headersSent = true;
-          resolve(jsonResponse(status, obj));
+          resolve(jsonResponse(status, obj, resHeaders));
         },
         send: function (data) {
           if (done) return; done = true; res.headersSent = true;
@@ -8290,6 +8290,20 @@ app.use((req, res, next) => {
       } catch (e) { _undoSnap = null; }
     }
     _undoSnapAt = Date.now();
+    // UNDO IS OFFERED ONLY WHEN THERE IS SOMETHING TO PUT BACK (Sep '26): a
+    // deleted paid-out or ingredient is not in the snapshot, and Undo said
+    // "Put back" while the $50 stayed gone. The reply says whether this
+    // delete changed anything the snapshot holds.
+    const sendJson = res.json.bind(res);
+    res.json = body => {
+      try {
+        if (_undoSnap && !(body && body.error)) {
+          const d = readData();
+          if (UNDO_KEEP.some(k => JSON.stringify(d[k]) !== JSON.stringify(_undoSnap[k]))) res.setHeader('X-Undo', '1');
+        }
+      } catch (e) {}
+      return sendJson(body);
+    };
   }
   next();
 });
@@ -8695,6 +8709,13 @@ app.put('/api/discount-presets/:id', (req, res) => {
   const preset = data.discountPresets.find(p => p.id === req.params.id);
   if (!preset) return res.status(404).json({ error: 'Preset not found' });
   const { name, kind, type, value, color } = req.body;
+  // THE SAME LIMITS AS A NEW ONE (Sep '26): an edit saved 150% — a slip for
+  // 15 that doubled every bill it went on — and a cleared box saved 0. Judged
+  // on the type it will have, so switching $150 to % is caught too.
+  const nextType = type !== undefined ? (type === 'fixed' ? 'fixed' : 'percent') : preset.type;
+  const nextValue = value !== undefined ? parseFloat(value) : preset.value;
+  if (value !== undefined && (isNaN(nextValue) || nextValue <= 0)) return res.status(400).json({ error: 'Enter an amount greater than zero' });
+  if (nextType !== 'fixed' && nextValue > 100) return res.status(400).json({ error: 'A percentage cannot be over 100' });
   if (name !== undefined) { if (!name.trim()) return res.status(400).json({ error: 'Name is required' }); preset.name = name.trim().slice(0, 40); }
   if (kind !== undefined) preset.kind = kind === 'surcharge' ? 'surcharge' : 'discount';
   if (type !== undefined) preset.type = type === 'fixed' ? 'fixed' : 'percent';
@@ -9964,7 +9985,12 @@ app.put('/api/menu/:id', (req, res) => {
   if (Array.isArray(variants)) {
     item.variants = variants.filter(v => v && String(v.label || '').trim() && !isNaN(parseFloat(v.price)) && parseFloat(v.price) >= 0).map((v, i) => ({ id: v.id || ('v' + Date.now() + i), label: String(v.label).trim(), price: parseFloat(v.price) }));
   }
+  // Switching the count OFF brings the dish back on: a count that ran to zero
+  // had marked it out, and with the count gone nothing on the tile said why
+  // every tap asked "has none left — order anyway?" (Sep '26).
+  const wasCounted = !!item.trackStock;
   if (trackStock !== undefined) item.trackStock = !!trackStock;
+  if (wasCounted && !item.trackStock && out === undefined) item.out = false;
   if (out !== undefined && !item.trackStock) item.out = !!out;
   if (stockCount !== undefined) item.stockCount = Math.max(0, Math.round((parseFloat(stockCount) || 0) * 100) / 100);
   if (lowStockThreshold !== undefined) item.lowStockThreshold = Math.max(0, parseInt(lowStockThreshold) || 0);
@@ -11153,7 +11179,17 @@ app.post('/api/orders/:id/print-bill', (req, res) => {
   const sent = req.body && req.body.splitLines;
   const lines = Array.isArray(sent) ? sent.filter(l => l && typeof l === 'object').slice(0, 200) : null;
   const split = label && !isNaN(amount) && amount > 0 ? { label, amount, lines } : null;
-  printing.printReceiptForOrder(data, order, 'bill', split);
+  // THE PAPER SAYS WHAT THE GUEST WILL PAY (Sep '26): an open bill stores only
+  // its dishes, so a discount, a surcharge or tax on top never reached the
+  // bill — it read $100 for a $115 charge. The till sends the discount it
+  // holds, and the paper is worked out exactly the way closing works it out.
+  const subtotal = (order.items || []).reduce((sum, i) => sum + i.price * i.qty, 0);
+  const { discountRecord, discountAmount } = computeDiscount(subtotal, req.body && req.body.discount, order.items, data);
+  const taxable = subtotal - discountAmount;
+  const taxCalc = computeTax(data, taxable - voucherSaleTotal(order.items));
+  const total = Math.round((taxable + taxCalc.add) * 100) / 100;
+  const shown = { ...order, subtotal, discount: discountRecord, tax: taxCalc.tax, total, grandTotal: total };
+  printing.printReceiptForOrder(data, shown, 'bill', split);
   res.json({ ok: true });
 });
 
@@ -12520,6 +12556,12 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { items: rawItems, staffName } = req.body;
+  // A real waiter's round never lands on a trainee's practice ticket, nor a
+  // trainee's on a real one (Sep '26) — judged on who sent it.
+  const sender = req.body.staffId && (data.staff || []).find(x => x.id === req.body.staffId);
+  if (sender && !!sender.trainee !== !!order.practice) {
+    return res.status(400).json({ error: order.practice ? 'That is a practice table' : 'That table is in real service' });
+  }
   const sendKey = String(req.body.sendKey || '').slice(0, 64) || null;
   if (req.body.customerId !== undefined && req.body.customerId !== null) order.customerId = req.body.customerId || null;
   // SEND-ONCE, per LINE: whatever this ticket already holds is skipped, the
@@ -12566,7 +12608,14 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const n = action === 'remove' && qty ? Math.min(count, parseInt(qty, 10) || 0) : count;
     const drop = action === 'remove' ? n * Number(match.price) : count * (Number(match.price) - (parseFloat(newPrice) || 0));
     const itemsNow = order.items.reduce((a, i) => a + i.price * i.qty, 0);
-    if (itemsNow - drop < splitPaidNet(order) - 0.005) {
+    // Judged on the BILL — after the discount or surcharge the till holds and
+    // tax on top — not on the dishes: $40 taken on a $100 bill at half price
+    // let the $40 wine come off and the bill closed at $30 (Sep '26).
+    const billAt = sub => {
+      const { discountAmount } = computeDiscount(sub, (req.body || {}).discount, order.items, data);
+      return Math.round((sub - discountAmount + computeTax(data, sub - discountAmount - voucherSaleTotal(order.items)).add) * 100) / 100;
+    };
+    if (billAt(itemsNow - drop) < splitPaidNet(order) - 0.005) {
       return res.status(400).json({ error: 'Money has been taken on this bill — refund it first' });
     }
   }
@@ -12748,6 +12797,12 @@ app.post('/api/orders/:id/close', (req, res) => {
     if (already < owed - 1) {
       return res.status(400).json({ error: `$${((owed - already) / 100).toFixed(2)} of this bill is still unpaid — settle every part first.` });
     }
+    // …and never for LESS than the parts took off the bill: a surcharge taken
+    // in the parts and then dropped closed $100 against $110 paid (Sep '26).
+    const over = Math.round(splitPaidNet(order) * 100) - Math.round(total * 100);
+    if (over > 1) {
+      return res.status(400).json({ error: `$${(over / 100).toFixed(2)} more was taken than this bill — refund it first.` });
+    }
     // The parts ARE the payment: what was taken, by which method, with their
     // tips — never the pane's default "card" and a zero tip (Sep '26: a close
     // after a dropped wifi recorded $80 card, $0 cash and lost the tips).
@@ -12917,8 +12972,13 @@ app.post('/api/orders/:id/void', (req, res) => {
   if (order.status === 'void') return res.status(400).json({ error: 'That ticket is already void' });
   if (order.status === 'open' && (order.splitPaid || []).length) return res.status(400).json({ error: 'Money has been taken on this ticket in parts — refund it before voiding' });
   if (order.status === 'paid' && (order.refundedTotal || 0) > 0.005) return res.status(400).json({ error: 'A refunded ticket cannot be voided' });
-  if (order.status === 'paid' && data.settings.managerApprovalForVoid && !managerFromReq(req, data)) {
-    return res.status(403).json({ error: 'A manager PIN is needed to void a paid ticket' });
+  // AN OPEN TICKET IS MONEY TOO (Sep '26): only a paid one asked for a
+  // manager, so staff could void a $220 unpaid takeaway from Bills — take the
+  // cash, void the ticket. Any ticket with food on it asks; an empty one,
+  // closed with its table, has nothing to approve.
+  const hasFood = (order.items || []).some(i => i.qty > 0);
+  if ((order.status === 'paid' || hasFood) && data.settings.managerApprovalForVoid && !managerFromReq(req, data)) {
+    return res.status(403).json({ error: 'A manager PIN is needed to void this ticket' });
   }
   // GIFT CARDS COME UNDONE WITH THE TICKET (Sep '26): a void left a voucher
   // sold on it live at full value, and a card that paid it short. A voucher
@@ -13029,6 +13089,13 @@ app.post('/api/orders/:id/refund', (req, res) => {
   res.json(order);
 });
 
+// A PRACTICE BILL AND A REAL ONE NEVER SHARE A TABLE (Sep '26): a real $200
+// moved onto a trainee's table became practice and was cleared away with it;
+// a trainee's lobster moved onto a guest's bill was charged to the guest.
+function practiceClash(a, b) {
+  if (!!a.practice === !!b.practice) return null;
+  return `Table ${b.table} has a ${b.practice ? 'practice' : 'real'} bill — ${a.practice ? 'practice' : 'real'} food can't join it`;
+}
 app.post('/api/orders/:id/transfer', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
@@ -13040,6 +13107,7 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   // Destination already has an open tab → COMBINE: its lines and rounds ride
   // over, totals re-add, and the source ticket closes as merged.
   const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
+  if (dest && practiceClash(order, dest)) return res.status(400).json({ error: practiceClash(order, dest) });
   if (dest) {
     dest.items = [...(dest.items || []), ...(order.items || [])];
     const base = nextRoundId(dest) - 1;
@@ -13141,6 +13209,8 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   const keyOf = i => String(i.uid || i.id);
   const moving = (order.items || []).filter(i => ids.includes(keyOf(i)));
   if (!moving.length) return res.status(400).json({ error: 'Those items are no longer on the ticket' });
+  const there = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
+  if (there && practiceClash(order, there)) return res.status(400).json({ error: practiceClash(order, there) });
   order.items = order.items.filter(i => !ids.includes(keyOf(i)));
   order.rounds = (order.rounds || [])
     .map(r => ({ ...r, items: (r.items || []).filter(i => !ids.includes(keyOf(i))) }))
@@ -13169,6 +13239,8 @@ app.post('/api/orders/:id/move-items', (req, res) => {
       staffId: order.staffId || null,
       staffName: staffName || order.staffName || 'Unknown',
       customerId: null,
+      // practice dishes make a practice bill — it goes with the clear-out
+      ...(order.practice ? { practice: true } : {}),
     };
     carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
     retotal(dest);
@@ -16018,7 +16090,9 @@ async function api(path, opts) {
   state.online = true;
   // Any admin delete that succeeds offers its undo (owner, Aug '26). One
   // hook here rather than in each of the twenty-odd delete calls.
-  if (res.ok && opts.method === 'DELETE' && state.view === 'admin' && path.indexOf('/api/') === 0) {
+  // Only when the server kept a copy to put back — a paid-out or an
+  // ingredient has none, and "Put back" on those brought nothing back.
+  if (res.ok && opts.method === 'DELETE' && state.view === 'admin' && path.indexOf('/api/') === 0 && res.headers.get('X-Undo')) {
     setTimeout(() => offerUndo('Deleted', undoLastAdminDelete), 0);
   }
   if (!res.ok) {
@@ -18366,7 +18440,7 @@ async function printSplitPart(key) {
       // The lines ride with the part when the split knows them (by item). No
       // lines means "divide the money, keep the whole bill" — evenly, by
       // amount, and the paid rows — exactly as before.
-      body: JSON.stringify({ splitLabel: part.label, splitAmount: part.amount, splitLines: part.lines || null }),
+      body: JSON.stringify({ splitLabel: part.label, splitAmount: part.amount, splitLines: part.lines || null, discount: billDiscount(order, billTableOf(order)) }),
     });
     state.billSplit.printed[key] = true;
     state.toast = `${part.label} printed`;
@@ -19582,7 +19656,7 @@ async function markBillPrinted(orderId) {
   if (!order) return;
   if ((state.settings.printColorMode || 'thermal') !== 'color') {
     // Thermal: the server prints the bill on the receipt station(s).
-    api(`/api/orders/${orderId}/print-bill`, { method: 'POST' })
+    api(`/api/orders/${orderId}/print-bill`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discount: billDiscount(order, billTableOf(order)) }) })
       .catch(e => { state.toast = toastFail(e.message || 'Could not print the bill.'); render(); armToastTimer(3000); });
   } else {
     try { printReceipt(order); } catch (e) {}
@@ -19906,7 +19980,7 @@ async function applyLineDiscount(m, value) {
       for (const match of l.sent) {
         if (!o) break;
         await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ match, action: 'reprice', newPrice: np, reason, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+          body: JSON.stringify({ match, action: 'reprice', newPrice: np, reason, discount: billDiscount(o, billTableOf(o)), staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
       }
     }
     if (o) await refreshOrders();
@@ -20911,7 +20985,7 @@ async function sendToKitchen() {
       order = await api(`/api/orders/${state.openOrderId}/rounds`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: state.cart, staffName, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null, customerId: state.attachedCustomerId || null }),
+        body: JSON.stringify({ items: state.cart, staffName, staffId: state.currentStaff ? state.currentStaff.id : null, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null, customerId: state.attachedCustomerId || null }),
       });
     } else {
       const payload = {
@@ -22987,7 +23061,7 @@ async function doRepriceSent(match, newPrice, reason) {
   if (!match || !o) return;
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'reprice', newPrice, reason: reason || '', staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'reprice', newPrice, reason: reason || '', discount: billDiscount(o, billTableOf(o)), staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     // Keep any pending (unsent) additions of this item merged with the sent line.
     state.cart.forEach(c => { if (sentItemMatches(c, match)) c.price = newPrice; });
@@ -23219,7 +23293,7 @@ async function commitRemoveSent(match, reason, qty, then) {
   }).filter(Boolean);
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'remove', qty: qty || null, reason: reason || null, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'remove', qty: qty || null, reason: reason || null, discount: billDiscount(o, billTableOf(o)), staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     state.voidItemPrompt = null;
     if (then) await then(); else { state.editSent = null; render(); }
@@ -29205,7 +29279,7 @@ function renderPresetTileList(kind, addLabel) {
             <input type="text" value="${esc(p.name)}" onblur="updateDiscountPresetField('${p.id}', { name: this.value })" style="width:100%;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);">
             <label class="field-label" style="margin-top:10px;">${kind === 'surcharge' ? 'Surcharge' : 'Discount'}</label>
             <div style="display:flex;gap:6px;align-items:center;">
-              <input type="number" step="0.5" min="0" value="${p.value}" onblur="updateDiscountPresetField('${p.id}', { value: parseFloat(this.value) || 0 })" style="width:90px;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);">
+              <input type="number" step="0.5" min="0" value="${p.value}" onblur="if (this.value !== '') updateDiscountPresetField('${p.id}', { value: parseFloat(this.value) }); else this.value = '${p.value}'" style="width:90px;box-sizing:border-box;padding:8px 10px;border:0.5px solid var(--steel-300);border-radius:6px;background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);font-family:var(--font-mono);">
               <button class="pay-opt sm${p.type === 'percent' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="percent">%</button>
               <button class="pay-opt sm${p.type === 'fixed' ? ' active' : ''}" style="flex:0 0 auto;min-height:34px;" data-act="discount-preset-inline-type" data-id="${p.id}" data-val="fixed">$</button>
             </div>
@@ -33546,6 +33620,13 @@ function coursePillLevels() {
     color: (own[i] || {}).color || null, on: !(own[i] || {}).off,
   })).filter(l => courseInfo(l.n).enabled !== false);
 }
+// The floor's pill settings are kept by course POSITION, so when courses
+// move or go they move with them — deleting Cheese hid Petit fours' pill
+// (Sep '26). `order` lists the old positions in their new order.
+function coursePillsIn(order) {
+  const own = coursePillOwn();
+  return order.map(i => Object.assign({ color: null, off: false }, own[i]));
+}
 function coursePillOff(n) { return (coursePillOwn()[n - 1] || {}).off === true; }
 function coursePillColor(n) { return (coursePillOwn()[n - 1] || {}).color || courseInfo(n).color || null; }
 function setCoursePillLevel(n, patch) {
@@ -34128,14 +34209,20 @@ function billsOn() { return floorViewOn('bills'); }
 function passCells(o, courses) {
   const fired = o.firedCourses || {};
   const firedNs = Object.keys(fired).filter(k => fired[k] > 0).map(Number);
-  const lastFired = firedNs.length ? Math.max(...firedNs) : 0;
+  // PASSED BY A LATER CALL means called LATER, not just numbered later: a
+  // kitchen firing two courses together (owner: "call away both") saw the
+  // first flip to Done the moment the second went (Sep '26). A course is
+  // passed once a later course was called well after it — or it was never
+  // called and a later one was.
+  const TOGETHER = 5 * 60000;
+  const passed = n => firedNs.some(m => m > n && fired[m] - (fired[n] || 0) > TOGETHER);
   const sentAt = {};
   (o.rounds || []).forEach(r => (r.items || []).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; }));
   let next = false;
   return courses.map(n => {
     const items = (o.items || []).filter(i => (i.course || 1) === n && i.qty > 0);
     if (!items.length) return { n, kind: 'none' };
-    if (items.every(i => i.status === 'served') || n < lastFired) return { n, kind: 'done', items };
+    if (items.every(i => i.status === 'served') || passed(n)) return { n, kind: 'done', items };
     if (fired[n] > 0) return { n, kind: 'away', since: fired[n], items };
     const cell = { n, kind: 'hold', since: sentAt[n], items };
     if (!next) { next = true; cell.next = true; }
@@ -34164,10 +34251,11 @@ function courseInKitchen(n) {
 const dishesIn = items => (items || []).reduce((a, i) => a + (i.status === 'served' || !(i.qty > 0) ? 0 : i.qty), 0);
 // The dishes a ticket has cooking at `now`: every course called away within
 // the cook time that the Pass does not already call done.
+// Every course called inside its own cook time counts, whatever was called
+// after it — two courses fired together are both on the stoves.
 function dishesCooking(o, now, cookMs) {
-  const courses = (state.settings.courses || []).map((c, i) => i + 1);
-  return passCells(o, courses).reduce((a, c) =>
-    a + (c.kind === 'away' && courseInKitchen(c.n) && now - c.since < cookMs ? dishesIn(c.items) : 0), 0);
+  return Object.entries(o.firedCourses || {}).reduce((a, [n, at]) =>
+    a + (at > 0 && now - at < cookMs && courseInKitchen(+n) ? dishesIn((o.items || []).filter(i => (i.course || 1) === +n)) : 0), 0);
 }
 function kitchenLoad() {
   const { cookMins } = kitchenTrafficCfg(), now = Date.now();
@@ -34280,12 +34368,21 @@ function billPaidBy(o) {
 // What an open bill comes to, the pay screen's way: the table's discount or
 // surcharge and GST on top when it is added — the Bills card said $179 left
 // on a bill the pay screen owed $136.10 (Sep '26).
+// The discount or surcharge a bill will close with: the one on screen for the
+// open table, else the table's own, else a preset that goes on by itself —
+// the card read $26 while Pay asked $28.60, and the printed bill ignored all
+// three (Sep '26).
+function billDiscount(o, t, sub) {
+  if (state.discount && activeOpenOrder() && activeOpenOrder().id === o.id) return state.discount;
+  if (t && t.discount) return t.discount;
+  const s = sub !== undefined ? sub : (o.items || []).filter(i => i.qty > 0).reduce((a, i) => a + i.price * i.qty, 0);
+  return matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: s, orderType: o.orderType, table: t ? t.id : '' });
+}
+const billTableOf = o => o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null;
 function openBillTotal(o, t) {
   const lines = (o.items || []).filter(i => i.qty > 0);
   const sub = lines.reduce((a, i) => a + i.price * i.qty, 0);
-  // A preset that goes on by itself is on this bill too — the card read $26
-  // while Pay asked $28.60 (Sep '26).
-  const d = (t && t.discount) || matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: sub, orderType: o.orderType, table: t ? t.id : '' });
+  const d = billDiscount(o, t, sub);
   const vouchers = lines.reduce((a, i) => a + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
   let off = 0;
   if (d && d.value) {
@@ -35180,6 +35277,17 @@ function pickTable(id) {
     id = target.mergedInto;
     armToastTimer(2500);
   }
+  // A PRACTICE BILL AND A REAL ONE NEVER SHARE A TABLE (Sep '26): a real
+  // waiter's Swordfish landed on a trainee's practice ticket — it never
+  // printed, never counted, and "Finish & clear" deleted it.
+  const pt = findTableById(id);
+  const other = pt && (state.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(pt.label) && !!o.practice !== isTrainee());
+  if (other) {
+    state.pickFlashId = null;
+    state.toast = toastFail(other.practice ? `Table ${pt.label} is a practice table` : `Table ${pt.label} is in real service`);
+    render(); armToastTimer(2500);
+    return;
+  }
   const proceed = async (forceLock) => {
     // The claim is AWAITED: two tills tapping one table used to both open
     // it — the 409 was thrown away — and each sent its own ticket (Sep '26).
@@ -35281,6 +35389,17 @@ function transferToTable(newTableId, extra) {
   const newTable = findTableById(newTableId);
   if (!newTable || newTableId === oldTableId) { state.transferFrom = null; state.showTablePicker = false; render(); return; }
   if (newTable.mergedInto && newTable.mergedInto !== newTable.id) { state.toast = toastFail('Pick a table that is not joined to another.'); render(); return; }
+  // A TABLE ANOTHER TILL HAS OPEN DOES NOT MOVE (Sep '26): dragging it moved
+  // the party and its allergy notes while that till's round still rang on the
+  // old number. Refused the way a tap on it is; a manager unlocks it first.
+  const held = tableLocksOn() && [oldTableId, newTableId].map(tableLockedBy).find(Boolean);
+  if (held) {
+    state.transferFrom = null;
+    state.toast = toastFail(`In use — ${held.staff}`);
+    render(); armToastTimer(2500);
+    if (extra && extra.onCancel) extra.onCancel();
+    return;
+  }
   // A destination with its own open tab is fine — the two tabs COMBINE.
   const destOpenOrder = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
   // Both sides carry their area AND how much is on them (owner, Aug '26):
@@ -39701,7 +39820,7 @@ function reorderCourseTemplates(fromIdx, toIdx) {
   // Defaults follow their course to its new slot (map built before state moves).
   const order = state.settings.courses.map((_, i) => i).filter(i => i !== fromIdx);
   order.splice(toIdx, 0, fromIdx);
-  saveTicketSetting({ courses });
+  saveTicketSetting({ courses, coursePillLevels: coursePillsIn(order) });
   remapCourseRefs(n => order.indexOf(n - 1) + 1);
 }
 
@@ -39831,7 +39950,7 @@ function deleteSelectedCourses() {
   const proceed = () => {
     const courses = keep.map(i => all[i]);
     state.selectedCourseIdxs = [];
-    saveTicketSetting({ courses });
+    saveTicketSetting({ courses, coursePillLevels: coursePillsIn(keep) });
     remapCourseRefs(mapN);
   };
   const n = sel.size;
@@ -40166,7 +40285,7 @@ function reorderVoidReasons(fromIdx, toIdx) {
 function openVoidModal(orderId) {
   const order = state.orders.find(o => o.id === orderId);
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
-  const needsApproval = !!(state.settings.managerApprovalForVoid && order && order.status === 'paid' && !isManager);
+  const needsApproval = !!(state.settings.managerApprovalForVoid && order && (order.status === 'paid' || (order.items || []).some(i => i.qty > 0)) && !isManager);
   state.voidModal = { orderId, reason: state.voidReasons[0] || '', note: '', needsApproval, managerPin: '', pinError: '' };
   render();
 }
@@ -40304,7 +40423,7 @@ async function updateDiscountPresetField(id, patch) {
   try {
     await api(`/api/discount-presets/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     state.discountPresets = await api('/api/discount-presets');
-  } catch (e) { state.toast = toastFail('Could not save that change.'); armToastTimer(2500); }
+  } catch (e) { state.toast = toastFail(e.message || 'Could not save that change.'); armToastTimer(2500); }
   render();
 }
 async function bulkSetDiscountPresetColor(color) {
@@ -40985,13 +41104,6 @@ function openAddStaff() { state.staffModal = withDirtyCheck({ mode: 'add', id: n
 // was written nowhere — so the one route into a staff card from the search
 // threw and nothing opened (sweep, Sep '26). It opens the same card "+ Staff"
 // opens, filled in.
-function openEditStaff(id) {
-  const st = (state.staffList || []).find(x => x.id === id);
-  if (!st) return;
-  state.staffModal = withDirtyCheck({ mode: 'edit', id: st.id, name: st.name || '', pin: '', role: st.role || 'staff', tipShare: st.tipShare || 'full' });
-  state.adminError = '';
-  render();
-}
 function closeStaffModal() { if (!confirmDiscard(state.staffModal)) return; state.staffModal = null; state.adminError = ''; render(); }
 
 async function saveStaffModal() {
@@ -42924,7 +43036,7 @@ function bindEvents() {
   const staffNameInput = document.getElementById('staff-name-input');
   if (staffNameInput) staffNameInput.addEventListener('input', (e) => { state.staffModal.name = e.target.value; });
   const staffPinInput = document.getElementById('staff-pin-input');
-  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 4); });
+  if (staffPinInput) staffPinInput.addEventListener('input', (e) => { state.staffModal.pin = e.target.value.replace(/\D/g, '').slice(0, 8); });
   const staffRoleInput = document.getElementById('staff-role-input');
   if (staffRoleInput) staffRoleInput.addEventListener('change', (e) => { state.staffModal.role = e.target.value; });
   const menuNameInput = document.getElementById('menu-name-input');
@@ -43661,7 +43773,9 @@ function handleActClick(el, e) {
       const act = el.dataset.act;
       // Held screen: the scrim already swallows taps physically — this guard
       // is the belt-and-braces so NOTHING else can run until the PIN unlocks.
-      if (state.frozen && act !== 'frz-digit' && act !== 'frz-back' && act !== 'frz-enter') return;
+      // A waiter's till unlocks on their NAME (no PIN of their own), so the
+      // name is let through too — without it a locked till stayed dead (Sep '26).
+      if (state.frozen && act !== 'frz-digit' && act !== 'frz-back' && act !== 'frz-enter' && act !== 'frz-name') return;
       // Keyboard up + a tap on a lit search result (or its subsections): the
       // keyboard steps aside and the tap does its job — pick straight from
       // the bright results without hunting for the tick first.
@@ -44050,7 +44164,7 @@ function handleActClick(el, e) {
       else if (act === 'login-back') { state.loginSelectedId = null; state.loginPin = ''; state.loginError = ''; render(); }
       else if (act === 'frz-name') { if (state.frozen && state.frozen.id === el.dataset.id) unfreezeScreen(); }
       else if (act === 'pin-back') { pressPinBackspace(); }
-      else if (act === 'frz-digit') { if (state.frozenPin.length < 4) { state.frozenPin += el.dataset.val; state.frozenErr = ''; render(); } }
+      else if (act === 'frz-digit') { if (state.frozenPin.length < 8) { /* a PIN runs to 8, as at login */ state.frozenPin += el.dataset.val; state.frozenErr = ''; render(); } }
       else if (act === 'frz-back') { state.frozenPin = state.frozenPin.slice(0, -1); render(); }
       else if (act === 'frz-enter') { pressFrzEnter(); }
       else if (act === 'logout') {
@@ -44139,7 +44253,9 @@ function handleActClick(el, e) {
         snapAdminGroupLeft(key);
       }
       // §§ router: search and staff
-      else if (act === 'search-open-staff') { state.adminTab = 'staff'; state.adminSearch = ''; openEditStaff(el.dataset.id); jumpToAdminRow(el.dataset.id); }
+      // ONE DOOR: a person is edited in their own row. The search opened the
+      // ADD card instead, and saving it made a second Jamie (Sep '26).
+      else if (act === 'search-open-staff') { state.adminTab = 'staff'; state.adminSearch = ''; state.expandedStaffIds = [el.dataset.id]; render(); jumpToAdminRow(el.dataset.id); }
       else if (act === 'search-open-menu-item') {
         state.adminTab = 'menu'; state.adminSearch = '';
         // Clear the list filters so the item's row is actually on the page.

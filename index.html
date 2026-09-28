@@ -5447,7 +5447,11 @@ select.ie-field{font-weight:700;}
 /* WHICH VIEW ON THE LEFT, WHICH ROOM ON THE RIGHT (owner, Sep '26). The
    rooms and the colours ride one group pushed to the right by a stretch, so
    the view keys never move and the room key stays under the thumb. */
-.fp-float-side{ display:flex; align-items:center; gap:8px; margin-left:auto; min-width:0; }
+/* THE STRIP SITS ABOVE ITS OWN CLOSE SHEET. Its fade is a mask, and a mask
+   puts the strip on a layer of its own at the bottom of the floor's stack —
+   under the sheet that closes the colour keys, so every colour key closed the
+   row instead of picking (Sep '26, phone, iPad and till). */
+.fp-float-side{ display:flex; align-items:center; gap:8px; margin-left:auto; min-width:0; position:relative; z-index:var(--z-menu); }
 /* NO CARD ROUND THE KEYS (owner, Sep '26: "remove the white edge on both of
    the buttons on the floating dock" → "yes give the chips a darker grey").
    It wore a hairline AND a lift — a second edge just outside the first — and
@@ -8482,6 +8486,9 @@ function creditLoyalty(data, customerId, amount) {
 // code come back. `order.loyaltyBack` remembers the share already taken, so
 // two part refunds never take more than the sale gave.
 function takeBackLoyalty(data, order, share, byName, why) {
+  // A practice bill never gave or spent anything, so it has nothing to take
+  // back — voiding one took a real guest's points and visit (Sep '26).
+  if (order.practice) return;
   const was = order.loyaltyBack || 0;
   if (!(share > was)) return;
   order.loyaltyBack = share;
@@ -12161,10 +12168,14 @@ app.post('/api/admin-restore', (req, res) => {
 app.get('/api/orders/export.csv', (req, res) => {
   const data = readData();
   const { from, to } = req.query;
-  const fromTs = from ? new Date(from + 'T00:00:00').getTime() : null;
-  const toTs = to ? new Date(to + 'T23:59:59').getTime() : null;
+  // The venue's trading day, by when the bill was PAID — the same cut as the
+  // cash-up. A 2:45am bill is the night before's trade; the file put it on
+  // the next day, by when the tab opened at midnight (Sep '26).
+  const dayAt = d => { const t = new Date(d + 'T00:00:00'); t.setHours(dayStartsAt(data.settings), 0, 0, 0); return t.getTime(); };
+  const fromTs = from ? dayAt(from) : null;
+  const toTs = to ? dayAt(to) + 86400000 : null;
   const orders = data.orders
-    .filter(o => !o.practice && (fromTs === null || o.createdAt >= fromTs) && (toTs === null || o.createdAt <= toTs))
+    .filter(o => !o.practice && (fromTs === null || periodAt(o) >= fromTs) && (toTs === null || periodAt(o) < toTs))
     .sort((a, b) => a.createdAt - b.createdAt);
 
   const header = ['Ticket #', 'Date', 'Time', 'Type', 'Table/Customer', 'Items', 'Subtotal', 'Discount', 'Tax', 'Total', 'Tip', 'Grand Total', 'Refunded', 'Net', 'Payment', 'Staff', 'Status'];
@@ -12317,7 +12328,13 @@ function computeDiscount(subtotal, discount, items, data) {
       discountRecord = { type, value, reason: discount.reason || '', amount: discountAmount, kind };
       // What the discount SPENT rides with it, so a void can give it back.
       if (discount.voucherCode) discountRecord.voucherCode = String(discount.voucherCode).slice(0, 40);
-      if (discount.loyaltyPoints && discount.customerId) { discountRecord.loyaltyPoints = parseInt(discount.loyaltyPoints, 10) || 0; discountRecord.customerId = discount.customerId; }
+      // Points pay for the dollars the bill actually took, never the lot: $100
+      // of points on a $30 lunch spent all 2000 and left the guest on 0 (Sep '26).
+      if (discount.loyaltyPoints && discount.customerId) {
+        const pts = parseInt(discount.loyaltyPoints, 10) || 0;
+        discountRecord.loyaltyPoints = type === 'fixed' && value > 0 && rawAmount < value ? Math.ceil(pts * rawAmount / value) : pts;
+        discountRecord.customerId = discount.customerId;
+      }
       if (scope.length) discountRecord.scope = scope;
     }
   }
@@ -12536,7 +12553,7 @@ app.post('/api/orders', (req, res) => {
   };
 
   if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
-  spendDiscountExtras(data, order, discount, order.staffName);
+  spendDiscountExtras(data, order, discountRecord, order.staffName);
   data.orders.push(order);
   data.ticketCounter += 1;
   if (discountRecord) {
@@ -12664,6 +12681,12 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { match, action, newPrice, newSeat, newCourse, newNote, staffName, reason, qty } = req.body || {};
   if (!match || !match.name) return res.status(400).json({ error: 'Missing item to modify' });
+  // MONEY OFF IS A MANAGER'S, on the server too: the till asks for the PIN,
+  // but anything on the wifi could take a sent dish off or cut it to $1 with
+  // a waiter's name (Sep '26). A surcharge (price up) needs nobody.
+  if ((action === 'remove' || (action === 'reprice' && (parseFloat(newPrice) || 0) < Number(match.price))) && !managerFromReq(req, data)) {
+    return res.status(403).json({ error: 'A manager PIN is needed to take money off' });
+  }
   const norm = v => (v === null || v === undefined || v === '') ? null : v;
   const matches = (i) =>
     i.name === match.name &&
@@ -12904,7 +12927,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   order.payKey = payKey;
   order.closedBy = staffName || order.staffName;
   order.closedAt = Date.now();
-  spendDiscountExtras(data, order, discount, staffName || order.staffName);
+  spendDiscountExtras(data, order, discountRecord, staffName || order.staffName);
   if (customerId !== undefined) order.customerId = customerId || null;
 
   if (discountRecord) {
@@ -13097,6 +13120,7 @@ app.post('/api/orders/:id/refund', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can refund' });
   // REFUND-ONCE: a double tap sends the same key twice — the second gets the
   // ticket back untouched, never a second refund (Sep '26: two -$10s).
   const refundKey = String((req.body || {}).refundKey || '').slice(0, 64) || null;
@@ -13201,6 +13225,7 @@ app.post('/api/orders/:id/add-tip', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'paid') return res.status(400).json({ error: 'Only a paid order can take a tip.' });
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can add a tip to a paid bill' });
   // TIP-ONCE, the same way: a repeat of the same key is the same tip.
   const tipKey = String((req.body || {}).tipKey || '').slice(0, 64) || null;
   if (tipKey && (order.tipKeys || []).includes(tipKey)) return res.json(order);
@@ -13344,7 +13369,12 @@ app.get('/api/summary', (req, res) => {
   const todayFrom = tradingDayStart(Date.now(), data.settings);
   const todaysOrders = data.orders.filter(o => o.status === 'paid' && !o.practice && periodAt(o) >= todayFrom);
   const salesToday = todaysOrders.reduce((s, o) => s + o.total, 0);
-  const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0), 0);
+  // A tip added after the bill counts on the day it was ADDED, as on the
+  // cash-up — it moved the Z but not "Tips today" (Sep '26).
+  const lateOf = o => (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+  const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0) - lateOf(o), 0)
+    + data.orders.filter(o => o.status === 'paid' && !o.practice)
+      .reduce((s, o) => s + (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= todayFrom ? (t.amount || 0) : 0), 0), 0);
   // Refunds by when they were GIVEN, as on the Z (Sep '26).
   const refundsToday = data.orders.filter(o => o.status === 'paid' && !o.practice)
     .reduce((s, o) => s + (o.refunds || []).reduce((a, r) => a + ((r.timestamp || periodAt(o)) >= todayFrom ? (r.amount || 0) : 0), 0), 0);
@@ -13506,6 +13536,7 @@ function computePeriodSummary(data, fromTs, toTs) {
 // A paid-out: cash leaving the drawer with a reason attached.
 app.post('/api/register/paidout', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can take money from the drawer' });
   const amount = parseFloat(req.body && req.body.amount);
   const reason = String((req.body && req.body.reason) || '').trim().slice(0, 60);
   if (!(amount > 0) || amount > 10000) return res.status(400).json({ error: 'Enter the amount taken out' });
@@ -13518,6 +13549,7 @@ app.post('/api/register/paidout', (req, res) => {
 });
 app.delete('/api/register/paidout/:id', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change a paid-out' });
   const rec = (data.paidOuts || []).find(p => p.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
   data.paidOuts = data.paidOuts.filter(p => p.id !== req.params.id);
@@ -20059,7 +20091,7 @@ async function applyLineDiscount(m, value) {
       for (const match of l.sent) {
         if (!o) break;
         await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ match, action: 'reprice', newPrice: np, reason, discount: billDiscount(o, billTableOf(o)), staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+          body: JSON.stringify({ match, action: 'reprice', newPrice: np, reason, discount: billDiscount(o, billTableOf(o)), managerPin: m.managerPin || undefined, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
       }
     }
     if (o) await refreshOrders();
@@ -21470,6 +21502,10 @@ function render() {
   // render(), so guarding here covers every trigger. The pending render is
   // replayed the moment the drag ends (see endSortDrag/up()).
   if (state._sortDragging || state._mockDragging) { state._renderQueuedDuringDrag = true; return; }
+  // A LENS SWITCHED OFF IS NOT LEFT LIT. Switching Drinks off while it was
+  // picked (here or on another till) left the floor washed in it with no key
+  // to tap it off (Sep '26). The floor goes back to plain.
+  if (state.floorStatusView && state.settings && !floorLensesOn().some(l => l[0] === state.floorStatusView)) state.floorStatusView = null;
   // NOTHING OUTLIVES A HANDLE DRAG. The mark that stops the floor panning
   // under a corner drag could be left behind by a drag that ended somewhere
   // unusual, and then the floor never moved again (owner, Sep '26: "I can't
@@ -23344,7 +23380,7 @@ function renderVoidReasonPop() {
         <div class="sp-item" style="text-align:center;font-weight:800;margin-bottom:4px;">Void ${m.qty ? m.qty + ' × ' : ''}${esc(it.name || 'item')}${m.needPin ? '' : ' — why?'}</div>
         ${m.needPin ? `
         <label class="field-label">Manager PIN</label>
-        <input id="void-item-pin" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);" oninput="state.voidItemPrompt.pin = this.value;">
+        <input id="void-item-pin" type="password" inputmode="numeric" maxlength="8" placeholder="Manager PIN" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid var(--steel-300);border-radius:var(--r-control);background:var(--surface);color:var(--text-primary);font-size:var(--fs-md);" oninput="state.voidItemPrompt.pin = this.value;">
         ${m.pinError ? `<div class="login-error">${esc(m.pinError)}</div>` : ''}
         <div class="qp-row qp-actions" style="margin-top:12px;">
           <button class="icon-action neutral" data-act="close-void-reason">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
@@ -23358,7 +23394,7 @@ function renderVoidReasonPop() {
         </div>`}
       </div>`;
 }
-async function commitRemoveSent(match, reason, qty, then) {
+async function commitRemoveSent(match, reason, qty, then, managerPin) {
   const o = activeOpenOrder();
   if (!match || !o) return;
   // Grab the exact lines coming off so Undo can re-send them — only as many
@@ -23372,7 +23408,7 @@ async function commitRemoveSent(match, reason, qty, then) {
   }).filter(Boolean);
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ match, action: 'remove', qty: qty || null, reason: reason || null, discount: billDiscount(o, billTableOf(o)), staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ match, action: 'remove', qty: qty || null, reason: reason || null, discount: billDiscount(o, billTableOf(o)), managerPin: managerPin || undefined, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
     await refreshOrders();
     state.voidItemPrompt = null;
     if (then) await then(); else { state.editSent = null; render(); }
@@ -29425,8 +29461,14 @@ function tipPeriodStart(period) {
 function tipsCollected(period) {
   const start = tipPeriodStart(period);
   return (state.orders || [])
-    .filter(o => o.status === 'paid' && !o.practice && (o.closedAt || o.createdAt || 0) >= start)
-    .reduce((s, o) => s + (o.tip || 0), 0);
+    .filter(o => o.status === 'paid' && !o.practice)
+    // A tip added after the bill is paid out with the day it was ADDED, as
+    // the cash-up counts it — payouts read $10 short of the Z (Sep '26).
+    .reduce((s, o) => {
+      const late = (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+      const lateIn = (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= start ? (t.amount || 0) : 0), 0);
+      return s + ((o.closedAt || o.createdAt || 0) >= start ? (o.tip || 0) - late : 0) + lateIn;
+    }, 0);
 }
 function renderTipsSettingsAdmin() {
   const period = state.tipPayoutPeriod || 'today';
@@ -40262,7 +40304,7 @@ function renderVoidModal() {
       <input id="void-note-input" type="text" value="${esc(m.note)}">
       ${m.needsApproval ? `
         <label>Manager PIN required</label>
-        <input id="void-manager-pin-input" type="password" inputmode="numeric" maxlength="6" placeholder="Manager PIN" value="${m.managerPin}">
+        <input id="void-manager-pin-input" type="password" inputmode="numeric" maxlength="8" placeholder="Manager PIN" value="${m.managerPin}">
         ${m.pinError ? `<div class="login-error">${m.pinError}</div>` : ''}
       ` : ''}
       <div class="modal-actions">
@@ -44088,7 +44130,7 @@ function handleActClick(el, e) {
       else if (act === 'void-item-approve') {
         const m = state.voidItemPrompt; if (!m) return;
         api('/api/staff/verify-manager-pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: m.pin || '' }) })
-          .then(() => commitRemoveSent(m.match, m.reason, m.qty, m.then))
+          .then(() => commitRemoveSent(m.match, m.reason, m.qty, m.then, m.pin))
           .catch(() => { m.pinError = 'Incorrect manager PIN.'; render(); });
       }
       else if (act === 'house-reason') {

@@ -38371,6 +38371,7 @@ const DRAG_FLICK = 0.4;
 // flick and threw the panel away. Past this much stillness the release is
 // judged on distance alone, which is what a stopped finger means.
 const VEL_STALE = 90;     // ms of no movement before the speed is forgotten
+const VEL_GRACE = 45;     // ...and until this, it is kept whole (see onEnd)
 // THE REST OF THE TRIP RUNS AT THE SPEED OF THE WHOLE TRIP (owner, Sep '26:
 // "from floor layout to order panel is quicker, it's not timed correctly").
 // The release used the panel's full duration whatever was left to cover, so
@@ -38449,6 +38450,9 @@ let _tpDragOwned = false;
   // this way; the docket goes both ways, because unlike the map it is already
   // built and parked off the right edge whether it is open or not.
   let pane = null, paneW = 0, paneX = 0, base = 0, rest = 0, kind = '', slop = 0;
+  // Where a panel caught on its way HOME was caught: that pull is judged on
+  // its own travel from there (see onEnd).
+  let caughtAt = null;
   // `anchor` is where the panel was when THIS finger landed. Normally that is
   // the same as `base` — the end it started from — but a panel caught in mid
   // flight starts somewhere in between, while the trip it is still on is
@@ -38535,6 +38539,7 @@ let _tpDragOwned = false;
     el.style.transform = 'translateX(' + at + 'px)';
     pane = el; paneW = f.w; base = f.from; rest = f.to; kind = f.kind;
     anchor = at; paneX = at; slop = 0;
+    caughtAt = f.home ? at : null;
     // CATCHING A MOVING PANEL IS CARRYING IT, so this gesture belongs to the
     // drag just as much as one that claimed from a standing start (owner,
     // Sep '26: "I slide a little bit, it reverts, and on the third time it
@@ -38737,7 +38742,7 @@ let _tpDragOwned = false;
       const c = claim(dx, dy, e.target);
       if (!c) return;
       pane = c.el; paneW = c.w; base = c.base; rest = c.rest; kind = c.kind; slop = c.slop;
-      anchor = base; paneX = base; _tpDragOwned = true;
+      anchor = base; paneX = base; _tpDragOwned = true; caughtAt = null;
       pane.classList.add('panel-drag');
       lastX = t.clientX; lastT = e.timeStamp || Date.now(); vel = 0;
     }
@@ -38782,10 +38787,26 @@ let _tpDragOwned = false;
       // Two ways to finish, both how a phone does it: past a third of the way,
       // or a flick — a short fast drag that never got far but was clearly
       // meant. The flick has to point the way the panel was going.
-      const gone = Math.abs(paneX - from);
+      // A PULL THAT CATCHES THE PANEL ON ITS WAY HOME IS ITS OWN PULL (owner,
+      // Sep '26: "I slide a little bit and it reverts, and the third time it
+      // auto goes to the order panel"). Measured from where the trip set off,
+      // each quick short pull added the distance the last one had not yet
+      // come back, and the third tipped past the third of the way — on a slow
+      // tablet, every time. A panel caught going home is judged on how far
+      // THIS finger took it; one caught leaving still counts the whole trip.
+      const gone = Math.abs(paneX - (caughtAt !== null ? caughtAt : from));
+      caughtAt = null;
       const towards = to > from ? 1 : -1;
       const stillFor = ((e.timeStamp || Date.now()) - lastT);
-      const speed = stillFor > VEL_STALE ? 0 : vel;   // stopped means stopped
+      // A FINGER THAT HAS STOPPED HAS STOPPED — gradually, not at a cliff. The
+      // speed fades with every millisecond the finger stood still before it
+      // lifted: a pull, a pause and a lift used to keep its full speed right
+      // up to 90ms and read as a flick, which on a slow tablet threw the floor
+      // away on the second quick pull (Sep '26). A real flick lifts while
+      // still moving and keeps nearly all of it.
+      // The first VEL_GRACE of standing still is only the gap between two
+      // finger reports on a busy tablet, so it keeps the speed whole.
+      const speed = vel * Math.min(1, Math.max(0, (VEL_STALE - stillFor) / (VEL_STALE - VEL_GRACE)));
       const take = gone > w * DRAG_TAKE || (speed * towards > DRAG_FLICK);
       const land = take ? to : from;
       // IT CARRIES ON FROM THE FINGER — IT DOES NOT START AGAIN (owner,
@@ -38848,7 +38869,7 @@ let _tpDragOwned = false;
       // supposed to stop. The trip is remembered by the two ends it is
       // travelling between, so catching it does not restart the journey: the
       // release still measures how far it got from where it set off.
-      flight = { el, kind: was, from, to, w, stop: unwatch };
+      flight = { el, kind: was, from, to, w, stop: unwatch, home: !take };
       return;
     }
     if (!armed) return; armed = false;

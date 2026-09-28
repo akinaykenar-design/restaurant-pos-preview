@@ -11228,7 +11228,7 @@ app.post('/api/orders/:id/print-course', (req, res) => {
   const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   const course = parseInt(req.body && req.body.course) || 1;
-  const items = (order.items || []).filter(i => (i.course || 1) === course);
+  const items = (order.items || []).filter(i => (i.course || 1) === course && !i.giftcardSale);
   if (!items.length) return res.status(400).json({ error: 'No items in that course yet' });
   const courseName = (((data.settings || {}).courses || [])[course - 1] || {}).name || `Course ${course}`;
   // A call-away prints a SLIM slip (banner + course + table) — not the whole
@@ -12828,6 +12828,11 @@ app.post('/api/orders/:id/call-away', (req, res) => {
   // was pressed on, and the pass kept saying Away).
   if (req.body && req.body.undo) {
     if (course > 0 && order.firedCourses) delete order.firedCourses[course];
+    // …and the table's clock goes back to the last call still standing. The
+    // stamp stayed, so a taken-back 1st kept the table timing, red at 20m,
+    // for a course nobody had called (Sep '26).
+    const standing = Object.values(order.firedCourses || {}).filter(Number.isFinite);
+    if (standing.length) order.calledAwayAt = Math.max(...standing); else delete order.calledAwayAt;
     logAudit(data, staffFromReq(req), `Took back the call-away on ${order.orderType === 'dine-in' ? 'Table ' + order.table : 'order #' + order.id}`);
     writeData(data);
     return res.json(order);
@@ -20955,7 +20960,7 @@ function renderTablePeekPop() {
   const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
   // Merge every sent round into per-course lines, same grammar as the ticket.
   const byCourse = {};
-  (o.rounds || []).forEach(r => (r.items || []).forEach(it => {
+  (o.rounds || []).forEach(r => courseLines(r.items).forEach(it => {
     const c = it.course || 1;
     const key = `${it.name}|${it.seat || ''}|${it.note || ''}|${it.price}|${removedSig(it)}`;
     const bucket = (byCourse[c] = byCourse[c] || {});
@@ -20985,7 +20990,7 @@ function renderTablePeekPop() {
       <div class="pop-scrim"></div>
       <div class="qty-pop covers-pop peek-pop">
         <div class="sp-item">${tableDisplayLabel(t.id)}</div>
-        <div class="peek-meta">${o.covers ? `${o.covers} covers · ` : ''}${esc(o.staffName || '')} · ${pillDur(mins)}</div>
+        <div class="peek-meta">${o.covers ? `${o.covers} cover${o.covers === 1 ? '' : 's'} · ` : ''}${esc(o.staffName || '')} · ${pillDur(mins)}</div>
         ${(() => {
           // The docket panel's course header, on the peek (owner pick, Aug
           // '26): one tab per sent course — called-away ones wear the blue +
@@ -25216,12 +25221,12 @@ function renderBriefingAdmin() {
   const liveNotes = allTables().filter(t => notesOfType('allergy', t.notes).length);
   return `
   <div class="settings-card">
-    <div class="th">Bookings — ${bookings.length ? `${bookings.length} (${covers} covers)` : 'none today'}</div>
+    <div class="th">Bookings — ${bookings.length ? `${bookings.length} (${covers} cover${covers === 1 ? '' : 's'})` : 'none today'}</div>
     ${bookings.map(r => `
       <div class="detail-line" style="align-items:center;gap:8px;">
         <span style="font-family:var(--font-mono);font-weight:700;flex-shrink:0;">${fmtTime(r.time)}</span>
         <span style="font-weight:700;">${esc(r.name)}</span>
-        <span class="ts">${r.partySize} covers${tableName(r.tableId) ? ` · T${esc(tableName(r.tableId))}` : ''}</span>
+        <span class="ts">${r.partySize} cover${r.partySize === 1 ? '' : 's'}${tableName(r.tableId) ? ` · T${esc(tableName(r.tableId))}` : ''}</span>
         <span style="flex:1;"></span>
         ${r.notes ? `<span class="seat-chip">${esc(r.notes)}</span>` : ''}
       </div>`).join('')}
@@ -33663,8 +33668,13 @@ const PILL_CLOCKS = [
 // When the table's last drink went out: the newest round carrying anything
 // from a drinks course — or, with none yet, when the party sat down.
 const courseIsDrinks = n => /drink|bar|bev/i.test(courseInfo(n).name || '');
+// A GIFT VOUCHER IS NOT A COURSE. Sold at the table it had no course, so it
+// read as course 1 everywhere: a held Drinks course on the Pass with a Call
+// away key, the table's last drink on the Drinks clock, a Drinks tab on the
+// floor hold (Sep '26). Everything that reads a table's courses reads these.
+const courseLines = items => (items || []).filter(i => !i.giftcardSale);
 function lastDrinkAt(o) {
-  const at = (o.rounds || []).filter(r => (r.items || []).some(i => i.qty > 0 && courseIsDrinks(i.course || 1))).map(r => r.sentAt || 0);
+  const at = (o.rounds || []).filter(r => courseLines(r.items).some(i => i.qty > 0 && courseIsDrinks(i.course || 1))).map(r => r.sentAt || 0);
   return at.length ? Math.max(...at) : (o.createdAt || Date.now());
 }
 const drinkMins = o => Math.max(0, Math.floor((Date.now() - lastDrinkAt(o)) / 60000));
@@ -34096,7 +34106,7 @@ function renderStaleAccounts() {
         return `
         <button class="order-row" data-act="stale-go" data-id="${t ? t.id : ''}" style="width:100%;text-align:left;cursor:pointer;">
           <div class="order-info">
-            <div class="t1">Table ${esc(o.table)}${o.covers ? ` · ${o.covers} covers` : ''}${o.staffName ? ` · ${esc(o.staffName)}` : ''}</div>
+            <div class="t1">Table ${esc(o.table)}${o.covers ? ` · ${o.covers} cover${o.covers === 1 ? '' : 's'}` : ''}${o.staffName ? ` · ${esc(o.staffName)}` : ''}</div>
             <div class="t2">${o.items ? o.items.reduce((s, i) => s + i.qty, 0) : 0} items · ${money(total)} · opened ${fmtTime(o.createdAt)}</div>
           </div>
           <span class="status-chip ${idle >= 60 ? 'void' : 'course'}">idle ${idleLabel}</span>
@@ -34374,10 +34384,10 @@ function passCells(o, courses) {
   const TOGETHER = 5 * 60000;
   const passed = n => firedNs.some(m => m > n && fired[m] - (fired[n] || 0) > TOGETHER);
   const sentAt = {};
-  (o.rounds || []).forEach(r => (r.items || []).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; }));
+  (o.rounds || []).forEach(r => courseLines(r.items).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; }));
   let next = false;
   return courses.map(n => {
-    const items = (o.items || []).filter(i => (i.course || 1) === n && i.qty > 0);
+    const items = courseLines(o.items).filter(i => (i.course || 1) === n && i.qty > 0);
     if (!items.length) return { n, kind: 'none' };
     if (items.every(i => i.status === 'served') || passed(n)) return { n, kind: 'done', items };
     if (fired[n] > 0) return { n, kind: 'away', since: fired[n], items };
@@ -34412,7 +34422,7 @@ const dishesIn = items => (items || []).reduce((a, i) => a + (i.status === 'serv
 // after it — two courses fired together are both on the stoves.
 function dishesCooking(o, now, cookMs) {
   return Object.entries(o.firedCourses || {}).reduce((a, [n, at]) =>
-    a + (at > 0 && now - at < cookMs && courseInKitchen(+n) ? dishesIn((o.items || []).filter(i => (i.course || 1) === +n)) : 0), 0);
+    a + (at > 0 && now - at < cookMs && courseInKitchen(+n) ? dishesIn(courseLines(o.items).filter(i => (i.course || 1) === +n)) : 0), 0);
 }
 function kitchenLoad() {
   const { cookMins } = kitchenTrafficCfg(), now = Date.now();
@@ -34428,7 +34438,7 @@ function kitchenPeakLastWeek() {
     if (o.practice || o.status === 'void' || (o.createdAt || 0) < from) return;
     Object.entries(o.firedCourses || {}).forEach(([n, at]) => {
       if (!(at > from) || !courseInKitchen(+n)) return;
-      const q = (o.items || []).reduce((a, i) => a + ((i.course || 1) === +n && i.qty > 0 ? i.qty : 0), 0);
+      const q = courseLines(o.items).reduce((a, i) => a + ((i.course || 1) === +n && i.qty > 0 ? i.qty : 0), 0);
       if (q) calls.push([at, q]);
     });
   });
@@ -34484,7 +34494,7 @@ function renderPass(fp) {
     <div class="pass-rows">
       ${rows.map(({ t, o }) => `
       <div class="pass-row${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}">
-        <div class="pass-lead"><b>${esc(String(t.label))}</b><small>${o ? pillDur(mins(o.createdAt)) : ''}${(o ? o.covers : t.covers) ? `${o ? ' · ' : ''}${o ? o.covers : t.covers} covers` : ''}</small></div>
+        <div class="pass-lead"><b>${esc(String(t.label))}</b><small>${o ? pillDur(mins(o.createdAt)) : ''}${(o ? o.covers : t.covers) ? `${o ? ' · ' : ''}${o ? o.covers : t.covers} cover${(o ? o.covers : t.covers) === 1 ? '' : 's'}` : ''}</small></div>
         ${!o ? `<div class="pass-cell seated"><span class="pass-st"><span class="pass-w">Seated</span></span><span class="pass-items">Nothing sent yet</span></div>` :
         cellsOf.get(o.id).map(c => {
           if (c.kind === 'none') return `<div class="pass-cell none"></div>`;
@@ -34611,14 +34621,19 @@ function billDocket(o, closed) {
 // Rung, not paid: every round's value at the moment it went out, voids left
 // out, so both days are measured the same way from the same records.
 const DAY_MS = 86400000;
+// THE CLOCK ON THE WALL, not milliseconds: across a clock change a day is
+// 23 or 25 hours, and "7pm last Monday" is not 7 × 24 hours ago. The race
+// compared 7pm today with 6pm last week for the whole week after (Sep '26).
+const wallMs = t => t - new Date(t).getTimezoneOffset() * 60000;
 function rungSteps(from) {
   const ev = [];
+  const until = new Date(from); until.setDate(until.getDate() + 1);
   (state.orders || []).forEach(o => {
     if (o.practice || o.status === 'void') return;
     (o.rounds || []).forEach(r => {
-      if (!(r.sentAt >= from && r.sentAt < from + DAY_MS)) return;
+      if (!(r.sentAt >= from && r.sentAt < until.getTime())) return;
       const v = (r.items || []).reduce((a, i) => a + (i.qty > 0 ? (i.price || 0) * i.qty : 0), 0);
-      if (v) ev.push([r.sentAt - from, v]);
+      if (v) ev.push([wallMs(r.sentAt) - wallMs(from), v]);
     });
   });
   ev.sort((a, b) => a[0] - b[0]);
@@ -34627,14 +34642,15 @@ function rungSteps(from) {
 }
 const rungBy = (steps, off) => { let v = 0; for (const [t, c] of steps) { if (t > off) break; v = c; } return v; };
 function raceNumbers(now) {
-  const from = tradingDayStart(now), off = now - from;
-  const today = rungSteps(from), then = rungSteps(from - 7 * DAY_MS);
+  const from = tradingDayStart(now), off = wallMs(now) - wallMs(from);
+  const back = new Date(from); back.setDate(back.getDate() - 7);
+  const today = rungSteps(from), then = rungSteps(back.getTime());
   if (!then.length) return null;
   const gap = rungBy(today, off) - rungBy(then, off);
   const gapBefore = rungBy(today, off - 30 * 60000) - rungBy(then, off - 30 * 60000);
   return { today, then, off, now: rungBy(today, off), was: rungBy(then, off), gap,
     growing: Math.abs(gap) > Math.abs(gapBefore) + 0.5,
-    day: new Date(from - 7 * DAY_MS).toLocaleDateString([], { weekday: 'long' }) };
+    day: back.toLocaleDateString([], { weekday: 'long' }) };
 }
 const raceSw = cls => `<svg viewBox="0 0 12 4" aria-hidden="true"><path class="${cls}" d="M0 2H12"/></svg>`;
 function renderRace() {
@@ -34654,7 +34670,7 @@ function renderRace() {
   return `<div class="race${ahead ? ' ahead' : ' behind'}">
     <div class="race-plot">
       <svg viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true">
-        <path class="race-then" vector-effect="non-scaling-stroke" d="${line(r.then, span)}"/>
+        <path class="race-then" vector-effect="non-scaling-stroke" d="${line(r.then, t0 + span)}"/>
         <path class="race-now" vector-effect="non-scaling-stroke" d="${line(r.today, r.off)}"/>
         <line class="race-mark" vector-effect="non-scaling-stroke" x1="${X(r.off)}" x2="${X(r.off)}" y1="0" y2="100"/>
       </svg>
@@ -34769,7 +34785,7 @@ function renderTimeline(fp) {
     const calls = Object.keys(fired).map(Number).filter(n => fired[n] > 0).sort((a, b) => fired[a] - fired[b]);
     const bars = calls.map((n, i) => {
       const from = fired[n], to = i + 1 < calls.length ? fired[calls[i + 1]] : null;
-      const items = (o.items || []).filter(it => (it.course || 1) === n && it.qty > 0);
+      const items = courseLines(o.items).filter(it => (it.course || 1) === n && it.qty > 0);
       const served = items.length && items.every(it => it.status === 'served');
       if (to || served) return `<div class="tl-bar done" style="left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
       const lvl = pillClockLevel(mins(now - from), 'course');
@@ -34815,7 +34831,7 @@ function renderTimeline(fp) {
         <div class="tl-over"><span class="tl-now" style="left:${at(now)}"><b>${esc(clock(now))}</b></span></div>
         ${rows.map(r => `
         <div class="tl-row${state.pickFlashId === r.t.id ? ' picking' : ''}" data-act="pick-table" data-id="${r.t.id}">
-          <div class="pass-lead"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} covers` : ''}</small>${due(r)}</div>
+          <div class="pass-lead"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} cover${(r.o ? r.o.covers : r.t.covers) === 1 ? '' : 's'}` : ''}</small>${due(r)}</div>
           <div class="tl-lane">${lane(r)}</div>
         </div>`).join('')}
       </div>
@@ -35461,7 +35477,7 @@ function offerCloseEmptyTable(next) {
   openConfirm({
     message: emptyTicket
       ? `Table ${esc(String(t.label))} has nothing ordered — close it?`
-      : `Table ${esc(String(t.label))} is seated (${t.covers || 0} covers) with nothing ordered — close it, or leave it seated?`,
+      : `Table ${esc(String(t.label))} is seated (${t.covers || 0} cover${t.covers === 1 ? '' : 's'}) with nothing ordered — close it, or leave it seated?`,
     confirmLabel: 'Close table',
     cancelLabel: 'Leave seated',
     danger: false,
@@ -35568,8 +35584,13 @@ function pickTable(id) {
     // opened on an empty Drinks page. With food on it, it opens on All — or,
     // with All switched off, on the first page that holds food.
     if (prevTable !== id && !state.cart.length && oo && (oo.items || []).some(i => i.qty > 0) && state.settings.coursePagedDocket === true) {
-      if (state.settings.docketAllTab !== false) state.docketShowAll = true;
+      if (state.settings.docketAllTab !== false) { state.docketShowAll = true; state._autoAll = true; }
       else { state.docketShowAll = false; state.activeCourse = Math.min(...oo.items.filter(i => i.qty > 0).map(i => i.course || 1)); }
+    } else if (prevTable !== id && state._autoAll) {
+      // …and only that table: the next one, with nothing on it, opens the way
+      // it always did — it opened on an empty All after a busy one (Sep '26).
+      state.docketShowAll = false;
+      state._autoAll = false;
     }
     // Ask for covers at the natural moment ONLY: seating a FRESH table
     // (covers enabled, none recorded, no order in progress). The pad POPS
@@ -44761,7 +44782,7 @@ function handleActClick(el, e) {
         state.docketShowAll = false;
         setActiveCourse(parseInt(el.dataset.val));
       }
-      else if (act === 'docket-show-all') { state.docketShowAll = true; render(); }
+      else if (act === 'docket-show-all') { state.docketShowAll = true; state._autoAll = false; render(); }
       else if (act === 'toggle-all-courses') { state.allCourseTabs = !state.allCourseTabs; render(); }
       else if (act === 'auto-assign-courses') { autoAssignCourses(); }
       else if (act === 'toggle-auto-course-order') { toggleAutoCourseOrder(); }

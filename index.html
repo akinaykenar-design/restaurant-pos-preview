@@ -1778,6 +1778,11 @@ body[data-tp-landed] .middle-view{ animation:none !important; }
    phone and tablet, so 156 clears it with the 8px gap. */
 body:has(.ticket-actions){ --toast-bottom:156px; }
 .toast-btn{background:none;border:1px solid rgba(255,255,255,0.4);color:#fff;font:inherit;font-size:var(--fs-md);font-weight:700;padding:4px 12px;border-radius:var(--r-control);cursor:pointer;margin-left:4px;}
+/* A TOAST IS READ, NOT TAPPED — except its one key. It sat over every pad's
+   ✕ and ✓ on the till and iPad for three seconds and caught the tap (Sep '26);
+   a tap now falls through it to whatever is underneath. */
+.toast{pointer-events:none;}
+.toast .toast-btn{pointer-events:auto;}
 .toast .dot{width:9px;height:9px;border-radius:50%;background:var(--green);}
 /* A message about something that did NOT happen wears red (owner's pick,
    Sep '26 — it wore the success green). toastFail() sets the mark. */
@@ -2438,7 +2443,7 @@ body[data-theme="dark"] .denom-cell{background:var(--steel-200);}
    black, so one printer sat darker and smaller than the 33 drawings under it
    (owner, Sep '26: "some icons a differing shades of grey black"). */
 .dk-test svg{ width:20px; height:20px; margin-right:8px; color:var(--charcoal-soft); }
-.btn-secondary svg:last-child:first-child{ margin-right:0; } /* icon-only (print docket) stays centred */
+.btn-secondary.icon-only svg{ margin-right:0; } /* icon-only (print docket) stays centred — said by a class: the old :last-child:first-child test also matched every icon + WORD key, since a word is not an element, and put the drawing back against 'Print totals' (Sep '26) */
 .sort-btn.on{border-color:var(--orange);color:var(--orange);background:var(--orange-dim);}
 .sort-menu{position:absolute;top:calc(100% + 4px);left:0;z-index:20;background:var(--surface);border:1px solid var(--steel-200);border-radius:var(--r-control);box-shadow:var(--shadow);padding:4px;min-width:170px;max-height:60vh;overflow-y:auto;display:flex;flex-direction:column;gap:4px;} /* the house dropdown (.fp-dd) */
 .sort-opt{text-align:left;min-height:44px;padding:12px 12px;border:none;background:none;border-radius:var(--r-control);font-size:var(--fs-md);font-weight:400;color:var(--text-primary);cursor:pointer;font-family:inherit;white-space:nowrap;}
@@ -6708,6 +6713,9 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
         params: params, query: query, body: body || {},
         ip: 'preview', connection: { remoteAddress: 'preview' },
         get: function (h) { return lowerHeaders[String(h).toLowerCase()]; },
+        // express has both spellings; the drawer routes use this one, and without
+        // it every paid-out, float and X read answered 500 here (Sep '26).
+        header: function (h) { return lowerHeaders[String(h).toLowerCase()]; },
       };
       var status = 200, resHeaders = {}, done = false;
       var res = {
@@ -6861,6 +6869,9 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     if (name === './terminal') return terminalShim;
     if (name === './doshii') return doshiiShim;
     if (name === './backups') return backupsShim;
+    // Gift voucher codes are random bytes; the browser has its own (Sep '26 —
+    // selling a voucher here answered "Something went wrong").
+    if (name === 'crypto') return { randomBytes: function (n) { var a = new Uint8Array(n); window.crypto.getRandomValues(a); return a; } };
     throw new Error('Module not available in preview: ' + name);
   }
   window.__POS__ = {
@@ -8258,7 +8269,12 @@ function writeData(data) {
 // What the till's poll asks every 15s instead of fetching everything: the
 // store file's and the orders folder's last-write times. Any write moves one.
 function dataVersion() { return { store: statMs(DB_FILE), orders: statMs(ORDERS_DIR) }; }
-module.exports = { readData, writeData, STAFF_ROLE_OPTIONS, dataVersion };
+// Drop the in-memory copy, so the next read comes from disk. The server calls
+// it when it REFUSES a save: a route that edited the copy before its last
+// check must not leave that edit live (Sep '26).
+function forgetCache() { _cache = null; }
+
+module.exports = { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion };
 
   })(module, module.exports, window.__POS__.requireShim, '', window.__POS__.process);
   window.__POS__.modules['./db'] = module;
@@ -8277,7 +8293,7 @@ const express = require('express');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { readData, writeData, STAFF_ROLE_OPTIONS, dataVersion } = require('./db');
+const { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion } = require('./db');
 const printing = require('./printing');
 const terminal = require('./terminal');
 const doshii = require('./doshii');
@@ -8298,6 +8314,17 @@ const PORT = 3000;
 // Parsed first here, so the everyday cap below leaves it alone.
 app.use('/api/import', express.json({ limit: '200mb' }));
 app.use(express.json({ limit: '8mb' }));
+// A REFUSED SAVE CHANGES NOTHING. readData() hands back the shared copy, and
+// many routes edit it before their last check: a printer save refused for a
+// bad backup IP was live at once and went to disk with the next save; a staff
+// PIN stuck when the role change was refused; a refused tip kept its key
+// (Sep '26). Any refusal forgets the copy, so the next read is from disk.
+app.use((req, res, next) => {
+  if (req.method === 'GET') return next();
+  const st = res.status.bind(res);
+  res.status = (code) => { if (code >= 400) forgetCache(); return st(code); };
+  next();
+});
 // GZIP (owner, Aug '26: "a lot of lag on the first screen"). Measured: the
 // login screen waited on 286kb of menu JSON and a 1.5MB app.js, uncompressed,
 // over the venue's wifi — that is the lag, not the drawing (the floor itself
@@ -8964,6 +8991,8 @@ app.put('/api/categories/:id', (req, res) => {
   if (iconEnabled !== undefined) cat.iconEnabled = !!iconEnabled;
   // Keep menu items pointed at the right category after a rename.
   data.menu.forEach(m => { if (m.category === oldName) m.category = cat.name; });
+  // …and the set menus filed under it, or they vanished from the till (Sep '26).
+  (data.combos || []).forEach(c => { if (c.category === oldName) c.category = cat.name; });
   // …and the printers that print it: they hold the name too, and a renamed
   // section stopped printing anywhere, with no alert (Sep '26).
   (data.printerStations || []).forEach(ps => {
@@ -8985,6 +9014,7 @@ app.delete('/api/categories/:id', (req, res) => {
   const itemsUsingIt = data.menu.filter(m => m.category === cat.name).length;
   const subsUsingIt = data.subcategories.filter(s => s.categoryId === cat.id).length;
   data.menu.forEach(m => { if (m.category === cat.name) { m.category = ''; m.subcategoryId = null; } });
+  (data.combos || []).forEach(c => { if (c.category === cat.name) c.category = ''; }); // unfiled, like its dishes
   data.subcategories = data.subcategories.filter(s => s.categoryId !== cat.id);
   data.categories = data.categories.filter(c => c.id !== cat.id);
   const detail = itemsUsingIt > 0 || subsUsingIt > 0
@@ -9033,6 +9063,8 @@ app.put('/api/sales-categories/:id', (req, res) => {
   if (!cat) return res.status(404).json({ error: 'Sales group not found' });
   const { name, color } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Sales group name is required' });
+  // A rename onto a name in use is refused, as adding one is (Sep '26).
+  if (data.salesCategories.some(c => c !== cat && c.name.toLowerCase() === name.trim().toLowerCase())) return res.status(400).json({ error: 'That sales group already exists' });
   cat.name = name.trim();
   if (color !== undefined) { cat.color = color || null; }
   logAudit(data, staffFromReq(req), `Renamed sales category to "${cat.name}"`);
@@ -9897,6 +9929,14 @@ app.put('/api/modifier-groups/:id', (req, res) => {
   if (req.body.promptAt !== undefined) group.promptAt = ['ordering', 'later', 'default'].includes(req.body.promptAt) ? req.body.promptAt : 'ordering';
   if (req.body.allowCustom !== undefined) group.allowCustom = !!req.body.allowCustom; // "Other…" typed option
   if ((group.max == null ? 1 : group.max) < (group.min || 0)) group.max = group.min || 1;
+  // A GROUP CAN NEVER ASK FOR MORE THAN IT HOLDS: deleting one of three options
+  // under "choose 3" left "choose 3 from 2", and the dish could not be added at
+  // all (Sep '26). A typed "Other…" option can make up the difference.
+  const held = (group.options || []).length;
+  if (held && !group.allowCustom) {
+    if ((group.min || 0) > held) group.min = held;
+    if ((group.max == null ? 1 : group.max) > held) group.max = held;
+  }
   if (color !== undefined) {
     group.color = color && /^#[0-9A-Fa-f]{6}$/.test(color) ? color : null;
   }
@@ -9983,15 +10023,20 @@ app.put('/api/subcategories/:id', (req, res) => {
       if (parent.parentSubcategoryId) return res.status(400).json({ error: 'Only two levels deep — pick a top-level subsection' });
       if (kids.length) return res.status(400).json({ error: 'This subsection has its own subsections — move it to a section instead' });
       sub.parentSubcategoryId = parent.id;
-      sub.categoryId = null;
+      // It keeps a section: its parent's. With none it vanished from Sections
+      // and from every dish's subsection box (Sep '26).
+      sub.categoryId = parent.categoryId || null;
     }
     // Items in the moved subtree adopt the new root section's name.
     const collect = (id) => [id, ...data.subcategories.filter(s => s.parentSubcategoryId === id).flatMap(s => collect(s.id))];
     const treeIds = new Set(collect(sub.id));
     let root = sub;
-    while (root && !root.categoryId && root.parentSubcategoryId) root = data.subcategories.find(x => x.id === root.parentSubcategoryId);
+    while (root && root.parentSubcategoryId) root = data.subcategories.find(x => x.id === root.parentSubcategoryId);
     const rootCat = root && data.categories.find(c => c.id === root.categoryId);
     if (rootCat) data.menu.forEach(m => { if (treeIds.has(m.subcategoryId)) m.category = rootCat.name; });
+    // The WHOLE subtree belongs to the new section — its children stayed on the
+    // old one and dropped out of sight (Sep '26).
+    if (rootCat) data.subcategories.forEach(x => { if (treeIds.has(x.id)) x.categoryId = rootCat.id; });
     logAudit(data, staffFromReq(req), `Moved subsection "${sub.name}"${rootCat ? ` to ${rootCat.name}` : ''}`);
     writeData(data);
     return res.json(sub);
@@ -10468,6 +10513,13 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (decorType !== undefined && table.type === 'decor') table.decorType = decorType;
   if (icon !== undefined && table.type === 'decor') table.icon = icon || null;
   if (covers !== undefined) table.covers = Math.max(0, parseInt(covers) || 0);
+  // …and its open bill, which is what the Pass, Bills, per-head spend and a
+  // covers rule read: the bill kept the count from its first send, so a change
+  // after it never stuck (Sep '26).
+  if (covers !== undefined && table.covers > 0) {
+    const open = (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table.label));
+    if (open) open.covers = table.covers;
+  }
   // The account's own discount or surcharge, kept until the bill (Sep '26).
   if (discount !== undefined) {
     const d = discount && typeof discount === 'object' ? discount : null;
@@ -10749,6 +10801,9 @@ app.delete('/api/staff/:id', (req, res) => {
     return res.status(400).json({ error: 'Keep at least one manager' });
   }
   data.staff = data.staff.filter(s => s.id !== req.params.id);
+  // A person removed while clocked in is clocked out now: nothing on any
+  // screen could close that shift, and its hours climbed for ever (Sep '26).
+  (data.shifts || []).forEach(sh => { if (sh.staffId === req.params.id && sh.clockOut === null) sh.clockOut = Date.now(); });
   if (staff) logAudit(data, staffFromReq(req), `Removed staff member: ${staff.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -11711,6 +11766,20 @@ app.put('/api/suppliers/:id', (req, res) => {
   res.json(supplier);
 });
 
+// The Suppliers list has a delete, and there was no route behind it: every
+// delete answered "Could not delete supplier." (Sep '26). Its stock items keep
+// existing and simply lose the supplier.
+app.delete('/api/suppliers/:id', (req, res) => {
+  const data = readData();
+  const supplier = (data.suppliers || []).find(s => s.id === req.params.id);
+  if (!supplier) return res.status(404).json({ error: 'Supplier not found' });
+  data.suppliers = data.suppliers.filter(s => s.id !== supplier.id);
+  (data.inventoryItems || []).forEach(i => { if (i.supplierId === supplier.id) i.supplierId = null; });
+  logAudit(data, staffFromReq(req), `Deleted supplier: ${supplier.name}`);
+  writeData(data);
+  res.json({ ok: true });
+});
+
 app.get('/api/inventory-items', (req, res) => {
   res.json(readData().inventoryItems || []);
 });
@@ -11767,6 +11836,12 @@ app.put('/api/inventory-items/:id', (req, res) => {
   const item = (data.inventoryItems || []).find(i => i.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Inventory item not found' });
   const { name, category, sku, unit, currentStock, minStock, maxStock, costPerUnit, supplierId } = req.body;
+  // A RENAME REACHES THE RECIPES: a docket build line keeps the ingredient's
+  // name as its label, so renaming Mozzarella to Vegan cheese went on printing
+  // Mozzarella (Sep '26). A label the venue wrote itself is left alone.
+  if (name !== undefined && name !== item.name) (data.menu || []).forEach(m => (m.recipes || []).forEach(r => {
+    if (r.inventoryItemId === item.id && (!r.label || r.label === item.name)) r.label = name;
+  }));
   if (name !== undefined) item.name = name;
   if (category !== undefined) item.category = category;
   if (sku !== undefined) item.sku = sku;
@@ -11786,6 +11861,10 @@ app.delete('/api/inventory-items/:id', (req, res) => {
   const item = (data.inventoryItems || []).find(i => i.id === req.params.id);
   if (item) {
     data.inventoryItems = (data.inventoryItems || []).filter(i => i.id !== req.params.id);
+    // …and a delete takes it out of every recipe, or the dish kept offering
+    // it as a build line and its recipe row read "Select ingredient…" (Sep '26).
+    (data.menu || []).forEach(m => { if (m.recipes) m.recipes = m.recipes.filter(r => r.inventoryItemId !== item.id); });
+    recomputeServingsLeft(data);
     logAudit(data, staffFromReq(req), `Deleted inventory item: ${item.name}`);
     writeData(data);
   }
@@ -12235,7 +12314,9 @@ app.get('/api/orders/export.csv', (req, res) => {
       (o.tip || 0).toFixed(2),
       grandTotal.toFixed(2),
       refunded.toFixed(2),
-      (grandTotal - refunded).toFixed(2),
+      // Net is money KEPT: a voided, combined or still-open ticket kept none,
+      // yet summed in full — $70 kept read $135 (Sep '26).
+      (o.status === 'paid' ? grandTotal - refunded : 0).toFixed(2),
       o.paymentMethod,
       o.staffName || '',
       o.status,
@@ -12771,6 +12852,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     // counted down in one list must not be counted down again in the other
     // (it came off twice: 3 → 1 for a removal of 1, caught Sep '26).
     const taken = new Map(); // line object → how many already came off it
+    const onTicket = new Set(order.items); // a round line that IS a ticket line not taken stays whole
     for (let k = order.items.length - 1; k >= 0 && left > 0; k--) {
       const i = order.items[k]; if (!matches(i)) continue;
       const n = Math.min(i.qty, left);
@@ -12778,10 +12860,16 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
       i.qty -= n; left -= n; taken.set(i, n);
       if (i.qty <= 0) order.items.splice(k, 1);
     }
+    // The round copies follow, NEWEST round first, as the ticket's lines were
+    // taken. Walking the oldest first cut the first round's line — which is the
+    // same object as the ticket's line still standing — so taking 1 of 2 Pita
+    // took both off the bill (Sep '26). A ticket line that was not taken is
+    // never touched here.
     let leftRounds = removed.reduce((s, i) => s + i.qty, 0);
-    (order.rounds || []).forEach(r => {
+    [...(order.rounds || [])].reverse().forEach(r => {
       for (let k = (r.items || []).length - 1; k >= 0 && leftRounds > 0; k--) {
         const i = r.items[k]; if (!matches(i)) continue;
+        if (!taken.has(i) && onTicket.has(i)) continue;
         const n = taken.has(i) ? taken.get(i) : Math.min(i.qty, leftRounds); // a shared object is already down
         if (!taken.has(i)) i.qty -= n;
         leftRounds -= n;
@@ -13070,8 +13158,12 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   const tipAsked = Math.max(0, Math.round((parseFloat(tip) || 0) * 100) / 100);
   const netPaid = splitPaidNet(order);
   const room = Math.max(0, Math.round((billNow - netPaid) * 100) / 100);
-  if (amt > room + tipAsked + 0.01) return res.status(400).json({ error: `Only $${(room + tipAsked).toFixed(2)} is still owing on this bill` });
-  const tipNow = Math.min(tipAsked, Math.max(0, Math.round((amt - room) * 100) / 100));
+  // THE TIP IS WHAT THE TILL SAYS IT IS. Counting only money past the bill as
+  // tip turned a $10 tip on the first of two shares into bill money: the
+  // second till then asked $40 of a $50 share and the bill closed with no tip
+  // at all (Sep '26). The rest of the part must fit what is still owing.
+  const tipNow = Math.min(tipAsked, amt);
+  if (amt - tipNow > room + 0.01) return res.status(400).json({ error: `Only $${(room + tipNow).toFixed(2)} is still owing on this bill` });
   if (!order.splitParts && Array.isArray(parts) && parts.length) {
     order.splitParts = parts.slice(0, 60).map(p => ({
       key: String(p.key || '').slice(0, 40),
@@ -13137,7 +13229,10 @@ app.post('/api/orders/:id/void', (req, res) => {
     const byName = req.body.staffName || 'Unknown';
     soldHere.forEach(g => { g.active = false; g.balance = 0; logAudit(data, byName, `Gift card ${g.code} cancelled with void of #${order.id}`); });
     const back = [];
-    if (order.paymentMethod === 'giftcard' && order.giftCardCode) back.push([order.giftCardCode, order.grandTotal || 0]);
+    // A tip added AFTER the bill was taken on a card, not the gift card: it
+    // does not go back on the gift card (Sep '26 — a $5 late tip grew the card).
+    const lateGc = (order.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+    if (order.paymentMethod === 'giftcard' && order.giftCardCode) back.push([order.giftCardCode, Math.max(0, (order.grandTotal || 0) - lateGc)]);
     (order.splitPaid || []).filter(p => p.method === 'giftcard' && p.giftCardCode).forEach(p => back.push([p.giftCardCode, p.amount || 0]));
     back.forEach(([code, amt]) => {
       const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
@@ -13201,7 +13296,9 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // nowhere — the card stayed spent and the cash-up showed it handed back.
   // A split bill gives the card back its share of the refund.
   const cardBack = [];
-  if (order.paymentMethod === 'giftcard' && order.giftCardCode) cardBack.push([order.giftCardCode, value]);
+  // …only the gift card's share: a tip added later was paid by card (Sep '26).
+  const lateGc = (order.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+  if (order.paymentMethod === 'giftcard' && order.giftCardCode) cardBack.push([order.giftCardCode, grandTotal > 0 ? r2(value * Math.max(0, grandTotal - lateGc) / grandTotal) : value]);
   else if ((order.splitPaid || []).some(p => p.method === 'giftcard' && p.giftCardCode) && grandTotal > 0) {
     (order.splitPaid || []).filter(p => p.method === 'giftcard' && p.giftCardCode).forEach(p => cardBack.push([p.giftCardCode, r2(value * (p.amount || 0) / grandTotal)]));
   }
@@ -13247,6 +13344,9 @@ app.post('/api/orders/:id/transfer', (req, res) => {
     if (order.covers) dest.covers = (dest.covers || 0) + order.covers;
     const sub = dest.items.reduce((s, i) => s + i.price * i.qty, 0);
     dest.subtotal = sub; dest.total = sub; dest.grandTotal = sub;
+    // A bill printed before more food came onto it is out of date — it
+    // un-prints, as a new round does (Sep '26: the guest held a short bill).
+    dest.billPrinted = false;
     order.status = 'void';
     order.voidedBy = staffName || 'Unknown';
     order.voidReason = `Combined into Ticket #${dest.id} (Table ${table})`;
@@ -13344,6 +13444,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
     dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true }];
     carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
     retotal(dest);
+    dest.billPrinted = false; // its printed bill no longer holds these dishes
   } else {
     dest = {
       id: data.ticketCounter,
@@ -13635,8 +13736,13 @@ function computeReportsOverview(data) {
   const week = paidIn(now - 7 * dayMs, now);
   const lastWeekSameDay = paidIn(todayFrom - 7 * dayMs, todayFrom - 7 * dayMs + (now - todayFrom));
   const t = sum(today), w = sum(week);
-  const voids = data.orders.filter(o => o.status === 'void' && !o.practice && o.createdAt > now - 7 * dayMs)
-    .map(o => ({ when: o.createdAt, by: o.staffName || '—', total: o.total || 0 }));
+  // A VOID IS MONEY TAKEN BACK, not a table moved: combining two tables, moving
+  // every dish off one, or closing an empty table are not voids — the cash-up
+  // already knew; Reports showed each as a whole-bill void under whoever
+  // opened the table (Sep '26). And it is the voider's name, not the opener's.
+  const voids = data.orders.filter(o => o.status === 'void' && !o.practice && o.createdAt > now - 7 * dayMs
+      && (o.items || []).length && !/^(Combined into|All items moved|Nothing ordered)/.test(o.voidReason || ''))
+    .map(o => ({ when: o.voidedAt || o.createdAt, by: o.voidedBy || o.staffName || '—', total: o.total || 0 }));
   const discounts = week.filter(o => o.discount && o.discount.kind !== 'surcharge')
     .map(o => ({ when: o.createdAt, by: o.staffName || '—', amount: o.discount.amount, reason: o.discount.reason || '' }));
   // A fortnight of daily nets for the trend, and the month's running total.
@@ -18257,6 +18363,20 @@ async function refreshOrders() {
   const data = await api('/api/orders');
   state.orders = data.orders;
   state.nextTicket = data.nextTicket;
+  syncFiredCourses();
+}
+// THE OPEN TABLE'S CALLED-AWAY COURSES FOLLOW THE TICKET. They were read only
+// when the table was tapped, so a course called away from the Pass on another
+// till never showed here — no tick, a second call possible, no take-back
+// (Sep '26). The ticket is the truth; a call this till made in the last few
+// seconds, not yet on the ticket, is kept.
+function syncFiredCourses() {
+  const o = state.openOrderId && (state.orders || []).find(x => x.id === state.openOrderId);
+  if (!o) return;
+  const srv = o.firedCourses || {}, mine = state.firedCourses || {}, now = Date.now(), next = {};
+  Object.keys(srv).forEach(k => { if (srv[k] > 0) next[k] = srv[k]; });
+  Object.keys(mine).forEach(k => { if (!(k in next) && mine[k] > 0 && now - mine[k] < 30000) next[k] = mine[k]; });
+  state.firedCourses = next;
 }
 async function refreshSummary() {
   state.summary = await api('/api/summary');
@@ -18527,6 +18647,9 @@ function openBillSplit() {
   // printing lives, and it never touches the pay screen.
   state.discountModal = null;
   state.payRailVouchers = false;
+  // The shares are shares of THE BILL, automatic rules and all: a split made
+  // before Pay ran the rules gave $50 + $50 on a $110 bill (Sep '26).
+  maybeApplyAutoSurcharge();
   // How the bill is being divided is kept ON THE ORDER, so coming back to the
   // table — on this till or another one — shows the same parts, with the ones
   // already paid still paid (owner-asked, Aug '26).
@@ -20398,7 +20521,10 @@ function ruleMatches(r, now, bill) {
     case 'orderType': return same(bill ? bill.orderType : state.orderType, r.value1, r.op);
     case 'weekday': return same(now.getDay(), r.value1, r.op);
     case 'holiday': return same(publicHolidayToday(now) ? 'yes' : 'no', r.value1, 'is');
-    case 'table': return same(bill ? bill.table || '' : state.table || '', r.value1, r.op);
+    // A table rule names the table's NUMBER ("21"); the till holds its id.
+    // Compared id to number, "Table is 21" never fired and "is not 21" fired
+    // on 21 too (Sep '26).
+    case 'table': { const id = bill ? bill.table || '' : state.table || ''; const t = id && findTableById(id); return same(t ? t.label : id, r.value1, r.op); }
     case 'date': {
       const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
       const today = ruleDateKey(now);
@@ -20436,6 +20562,10 @@ function presetOffered(p, now) {
 // surcharge the staff already put on by hand. It lands as a normal line a
 // manager can take straight back off.
 function maybeApplyAutoSurcharge() {
+  // AN AUTOMATIC RULE IS ASKED AGAIN EVERY TIME: once on, it was never checked
+  // again, so 10% off a $120 bill stayed on after a dish came off and the bill
+  // was $60 (Sep '26). A hand-made discount is still never touched.
+  if (state.discount && state.discount.auto) state.discount = null;
   if (state.discount) return;
   const r = matchingAutoPreset();
   if (r) state.discount = { type: r.type, value: r.value, reason: r.name, kind: r.kind, auto: true, ruleId: r.id };
@@ -21347,7 +21477,7 @@ async function confirmPaymentInner() {
     const taken = cashTakenAmount();
     if (taken <= 0) return;
     if (state.payShare || taken < amountOwing() - 0.005 || splitPaidList().length) {
-      await takePart(Math.min(taken, cashDue()), 'cash');
+      await takePart(Math.min(taken, cashDue()), 'cash', null, Math.max(0, Math.round((taken - cashDue()) * 100) / 100));
       return;
     }
   }
@@ -21373,7 +21503,8 @@ async function confirmPaymentInner() {
   // THE CHANGE OUTLIVES CONFIRM. It was on the pay screen and nowhere after:
   // Confirm left "Order closed — $80.00 paid" and "Close the table?", and the
   // $20 to hand back was gone while the waiter still held the notes (Sep '26).
-  const change = state.paymentMethod === 'cash' && !state.splitMode ? Math.max(0, Math.round((cashTakenAmount() - grandTotal) * 100) / 100) : 0;
+  const change = state.paymentMethod === 'cash' && !state.splitMode ? Math.max(0, Math.round((cashTakenAmount() - grandTotal) * 100) / 100) : (state._partChange || 0);
+  state._partChange = 0;
   const changeWords = change > 0.005 ? ` · ${money(change)} change` : '';
   if (state.openOrderId) {
     const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
@@ -24469,7 +24600,7 @@ function renderCallAwayPop() {
               <div style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
                 ${fired
                   ? `<span class="status-chip paid elapsed-timer" data-fired="${fired}">⏱ ${elapsedMinLabel(fired)}</span>
-                     ${state.settings.printEnabled ? '' : `<button class="btn-secondary" style="width:auto;padding:8px 12px;" data-act="print-docket" data-val="${n}">${SYS_PRINTER_SVG}</button>`}`
+                     ${state.settings.printEnabled ? '' : `<button class="btn-secondary icon-only" style="width:auto;padding:8px 12px;" data-act="print-docket" data-val="${n}">${SYS_PRINTER_SVG}</button>`}`
                   : total
                   ? `<button class="icon-action ${state.callAwayPick === n ? 'send' : 'neutral'} ca-tick" data-act="pick-callaway" data-val="${n}" aria-label="Choose ${esc(info.name)}">${ACT_TICK_SVG}</button>`
                   : ''}
@@ -24560,7 +24691,7 @@ function payConfirmLabel() {
 // now — the same parts the split screen uses, so the table still cannot close
 // a dollar short.
 async function takeCardPart(amount) { return takePart(amount, 'card'); }
-async function takePart(amount, method, giftCardCode) {
+async function takePart(amount, method, giftCardCode, change) {
   const order = activeOpenOrder();
   if (!order) { state.toast = toastFail('Send the order first.'); render(); return; }
   if (method === 'card' && terminalActive() && !state._terminalApproved) {
@@ -24568,6 +24699,14 @@ async function takePart(amount, method, giftCardCode) {
     if (!ok) return;
   }
   const n = (order.splitPaid || []).filter(p => String(p.key).indexOf(method) === 0).length + 1;
+  // EACH ATTEMPT HAS ITS OWN NAME, kept only for its retries. "card" + the
+  // number of cards this till knew of meant a second till, 15s behind, named
+  // its part "card1" again and the server refused it as already paid — after
+  // the terminal had charged the card (Sep '26). A retry of a lost reply keeps
+  // the name, so it is still never counted twice.
+  if (!state._partAttempt || state._partAttempt.order !== order.id || state._partAttempt.method !== method) {
+    state._partAttempt = { order: order.id, method, key: method + n + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) };
+  }
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
   // Paying the share from the split screen marks THAT share paid, and the
   // shares freeze as they were — so a three-way split stays three equal
@@ -24578,7 +24717,7 @@ async function takePart(amount, method, giftCardCode) {
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: share ? share.key : method + n, parts: share ? share.parts : undefined,
+      body: JSON.stringify({ key: share ? share.key : state._partAttempt.key, parts: share ? share.parts : undefined,
         label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
         amount, method, giftCardCode: giftCardCode || null, discount: state.discount,
         cardType: method === 'card' ? state.cardType : null,
@@ -24586,7 +24725,12 @@ async function takePart(amount, method, giftCardCode) {
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
+    state._partAttempt = null;
   } catch (e) {
+    // A refusal is an answer: the next try is a new attempt, and the table is
+    // re-read so this till sees what the other one took. Only a lost reply
+    // (no status) keeps the name for its retry.
+    if (e.status) { state._partAttempt = null; refreshOrders().then(() => renderWhenStill()).catch(() => {}); }
     state.toast = toastFail(e.message || (method === 'giftcard' ? 'Could not take that gift card.' : 'Could not record that card.'));
     render();
     return false;
@@ -24609,10 +24753,13 @@ async function takePart(amount, method, giftCardCode) {
     // A seat or even split ends here too, so its screen state goes first.
     state.splitTenders = splitPaidList().map(p => ({ method: p.method, amount: p.amount.toFixed(2) }));
     state.splitMode = true;
+    state._partChange = change || 0; // the last share's change rides to the close
     await confirmPaymentNow();
     return true;
   }
-  state.toast = `${money(amount)} taken — ${money(amountOwing())} still to pay`;
+  // CASH OVER A SHARE IS CHANGE, and the waiter is told so, as a whole bill
+  // is — a $100 note on a $50 share said only "$50.00 taken" (Sep '26).
+  state.toast = `${money(amount)} taken${change > 0.005 ? ` · ${money(change)} change` : ''} — ${money(amountOwing())} still to pay`;
   render();
   return true;
 }
@@ -25394,7 +25541,10 @@ function renderRosterAdmin() {
   const dayHours = key => staff.reduce((sum, s) => sum + shiftsFor(s.id, key).reduce((a, sh) => a + rosterShiftHours(sh), 0), 0);
   const weekTotalHours = days.reduce((a, d) => a + dayHours(d.key), 0);
   const labourCost = staff.reduce((sum, s) => sum + staffWeekHours(s) * (s.payRate || 0), 0);
-  const weekSales = (state.orders || []).filter(o => o.status !== 'void' && (o.createdAt || 0) >= weekStart && (o.createdAt || 0) < weekEnd)
+  // Sales are bills PAID, not practice, by when they were paid — the rule every
+  // other sales box uses. Open tabs and trainee rings made labour look cheap
+  // (Sep '26).
+  const weekSales = (state.orders || []).filter(o => o.status === 'paid' && !o.practice && (o.closedAt || o.createdAt || 0) >= weekStart && (o.closedAt || o.createdAt || 0) < weekEnd)
     .reduce((a, o) => a + (o.grandTotal !== undefined ? o.grandTotal : (o.total || 0)), 0);
   // Actuals from the time clock: shifts clocked in during this week.
   const staffById = {}; staff.forEach(s => { staffById[s.id] = s; });
@@ -32722,7 +32872,11 @@ function miPreviewRows() {
     const rawName = ni >= 0 ? (r[ni] || '') : '';
     const name = miStripSpecs(rawName);
     const price = pi >= 0 ? parseFloat(String(r[pi] || '').replace(/[^0-9.]/g, '')) : NaN;
-    const cat = (ci >= 0 && (r[ci] || '').trim()) || mi.fallbackCat || '';
+    const typed = (ci >= 0 && (r[ci] || '').trim()) || mi.fallbackCat || '';
+    // A section is the same section whatever its capitals: "cocktails" is
+    // Cocktails. The server refuses a second one that differs only in case,
+    // so every such row previewed as new and then failed (Sep '26).
+    const cat = (state.categories.find(c => c.name.toLowerCase() === typed.toLowerCase()) || {}).name || typed;
     if (!name || isNaN(price)) return { name: rawName || '—', status: 'skip' };
     // ledger noise, not menu: a sheet's TOTAL/SUBTOTAL rows never import
     if (/^(sub)?total\b|^sum\b/i.test(name)) return { name, status: 'skip' };
@@ -35675,7 +35829,7 @@ function pickTable(id) {
     // again on the way back — every time, until something was ordered. The
     // table's own number stands on its own now; the order's wins when it has
     // one.
-    state.covers = (oo && oo.covers) || (t && t.covers) || 0;
+    state.covers = (t && t.covers) || (oo && oo.covers) || 0; // the table first, as login reads it: it holds the latest change
     state.discount = (t && t.discount) || null; // the account's discount comes back with the table
     state.notes = (t && t.notes) || [];
     state.openOrderId = (oo && oo.id) || null;
@@ -35852,11 +36006,19 @@ async function doTransferToTable(newTableId) {
   refreshOrders().then(() => render()).catch(() => {});
   const movedLabel = oldTable ? oldTable.label : '';
   if (movingOwn) {
+    // THE LOCK MOVES WITH THE PARTY: the table they left stayed "In use" for a
+    // minute and staff could not open it (Sep '26).
+    if (oldTableId && oldTableId !== newTableId) releaseTableLock(oldTableId);
+    claimTableLock(newTableId).catch(() => {});
     state.table = newTableId;
     // After a combine the live tab is the DESTINATION's order — re-point.
     state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
     state.covers = newTable.covers || 0; state.discount = newTable.discount || null;
   }
+  // Whenever this till is ON the table that received the party, it reads that
+  // table's notes afresh — pulling a table onto this one left the old list in
+  // hand, and the next note saved it over the top: an allergy gone (Sep '26).
+  if (state.table === newTableId) { state.notes = (newTable.notes || []).slice(); state.covers = newTable.covers || 0; }
   state.transferFrom = null;
   // A transfer ALWAYS lands back on the floor — that's where the ⇄ lives and
   // where the next job is. Even moving your own table no longer follows it
@@ -40154,12 +40316,20 @@ async function remapCourseRefs(mapFn) {
   state.menu.forEach(m => { if (m.defaultCourse && mapFn(m.defaultCourse) !== m.defaultCourse) put('/api/menu/' + m.id, mapFn(m.defaultCourse)); });
   state.categories.forEach(c => { if (c.defaultCourse && mapFn(c.defaultCourse) !== c.defaultCourse) put('/api/categories/' + c.id, mapFn(c.defaultCourse)); });
   state.subcategories.forEach(s => { if (s.defaultCourse && mapFn(s.defaultCourse) !== s.defaultCourse) put('/api/subcategories/' + s.id, mapFn(s.defaultCourse)); });
+  // …and a set menu's choices, which carry a course each: deleting a course
+  // left them on the wrong one, or on an unnamed "Course 7" page (Sep '26).
+  (state.combos || []).forEach(c => {
+    if (!(c.groups || []).some(g => g.course && mapFn(g.course) !== g.course)) return;
+    const groups = c.groups.map(g => Object.assign({}, g, g.course ? { course: mapFn(g.course) } : {}));
+    jobs.push(api('/api/combos/' + c.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups }) }));
+  });
   if (!jobs.length) return;
   try {
     await Promise.all(jobs);
     state.menu = await api('/api/menu');
     state.categories = await api('/api/categories');
     state.subcategories = await api('/api/subcategories');
+    state.combos = await api('/api/combos');
     render();
   } catch (e) {}
 }
@@ -40607,7 +40777,10 @@ function duplicateSelectedNoteTypes() {
   const sel = new Set(state.selectedNoteTypeIds || []);
   const dupes = state.noteCategories.filter(c => sel.has(c.id)).map(c => ({
     id: 'note-' + Date.now() + '-' + Math.floor(state.noteCategories.length + Math.random() * 1000),
-    name: c.name + ' copy', color: c.color, presets: (c.presets || []).map(p => ({ ...p })),
+    // THE WHOLE CARD COMES WITH IT — where it prints and what it is about. The
+    // copy used to keep only the name, colour and presets, so it printed on
+    // every docket and flipped to "a seat" (Sep '26).
+    ...c, name: c.name + ' copy', presets: (c.presets || []).map(p => ({ ...p })),
   }));
   if (!dupes.length) return;
   saveNoteCategories([...state.noteCategories, ...dupes]); // originals stay selected
@@ -40615,17 +40788,14 @@ function duplicateSelectedNoteTypes() {
 function deleteSelectedNoteTypes() {
   const sel = new Set(state.selectedNoteTypeIds || []);
   if (!sel.size) return;
-  const nCustom = state.noteCategories.filter(c => sel.has(c.id)).length;
-  const nBuiltin = ['vip', 'allergy'].filter(id => sel.has(id)).length;
-  openConfirm({ message: `Delete ${nCustom + nBuiltin} note type${nCustom + nBuiltin === 1 ? '' : 's'}?${nBuiltin ? ' (VIP/Allergies are hidden, restorable with ↺.)' : ''}`, confirmLabel: 'Delete', danger: true }, () => {
-    // Hide built-ins, delete custom.
-    const hide = ['vip', 'allergy'].filter(id => sel.has(id));
+  // THERE ARE NO BUILT-IN NOTE TYPES (Order note law): VIP is a row like any
+  // other. The confirm counted it twice and promised a ↺ restore that never
+  // came, while the type was deleted for good (Sep '26).
+  const n = state.noteCategories.filter(c => sel.has(c.id)).length;
+  if (!n) return;
+  openConfirm({ message: `Delete ${n} note type${n === 1 ? '' : 's'}?`, confirmLabel: 'Delete', danger: true }, () => {
     const keepCats = state.noteCategories.filter(c => !sel.has(c.id));
     state.selectedNoteTypeIds = [];
-    if (hide.length) {
-      const hidden = Array.from(new Set([...(state.settings.hiddenNoteTypes || []), ...hide]));
-      saveTicketSetting({ hiddenNoteTypes: hidden });
-    }
     saveNoteCategories(keepCats);
   });
 }
@@ -44521,7 +44691,7 @@ function handleActClick(el, e) {
       // on top of a tip an earlier part already carried away (the chips
       // stacked and never lit once a part had gone through, Sep '26). Tip
       // already taken cannot be un-taken, so the total never drops below it.
-      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); const before = cardTipPending(); state.cardTip = Math.round(Math.max(already, p ? cartTotal() * p / 100 : 0) * 100) / 100; shareCardFollowsTip(before); render(); }
+      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); const before = cardTipPending(); state.cardTip = Math.round(Math.max(already, p ? (state.payShare ? already + state.payShare.amount * p / 100 : cartTotal() * p / 100) : 0) * 100) / 100; shareCardFollowsTip(before); render(); }
       else if (act === 'ordertype') {
         // Mode chips live in the bar now — tapping one from ANY view lands on
         // the order screen in that mode. Dine-in has no chip: Order IS dine-in.
@@ -46000,7 +46170,13 @@ function handleActClick(el, e) {
         const params = new URLSearchParams();
         if (from) params.set('from', from);
         if (to) params.set('to', to);
-        window.location.href = '/api/orders/export.csv' + (params.toString() ? '?' + params.toString() : '');
+        // FETCHED AND SAVED, never navigated to: going to the file's address left
+        // the till page, and in the preview (no real server) it was a 404 with
+        // no file and no till (Sep '26).
+        fetch('/api/orders/export.csv' + (params.toString() ? '?' + params.toString() : ''))
+          .then(r => { if (!r.ok) throw new Error(); return r.blob(); })
+          .then(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `sales-${from || 'all'}${to && to !== from ? '-to-' + to : ''}.csv`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); })
+          .catch(() => { state.toast = toastFail('Could not download the sales file.'); render(); armToastTimer(2500); });
       }
       else if (act === 'download-backup') { downloadDataFile(); }
       else if (act === 'import-data') { const inp = document.getElementById('import-data-input'); if (inp) inp.click(); }

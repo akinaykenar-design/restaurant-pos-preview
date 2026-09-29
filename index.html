@@ -1514,6 +1514,11 @@ label.toggle-row{display:flex;align-items:center;gap:8px;cursor:pointer;font-siz
    Printers row (inline editor). Same field dress in both. */
 .ps-inline-form input, .ps-inline-form select{width:100%;padding:8px 12px;border-radius:var(--r-control);border:1px solid var(--steel-300);font-family:var(--font-mono);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);}
 .ps-inline-form select.found-assign{width:auto;}
+/* "Is this you?" on the manager's void PIN (§ loadVoidPattern): a waiter's
+   night out of the ordinary, said before the PIN goes in. */
+.void-odd{background:color-mix(in srgb, var(--red) 12%, var(--surface));color:var(--text-primary);border-radius:var(--r-control);padding:8px 12px;margin:12px 0 0;display:flex;flex-direction:column;gap:4px;font-size:var(--fs-md);}
+.void-odd b{color:color-mix(in srgb, var(--red) 70%, var(--text-primary));font-weight:800;}
+.void-odd .sys-i{width:16px;height:16px;vertical-align:-3px;}
 .change-due{background:var(--green-dim);color:var(--green);border-radius:var(--r-control);padding:8px 12px;margin-top:12px;font-family:var(--font-mono);font-weight:700;display:flex;justify-content:space-between;}
 /* Pay/discount content hosted in the middle pane reuses the modal typography. */
 .pay-pane h2{font-family:var(--font-display);font-size:var(--fs-xl);margin:0 0 4px;}
@@ -4010,6 +4015,15 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 .tbl-cpill i{ width:12px; height:12px; border-radius:50%; display:block; border:1px solid color-mix(in srgb, currentColor 35%, transparent); box-sizing:border-box; }
 .tbl-cpill b{ font-size:var(--fs-md); font-weight:800; color:inherit; line-height:1; font-family:var(--font-mono); text-transform:uppercase; }
 .tbl-cpill.over{ background:var(--violet); box-shadow:0 0 0 var(--ring) rgba(255,255,255,.8); }
+/* NOT PRINTED (§ Missed call in app.js): the kitchen never got a docket for
+   this table. Solid, like a missed call — the one badge that must shout. */
+.tbl-cpill.tbl-missed{ background:color-mix(in srgb, var(--red) 78%, #000); color:#fff; }
+.missed-row{display:flex;flex-direction:column;gap:4px;padding:12px 0 0;font-size:var(--fs-md);}
+.missed-row b{font-weight:800;}
+/* A DRAFT (§ Drafts in app.js): unsent dishes waiting on a table this waiter
+   left. It wears the pill's clothes in the late pill's red — it is the one
+   thing on the floor that means "the kitchen does not know yet". */
+.tbl-cpill.tbl-draft{ background:color-mix(in srgb, var(--red) 18%, var(--surface)); color:color-mix(in srgb, var(--red) 64%, var(--text-primary)); }
 /* Allergy / VIP marks: top-right overlay stack — tiny, permanent, no flow. */
 /* Always-on RES chip (booking clock time), top-left like the lock badge. */
 .tbl-res{ position:absolute; top:3px; left:3px; z-index:3; background:var(--blue); color:#fff; font-size:var(--fs-chip); font-weight:800; padding:4px 4px; border-radius:var(--r-control); line-height:1.4; white-space:nowrap; pointer-events:none; box-shadow:var(--lift-1); }
@@ -6788,6 +6802,8 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
     // one made Call away answer "Something went wrong" here (owner, Sep '26),
     // as a missing drawer stub once did to every payment.
     printCallAwaySlips: function () {},
+    getMissed: function () { return []; },
+    settleMissed: function () { return Promise.resolve(null); },
     courseNameOf: function (settings, n) { return (((settings || {}).courses || [])[n - 1] || {}).name || ('Course ' + n); },
     openCashDrawer: function () { return false; },
     probe: function () { return Promise.resolve(true); },
@@ -8611,6 +8627,34 @@ app.get('/api/audit-log', (req, res) => {
 app.get('/api/house-log', (req, res) => {
   const data = readData();
   res.json(data.houseLog || []);
+});
+// IS THIS YOU? (owner, Sep '26 — borrowed from a bank's fraud check). The
+// manager's void PIN form asks this before it opens: how many voids this
+// waiter has rung tonight, what they were worth, and how many a night they
+// usually ring. The till only shows it when tonight is out of the ordinary.
+// A void is money taken back off a ticket: a sent dish taken off, or a
+// whole ticket voided — never a table moved.
+app.get('/api/void-pattern', (req, res) => {
+  const data = readData();
+  const who = String(req.query.staff || '');
+  const now = Date.now(), dayMs = 86400000, today = tradingDayStart(now, data.settings);
+  const from = today - 28 * dayMs;
+  const events = [
+    ...(data.orders || []).filter(o => !o.practice).flatMap(o => (o.lineVoids || []).filter(e => e.staff === who && e.at >= from)),
+    ...(data.orders || []).filter(o => o.status === 'void' && !o.practice && o.voidedBy === who && (o.items || []).length
+      && !/^(Combined into|All items moved|Nothing ordered)/.test(o.voidReason || '') && (o.voidedAt || o.createdAt) >= from)
+      .map(o => ({ at: o.voidedAt || o.createdAt, value: o.total || 0 })),
+  ];
+  const tonight = events.filter(e => e.at >= today);
+  // The nights they worked: any ticket of theirs opened that trading day.
+  const worked = new Set((data.orders || []).filter(o => !o.practice && o.staffName === who && o.createdAt >= from && o.createdAt < today)
+    .map(o => tradingDayStart(o.createdAt, data.settings)));
+  const before = events.filter(e => e.at < today).length;
+  res.json({
+    tonight: tonight.length,
+    tonightValue: Math.round(tonight.reduce((s, e) => s + e.value, 0) * 100) / 100,
+    usual: worked.size ? Math.round(before / worked.size) : null,
+  });
 });
 app.post('/api/house-log', (req, res) => {
   const data = readData();
@@ -11273,6 +11317,18 @@ app.post('/api/backups/restore', (req, res) => {
 app.get('/api/print-alerts', (req, res) => {
   res.json(printing.getAlerts(parseInt(req.query.since, 10) || 0));
 });
+// Dockets that did not print, each on its table until sorted (§ missed call
+// in the printing module): printed again, or walked over to the kitchen by hand.
+app.get('/api/missed-prints', (req, res) => { res.json(printing.getMissed()); });
+app.post('/api/missed-prints/:id', async (req, res) => {
+  const data = readData();
+  const how = (req.body || {}).how === 'reprint' ? 'reprint' : 'walked';
+  const m = await printing.settleMissed(parseInt(req.params.id, 10), how, data.printerStations || []);
+  if (!m) return res.status(404).json({ error: 'Already sorted' });
+  logAudit(data, staffFromReq(req), `${m.label} for ${m.stationName}: ${how === 'reprint' ? 'printed again' : 'walked over by hand'}`);
+  writeData(data);
+  res.json(printing.getMissed());
+});
 
 // Live reachability per station — drives the online dot on the Printers page.
 // Every non-serial printer address gets a quick knock; COM ports can't be
@@ -12881,6 +12937,9 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
     const why = reason ? ` (${reason})` : '';
     logAudit(data, staff, `Removed ${qtyRemoved}× ${match.name} from Ticket #${order.id}${why}`);
+    // The ticket remembers who took money off it and how much, reason or not
+    // (the house log only holds reasoned ones): "Is this you?" counts these.
+    if (qtyRemoved) (order.lineVoids = order.lineVoids || []).push({ at: Date.now(), staff, qty: qtyRemoved, value: Math.round(value * 100) / 100 });
     // House log: every reasoned removal is a shift-level record — wastage,
     // comps and staff meals roll up here for the manager and reports.
     if (reason) {
@@ -20842,6 +20901,9 @@ function cancelCoversPad() {
     // covers (owner, Aug '26). Un-claim it — release the lock, restore
     // whatever table was current before, and stay on the floor.
     releaseTableLock(state.table);
+    // Whatever the pick took up goes back down, and the table left comes
+    // back with its round (§ Drafts).
+    draftStash(state.table);
     state.table = fp.prev || null;
     const pt = fp.prev ? findTableById(fp.prev) : null;
     const po = pt ? state.orders.find(o => o.status === 'open' && o.table === pt.label) : null;
@@ -20849,6 +20911,7 @@ function cancelCoversPad() {
     state.notes = (pt && pt.notes) || [];
     state.discount = (pt && pt.discount) || null;
     state.openOrderId = (po && po.id) || null;
+    if (fp.prev) draftTake(fp.prev);
     if (fp.prev) claimTableLock(fp.prev);
     state.showTablePicker = true; // still choosing a table
   } else if (state.settings.coversEnabled && state.orderType === 'dine-in' && !state.covers && state.table != null && !activeOpenOrder()) {
@@ -21235,6 +21298,73 @@ function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.ran
 // keys, a discount, a staged call-away, a quick note (Sep '26: a 10% off on
 // table 22 followed the till onto table 222 and the next person's log-in).
 function clearSendState() { state.sendKey = null; state.sendFailed = null; state._payAfterSend = false; /* the discount is the ACCOUNT's — it lives on the table and comes back with it — not the send's */ state.stagedCallAway = null; state.quickNote = ''; state.quickNoteStation = null; }
+
+// §§ Drafts: an unsent round stays on its table
+// LEAVE MID-ORDER, LOSE NOTHING (owner, Sep '26 — borrowed from a mail
+// app's Draft). Tapping another table asked "Switch tables? Items not yet
+// sent will be cleared", so a waiter called away mid-order either lost the
+// round or sent half of it. Now the unsent round stays on the table it was
+// rung on, the floor tags it "Draft · 6", and a tap on that table hands it
+// back. A draft is the WAITER'S and lives on this till: the next person on
+// the till never sends somebody else's half-thought order. Kept a shift,
+// like the refresh armour.
+const DRAFT_KEY = 'pos-drafts', DRAFT_TTL = 8 * 3600 * 1000;
+function draftsLoad() {
+  if (state._drafts) return state._drafts;
+  let all = {};
+  try { all = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}') || {}; } catch (e) {}
+  const now = Date.now();
+  for (const who of Object.keys(all)) {
+    for (const tid of Object.keys(all[who] || {})) if (!(now - (all[who][tid].ts || 0) < DRAFT_TTL)) delete all[who][tid];
+    if (!Object.keys(all[who] || {}).length) delete all[who];
+  }
+  return (state._drafts = all);
+}
+function draftsWrite() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state._drafts || {})); } catch (e) {} }
+function draftsMine() { return (state.currentStaff && draftsLoad()[state.currentStaff.id]) || {}; }
+// How many dishes wait unsent on a table, for its tag. Zero = no tag.
+function draftCount(tableId) { const d = draftsMine()[tableId]; return d ? d.cart.reduce((s, l) => s + (l.qty || 1), 0) : 0; }
+// Put the till's unsent round on a table and empty the till.
+function draftStash(tableId) {
+  if (tableId == null || !state.currentStaff || !state.cart.length) { state.cart = []; clearSendState(); return; }
+  const all = draftsLoad(), mine = all[state.currentStaff.id] || (all[state.currentStaff.id] = {});
+  const there = mine[tableId]; // one already waiting there (a table moved onto it) keeps its lines
+  mine[tableId] = { cart: there ? [...there.cart, ...state.cart] : state.cart, activeCourse: state.activeCourse, openOrderId: state.openOrderId,
+    sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
+    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now() };
+  draftsWrite();
+  state.cart = []; clearSendState();
+}
+// Hand a table's draft back to the till, after anything already rung up.
+function draftTake(tableId) {
+  const mine = draftsMine(), d = mine[tableId];
+  if (!d) return;
+  delete mine[tableId]; draftsWrite();
+  state.cart = [...d.cart, ...state.cart];
+  if (d.activeCourse) state.activeCourse = d.activeCourse;
+  state.stagedCallAway = state.stagedCallAway || d.stagedCallAway || null;
+  state.quickNote = state.quickNote || d.quickNote || '';
+  state.quickNoteStation = state.quickNoteStation || d.quickNoteStation || null;
+  // A failed send's key only means something on the ticket it was aimed at:
+  // if that ticket has closed since, the round goes out fresh.
+  if (d.sendKey && d.openOrderId === state.openOrderId) { state.sendKey = d.sendKey; state.sendFailed = d.sendFailed || null; }
+  else state.cart.forEach(l => { delete l.lineKey; delete l.sentQty; });
+}
+// A table that moves takes its drafts with it — every waiter's.
+function draftsMove(fromId, toId) {
+  const all = draftsLoad(); let moved = false;
+  for (const who of Object.keys(all)) {
+    const d = all[who][fromId]; if (!d) continue;
+    const there = all[who][toId];
+    all[who][toId] = there ? { ...there, cart: [...there.cart, ...d.cart], ts: Date.now() } : d;
+    delete all[who][fromId]; moved = true;
+  }
+  if (moved) draftsWrite();
+}
+function draftBadgeHtml(t) {
+  const n = draftCount(t.id);
+  return n ? `<span class="tbl-cpill tbl-draft"><b>Draft · ${n}</b></span>` : '';
+}
 async function sendToKitchen() {
   if (state.sending) return;
   // The phone Save button is always tappable (its hold is the log-off
@@ -21838,6 +21968,7 @@ function render() {
     ${state.confirmDialog ? renderConfirmDialog() : ''}
     ${state.idleWarn ? renderIdleWarn() : ''}
     ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
+    ${state.missedPop ? renderMissedPop() : ''}
 
     ${state.toast ? `<div class="toast"><span class="dot${state.toastFailed === state.toast ? ' bad' : ''}"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
     ${state.frozen ? renderFreezeOverlay() : ''}
@@ -23543,7 +23674,30 @@ function doRemoveSent(match, qty, then) {
   const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
   if (!ask && isMgr) { commitRemoveSent(match, null, qty, then); return; }
   state.voidItemPrompt = { match, qty, then, needPin: !ask, reason: null, pin: '', pinError: '' };
+  if (!ask) loadVoidPattern(state.voidItemPrompt);
   render();
+}
+// IS THIS YOU? (owner, Sep '26 — a bank's fraud check, carried across). The
+// manager's PIN went in blind: nothing on the form said this was the waiter's
+// fourth void tonight when they usually ring one, so it came out at the
+// cash-up, hours too late to ask. The form now asks the till first and says
+// so, only when tonight is out of the ordinary.
+function loadVoidPattern(m) {
+  const who = state.currentStaff && state.currentStaff.name; if (!who) return;
+  api('/api/void-pattern?staff=' + encodeURIComponent(who))
+    .then(r => { if (state.voidItemPrompt === m) { m.pattern = r; render(); } }).catch(() => {});
+}
+// Out of the ordinary: a third void or more tonight, and more than twice the
+// waiter's usual night. Nothing to show otherwise — a band on every void is a
+// band nobody reads.
+function voidPatternHtml(m, worth) {
+  const r = m.pattern; if (!r) return '';
+  const nth = r.tonight + 1;
+  if (nth < 3 || (r.usual != null && nth <= 2 * r.usual)) return '';
+  const th = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+  const who = state.currentStaff ? state.currentStaff.name : '';
+  return `<div class="void-odd"><b>${SYS_WARN_SVG} ${esc(who)} · ${th(nth)} void tonight</b>
+    ${r.usual != null ? `<span>Usually ${r.usual}</span>` : ''}<span>${money(r.tonightValue + worth)} voided tonight</span></div>`;
 }
 // The venue's own void reasons (Settings → Voids), theirs entirely. It used
 // to force "Wastage" back onto the list whatever they had written, so a venue
@@ -23578,8 +23732,9 @@ function renderVoidReasonPop() {
   <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>Void ${n > 1 ? n + ' × ' : ''}${esc(it.name || 'item')} · ${money((Number(it.price) || 0) * n)}</h2>
+      ${voidPatternHtml(m, (Number(it.price) || 0) * n)}
       <label>Manager PIN</label>
-      <input id="void-item-pin" type="password" inputmode="numeric" maxlength="8" placeholder="Manager PIN" oninput="state.voidItemPrompt.pin = this.value;">
+      <input id="void-item-pin" type="password" inputmode="numeric" maxlength="8" placeholder="Manager PIN" value="${esc(m.pin || '')}" oninput="state.voidItemPrompt.pin = this.value;">
       ${m.pinError ? `<div class="login-error">${esc(m.pinError)}</div>` : ''}
       <div class="modal-actions">
         <button class="icon-action neutral" data-act="close-void-reason">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
@@ -26824,7 +26979,55 @@ async function pollPrintAlerts() {
       renderWhenStill();
       armToastTimer(6000);
     }
+    // The toast is the moment; the table keeps it (§ Missed call).
+    const missed = await api('/api/missed-prints');
+    if (missed.map(m => m.id).join() !== (state.missedPrints || []).map(m => m.id).join()) { state.missedPrints = missed; renderWhenStill(); }
   } catch (e) { /* server unreachable — the offline dot already shows that */ }
+}
+// §§ Missed call: a docket that did not print stays on its table
+// (owner, Sep '26 — a phone's missed-call badge). The toast went in six
+// seconds and named no table anyone could find, so a table whose docket
+// never printed looked exactly like one being cooked for. Now the table
+// wears "Not printed" until somebody sorts it, and a tap on it asks first:
+// walked it over, or print it again.
+function missedOn(tableId) {
+  const t = findTableById(tableId); if (!t) return [];
+  return (state.missedPrints || []).filter(m => m.table != null && String(m.table) === String(t.label)
+    && state.orders.some(o => o.id === m.orderId && o.status === 'open'));
+}
+function missedBadgeHtml(t) { return missedOn(t.id).length ? `<span class="tbl-cpill tbl-missed"><b>Not printed</b></span>` : ''; }
+const ACT_PRINTER_SVG = SYS_PRINTER_SVG.replace(' class="sys-i"', '');
+function renderMissedPop() {
+  const mp = state.missedPop; if (!mp) return '';
+  const list = missedOn(mp.tableId);
+  if (!list.length) { state.missedPop = null; return ''; }
+  return `
+  <div class="modal-bg">
+    <div class="modal" data-stop="1">
+      <h2>Kitchen didn't get this</h2>
+      ${list.map(m => `<div class="missed-row"><b>${esc(m.stationName)}</b><span>${esc(m.lines)}</span></div>`).join('')}
+      <div class="modal-actions">
+        <button class="icon-action neutral" data-act="missed-close">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
+        <button class="icon-action neutral" data-act="missed-settle" data-how="walked"${mp.busy ? ' disabled' : ''}>${ACT_TICK_SVG}<span class="ia-label">Walked over</span></button>
+        <button class="icon-action send" data-act="missed-settle" data-how="reprint"${mp.busy ? ' disabled' : ''}>${ACT_PRINTER_SVG}<span class="ia-label">Print again</span></button>
+      </div>
+    </div>
+  </div>`;
+}
+async function settleMissedOn(tableId, how) {
+  const mp = state.missedPop; if (!mp || mp.busy) return;
+  mp.busy = true; render();
+  const before = missedOn(tableId).length;
+  try {
+    for (const m of missedOn(tableId)) state.missedPrints = await api(`/api/missed-prints/${m.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ how }) });
+  } catch (e) { mp.busy = false; state.toast = toastFail('Could not reach the till'); render(); armToastTimer(2500); return; }
+  mp.busy = false;
+  const still = missedOn(tableId).length;
+  state.missedPop = still ? mp : null;
+  const t = findTableById(tableId);
+  state.toast = how === 'walked' ? `Table ${t ? t.label : ''} sorted`
+    : still ? toastFail(`Still not printing — ${before > 1 ? 'dockets' : 'docket'} for Table ${t ? t.label : ''}`) : `Printed again for Table ${t ? t.label : ''}`;
+  render(); armToastTimer(2500);
 }
 setInterval(pollPrintAlerts, 12000);
 
@@ -34217,7 +34420,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // own corner, so it turned with a turned table, lay over the number and
   // clipped the name to "Jam…" (owner's walk, Sep '26).
   const lockHtml = opts.lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(opts.lock.staff)}</span>` : '';
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, lockHtml + floorPillHtml(t, cs))}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs))}`;
 }
 
 // EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
@@ -35284,7 +35487,7 @@ function renderTablePickerMiddle() {
                 const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
                 return oo && oo.covers ? oo.covers + ' covers' : '';
               })()}</span>
-              ${!lock ? floorPillHtml(t, cs) : ''}
+              ${uprightBadges(t, missedBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''))}
               ${transferFxHtml(t)}
             </div>`;
           }).join('')}
@@ -35760,6 +35963,11 @@ function pickTable(id) {
   // an order screen with no tiles yet. If it is still in the air, wait for it
   // and come back — a fraction of a second, once, on a cold start.
   if (_menuReady && !state.menu.length) { menuReady().then(() => pickTable(id)); return; }
+  // A round on its way belongs to the table it left from: leaving mid-send
+  // would put the lines in the air down as a draft as well (§ Drafts).
+  if (state.sending && id !== state.table) { state.pickFlashId = null; state.toast = toastFail('Still sending — one moment'); render(); armToastTimer(1800); return; }
+  // A table whose docket never printed asks that first (§ Missed call).
+  if (missedOn(id).length && !state.moveItemsPicking && !state.transferFrom) { state.pickFlashId = null; state.missedPop = { tableId: id }; render(); return; }
   // Switching AWAY from an empty set-up table asks about closing it first.
   const rt = findTableById(id);
   const resolvedId = rt && rt.mergedInto && rt.mergedInto !== id ? rt.mergedInto : id;
@@ -35813,7 +36021,9 @@ function pickTable(id) {
     // the "Switch tables?" guard above only asks for a DIFFERENT table, so a
     // swipe onto the floor and a tap on your own table silently ate the
     // round (owner: "swiping left while ordering deletes the order").
-    if (hadTable && prevTable !== id) { state.cart = []; clearSendState(); }
+    // A DIFFERENT table puts the round down as that table's draft instead
+    // (§ Drafts), and picks up whatever this table had waiting.
+    if (hadTable && prevTable !== id) draftStash(prevTable);
     state.autoCourseOverride = null;
     const oo = t && state.orders.find(o => o.status === 'open' && o.table === t.label);
     // Covers may be recorded on the table OR its open order — either counts
@@ -35836,6 +36046,7 @@ function pickTable(id) {
     // The called-away courses come back with the table (Sep '26: leaving and
     // returning forgot the call-away, so mains were called twice).
     state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
+    if (prevTable !== id) draftTake(id);
     // A BUSY TABLE OPENS ON ITS WHOLE TICKET (owner, Sep '26): the paged docket
     // opened on the first course, so a table with seven dishes and no drinks
     // opened on an empty Drinks page. With food on it, it opens on All — or,
@@ -35884,15 +36095,8 @@ function pickTable(id) {
     }
     return;
   }
-  if (state.table && id !== state.table && state.cart.length > 0) {
-    openConfirm({
-      message: 'Switch tables? Items not yet sent to the kitchen will be cleared.', confirmLabel: 'Switch tables', danger: false,
-      // Backing out ends the tap — the sweep may not stay stuck green.
-      onCancel: () => { state.pickFlashId = null; render(); },
-    }, () => proceed(false));
-  } else {
-    proceed(false);
-  }
+  // No "Switch tables?" any more: the round stays behind as a draft.
+  proceed(false);
 }
 
 function transferToTable(newTableId, extra) {
@@ -36003,6 +36207,7 @@ async function doTransferToTable(newTableId) {
     }
   }
   await sittingMove;
+  draftsMove(oldTableId, newTableId); // an unsent round follows its party
   refreshOrders().then(() => render()).catch(() => {});
   const movedLabel = oldTable ? oldTable.label : '';
   if (movingOwn) {
@@ -44424,8 +44629,10 @@ function handleActClick(el, e) {
         const m = state.voidItemPrompt; if (!m) return;
         const isMgr = state.currentStaff && state.currentStaff.role === 'manager';
         if (isMgr) commitRemoveSent(m.match, el.dataset.val, m.qty, m.then);
-        else { m.reason = el.dataset.val; m.needPin = true; m.pin = ''; m.pinError = ''; render(); const pi = document.getElementById('void-item-pin'); if (pi) pi.focus(); }
+        else { m.reason = el.dataset.val; m.needPin = true; m.pin = ''; m.pinError = ''; loadVoidPattern(m); render(); const pi = document.getElementById('void-item-pin'); if (pi) pi.focus(); }
       }
+      else if (act === 'missed-close') { state.missedPop = null; render(); }
+      else if (act === 'missed-settle') { if (state.missedPop) settleMissedOn(state.missedPop.tableId, el.dataset.how); }
       else if (act === 'void-item-approve') {
         const m = state.voidItemPrompt; if (!m) return;
         api('/api/staff/verify-manager-pin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pin: m.pin || '' }) })

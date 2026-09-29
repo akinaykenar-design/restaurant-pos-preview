@@ -2408,7 +2408,6 @@ body[data-theme="dark"] .denom-cell{background:var(--steel-200);}
 .roster-grid thead th.rg-staff,.roster-grid tfoot td.rg-staff{background:var(--steel-100);}
 .rg-name{font-weight:700;}
 .rg-rate{font-size:var(--fs-chip);color:var(--charcoal-soft);}
-.rg-norate{color:var(--orange);}
 .rg-cell{cursor:pointer;padding:4px;min-width:88px;height:46px;}
 .rg-today{background:var(--orange-dim);}
 /* The "today" column tint must run the full height — header and day-total cells
@@ -6218,6 +6217,17 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .bl-hd{ display:flex; align-items:baseline; gap:12px; margin:4px 4px 12px; color:var(--text-primary); }
 .bl-hd b{ font-size:var(--fs-lg); font-weight:800; }
 .bl-hd span{ font-size:var(--fs-md); font-weight:600; }
+/* Live wages (§ in app.js): a manager's pill beside the open bills, in the
+   status pill's clothes — green while the hour is as usual, red over it —
+   and the hour it opens, a card like the race's. */
+.wages-pill{ min-height:36px; padding:0 12px; border:0; border-radius:18px; font:inherit; font-size:var(--fs-md); font-weight:700; cursor:pointer;
+  background:var(--green-dim); color:color-mix(in srgb, var(--green) 45%, var(--text-primary)); }
+.wages-pill.over{ background:color-mix(in srgb, var(--red) 18%, var(--surface)); color:color-mix(in srgb, var(--red) 64%, var(--text-primary)); }
+.wages-card{ display:flex; flex-direction:column; gap:8px; max-width:360px; padding:12px; margin:0 4px 12px; background:var(--surface);
+  border-radius:var(--radius); box-shadow:var(--lift-1); color:var(--text-primary); font-size:var(--fs-md); }
+.wages-card .wc-hd{ font-weight:800; }
+.wages-card .wc-row{ display:flex; justify-content:space-between; gap:12px; }
+.wages-card .wc-row b{ font-family:'IBM Plex Mono',monospace; font-weight:700; }
 .bl-hd .bl-sum{ margin-left:auto; font-family:'IBM Plex Mono',monospace; font-size:var(--fs-lg); font-weight:700; }
 .bl-cols{ columns:4 240px; column-gap:12px; margin-bottom:24px; }
 .bl-card{ break-inside:avoid; display:flex; flex-direction:column; margin-bottom:12px; background:var(--surface); border-radius:var(--radius);
@@ -9188,6 +9198,8 @@ function safeSettings(settings) {
     const d = out.doshii;
     out.doshii = { enabled: !!d.enabled, env: d.env || 'sandbox', clientId: d.clientId || '', locationId: d.locationId || '', baseUrl: d.baseUrl || '', configured: !!d.clientSecret, payAtTable: d.payAtTable !== false };
   }
+  // The roster's till key never leaves the server (see Live wages).
+  if (out.roster) out.roster = { url: out.roster.url || '', linked: !!out.roster.key };
   // The printing on/off switch is gone from the UI — printing is simply always
   // on; whether anything prints is decided by the stations that exist.
   out.printEnabled = true;
@@ -11319,7 +11331,20 @@ app.get('/api/print-alerts', (req, res) => {
 });
 // Dockets that did not print, each on its table until sorted (§ missed call
 // in the printing module): printed again, or walked over to the kitchen by hand.
-app.get('/api/missed-prints', (req, res) => { res.json(printing.getMissed()); });
+// Each one is sent on the table its party sits at NOW: a ticket moved to
+// another table keeps its number, and one combined into another is followed
+// to the ticket it joined.
+function missedWhereNow(data, list) {
+  return list.map(m => {
+    let o = data.orders.find(x => x.id === m.orderId);
+    for (let hop = 0; hop < 4 && o && o.status === 'void'; hop++) {
+      const into = /^Combined into Ticket #(\d+)/.exec(o.voidReason || '');
+      o = into ? data.orders.find(x => x.id === parseInt(into[1], 10)) : null;
+    }
+    return o ? { ...m, orderId: o.id, table: o.orderType === 'dine-in' ? o.table : null } : m;
+  });
+}
+app.get('/api/missed-prints', (req, res) => { res.json(missedWhereNow(readData(), printing.getMissed())); });
 app.post('/api/missed-prints/:id', async (req, res) => {
   const data = readData();
   const how = (req.body || {}).how === 'reprint' ? 'reprint' : 'walked';
@@ -11327,7 +11352,7 @@ app.post('/api/missed-prints/:id', async (req, res) => {
   if (!m) return res.status(404).json({ error: 'Already sorted' });
   logAudit(data, staffFromReq(req), `${m.label} for ${m.stationName}: ${how === 'reprint' ? 'printed again' : 'walked over by hand'}`);
   writeData(data);
-  res.json(printing.getMissed());
+  res.json(missedWhereNow(data, printing.getMissed()));
 });
 
 // Live reachability per station — drives the online dot on the Printers page.
@@ -12248,10 +12273,16 @@ app.post('/api/table-locks/release', (req, res) => {
 
 app.get('/api/backup', (req, res) => {
   const data = readData();
+  // The whole store holds every PIN, so it is a manager's to take — anything
+  // on the wifi could download it until Sep '26. The roster's till key never
+  // leaves at all: a data file gets pasted into chats and committed as seed.
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can download the data' });
+  const out = data.settings && data.settings.roster
+    ? { ...data, settings: { ...data.settings, roster: { url: data.settings.roster.url || '' } } } : data;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="pos-backup-${stamp}.json"`);
-  res.send(JSON.stringify(data, null, 2));
+  res.send(JSON.stringify(out, null, 2));
 });
 
 // Replace the whole store with an uploaded data file (a downloaded copy from
@@ -12791,6 +12822,11 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   // ordered, so Bill looked done and the table kept its bill colour while
   // the guest held a total missing the last round (owner, Sep '26).
   if (!restore && order.billPrinted) order.billPrinted = false;
+  // An Undo takes the void back, so it stops counting as one (§ Is this you?).
+  if (restore && (order.lineVoids || []).length) {
+    const worth = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100) / 100;
+    for (let k = order.lineVoids.length - 1; k >= 0; k--) if (Math.abs(order.lineVoids[k].value - worth) < 0.01) { order.lineVoids.splice(k, 1); break; }
+  }
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
   writeData(data);
   // Later rounds ALWAYS print only the added items — reprinting the whole
@@ -13589,6 +13625,143 @@ app.get('/api/summary', (req, res) => {
     avgTicket,
     tipsToday,
     refundsToday,
+  });
+});
+
+// ---------- Live wages ----------
+// WAGES AGAINST TAKINGS, THE LAST HOUR (owner, Sep '26 — a car's live
+// fuel-use readout). A manager on Bills sees "Wages 39%" beside the open
+// bills, and a tap says what the hour took, what it cost and who went on
+// last. The wages are the ROSTER's (SUITE.md: it owns pay rates and who is
+// clocked in), so the till reads them with a key a manager makes on the
+// roster (Team → Link the till). The roster is online and cannot reach a
+// till on the venue's own network, so the till asks, every two minutes —
+// the pattern the desk and Doshii already use. A roster that does not
+// answer changes nothing but the pill: it hides. Selling never waits on it.
+let rosterWages = null, rosterWagesError = null;
+// Ask the roster once. Answers in plain words; never throws. A refused key
+// or an address that is not the roster drops what was held, so an old
+// roster's numbers never read as live after a bad relink (Sep '26).
+async function askRoster(link) {
+  if (typeof fetch !== 'function') return { error: "This computer's Node is too old for the roster link" };
+  let r;
+  try {
+    r = await fetch(String(link.url).replace(/\/+$/, '') + '/api/till/wages', {
+      headers: { Cookie: 'roster=' + encodeURIComponent(link.key) },
+      signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined,
+    });
+  } catch (e) { return { error: 'Could not reach the roster at that address', down: true }; }
+  if (r.status === 401 || r.status === 403) return { error: 'The roster turned that key down' };
+  if (!r.ok) return { error: 'That address is not the roster' };
+  let got = null;
+  try { got = await r.json(); } catch (e) {}
+  if (!got || !Array.isArray(got.cards)) return { error: 'That address is not the roster' };
+  // Only cards that make sense: a junk one crashed the sums (Sep '26).
+  const cards = got.cards.filter(c => c && Number.isFinite(c.clockIn) && (c.clockOut == null || Number.isFinite(c.clockOut)))
+    .map(c => ({ name: String(c.name || ''), clockIn: c.clockIn, clockOut: c.clockOut == null ? null : c.clockOut,
+      breakMins: Math.max(0, Number(c.breakMins) || 0), rate: Math.max(0, Number(c.rate) || 0) }));
+  return { cards };
+}
+async function pullRosterWages() {
+  const link = (readData().settings || {}).roster;
+  if (!link || !link.url || !link.key) { rosterWages = null; rosterWagesError = null; return; }
+  const got = await askRoster(link);
+  if (got.cards) { rosterWages = { at: Date.now(), cards: got.cards }; rosterWagesError = null; return; }
+  rosterWagesError = got.error;
+  if (!got.down) rosterWages = null;
+}
+setTimeout(pullRosterWages, 3000);
+setInterval(pullRosterWages, 2 * 60000);
+// What an hour of pay cost, between two moments: every card's overlap, at
+// its own rate. A break is not taken off a running card (the roster's rule:
+// it only comes off a finished one), so this reads a little high mid-shift.
+function wagesBetween(cards, from, to) {
+  return cards.reduce((s, c) => {
+    const a = Math.max(c.clockIn, from), b = Math.min(c.clockOut || to, to);
+    if (!(b > a)) return s;
+    // A finished card pays its break back out, spread over the shift — the
+    // roster's payroll does the same sum (it read high by the break, Sep '26).
+    const span = c.clockOut ? c.clockOut - c.clockIn : 0;
+    const paid = span > 0 ? Math.max(0, span - (c.breakMins || 0) * 60000) / span : 1;
+    return s + (b - a) / 3600000 * paid * (Number(c.rate) || 0);
+  }, 0);
+}
+// What the floor RANG between two moments — every round's dishes as sent,
+// the race's measure, so the two read the same takings.
+function rungBetween(data, from, to) {
+  let v = 0;
+  for (const o of data.orders) {
+    if (o.practice || o.status === 'void') continue;
+    for (const r of o.rounds || []) {
+      if (r.moved || !(r.sentAt >= from && r.sentAt < to)) continue; // a dish moved tables was rung once, when it was sent
+      for (const i of r.items || []) if (i.qty > 0) v += (i.price || 0) * i.qty;
+    }
+  }
+  return v;
+}
+app.put('/api/roster-link', async (req, res) => {
+  const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can link the roster' });
+  const url = String((req.body || {}).url || '').trim();
+  const key = String((req.body || {}).key || '').trim();
+  if (!/^https?:\/\/[^\s/]+/i.test(url)) return res.status(400).json({ error: 'The address starts with https://' });
+  const had = data.settings.roster || {};
+  const link = { url, key: key || had.key || '' };
+  if (!link.key) return res.status(400).json({ error: 'Paste the till key' });
+  // Asked BEFORE it is saved: a key the roster refuses, or an address that
+  // is not the roster, is never saved as "Linked" (Sep '26).
+  // A refused try leaves the saved link, and what it last read, alone.
+  const got = await askRoster(link);
+  if (!got.cards) return res.status(400).json({ error: got.error });
+  rosterWages = { at: Date.now(), cards: got.cards }; rosterWagesError = null;
+  const fresh = readData();
+  fresh.settings.roster = link;
+  logAudit(fresh, staffFromReq(req), 'Linked the roster');
+  writeData(fresh);
+  res.json({ roster: safeSettings(fresh.settings).roster, on: got.cards.filter(c => !c.clockOut).length });
+});
+app.delete('/api/roster-link', (req, res) => {
+  const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can unlink the roster' });
+  // The key ends on the roster too, so it is not left working somewhere.
+  const was = data.settings.roster;
+  if (was && was.url && was.key && typeof fetch === 'function') {
+    fetch(String(was.url).replace(/\/+$/, '') + '/api/till/link', { method: 'DELETE', headers: { Cookie: 'roster=' + encodeURIComponent(was.key) },
+      signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(8000) : undefined }).catch(() => {});
+  }
+  delete data.settings.roster;
+  logAudit(data, staffFromReq(req), 'Unlinked the roster');
+  writeData(data);
+  rosterWages = null; rosterWagesError = null;
+  res.json({ ok: true });
+});
+// Pay is a manager's to see: the pill is never on a waiter's till.
+app.get('/api/wages-now', (req, res) => {
+  const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can see wages' });
+  const link = data.settings.roster;
+  if (!link || !link.key) return res.json({ linked: false });
+  // Ten minutes without an answer and the number is not live any more.
+  if (!rosterWages || Date.now() - rosterWages.at > 10 * 60000) return res.json({ linked: true, error: rosterWagesError || 'Waiting for the roster' });
+  const now = Date.now(), hour = now - 3600000, cards = rosterWages.cards;
+  const wages = wagesBetween(cards, hour, now), takings = rungBetween(data, hour, now);
+  const on = cards.filter(c => !c.clockOut && c.clockIn <= now);
+  // The usual: four weeks of wages over four weeks of takings, today left out.
+  // Only as far back as the roster's own record goes: one night of wages over
+  // four weeks of takings read "Usually 20%" (Sep '26).
+  const today = tradingDayStart(now, data.settings);
+  const first = cards.reduce((m, c) => Math.min(m, c.clockIn), now);
+  const from = Math.max(today - 28 * 86400000, tradingDayStart(first, data.settings));
+  const pastWages = wagesBetween(cards, from, today), pastTakings = rungBetween(data, from, today);
+  const pct = (w, t) => t > 0 ? Math.round(w / t * 100) : null;
+  // Last on, first off: the most recent clock-in, and the hour without them.
+  const last = on.slice().sort((a, b) => b.clockIn - a.clockIn)[0];
+  const lastCost = last ? wagesBetween([last], hour, now) : 0;
+  res.json({
+    linked: true, wages: Math.round(wages * 100) / 100, takings: Math.round(takings * 100) / 100, on: on.length,
+    pct: wages > 0 ? pct(wages, takings) : null,
+    usual: pastWages > 0 ? pct(pastWages, pastTakings) : null,
+    lastOn: last && on.length > 1 && takings > 0 ? { name: last.name, pct: pct(wages - lastCost, takings) } : null,
   });
 });
 
@@ -20903,7 +21076,7 @@ function cancelCoversPad() {
     releaseTableLock(state.table);
     // Whatever the pick took up goes back down, and the table left comes
     // back with its round (§ Drafts).
-    draftStash(state.table);
+    if (fp.prev) draftStash(state.table); // with no table before, the round stays on the till
     state.table = fp.prev || null;
     const pt = fp.prev ? findTableById(fp.prev) : null;
     const po = pt ? state.orders.find(o => o.status === 'open' && o.table === pt.label) : null;
@@ -21321,7 +21494,21 @@ function draftsLoad() {
   return (state._drafts = all);
 }
 function draftsWrite() { try { localStorage.setItem(DRAFT_KEY, JSON.stringify(state._drafts || {})); } catch (e) {} }
-function draftsMine() { return (state.currentStaff && draftsLoad()[state.currentStaff.id]) || {}; }
+// A draft ends when its shift does, and when its bill does: a draft kept for
+// a ticket that has since been paid belonged to a party that has left, and
+// it must never land on the next one (Sep '26). Checked on every read — a
+// till left on overnight kept yesterday's until it was reloaded.
+function draftLive(d) {
+  return !!d && Date.now() - (d.ts || 0) < DRAFT_TTL
+    && !(d.openOrderId && !(state.orders || []).some(o => o.id === d.openOrderId && o.status === 'open'));
+}
+function draftsMine() {
+  const mine = (state.currentStaff && draftsLoad()[state.currentStaff.id]) || {};
+  let gone = false;
+  for (const tid of Object.keys(mine)) if (!draftLive(mine[tid])) { delete mine[tid]; gone = true; }
+  if (gone) draftsWrite();
+  return mine;
+}
 // How many dishes wait unsent on a table, for its tag. Zero = no tag.
 function draftCount(tableId) { const d = draftsMine()[tableId]; return d ? d.cart.reduce((s, l) => s + (l.qty || 1), 0) : 0; }
 // Put the till's unsent round on a table and empty the till.
@@ -21345,10 +21532,11 @@ function draftTake(tableId) {
   state.stagedCallAway = state.stagedCallAway || d.stagedCallAway || null;
   state.quickNote = state.quickNote || d.quickNote || '';
   state.quickNoteStation = state.quickNoteStation || d.quickNoteStation || null;
-  // A failed send's key only means something on the ticket it was aimed at:
-  // if that ticket has closed since, the round goes out fresh.
+  // A failed send's key only means something on the ticket it was aimed at.
+  // The LINE keys always stay: the server skips a line it already has, so a
+  // round that landed while its reply was lost is not rung a second time
+  // when the draft comes back to a ticket the send itself opened (Sep '26).
   if (d.sendKey && d.openOrderId === state.openOrderId) { state.sendKey = d.sendKey; state.sendFailed = d.sendFailed || null; }
-  else state.cart.forEach(l => { delete l.lineKey; delete l.sentQty; });
 }
 // A table that moves takes its drafts with it — every waiter's.
 function draftsMove(fromId, toId) {
@@ -23685,7 +23873,14 @@ function doRemoveSent(match, qty, then) {
 function loadVoidPattern(m) {
   const who = state.currentStaff && state.currentStaff.name; if (!who) return;
   api('/api/void-pattern?staff=' + encodeURIComponent(who))
-    .then(r => { if (state.voidItemPrompt === m) { m.pattern = r; render(); } }).catch(() => {});
+    .then(r => {
+      if (state.voidItemPrompt !== m) return;
+      // The redraw must not take the PIN box from a manager already typing.
+      const typing = document.activeElement && document.activeElement.id === 'void-item-pin';
+      m.pattern = r; render();
+      const pi = typing && document.getElementById('void-item-pin');
+      if (pi) { pi.focus(); try { pi.setSelectionRange(pi.value.length, pi.value.length); } catch (e) {} }
+    }).catch(() => {});
 }
 // Out of the ordinary: a third void or more tonight, and more than twice the
 // waiter's usual night. Nothing to show otherwise — a band on every void is a
@@ -25739,7 +25934,7 @@ function renderRosterAdmin() {
       <tbody>
         ${staff.length === 0 ? `<tr><td colspan="9" class="ts" style="padding:16px;">No staff yet — add people on the Team page.</td></tr>` : staff.map(s => `
           <tr>
-            <td class="rg-staff"><div class="rg-name">${esc(s.name)}</div><div class="rg-rate">${s.payRate ? money(s.payRate) + '/h' : '<span class="rg-norate">set rate</span>'}</div></td>
+            <td class="rg-staff"><div class="rg-name">${esc(s.name)}</div>${s.payRate ? `<div class="rg-rate">${money(s.payRate)}/h</div>` : ''}</td>
             ${days.map(d => { const off = staffOff(s.id, d.key); return `
               <td class="rg-cell ${d.key === today ? 'rg-today' : ''}${off ? ' rg-off' : ''}" data-act="roster-add" data-staff="${s.id}" data-date="${d.key}">
                 ${off ? `<span class="rg-offlabel">OFF</span>` : ''}
@@ -25759,7 +25954,7 @@ function renderRosterAdmin() {
   </div>
   <div class="roster-summary">
     <div class="rs-card"><div class="rs-label">Scheduled hours</div><div class="rs-value">${fmtHours(weekTotalHours)}</div></div>
-    <div class="rs-card"><div class="rs-label">Labour cost</div><div class="rs-value">${money(labourCost)}</div>${staff.some(s => !s.payRate) ? `<div class="rs-sub">set pay rates on Team for accuracy</div>` : ''}</div>
+    <div class="rs-card"><div class="rs-label">Labour cost</div><div class="rs-value">${money(labourCost)}</div>${staff.some(s => !s.payRate) ? `<div class="rs-sub">Pay rates are on the roster</div>` : ''}</div>
     <div class="rs-card"><div class="rs-label">Sales this week</div><div class="rs-value">${money(weekSales)}</div></div>
     <div class="rs-card"><div class="rs-label">Labour % of sales</div><div class="rs-value">${weekSales > 0 ? Math.round(labourCost / weekSales * 100) + '%' : '—'}</div></div>
     <div class="rs-card"><div class="rs-label">Actual hours</div><div class="rs-value">${fmtHours(actualHours)}</div>${weekTotalHours > 0 && actualHours > 0 ? `<div class="rs-sub">${Math.round(actualHours / weekTotalHours * 100)}% of scheduled</div>` : ''}</div>
@@ -26981,7 +27176,7 @@ async function pollPrintAlerts() {
     }
     // The toast is the moment; the table keeps it (§ Missed call).
     const missed = await api('/api/missed-prints');
-    if (missed.map(m => m.id).join() !== (state.missedPrints || []).map(m => m.id).join()) { state.missedPrints = missed; renderWhenStill(); }
+    if (JSON.stringify(missed) !== JSON.stringify(state.missedPrints || [])) { state.missedPrints = missed; renderWhenStill(); }
   } catch (e) { /* server unreachable — the offline dot already shows that */ }
 }
 // §§ Missed call: a docket that did not print stays on its table
@@ -26990,10 +27185,18 @@ async function pollPrintAlerts() {
 // never printed looked exactly like one being cooked for. Now the table
 // wears "Not printed" until somebody sorts it, and a tap on it asks first:
 // walked it over, or print it again.
+// A missed docket belongs to its PARTY, not the number it was printed for:
+// the server follows the ticket through a move or a combine and sends the
+// table it is on now (Sep '26 — the empty table kept the badge and the
+// party's new table had none).
 function missedOn(tableId) {
   const t = findTableById(tableId); if (!t) return [];
-  return (state.missedPrints || []).filter(m => m.table != null && String(m.table) === String(t.label)
-    && state.orders.some(o => o.id === m.orderId && o.status === 'open'));
+  // The ticket's own table, read here too: a move shows at once, before the
+  // next ask of the server.
+  return (state.missedPrints || []).filter(m => {
+    const o = state.orders.find(x => x.id === m.orderId && x.status === 'open');
+    return o && o.orderType === 'dine-in' && String(o.table) === String(t.label);
+  });
 }
 function missedBadgeHtml(t) { return missedOn(t.id).length ? `<span class="tbl-cpill tbl-missed"><b>Not printed</b></span>` : ''; }
 const ACT_PRINTER_SVG = SYS_PRINTER_SVG.replace(' class="sys-i"', '');
@@ -27023,7 +27226,9 @@ async function settleMissedOn(tableId, how) {
   } catch (e) { mp.busy = false; state.toast = toastFail('Could not reach the till'); render(); armToastTimer(2500); return; }
   mp.busy = false;
   const still = missedOn(tableId).length;
-  state.missedPop = still ? mp : null;
+  // A reprint can take half a minute: if the popup was closed meanwhile, it
+  // stays closed — it came back over another table's order (Sep '26).
+  if (state.missedPop === mp) state.missedPop = still ? mp : null;
   const t = findTableById(tableId);
   state.toast = how === 'walked' ? `Table ${t ? t.label : ''} sorted`
     : still ? toastFail(`Still not printing — ${before > 1 ? 'dockets' : 'docket'} for Table ${t ? t.label : ''}`) : `Printed again for Table ${t ? t.label : ''}`;
@@ -27080,7 +27285,7 @@ function renderBackupsSettingsAdmin() {
 // practice copy's file thinking it held the till's data.
 async function downloadDataFile() {
   try {
-    const r = await fetch('/api/backup');
+    const r = await fetch('/api/backup', { headers: state.staffPin ? { 'X-Staff-Pin': state.staffPin } : {} });
     if (!r.ok) throw new Error('Could not read data.');
     const text = await r.text();
     const preview = typeof window.__POS_SEED__ !== 'undefined';
@@ -30129,7 +30334,48 @@ function renderVenueSettingsAdmin() {
         ${logo ? `<button class="btn-secondary sm" data-act="venue-logo-none">✕ Remove</button>` : ''}
       </div>
     </div>
+  </div>
+  ${rosterLinkCardHtml()}`;
+}
+// The roster link (§ Live wages). The key comes from the roster app, Team →
+// Link the till, and stays on this server: the page only learns it is set.
+function rosterLinkCardHtml() {
+  const r = state.settings.roster || {};
+  const d = state.rosterDraft || (state.rosterDraft = { url: r.url || '', key: '' });
+  return `
+  <div class="settings-card">
+    <div class="th">Roster</div>
+    <div class="ts">${r.linked ? 'Linked · live wages on Bills' : 'Not linked'}</div>
+    <div style="margin-top:12px;">
+      <label class="field-label">Roster address</label>
+      <input class="roster-field" data-key="url" type="text" value="${esc(d.url)}" placeholder="https://" style="width:320px;max-width:100%;">
+    </div>
+    <div style="margin-top:12px;">
+      <label class="field-label">Till key${r.linked ? ' (saved — blank keeps it)' : ''}</label>
+      <input class="roster-field" data-key="key" type="password" value="${esc(d.key)}" style="width:320px;max-width:100%;">
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;">
+      <button class="btn-add inline" data-act="roster-link">Link</button>
+      ${r.linked ? `<button class="btn-secondary" data-act="roster-unlink">Unlink</button>` : ''}
+    </div>
   </div>`;
+}
+async function linkRoster() {
+  const d = state.rosterDraft || {};
+  try {
+    const out = await api('/api/roster-link', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: d.url || '', key: d.key || '' }) });
+    state.settings.roster = out.roster; state.rosterDraft = null; state._wagesAt = 0;
+    state.toast = `Roster linked · ${out.on} on now`;
+  } catch (e) { state.toast = toastFail(e.message || 'Could not link the roster'); }
+  render(); armToastTimer(3000);
+}
+async function unlinkRoster() {
+  try {
+    await api('/api/roster-link', { method: 'DELETE' });
+    state.settings.roster = null; state.rosterDraft = null; state.wagesNow = null;
+    state.toast = 'Roster unlinked';
+  } catch (e) { state.toast = toastFail(e.message || 'Could not unlink the roster'); }
+  render(); armToastTimer(2500);
 }
 
 async function saveVenueSettings(patch) {
@@ -30334,10 +30580,6 @@ function renderStaffAdmin() {
               <div style="display:flex;flex-direction:column;max-width:200px;">
                 <label class="field-label">Trainee</label>
                 <div style="display:flex;align-items:center;min-height:36px;">${togglePill(!!s.trainee, 'set-staff-trainee', `data-id="${s.id}"`)}</div>
-              </div>
-              <div style="display:flex;flex-direction:column;max-width:150px;">
-                <label class="field-label">Pay rate ($/hr)</label>
-                <input type="number" min="0" step="0.5" class="staff-payrate-quick-edit" data-id="${s.id}" value="${s.payRate || ''}" placeholder="0.00" onchange="saveStaffPayRate('${s.id}', this.value)">
               </div>
             </div>
             <div style="display:flex;gap:8px;align-items:flex-end;">
@@ -35087,7 +35329,7 @@ function rungSteps(from) {
   (state.orders || []).forEach(o => {
     if (o.practice || o.status === 'void') return;
     (o.rounds || []).forEach(r => {
-      if (!(r.sentAt >= from && r.sentAt < until.getTime())) return;
+      if (r.moved || !(r.sentAt >= from && r.sentAt < until.getTime())) return; // a dish moved tables was rung once, when it was sent
       const v = (r.items || []).reduce((a, i) => a + (i.qty > 0 ? (i.price || 0) * i.qty : 0), 0);
       if (v) ev.push([wallMs(r.sentAt) - wallMs(from), v]);
     });
@@ -35135,6 +35377,39 @@ function renderRace() {
     <div class="race-score"><small>vs last ${esc(r.day)}</small><b>${money(Math.abs(r.gap))} ${ahead ? 'ahead' : 'behind'}</b><small>the gap is ${r.growing ? 'growing' : 'closing'}</small></div>
   </div>`;
 }
+// §§ Live wages: the last hour's pay against its takings
+// A MANAGER'S NUMBER (owner, Sep '26 — a car's live fuel-use readout). The
+// pill sits beside the open bills and says what the last hour's wages were
+// as a share of what it rang; a tap opens the hour. The roster owns the pay
+// (Settings → Venue → Roster links it), and a waiter's till never shows it.
+function isManagerHere() { return !!(state.currentStaff && state.currentStaff.role === 'manager'); }
+function loadWagesNow() {
+  if (!isManagerHere() || state._wagesLoading) return;
+  state._wagesLoading = true;
+  api('/api/wages-now').then(r => { state.wagesNow = r; }).catch(() => { state.wagesNow = null; })
+    .finally(() => { state._wagesLoading = false; state._wagesAt = Date.now(); renderWhenStill(); });
+}
+function wagesPillHtml() {
+  if (!isManagerHere()) return '';
+  if (!state._wagesAt || Date.now() - state._wagesAt > 60000) loadWagesNow();
+  const w = state.wagesNow;
+  if (!w || !w.linked || w.error || !(w.wages > 0)) return '';
+  // Wages running with nothing rung is the reddest hour there is.
+  const over = !(w.takings > 0) || (w.pct != null && (w.usual != null ? w.pct > w.usual + 4 : w.pct > 35));
+  return `<button class="wages-pill${over ? ' over' : ''}" data-act="wages-open">Wages ${w.pct != null ? w.pct + '%' : money(w.wages)}</button>`;
+}
+function wagesCardHtml() {
+  const w = state.wagesNow;
+  if (!state.wagesOpen || !isManagerHere() || !w || !w.linked || w.error || !(w.wages > 0)) return '';
+  const row = (k, v) => `<div class="wc-row"><span>${k}</span><b>${v}</b></div>`;
+  return `<div class="wages-card">
+    <div class="wc-hd">Last hour</div>
+    ${row('Taken', money(w.takings))}
+    ${row(`Wages · ${w.on} on`, money(w.wages))}
+    ${w.usual != null ? row('Usually', w.usual + '%') : ''}
+    ${w.lastOn ? row(`Without ${esc(w.lastOn.name)}`, w.lastOn.pct + '%') : ''}
+  </div>`;
+}
 function renderBills() {
   const live = o => !o.practice || isTrainee();
   const from = tradingDayStart(Date.now());
@@ -35146,12 +35421,12 @@ function renderBills() {
   const sum = list => list.reduce((a, o) => a + (o.status === 'paid'
     ? ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0)
     : openBillTotal(o, o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null)), 0);
-  const head = (word, list) => `<div class="bl-hd"><b>${word}</b><span>${list.length} bill${list.length === 1 ? '' : 's'}</span><span class="bl-sum">${money(sum(list))}</span></div>`;
+  const head = (word, list, extra) => `<div class="bl-hd"><b>${word}</b><span>${list.length} bill${list.length === 1 ? '' : 's'}</span>${extra || ''}<span class="bl-sum">${money(sum(list))}</span></div>`;
   if (!open.length && !closed.length) return `<div class="bills"><div class="pass-empty">No bills today</div></div>`;
   return `
   <div class="bills">
     ${renderRace()}
-    ${open.length ? head('Open', open) + `<div class="bl-cols">${open.map(o => billDocket(o, false)).join('')}</div>` : ''}
+    ${open.length ? head('Open', open, wagesPillHtml()) + wagesCardHtml() + `<div class="bl-cols">${open.map(o => billDocket(o, false)).join('')}</div>` : ''}
     ${closed.length ? head('Closed today', closed) + `<div class="bl-cols">${closed.map(o => billDocket(o, true)).join('')}</div>` : ''}
   </div>`;
 }
@@ -35966,8 +36241,6 @@ function pickTable(id) {
   // A round on its way belongs to the table it left from: leaving mid-send
   // would put the lines in the air down as a draft as well (§ Drafts).
   if (state.sending && id !== state.table) { state.pickFlashId = null; state.toast = toastFail('Still sending — one moment'); render(); armToastTimer(1800); return; }
-  // A table whose docket never printed asks that first (§ Missed call).
-  if (missedOn(id).length && !state.moveItemsPicking && !state.transferFrom) { state.pickFlashId = null; state.missedPop = { tableId: id }; render(); return; }
   // Switching AWAY from an empty set-up table asks about closing it first.
   const rt = findTableById(id);
   const resolvedId = rt && rt.mergedInto && rt.mergedInto !== id ? rt.mergedInto : id;
@@ -35983,6 +36256,9 @@ function pickTable(id) {
     id = target.mergedInto;
     armToastTimer(2500);
   }
+  // A table whose docket never printed asks that first (§ Missed call) —
+  // after the join is followed, so the joined partner asks too.
+  if (missedOn(id).length && !state.moveItemsPicking && !state.transferFrom) { state.pickFlashId = null; state.missedPop = { tableId: id }; render(); return; }
   // A PRACTICE BILL AND A REAL ONE NEVER SHARE A TABLE (Sep '26): a real
   // waiter's Swordfish landed on a trainee's practice ticket — it never
   // printed, never counted, and "Finish & clear" deleted it.
@@ -36332,6 +36608,9 @@ async function linkTables(fromId, intoId, drop, opts) {
       Object.assign(t, patch);
       done.add(t.id);
     }
+    // …and so do its unsent rounds (§ Drafts): tapping a joined table opens
+    // the main, so a draft left on the partner could never come back.
+    for (const t of joining) if (t.id !== main.id) draftsMove(t.id, main.id);
     // The joined table's party joins too: its covers and notes (an allergy!)
     // stayed on the faded table while the order ran on the main, so a dish
     // went on with no warning (Sep '26). The same call a transfer makes.
@@ -41916,16 +42195,6 @@ async function saveStaffTrainee(id, on) {
   }
   render(); armToastTimer(3000);
 }
-async function saveStaffPayRate(id, val) {
-  try {
-    await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ payRate: parseFloat(val) || 0 }) });
-    state.staffList = await api('/api/staff');
-    state.toast = 'Pay rate updated';
-  } catch (e) {
-    state.toast = toastFail('Could not update pay rate.');
-  }
-  render();
-}
 
 async function saveStaffPin(id) {
   const row = document.querySelector(`.staff-pin-quick-edit[data-id="${id}"]`);
@@ -43581,6 +43850,10 @@ function bindEvents() {
       }, 120);
     });
   }
+  document.querySelectorAll('.roster-field').forEach(el => el.addEventListener('input', (e) => {
+    const d = state.rosterDraft || (state.rosterDraft = {});
+    d[e.target.dataset.key] = e.target.value; // held until Link sends it
+  }));
   document.querySelectorAll('.doshii-field').forEach(el => el.addEventListener('input', (e) => {
     const d = state.settings.doshii || (state.settings.doshii = {});
     d[e.target.dataset.key] = e.target.value; // held until Save connection sends it
@@ -44631,6 +44904,9 @@ function handleActClick(el, e) {
         if (isMgr) commitRemoveSent(m.match, el.dataset.val, m.qty, m.then);
         else { m.reason = el.dataset.val; m.needPin = true; m.pin = ''; m.pinError = ''; loadVoidPattern(m); render(); const pi = document.getElementById('void-item-pin'); if (pi) pi.focus(); }
       }
+      else if (act === 'roster-link') { linkRoster(); }
+      else if (act === 'roster-unlink') { unlinkRoster(); }
+      else if (act === 'wages-open') { state.wagesOpen = !state.wagesOpen; render(); }
       else if (act === 'missed-close') { state.missedPop = null; render(); }
       else if (act === 'missed-settle') { if (state.missedPop) settleMissedOn(state.missedPop.tableId, el.dataset.how); }
       else if (act === 'void-item-approve') {

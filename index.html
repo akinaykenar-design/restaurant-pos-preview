@@ -5589,7 +5589,7 @@ body .deck-modes.track > .tab-btn.active{ background:var(--surface); border-colo
 .fp-float-keys{ --t-dock:.45s; justify-content:flex-end; }
 .fp-keys-in{ overflow:hidden; animation:fp-keys-grow var(--t-dock) cubic-bezier(.2,.8,.25,1) both; }
 @keyframes fp-keys-grow{
-  from{ width:calc(var(--sq-ctl) + 16px); }
+  from{ width:var(--sq-ctl); } /* the resting key: the card has no padding of its own, so +16 jumped a step at the start */
   to{ width:var(--dock-w); } }
 /* THE KEYS DO NOT MOVE. THE EDGE MOVES PAST THEM (owner, Sep '26: "why are
    they stuck together?"). Each key also slid 26px on a stagger, and the gap
@@ -5597,8 +5597,15 @@ body .deck-modes.track > .tab-btn.active{ background:var(--surface); border-colo
    row read as one welded lump. Two things were doing one job: the card's
    edge already uncovers them one by one, which IS the key sliding out from
    behind it. The stagger stays, because it is the edge's own travel. */
+/* ...and it closes the same way (calm audit, Sep '26): the width runs back
+   into the key. The delay is written on each redraw, so a redraw mid-close
+   carries on from where it was instead of starting over. */
+.fp-keys-out{ overflow:hidden; animation:fp-keys-shrink var(--t-dock) cubic-bezier(.4,0,.2,1) both; }
+@keyframes fp-keys-shrink{
+  from{ width:var(--dock-w); }
+  to{ width:var(--sq-ctl); } }
 @media (prefers-reduced-motion: reduce){
-  .fp-keys-in{ animation:none; }
+  .fp-keys-in, .fp-keys-out{ animation:none; }
 }
 .fp-float .fp-chip{ font-size:var(--fs-md); }
 .fp-float-rooms .fp-chip{ min-width:84px; }
@@ -20024,19 +20031,23 @@ function armToastTimer(ms) {
   state.toastAction = null;
   clearTimeout(state._toastTimer);
   clearTimeout(state._toastLeaveTimer);
-  state._toastLeaving = false;
+  state._toastLeaving = null;
   state._toastFor = state.toast;
   state._toastTimer = setTimeout(() => {
     state._toastTimer = null;
     // IT LEAVES THE WAY IT CAME (calm audit, Sep '26): it rose in and then
     // vanished in one frame. The toast on screen fades down first; a redraw
     // meanwhile writes it already gone, so nothing pops back.
+    // The fade belongs to THE TOAST IT STARTED ON: a new toast raised in
+    // those 180ms (by a path that never re-arms this timer — an Undo, a
+    // removed line) is drawn whole and is not cleared by the old fade.
     const el = document.querySelector('.toast');
-    const gone = () => { state._toastLeaving = false; state._toastFor = null; state.toast = null; state.toastAction = null; render(); };
+    const gone = () => { state._toastLeaving = null; state._toastFor = null; state.toast = null; state.toastAction = null; render(); };
     if (!el || motionOff()) return gone();
-    state._toastLeaving = true;
+    const leaving = state.toast;
+    state._toastLeaving = leaving;
     el.classList.add('leaving');
-    state._toastLeaveTimer = setTimeout(gone, 180);
+    state._toastLeaveTimer = setTimeout(() => { if (state.toast === leaving) gone(); else { state._toastLeaving = null; render(); } }, 180);
   }, ms);
   if (hadAction) render();
 }
@@ -22263,7 +22274,7 @@ function render() {
     ${state.voidItemPrompt ? renderVoidReasonPop() : ''}
     ${state.missedPop ? renderMissedPop() : ''}
 
-    ${state.toast ? `<div class="toast${state._toastLeaving ? ' leaving' : ''}"><span class="dot${state.toastFailed === state.toast ? ' bad' : ''}"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
+    ${state.toast ? `<div class="toast${state._toastLeaving != null && state._toastLeaving === state.toast ? ' leaving' : ''}"><span class="dot${state.toastFailed === state.toast ? ' bad' : ''}"></span>${esc(state.toast)}${state.toastAction ? `<button class="toast-btn" data-act="${state.toastAction.act}">${esc(state.toastAction.label)}</button>` : ''}</div>` : ''}
     ${state.frozen ? renderFreezeOverlay() : ''}
   `;
   bindEvents();
@@ -27343,12 +27354,19 @@ function markBlindSpots() {
   if (!wrap || !(state.missedPrints || []).length) return;
   const box = wrap.getBoundingClientRect();
   if (!box.width) return;
+  // THE DOCK IS NOT THE MAP: the floating keys cover part of the floor's
+  // foot, so a table behind them is out of sight, and a tab placed there hid
+  // under them. What they cover is measured off their own cards.
+  const cards = [...document.querySelectorAll('.middle-view .fp-float > *')].map(c => c.getBoundingClientRect()).filter(r => r.width && r.height);
+  const dk = cards.length ? { l: Math.min(...cards.map(r => r.left)), r: Math.max(...cards.map(r => r.right)), t: Math.min(...cards.map(r => r.top)) } : null;
   const seen = {};
   wrap.querySelectorAll('.floor-marker[data-act="pick-table"]').forEach(m => {
     if (!missedOn(m.dataset.id).length) return;
     const r = m.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const docked = dk && cy > dk.t && cx > dk.l && cx < dk.r;
     const side = r.right < box.left + 8 ? 'left' : r.left > box.right - 8 ? 'right'
-      : r.bottom < box.top + 8 ? 'top' : r.top > box.bottom - 8 ? 'bottom' : null;
+      : r.bottom < box.top + 8 ? 'top' : (r.top > box.bottom - 8 || docked) ? 'bottom' : null;
     if (!side || seen[side]) return;
     seen[side] = true;
     const t = findTableById(m.dataset.id);
@@ -27363,8 +27381,9 @@ function markBlindSpots() {
     const tw = tab.offsetWidth, th = tab.offsetHeight, E = 8;
     const x = side === 'left' ? box.left + E : side === 'right' ? box.right - E - tw
       : Math.max(box.left + E, Math.min(box.right - E - tw, r.left + r.width / 2 - tw / 2));
-    const y = side === 'top' ? box.top + E : side === 'bottom' ? box.bottom - E - th
-      : Math.max(box.top + E, Math.min(box.bottom - E - th, r.top + r.height / 2 - th / 2));
+    const foot = dk && x + tw > dk.l && x < dk.r ? Math.min(box.bottom, dk.t) : box.bottom;
+    const y = side === 'top' ? box.top + E : side === 'bottom' ? foot - E - th
+      : Math.max(box.top + E, Math.min(foot - E - th, r.top + r.height / 2 - th / 2));
     tab.style.left = (x - op.left) + 'px'; tab.style.top = (y - op.top) + 'px';
   });
 }
@@ -35907,8 +35926,14 @@ function fpFloatHtml(fp) {
   // whole trick.
   const keysIn = state._fpKeysIn ? ' data-dock-in="1"' : '';
   state._fpKeysIn = false;
+  // CLOSING IS A STATE, NOT A MOMENT: a redraw in the middle of the close
+  // (a toast running out was enough) drew the card full width again, then it
+  // shut in one frame. Every redraw now writes the close already under way —
+  // the same shrink, started as far back as it has already run.
+  const fc = state._fpClosing;
+  const keysOut = fc ? ` style="--dock-w:${fc.w}px;animation-delay:-${Math.min(fc.dur, Date.now() - fc.at)}ms"` : '';
   const stackKey = lensOpts
-    ? `<div class="fp-float-card fp-float-keys"${keysIn}>${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
+    ? `<div class="fp-float-card fp-float-keys${fc ? ' fp-keys-out' : ''}"${keysIn}${keysOut}>${lensKeys}<button class="fp-chip icon-only${state.fpViewOpen ? ' active' : ''}" data-act="fp-view-toggle" aria-label="What the tables show">${SYS_LAYERS_SVG}</button></div>`
     : '';
   // ONE LINE (owner, Sep '26: "one line. not two"): rooms, then the six when
   // they are out, then the keys — all along the same strip, right to left in
@@ -45992,15 +46017,15 @@ function handleActClick(el, e) {
         // IT CLOSES THE WAY IT OPENED (calm audit, Sep '26): the card grew
         // out of the key over --t-dock and then shut in one frame. Now its
         // width runs back into the key at the same pace before the redraw.
-        const card = state.fpViewOpen && el.closest('.fp-float-keys');
+        // The tap that closes it lands on the scrim over the whole floor (it
+        // carries this same act), so the card is found, not climbed to.
+        const card = state.fpViewOpen && document.querySelector('.middle-view .fp-float-keys');
+        if (state._fpClosing) return;
         if (card && !motionOff()) {
-          if (card.dataset.closing) return;
-          card.dataset.closing = '1';
           const dur = (parseFloat(getComputedStyle(card).getPropertyValue('--t-dock')) || .45) * 1000;
-          card.style.overflow = 'hidden';
-          card.animate([{ width: card.getBoundingClientRect().width + 'px' }, { width: el.getBoundingClientRect().width + 16 + 'px' }],
-            { duration: dur, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards' })
-            .finished.catch(() => {}).then(() => { state.fpViewOpen = null; render(); });
+          state._fpClosing = { at: Date.now(), w: card.getBoundingClientRect().width, dur };
+          render();
+          setTimeout(() => { state._fpClosing = null; state.fpViewOpen = null; render(); }, dur);
           return;
         }
         if (state.fpViewOpen) state.fpViewOpen = null;

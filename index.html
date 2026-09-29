@@ -18363,6 +18363,7 @@ function finishLogin(staff, warm) {
         state.openOrderId = snap.openOrderId || null;
         state.table = snap.table;
         state.showTablePicker = false;
+        state._snapFor = { openOrderId: snap.openOrderId || null, ts: snap.ts || 0 };
       }
     } catch (e) {}
   }
@@ -18382,8 +18383,20 @@ function finishLogin(staff, warm) {
     // the way a tap on the floor reads them (Sep '26).
     if (state.table != null && !state.showTablePicker) {
       const t = findTableById(state.table);
-      if (t) {
-        const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+      const oo0 = t && state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+      const sf = state._snapFor; state._snapFor = null;
+      // THE ROUND BELONGS TO THE BILL IT WAS RUNG FOR (Sep '26): after a
+      // reload the unsent drinks went onto whatever bill was open on that
+      // table now — the NEXT party's, once the first had paid and left — or
+      // pointed at the paid bill and sat "Not sent" for ever.
+      const gone = sf && (sf.openOrderId ? (!oo0 || String(oo0.id) !== String(sf.openOrderId)) : (oo0 && (oo0.createdAt || 0) > sf.ts));
+      if (t && gone) {
+        state.cart = []; state.openOrderId = null; state.table = null; state.showTablePicker = true;
+        try { localStorage.removeItem('pos-cart'); } catch (e) {}
+        state.toast = toastFail(`Table ${t.label}'s bill was settled on another till — the unsent round was not added.`);
+        render(); armToastTimer(TOAST_ALARM);
+      } else if (t) {
+        const oo = oo0;
         state.covers = (t.covers) || (oo && oo.covers) || 0; state.notes = t.notes || []; state.discount = t.discount || null;
         if (oo) state.openOrderId = oo.id;
         state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
@@ -18431,9 +18444,14 @@ async function pressPinEnter() {
   } catch (e) {
     // The server is away: the line under the clock says so — a shake would
     // say "wrong PIN", which is not what happened.
-    state.loginError = state.online ? 'shake' : ''; state.loginPin = ''; render();
+    state.loginError = state.online ? 'shake' : ''; state.loginPin = '';
+    // …and a pad LOCKED OUT after too many tries says so too: the right PIN
+    // just shook for five minutes and the manager never knew why (Sep '26).
+    if (pinLockedOut(e)) { state.loginError = ''; state.toast = toastFail(e.message); armToastTimer(TOAST_ALARM); }
+    render();
   }
 }
+function pinLockedOut(e) { return !!(e && /too many incorrect pins/i.test(e.message || '')); }
 // A name is the whole sign-in for staff; a manager's name opens the pad.
 async function pressLoginName(id) {
   const who = (state.staffList || []).find(x => x.id === id);
@@ -18486,7 +18504,9 @@ async function pressFrzEnter() {
       body: JSON.stringify({ pin: state.frozenPin, force: true }),
     });
     if (r && r.id && (r.id === state.frozen.id || r.role === 'manager')) { unfreezeScreen(); return; }
-  } catch (e) {}
+  } catch (e) {
+    if (pinLockedOut(e)) { state.frozenPin = ''; state.toast = toastFail(e.message); render(); armToastTimer(TOAST_ALARM); return; }
+  }
   state.frozenErr = 'shake'; state.frozenPin = '';
   render();
 }
@@ -18605,10 +18625,13 @@ function backToTableSelect() {
 function logOut() {
   clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
   clearSendState();
+  state.attachedCustomerId = null;
   state.staffPin = '';
   releaseTableLock(state.table);
   try { localStorage.removeItem('pos-signed-in'); } catch (e) {}
-  try { localStorage.removeItem('pos-cart'); } catch (e) {} // deliberate log-off = cart gone
+  // Deliberate log-off = THIS PERSON's cart gone — never a colleague's saved
+  // round (Sep '26: Sam logging off wiped the three items Jamie's lock held).
+  try { const raw = localStorage.getItem('pos-cart'); const owner = raw ? JSON.parse(raw).staffId : null; if (!owner || !state.currentStaff || owner === state.currentStaff.id) localStorage.removeItem('pos-cart'); } catch (e) {}
   // A fresh login starts with the admin nav collapsed.
   state.adminOpenGroups = [];
   try { localStorage.removeItem('pos-admin-group'); } catch (e) {}
@@ -18745,6 +18768,7 @@ async function loadRegisterData() {
   } catch (e) {}
   state.registerCashCounted = '';
   state.registerDenoms = {};
+  state.registerNextFloat = null;
   render();
 }
 async function closeRegister() {
@@ -18761,7 +18785,10 @@ async function closeRegister() {
             return t ? t.toFixed(2) : '';
           })(),
           denominations: state.registerDenoms || null,
-          nextFloat: (document.getElementById('register-next-float-input') || {}).value,
+          // What was TYPED, kept as it was typed: the box was redrawn from the
+          // old float on every refresh, and the confirm's own redraw reset
+          // it before this read it — every cash-up saved a float of 0 (Sep '26).
+          nextFloat: state.registerNextFloat != null ? state.registerNextFloat : (document.getElementById('register-next-float-input') || {}).value,
           staffName: state.currentStaff ? state.currentStaff.name : 'Unknown',
         }),
       });
@@ -22209,7 +22236,7 @@ function render() {
   if (state._tpLeaving && document.querySelector('.middle-view.tp-view.tp-off')) return;
 
   if (!state.currentStaff) {
-    app.innerHTML = renderLoginScreen();
+    app.innerHTML = renderLoginScreen() + (state.frozen ? renderFreezeOverlay() : '');
     bindEvents();
     return;
   }
@@ -25619,6 +25646,9 @@ function histHaystack(o) {
   const tot = o.grandTotal !== undefined ? o.grandTotal : o.total;
   return [
     '#' + o.id, o.id, o.table, o.customerName, o.staffName, o.paymentMethod, o.orderType,
+    // A loyalty guest is kept by id, so their NAME is looked up — searching
+    // "Bob" found nothing on the bill Bob earned 266 points on (Sep '26).
+    o.customerId ? (((state.customers || []).find(c => c.id === o.customerId) || {}).name || '') : '',
     o.status, (o.discount && o.discount.label) || '', o.voidReason || '',
     Number(tot || 0).toFixed(2), String(tot || 0),
   ].join(' ').toLowerCase();
@@ -25879,7 +25909,7 @@ function renderRegisterAdmin() {
     })()}
     ${cashDiff !== null ? `<div class="change-due" style="background:${Math.abs(cashDiff) < 0.005 ? 'var(--green-dim)' : '#F5DDD8'};color:${Math.abs(cashDiff) < 0.005 ? 'var(--green)' : 'var(--red)'};"><span>${Math.abs(cashDiff) < 0.005 ? 'Drawer matches' : (cashDiff > 0 ? 'Over' : 'Short')}</span><span>${cashDiff >= 0 ? '+' : ''}${money(cashDiff)}</span></div>` : ''}
     <label class="field-label">Float to leave for tomorrow</label>
-    <input id="register-next-float-input" class="field-box" type="number" min="0" step="0.01" value="${cur.float || 0}" placeholder="0.00">
+    <input id="register-next-float-input" class="field-box" type="number" min="0" step="0.01" value="${state.registerNextFloat != null ? esc(state.registerNextFloat) : (cur.float || 0)}" placeholder="0.00" oninput="state.registerNextFloat = this.value;">
     <button class="btn-send" style="width:100%;margin-top:12px;" data-act="close-register">Cash up</button>
   </div>` : ''}
   <div class="th">Past closes</div>
@@ -26376,6 +26406,9 @@ function kdsItemRows() {
   const cutoff = Date.now() - 4 * 3600000;
   state.orders.forEach(o => {
     if (o.status === 'void') return;
+    // A trainee's practice order never reaches the kitchen — printing already
+    // kept it off paper; the screen showed it at the top of Ordered (Sep '26).
+    if (o.practice) return;
     if (o.status !== 'open' && o.createdAt < cutoff) return;
     // Map each item back to the round it was sent in, so the KDS can show a
     // live age timer from when the kitchen actually received it. By the
@@ -26391,10 +26424,11 @@ function kdsItemRows() {
         idx,
         item,
         sentAt: sentAtByItem.get(keyOf(item)) || o.createdAt,
-        // Called-away is the only fire state persisted on the order (order-level,
-        // set by the floor-map "call away" action) — there is no per-course fire
-        // flag in the order data, so the KDS surfaces it at the ticket level.
+        // The ticket says it has been called away; each COURSE says whether it
+        // is one of the called ones. Tickets carry their called courses now,
+        // and a held 3rd sat under "Called away" with a Preparing key (Sep '26).
         calledAway: !!o.calledAwayAt,
+        held: Object.keys(o.firedCourses || {}).some(k => o.firedCourses[k] > 0) && !((o.firedCourses || {})[item.course || 1] > 0),
         table: o.orderType === 'dine-in' ? 'Table ' + (o.table == null ? '' : o.table) : (o.customerName || o.orderType),
       });
     });
@@ -26447,7 +26481,7 @@ function kdsGroupByTicket(colRows) {
     t.rows.forEach(r => {
       const cn = r.item.course || 1;
       let c = cmap.get(cn);
-      if (!c) { c = { course: cn, rows: [] }; cmap.set(cn, c); t.courses.push(c); }
+      if (!c) { c = { course: cn, rows: [], held: !!r.held }; cmap.set(cn, c); t.courses.push(c); }
       c.rows.push(r);
     });
     t.courses.sort((a, b) => a.course - b.course);
@@ -26506,7 +26540,7 @@ function renderKitchenAdmin() {
               const info = courseInfo(c.course);
               return `
               <div class="kds-course">
-                <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>
+                <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}${c.held ? ' · Held' : ''}</div>
                 ${c.rows.map(r => `
                   <div class="order-row kds-item" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-uid="${esc(r.item.uid || '')}" data-status="${col.next}">
                     ${col.prev ? `<button class="kds-back" data-stop="1" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-uid="${esc(r.item.uid || '')}" data-status="${col.prev}" aria-label="Recall to ${esc(col.prevLabel)}">‹</button>` : ''}
@@ -26538,6 +26572,11 @@ async function loadReservations() {
 async function seatBookingFromFloor(tableId) {
   const r = upcomingBookingFor(tableId);
   if (!r) { pickTable(tableId); return; }
+  // A TABLE ANOTHER TILL HAS OPEN SEATS NOBODY (Sep '26): the booking was
+  // marked seated and the table's covers overwritten before the pick said
+  // "In use", so the booking vanished from the floor with nobody at the table.
+  const held = tableLocksOn() && tableLockedBy(tableId);
+  if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return; }
   await markReservationSeated(r.id);
   await saveTableCovers(tableId, r.partySize || 1);
   // Seating a booking moves OFF the booked lens — it does not choose one for
@@ -34334,7 +34373,9 @@ function upcomingBookingFor(tableId, aheadMin) {
   const now = Date.now();
   const ahead = (aheadMin || 60) * 60000;
   return (state.reservations || [])
-    .filter(r => r.tableId === tableId && r.status !== 'cancelled' && r.status !== 'seated')
+    // Only a booking still EXPECTED: a no-show kept its tag and offered
+    // "Seat" for fifteen minutes while the Timeline had already let it go (Sep '26).
+    .filter(r => r.tableId === tableId && (!r.status || r.status === 'booked'))
     .filter(r => { const at = new Date(r.time).getTime(); return at > now - 15 * 60000 && at < now + ahead; })
     .sort((a, b) => new Date(a.time) - new Date(b.time))[0];
 }
@@ -36655,6 +36696,10 @@ function pickTable(id) {
     state.discount = (t && t.discount) || null; // the account's discount comes back with the table
     state.notes = (t && t.notes) || [];
     state.openOrderId = (oo && oo.id) || null;
+    // THE GUEST BELONGS TO THIS TABLE'S BILL (Sep '26): the one attached on
+    // the last table rode along to the next, and to the next waiter, and
+    // earned points on other parties' bills.
+    state.attachedCustomerId = (oo && oo.customerId) || null;
     // The called-away courses come back with the table (Sep '26: leaving and
     // returning forgot the call-away, so mains were called twice).
     state.firedCourses = { ...((oo && oo.firedCourses) || {}) };
@@ -47517,6 +47562,10 @@ setInterval(() => {
     const t = localStorage.getItem('pos-admin-tab');
     if (t && adminPageMeta(t)) state.adminTab = t;
   } catch (e) {}
+  // A HELD TILL STAYS HELD THROUGH A RELOAD (Sep '26): the lock was written
+  // down and never read back, so a reload opened the name list and a
+  // colleague could walk straight in over the round it was guarding.
+  try { const f = JSON.parse(localStorage.getItem('pos-frozen') || 'null'); if (f && f.id) state.frozen = f; } catch (e) {}
   // Theme (incl. dark mode) applies BEFORE login — the login screen must not
   // flash light on a dark till. The cached copy goes on synchronously first:
   // the fetch only refreshes it, and a failed fetch can no longer strand the

@@ -8453,7 +8453,7 @@ app.use((req, res, next) => {
 // stock fields, and a snapshot older than ten minutes is gone.
 const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
 const UNDO_TTL = 10 * 60 * 1000;
-let _undoSnap = null, _undoSnapAt = 0;
+let _undoSnap = null, _undoSnapAt = 0, _undoKeys = new Set();
 app.use((req, res, next) => {
   if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
     // A bulk delete is many DELETEs in a burst. Snapshot before the FIRST of
@@ -8465,6 +8465,7 @@ app.use((req, res, next) => {
         const snap = {};
         for (const k of UNDO_KEEP) if (d[k] !== undefined) snap[k] = d[k];
         _undoSnap = JSON.parse(JSON.stringify(snap));
+        _undoKeys = new Set();
       } catch (e) { _undoSnap = null; }
     }
     _undoSnapAt = Date.now();
@@ -8477,7 +8478,8 @@ app.use((req, res, next) => {
       try {
         if (_undoSnap && !(body && body.error)) {
           const d = readData();
-          if (UNDO_KEEP.some(k => JSON.stringify(d[k]) !== JSON.stringify(_undoSnap[k]))) res.setHeader('X-Undo', '1');
+          UNDO_KEEP.forEach(k => { if (JSON.stringify(d[k]) !== JSON.stringify(_undoSnap[k])) _undoKeys.add(k); });
+          if (_undoKeys.size) res.setHeader('X-Undo', '1');
         }
       } catch (e) {}
       return sendJson(body);
@@ -8490,13 +8492,24 @@ app.post('/api/undo', (req, res) => {
   if (!_undoSnap || Date.now() - _undoSnapAt > UNDO_TTL) { _undoSnap = null; return res.status(404).json({ error: 'Nothing to undo' }); }
   const d = readData();
   const live = new Map((d.menu || []).map(m => [m.id, m]));
+  // ONLY WHAT THE DELETE TOUCHED COMES BACK (Sep '26): Undo wrote the whole
+  // setup back, so covers and an allergy another till put on a table in those
+  // seconds — and any booking or setting — went back with the deleted row.
+  // And a table's service state (covers, notes, money off) is the floor's,
+  // not the setup's: it stays as it is now.
+  const liveTables = new Map();
+  (d.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => liveTables.set(t.id, t)));
+  const SERVICE = ['covers', 'notes', 'discount'];
   for (const k of Object.keys(_undoSnap)) {
-    if (k === 'menu') {
+    if (!_undoKeys.has(k)) continue;
+    if (k === 'floorPlans') {
+      d.floorPlans = _undoSnap.floorPlans.map(fp => ({ ...fp, tables: (fp.tables || []).map(t => { const cur = liveTables.get(t.id); if (!cur) return t; const out = { ...t }; SERVICE.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; else delete out[f]; }); return out; }) }));
+    } else if (k === 'menu') {
       // A dish comes back as it was set up; what has been SOLD since stays sold.
       d.menu = _undoSnap.menu.map(m => { const cur = live.get(m.id); if (!cur) return m; const out = { ...m }; STOCK_FIELDS.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; }); return out; });
     } else d[k] = _undoSnap[k];
   }
-  _undoSnap = null;
+  _undoSnap = null; _undoKeys = new Set();
   writeData(d);
   res.json({ ok: true });
 });
@@ -10239,6 +10252,15 @@ app.put('/api/menu/:id', (req, res) => {
   if (category) item.category = category;
   if (price !== undefined && !isNaN(parseFloat(price))) item.price = parseFloat(price);
   if (subcategoryId !== undefined) item.subcategoryId = subcategoryId || null;
+  // A MOVE TO ANOTHER SECTION LEAVES THE OLD SUBSECTION BEHIND (Sep '26): the
+  // dish kept Cocktails' subsection after moving to Food, and the till drew
+  // it under no section at all. A subsection that is not the new section's
+  // own is dropped.
+  if (category && subcategoryId === undefined && item.subcategoryId) {
+    const cat = (data.categories || []).find(c => c.name === category);
+    const sub = (data.subcategories || []).find(x => x.id === item.subcategoryId);
+    if (!cat || !sub || sub.categoryId !== cat.id) item.subcategoryId = null;
+  }
   if (salesCategoryId !== undefined) item.salesCategoryId = salesCategoryId || null;
   if (Array.isArray(modifierGroupIds)) item.modifierGroupIds = modifierGroupIds;
   // Allergen tags — names from the allergy presets, red/yellow levels + notes.
@@ -11499,6 +11521,15 @@ app.post('/api/orders/:id/print-bill', (req, res) => {
   const taxCalc = computeTax(data, taxable - voucherSaleTotal(order.items));
   const total = Math.round((taxable + taxCalc.add) * 100) / 100;
   const shown = { ...order, subtotal, discount: discountRecord, tax: taxCalc.tax, total, grandTotal: total };
+  // WHAT IS ALREADY PAID IS ON THE PAPER (Sep '26): $200 of a $438 bill on a
+  // card, and the bill printed TOTAL 438.00 with no paid line, while the till
+  // said $238 due. The parts print as payments, and what is left under them.
+  const parts = (order.splitPaid || []).filter(p => p && p.amount > 0);
+  if (parts.length && !split) {
+    shown.paymentMethod = 'split';
+    shown.payments = parts.map(p => ({ method: p.method || 'card', amount: p.amount }));
+    shown.leftToPay = Math.max(0, Math.round((total - parts.reduce((a, p) => a + p.amount - (p.tip || 0), 0)) * 100) / 100);
+  }
   printing.printReceiptForOrder(data, shown, 'bill', split);
   res.json({ ok: true });
 });
@@ -13182,8 +13213,13 @@ app.post('/api/orders/:id/close', (req, res) => {
   const giftParts = (order.splitPaid || []).filter(p => p.method === 'giftcard').reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
   if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : Math.max(0, total - voucherSaleTotal(order.items) - giftParts); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
   writeData(data);
-  if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
-  printing.drawerForSale(data, order);
+  // A BILL PAID IN PARTS TOOK ITS MONEY PART BY PART, and each cash part
+  // opened the drawer as it was taken. Closing it takes nothing, so it opens
+  // nothing: a $194 card that finished a bill after $200 in cash popped the
+  // drawer a second time, with no line in the log (Sep '26).
+  const partsPaid = (order.splitPaid || []).length > 0;
+  if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, partsPaid ? { ...order, drawerDone: true } : order);
+  if (!partsPaid) printing.drawerForSale(data, order);
   res.json(order);
 });
 
@@ -18802,6 +18838,9 @@ function cartDiscountAmount() {
   const base = cartDiscountBase();
   let rawAmount = d.type === 'percent' ? base * (Math.min(100, Math.max(0, d.value)) / 100) : Math.max(0, d.value);
   if (d.type === 'fixed' && (!d.kind || d.kind === 'discount')) rawAmount = Math.min(base, rawAmount);
+  // Whole cents, the server's own rounding: 12.5% of $1,539 asked $1,346.63
+  // on screen while the bill stored $1,346.62 and gave a cent in change (Sep '26).
+  rawAmount = Math.round(rawAmount * 100) / 100;
   return d.kind === 'surcharge' ? -rawAmount : rawAmount;
 }
 // GST never applies to SELLING a voucher (it applies when it is spent) —
@@ -20541,6 +20580,17 @@ async function saveDiscountModal() {
     }
   }
   if ((m.lines || []).length) { applyLineDiscount(m, value); return; }
+  // MONEY OFF NEVER DIPS UNDER WHAT WAS TAKEN (Sep '26): $60 off a $146 bill
+  // with $100 already on a card left the bill $14 over, Confirm refused to
+  // close it and a refund cannot touch an open bill — a dead end. Refused
+  // here instead, the way removing a paid-for dish already is.
+  if (m.kind !== 'surcharge' && splitPaidList().length) {
+    const had = state.discount;
+    state.discount = { type: m.type, value, reason: '', kind: m.kind };
+    const under = cartTotal() < splitPaidTotal() - 0.005;
+    state.discount = had;
+    if (under) { state.adminError = `${money(splitPaidTotal())} has been taken — that would take the bill under it.`; render(); return; }
+  }
   state.discount = { type: m.type, value, reason: m.reason.trim(), kind: m.kind };
   state.discountModal = null;
   state.adminError = '';
@@ -28895,6 +28945,9 @@ function applyHappyHour(id) {
   const hh = state.happyHours.find(h => h.id === id);
   if (!hh) return;
   state.discount = { type: 'percent', value: hh.discountPercent, reason: hh.name, kind: 'discount' };
+  // Kept on the table like the Discount pane's money off: it lived on this
+  // till only, so another till — or this one after a reload — lost it (Sep '26).
+  saveTableDiscount(state.table, state.discount);
   render();
 }
 // Promotions wear the Items uniform (owner ask, Aug '26): tile list on the
@@ -29169,7 +29222,13 @@ async function applyGiftCardCode() {
       // Sep '26).
       if (card.balance <= 0.005) { state.toast = toastFail('There is no money left on that gift card.'); render(); return; }
       const owed = amountOwing();
-      const spend = Math.min(card.balance, owed);
+      // A CARD PAYS THE BILL, NOT THE TIP: a $300 card on a $290 bill with a
+      // 15% tip tried to take $300 and the server said only $290 was owing, so
+      // the card could not be used at all (Sep '26). It takes what is left of
+      // the bill; the tip stays for card or cash.
+      const billLeft = Math.max(0, Math.round((cartTotal() - splitPaidTotal()) * 100) / 100);
+      if (billLeft <= 0.005) { state.toast = toastFail('A gift card pays the bill, not the tip.'); render(); return; }
+      const spend = Math.min(card.balance, owed, billLeft);
       const took = await takePart(spend, 'giftcard', card.code);
       if (!took) return; // takePart has already said why
       state.checkoutGiftCardCode = '';
@@ -35227,6 +35286,11 @@ async function doMoveItems(targetTableId) {
   if (!target || (cur && String(target.label) === String(cur.label))) {
     state.toast = toastFail('Pick a different table.'); render(); armToastTimer(TOAST_SHORT); return;
   }
+  // A TABLE ANOTHER TILL HAS OPEN TAKES NO DISHES (Sep '26): moved lines
+  // landed on a ticket a waiter was still ringing up. Refused the way moving
+  // the whole table already is.
+  const held = tableLocksOn() && tableLockedBy(target.id);
+  if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return; }
   const n = state.moveItems.sel.length;
   // Moving lines rewrites two tables' dockets — say what's about to happen
   // and let a mis-tap back out (owner-asked, Aug '26).
@@ -35768,11 +35832,14 @@ function renderTimeline(fp) {
     if (nothingSent(o)) return `<div class="tl-wait" style="--at:${at(now)}"><span class="tl-chip seated"><i>Seated</i>Nothing sent</span></div>`;
     const fired = o.firedCourses || {};
     const calls = Object.keys(fired).map(Number).filter(n => fired[n] > 0).sort((a, b) => fired[a] - fired[b]);
+    // DONE IS THE PASS'S WORD, NOT THE ORDER OF CALLS (Sep '26): two courses
+    // called together — the 2nd, then the 3rd a few minutes on — showed 2nd
+    // as finished here while the Pass said it was still away.
+    const kindOf = new Map(passCells(o, calls).map(c => [c.n, c.kind]));
     const bars = calls.map((n, i) => {
       const from = fired[n], to = i + 1 < calls.length ? fired[calls[i + 1]] : null;
-      const items = courseLines(o.items).filter(it => (it.course || 1) === n && it.qty > 0);
-      const served = items.length && items.every(it => it.status === 'served');
-      if (to || served) return `<div class="tl-bar done" style="left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
+      const k = kindOf.get(n);
+      if (k === 'done' || (k === 'none' && to)) return `<div class="tl-bar done" style="left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
       const lvl = pillClockLevel(mins(now - from), 'course');
       return `<div class="tl-bar away lvl-${lvl}" data-grow="${from}" style="left:${at(from)};width:${len(from, now)}"><i>${esc(courseInfo(n).name)} · ${pillDur(mins(now - from))}</i></div>`;
     }).join('');
@@ -36824,6 +36891,11 @@ async function linkTables(fromId, intoId, drop, opts) {
     armToastTimer(TOAST_SHORT);
     return false;
   }
+  // A TABLE ANOTHER TILL HAS OPEN IS NOT JOINED (Sep '26): its round, sent
+  // after the join, made a ticket on a table every tap now sends to the other
+  // one — the food had no way in. A manager unlocks it first, as for a move.
+  const held = tableLocksOn() && [a, b, ma, mb].map(t => tableLockedBy(t.id)).find(Boolean);
+  if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return false; }
   // Lowest number runs the group — UNLESS one side already has an open order:
   // that table stays in charge so its docket never becomes unreachable. Two
   // open orders can't be welded; one has to be paid or transferred first.
@@ -42844,6 +42916,11 @@ async function saveMenuItemQuickEdit(itemId, field, value) {
     item.price = price;
   } else if (field === 'category') {
     item.category = value;
+    // The server drops a subsection that is not the new section's; this till
+    // does the same so the row and the menu agree without a reload.
+    const cat = state.categories.find(c => c.name === value);
+    const sub = item.subcategoryId && (state.subcategories || []).find(x => x.id === item.subcategoryId);
+    if (item.subcategoryId && (!cat || !sub || sub.categoryId !== cat.id)) item.subcategoryId = null;
   } else if (field === 'subcategoryId' || field === 'salesCategoryId') {
     payloadValue = value || null;
     item[field] = payloadValue;
@@ -47067,7 +47144,13 @@ function handleActClick(el, e) {
       else if (act === 'practice-exit') { exitPracticeMode(); }
       else if (act === 'set-staff-trainee') { saveStaffTrainee(el.dataset.id, el.dataset.val === 'true'); }
       else if (act === 'coach-ok') { coachDismiss(el.dataset.val); }
-      else if (act === 'clear-fired-all') { state.firedCourses = {}; state.toast = 'Call-away cleared'; render(); armToastTimer(TOAST_SHORT); }
+      else if (act === 'clear-fired-all') {
+        // Taken back ON THE TICKET, course by course, through the one door a
+        // single course uses: it only emptied this till's copy, so the next
+        // refresh put every call back and the Pass never changed (Sep '26).
+        Object.keys(state.firedCourses || {}).map(Number).forEach(n => clearFiredCourse(n));
+        state.toast = 'Call-away cleared'; render(); armToastTimer(TOAST_SHORT);
+      }
       else if (act === 'switch-notes-tab') { switchNotesTab(el.dataset.val); }
       else if (act === 'pick-note-preset') {
         // One tap = the whole job (owner, Aug '26): the preset lights up for a

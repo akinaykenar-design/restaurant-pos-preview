@@ -6381,7 +6381,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    dotted route in the picked blue under the tables. Gone on the next tap. */
 .oyw-route{ position:absolute; inset:0; width:100%; height:100%; pointer-events:none; z-index:1; overflow:visible; }
 .oyw-route polyline{ fill:none; stroke:var(--blue); stroke-width:2; stroke-dasharray:2 6; stroke-linecap:round; vector-effect:non-scaling-stroke; }
-.oyw-stop{ position:absolute; transform:translate(-50%, calc(-100% - 8px)); display:inline-flex; align-items:center; gap:4px; padding:4px 8px 4px 4px;
+.oyw-stop{ position:absolute; transform:translate(-50%, 4px); display:inline-flex; align-items:center; gap:4px; padding:4px 8px 4px 4px;
   border:1px solid var(--steel-200); border-radius:var(--r-pill); background:var(--surface); color:var(--text-primary);
   font-size:var(--fs-chip); font-weight:800; white-space:nowrap; pointer-events:none; }
 .oyw-stop b{ display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; border-radius:50%; background:var(--blue); color:#fff; font-size:var(--fs-chip); }
@@ -10672,7 +10672,9 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (discount !== undefined) {
     const d = discount && typeof discount === 'object' ? discount : null;
     table.discount = d && ['percent', 'fixed'].includes(d.type) && parseFloat(d.value) > 0
-      ? { type: d.type, value: parseFloat(d.value), reason: String(d.reason || '').slice(0, 80), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount' } : null;
+      ? { type: d.type, value: parseFloat(d.value), reason: String(d.reason || '').slice(0, 80), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount',
+          // the manager's okay rides with it (§ approval stamps) — checked where it is spent, never here
+          ...(typeof d.ok === 'string' ? { ok: d.ok.slice(0, 120) } : {}) } : null;
   }
   if (Array.isArray(notes)) {
     table.notes = notes.slice(0, 50)
@@ -10872,6 +10874,36 @@ app.post('/api/staff/verify-manager-pin', (req, res) => {
   }
   pinRecordSuccess(req);
   res.json({ id: manager.id, name: manager.name, role: manager.role });
+});
+
+// A MANAGER'S OKAY IS A STAMP, NOT A PIN IN A TILL'S MEMORY (Sep '26). Money
+// off that a manager approved was kept approved only by the PIN the till
+// remembered — gone at log-off, gone on another till, blanked by a surcharge
+// — and the bill then could not be paid. The okay is now a stamp the server
+// signs for exactly that thing (this discount, this line at this price): it
+// rides with the discount on the table and with the line in the cart, every
+// till can pay it, and nothing can forge one without a manager's PIN. It
+// holds for a day.
+const OK_TTL = 24 * 3600 * 1000;
+function okMac(m, ts, scope) { const key = require('crypto').createHash('sha256').update('ok|' + m.id + '|' + m.pin).digest(); return require('crypto').createHmac('sha256', key).update(m.id + '~' + ts + '~' + scope).digest('base64url').slice(0, 22); }
+function okSign(m, scope) { const ts = Date.now().toString(36); return `${m.id}~${ts}~${okMac(m, ts, scope)}`; }
+function okValid(data, token, scope) {
+  if (typeof token !== 'string') return false;
+  const [id, ts, mac] = token.split('~');
+  const m = (data.staff || []).find(x => x.id === id && x.role === 'manager');
+  if (!m || !ts || !mac || Date.now() - parseInt(ts, 36) > OK_TTL) return false;
+  return okMac(m, ts, scope) === mac;
+}
+function offScope(d) { return `off|${d.type === 'percent' ? 'percent' : 'fixed'}|${Number(parseFloat(d.value) || 0)}|${d.kind === 'surcharge' ? 'surcharge' : 'discount'}`; }
+function lineScope(i) { return `line|${i.menuItemId || ''}|${(parseFloat(i.price) || 0).toFixed(2)}`; }
+app.post('/api/approve', (req, res) => {
+  if (pinRateBlocked(req, res)) return;
+  const data = readData();
+  const m = managerFromReq(req, data);
+  if (!m) { if (req.body && req.body.managerPin) pinRecordFailure(req); return res.status(401).json({ error: 'Incorrect manager PIN' }); }
+  if (req.body && req.body.managerPin) pinRecordSuccess(req);
+  const scopes = Array.isArray(req.body && req.body.scopes) ? req.body.scopes.slice(0, 60).map(String) : [];
+  res.json({ by: m.name, tokens: scopes.map(sc => okSign(m, sc)) });
 });
 
 // Manager eye on the Team page: reveal one PIN, and leave a trace.
@@ -12654,6 +12686,7 @@ function checkDiscountExtras(data, discount) {
 function moneyOffRefused(req, data, discount) {
   if (!discount || discount.kind === 'surcharge' || !(parseFloat(discount.value) > 0)) return null;
   if (managerFromReq(req, data)) return null;
+  if (okValid(data, discount.ok, offScope(discount))) return null;
   if (discount.voucherCode || (discount.loyaltyPoints && discount.customerId)) return null;
   const typeOf = t => (t === 'percent' ? 'percent' : 'fixed');
   const same = p => typeOf(p.type) === typeOf(discount.type) && Math.abs((parseFloat(p.value) || 0) - parseFloat(discount.value)) < 0.005;
@@ -12667,20 +12700,24 @@ function moneyOffRefused(req, data, discount) {
 // they typed to okay a line discount — or when a manager already set that
 // price on this ticket. A set menu is judged as the whole set: its dishes
 // ride at $0 behind the one line that carries the set's price.
-function priceFloorRefused(req, data, items, order) {
+function priceFloorRefused(req, data, items, order, back) {
   if (!Array.isArray(items) || !items.length || managerFromReq(req, data)) return null;
   const menu = new Map((data.menu || []).map(m => [m.id, m]));
   const groups = new Map((data.modifierGroups || []).map(g => [g.id, g]));
   const combos = new Map((data.combos || []).map(c => [c.id, c]));
-  const setByManager = new Set(((order && order.items) || []).map(i => i.menuItemId + '|' + Number(i.price).toFixed(2)));
+  const setByManager = new Set(((order && order.items) || []).filter(i => !i.comboRef).map(i => i.menuItemId + '|' + Number(i.price).toFixed(2))); // a set menu's $0 dishes are the set's, never a price to copy
   const sets = new Map();
   for (const it of items) {
     if (!it || it.giftcardSale) continue;
     const price = parseFloat(it.price) || 0;
+    // Undo of a void puts back exactly what the void took, at its price —
+    // a set menu's $0 dish included (Sep '26: Undo was refused).
+    if (back && back.has(it.menuItemId + '|' + price.toFixed(2))) continue;
     if (it.comboRef && combos.has(it.comboRef)) { const k = it.comboRef + '|' + (it.comboStamp || ''); sets.set(k, (sets.get(k) || 0) + price * (it.qty || 1)); continue; }
     const mi = menu.get(it.menuItemId);
     if (!mi) continue;
     if (setByManager.has(it.menuItemId + '|' + price.toFixed(2))) continue;
+    if (okValid(data, it.ok, lineScope(it))) continue;
     const prices = [parseFloat(mi.price) || 0, ...(mi.variants || []).map(v => parseFloat(v.price)).filter(n => !isNaN(n))];
     const down = (mi.modifierGroupIds || []).reduce((a, gid) => a + ((groups.get(gid) || {}).options || []).reduce((b, o) => b + Math.min(0, parseFloat(o.priceDelta) || 0), 0), 0);
     if (price < Math.min(...prices) + down - 0.005) return `A manager PIN is needed to sell ${mi.name} under its price.`;
@@ -12983,7 +13020,8 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   const fresh = unseenLines(order, rawItems);
   const dropped = (rawItems || []).length - fresh.length;
   if (dropped > 0 && fresh.length === 0) return res.json(order);
-  const underPrice = priceFloorRefused(req, data, fresh, order);
+  const back = req.body.restore ? new Set((order.lineVoids || []).filter(v => v.menuItemId).map(v => v.menuItemId + '|' + ((v.value || 0) / (v.qty || 1)).toFixed(2))) : null;
+  const underPrice = priceFloorRefused(req, data, fresh, order, back);
   if (underPrice) return res.status(403).json({ error: underPrice });
   // A notes-only round rides out with the table's notes or the quick note.
   if ((!fresh || fresh.length === 0) &&
@@ -17741,7 +17779,7 @@ function oskEligible() {
   // "our keyboard on the phone"). The keys flex down to the screen width.
   return (navigator.maxTouchPoints > 0 || 'ontouchstart' in window);
 }
-const OSK_TEXT_SEL = 'input[type="text"], input[type="search"], input:not([type]), textarea';
+const OSK_TEXT_SEL = 'input[type="text"]:not(.pay-amount), input[type="search"], input:not([type]), textarea';
 function oskRows() {
   // Phone-keyboard layout (owner, Aug '26 — "same design as here"): shift
   // and backspace flank the last letter row, the bottom row is
@@ -18055,7 +18093,7 @@ function openNumPad(el) {
   wrap.addEventListener('pointerdown', () => { if (_numPadSwallow) { document.removeEventListener('click', _numPadSwallow, true); _numPadSwallow = null; } }, true);
   // No minus on the pad, ever (owner, Sep '26: "why do we need a ± button?").
   // A form that can take stock away says so in words — Add / Remove.
-  let buf = el.value.replace(/^-/, '');
+  let buf = el.value.replace(/^-/, '').replace(/,/g, ''); // a pay box's comma is for reading, not for typing
   let touched = false;
   const disp = wrap.querySelector('.qp-display');
   const paint = () => {
@@ -18107,7 +18145,10 @@ function openNumPad(el) {
 let _numTap = null;
 document.addEventListener('pointerdown', (e) => {
   const t = e.target;
-  if (!t || !t.matches || !t.matches('input[type="number"]') || t.disabled || t.readOnly) return;
+  // The pay boxes are text now (they wear the thousands comma) and still get
+  // THE PAD, not the letter keyboard (Sep '26: a tap opened the letters and
+  // typing went on after the amount — 8.0050).
+  if (!t || !t.matches || !t.matches('input[type="number"], input.pay-amount') || t.disabled || t.readOnly) return;
   // The pay screen's amounts ALWAYS get the pad — a caret box on the money
   // screen invites typos, and it is the pad staff already know from covers
   // and quantities (owner-asked, Aug '26). Everything else keeps the
@@ -18719,7 +18760,6 @@ function logOut() {
   clearTimeout(_idleTimer); clearInterval(_idleCountdown); state.idleWarn = false;
   clearSendState();
   state.attachedCustomerId = null;
-  state.discountPins = {};
   state.staffPin = '';
   releaseTableLock(state.table);
   try { localStorage.removeItem('pos-signed-in'); } catch (e) {}
@@ -19114,7 +19154,7 @@ function onYourWayHtml(fp, hug) {
   const src = hugObject(fp.tables.find(t => t.id === state.onYourWay.from), hug);
   const pts = [src, ...stops.map(s => hugObject(s.t, hug))];
   return `<svg class="oyw-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')}"/></svg>
-    ${stops.map((s, i) => { const h = hugObject(s.t, hug); return `<span class="oyw-stop" style="left:${h.x}%;top:${h.y - h.height / 2}%;z-index:3100;"><b>${i + 1}</b>${esc(s.job)}</span>`; }).join('')}`;
+    ${stops.map((s, i) => { const h = hugObject(s.t, hug); return `<span class="oyw-stop" style="left:${h.x}%;top:${h.y + h.height / 2}%;z-index:3100;"><b>${i + 1}</b>${esc(s.job)}</span>`; /* in the table's OWN tag slot, under it: above it, it sat on the neighbour's tag (Sep '26) */ }).join('')}`;
 }
 // §§ Coming back
 // COMING BACK (owner's pick, Sep '26 — borrowed from a shop's "frequently
@@ -19153,7 +19193,11 @@ function paySplitRowHtml() {
   const o = activeOpenOrder();
   if (!o || !['card', 'cash'].includes(state.paymentMethod) || amountOwing() <= 0.005) return '';
   const paid = splitPaidList().length;
-  const share = state.payShare;
+  // The LAST share is simply what is owing, so the pay screen carries no
+  // share for it — the dots still say which one is up (Sep '26: they vanished).
+  const frozen = paid && !state.payShare && (o.splitParts || []).length ? o.splitParts : null;
+  const lastUp = frozen && frozen.find(p => !splitPaidMap()[p.key]);
+  const share = state.payShare || (lastUp ? { key: lastUp.key, label: lastUp.label, amount: amountOwing(), parts: frozen } : null);
   const parts = share && share.parts ? share.parts : null;
   const dots = parts ? `<div class="pay-split-dots">${parts.map(p => `<i class="${splitPaidMap()[p.key] ? 'paid' : p.key === share.key ? 'on' : ''}"></i>`).join('')}<span>${esc(share.label || '')} · ${money(share.amount)}</span></div>` : '';
   if (paid) return dots;
@@ -20783,8 +20827,6 @@ function pickDiscountPreset(id) {
 // do those things"). Staff sign in by name now, so a discount a waiter puts
 // on asks for a manager's PIN there and then — the same as voiding a sent
 // dish. Money ON (a surcharge) is not a giveaway and needs nobody.
-// The PIN a manager typed to okay this table's money off (memory only).
-function discountPinNow() { return ((state.discountPins || {})[String(state.table)]) || undefined; }
 function discountNeedsManager(m) {
   return !!m && m.kind !== 'surcharge' && !(state.currentStaff && state.currentStaff.role === 'manager');
 }
@@ -20806,8 +20848,7 @@ async function saveDiscountModal() {
       return;
     }
   }
-  if (discountNeedsManager(m)) { state.discountPins = state.discountPins || {}; state.discountPins[String(state.table)] = m.managerPin || ''; }
-  if ((m.lines || []).length) { applyLineDiscount(m, value); return; }
+  if ((m.lines || []).length) { await applyLineDiscount(m, value); return; }
   // MONEY OFF NEVER DIPS UNDER WHAT WAS TAKEN (Sep '26): $60 off a $146 bill
   // with $100 already on a card left the bill $14 over, Confirm refused to
   // close it and a refund cannot touch an open bill — a dead end. Refused
@@ -20820,16 +20861,36 @@ async function saveDiscountModal() {
     if (under) { state.adminError = `${money(splitPaidTotal())} has been taken — that would take the bill under it.`; render(); return; }
   }
   state.discount = { type: m.type, value, reason: m.reason.trim(), kind: m.kind };
-  // The PIN that okayed it rides with the payment, so the server can check
-  // the money off too — kept in this till's memory only, never on the table.
-  state.discountPins = state.discountPins || {};
-  state.discountPins[String(state.table)] = discountNeedsManager(m) ? (m.managerPin || '') : '';
+  // THE MANAGER'S OKAY TRAVELS WITH THE DISCOUNT (Sep '26): a stamp the
+  // server signs for exactly this money off, kept on the table with it — so
+  // any till can take the payment, after a log-off too. A surcharge needs none.
+  if (m.kind !== 'surcharge') state.discount.ok = await approvalFor(offScope(state.discount), m.managerPin);
   state.discountModal = null;
+  resizeEvenSplit();
   state.adminError = '';
   saveTableDiscount(state.table, state.discount);
   render();
 }
-function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); render(); }
+function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); resizeEvenSplit(); render(); }
+// The okay for one or more things, from a manager's till or the PIN typed.
+function offScope(d) { return `off|${d.type === 'percent' ? 'percent' : 'fixed'}|${Number(parseFloat(d.value) || 0)}|${d.kind === 'surcharge' ? 'surcharge' : 'discount'}`; }
+function lineScope(i) { return `line|${i.menuItemId || ''}|${(parseFloat(i.price) || 0).toFixed(2)}`; }
+async function approvalsFor(scopes, pin) {
+  try {
+    const r = await api('/api/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scopes, managerPin: pin || undefined }) });
+    return r.tokens || [];
+  } catch (e) { return []; }
+}
+async function approvalFor(scope, pin) { return (await approvalsFor([scope], pin))[0] || undefined; }
+// An even split sized before the money off changed is re-sized to the bill
+// it now is (Sep '26: ÷2 on $42, then 20% off, still asked $21 of $33.60).
+function resizeEvenSplit() {
+  const sh = state.payShare;
+  if (!sh || !sh.parts || splitPaidList().length) return;
+  const o = activeOpenOrder();
+  if (!o || (o.splitPlan || {}).way !== 'evenly') return;
+  paySplitEvenly(sh.parts.length);
+}
 // MONEY OFF (or on) THE PICKED LINES ONLY. A percent works on each line's
 // price; a dollar amount comes off each picked line. Sent lines reprice on
 // the server (the same 'reprice' the line editor uses, so the old price and
@@ -20845,6 +20906,13 @@ async function applyLineDiscount(m, value) {
     for (const l of lines) {
       const np = priceOf(l.price);
       l.cart.forEach(i => { const c = state.cart[i]; if (!c) return; if (c.origPrice === undefined) c.origPrice = c.price; c.price = np; c.discountReason = reason; });
+      // Each cart line carries the manager's okay for its new price, so the
+      // send is taken from any till, after a log-off, or from a draft.
+      if (sign < 0) {
+        const cs = l.cart.map(i => state.cart[i]).filter(Boolean);
+        const toks = await approvalsFor(cs.map(lineScope), m.managerPin);
+        cs.forEach((c, k) => { if (toks[k]) c.ok = toks[k]; });
+      }
       for (const match of l.sent) {
         if (!o) break;
         await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -21999,7 +22067,7 @@ async function sendToKitchen() {
       order = await api(`/api/orders/${state.openOrderId}/rounds`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ items: state.cart, staffName, staffId: state.currentStaff ? state.currentStaff.id : null, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null, customerId: state.attachedCustomerId || null, managerPin: discountPinNow() }),
+        body: JSON.stringify({ items: state.cart, staffName, staffId: state.currentStaff ? state.currentStaff.id : null, sendKey: state.sendKey, quickNote: state.quickNote || null, quickNoteStation: state.quickNoteStation || null, customerId: state.attachedCustomerId || null }),
       });
     } else {
       const payload = {
@@ -22015,7 +22083,6 @@ async function sendToKitchen() {
         quickNote: state.quickNote || null,
         quickNoteStation: state.quickNoteStation || null,
         customerId: state.attachedCustomerId || null,
-        managerPin: discountPinNow(),
       };
       order = await api('/api/orders', {
         method: 'POST',
@@ -22244,7 +22311,7 @@ async function confirmPaymentInner() {
       const order = await api(`/api/orders/${state.openOrderId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ payKey: state.payKey, paymentMethod: state.paymentMethod, payments, discount: state.discount, managerPin: discountPinNow(), tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType,
+        body: JSON.stringify({ payKey: state.payKey, paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType,
           expectItems: activeOpenOrder() ? activeOpenOrder().items.reduce((a, i) => a + i.price * i.qty, 0) : undefined }),
       });
       state.openOrderId = null;
@@ -22299,7 +22366,6 @@ async function confirmPaymentInner() {
     items: state.cart,
     covers: state.orderType === 'dine-in' ? (state.covers || null) : null,
     discount: state.discount,
-    managerPin: discountPinNow(),
     tip: tipAmount,
     paymentMethod: state.paymentMethod,
     payments,
@@ -24391,7 +24457,9 @@ async function commitRemoveSent(match, reason, qty, then, managerPin) {
     const n = Math.min(i.qty, left); left -= n;
     return n <= 0 ? null : { id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: n,
       course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
-      variantId: i.variantId, modSelections: i.modSelections };
+      variantId: i.variantId, modSelections: i.modSelections,
+      // a set menu's dish comes back as the set's, not as a $0 dish of its own
+      ...(i.comboRef ? { comboRef: i.comboRef, comboStamp: i.comboStamp } : {}) };
   }).filter(Boolean);
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -25512,7 +25580,7 @@ async function takePart(amount, method, giftCardCode, change) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: share ? share.key : state._partAttempt.key, parts: share ? share.parts : undefined,
         label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
-        amount, method, giftCardCode: giftCardCode || null, discount: state.discount, managerPin: discountPinNow(),
+        amount, method, giftCardCode: giftCardCode || null, discount: state.discount,
         cardType: method === 'card' ? state.cardType : null,
         tip: method === 'giftcard' ? 0 : cardTipPending(), staffName }),
     });

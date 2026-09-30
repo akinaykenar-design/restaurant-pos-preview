@@ -9108,7 +9108,7 @@ app.put('/api/categories/:id', (req, res) => {
   if (disabled !== undefined) cat.disabled = !!disabled;
   if (image !== undefined) cat.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) cat.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
-  if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
+  if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined || req.body.defaultCourse !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
   const oldName = cat.name;
   // Sections are joined to their dishes BY NAME, so a rename onto a name in
   // use welded two sections into one that could not be pulled apart (Sep '26).
@@ -10799,6 +10799,9 @@ app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
   // combination any more — it goes, rather than sitting in the desk's list
   // pointing at a table nobody can seat.
   if (floorPlan.joins) floorPlan.joins = floorPlan.joins.filter(c => !c.tables.includes(req.params.id));
+  // …and a table welded to it comes loose, or it stayed greyed out for good,
+  // joined to a table that no longer exists.
+  (data.floorPlans || []).forEach(f => (f.tables || []).forEach(t => { if (t.mergedInto === req.params.id) t.mergedInto = null; }));
   if (table) logAudit(data, staffFromReq(req), `Removed ${table.type === 'decor' ? 'floor object' : 'table'} "${table.label}" from ${floorPlan.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -12021,8 +12024,8 @@ app.post('/api/inventory-items', (req, res) => {
     sku: sku || '',
     unit: unit || 'unit',
     currentStock: 0,
-    minStock: minStock || 10,
-    maxStock: maxStock || 50,
+    minStock: isNaN(parseFloat(minStock)) ? 10 : Math.max(0, round3(minStock)),
+    maxStock: isNaN(parseFloat(maxStock)) ? 50 : Math.max(0, round3(maxStock)),
     costPerUnit: parseFloat(costPerUnit) || 0,
     supplierId: supplierId || null,
     lastRestockDate: Date.now()
@@ -12073,8 +12076,8 @@ app.put('/api/inventory-items/:id', (req, res) => {
   if (sku !== undefined) item.sku = sku;
   if (unit !== undefined) item.unit = unit;
   if (currentStock !== undefined) item.currentStock = Math.max(0, round3(currentStock));
-  if (minStock !== undefined) item.minStock = minStock;
-  if (maxStock !== undefined) item.maxStock = maxStock;
+  if (minStock !== undefined && !isNaN(parseFloat(minStock))) item.minStock = Math.max(0, round3(minStock));
+  if (maxStock !== undefined && !isNaN(parseFloat(maxStock))) item.maxStock = Math.max(0, round3(maxStock));
   if (costPerUnit !== undefined) item.costPerUnit = parseFloat(costPerUnit) || 0;
   if (supplierId !== undefined) item.supplierId = supplierId;
   recomputeServingsLeft(data);
@@ -12183,7 +12186,7 @@ app.post('/api/happy-hours', (req, res) => {
     startTime: startTime || '16:00',
     endTime: endTime || '18:00',
     discountPercent: Math.min(100, Math.max(0, parseFloat(discountPercent) || 0)),
-    enabled: true,
+    enabled: req.body.enabled !== false,
   };
   data.happyHours = [...(data.happyHours || []), happyHour];
   logAudit(data, staffFromReq(req), `Added happy hour: ${happyHour.name} (${happyHour.discountPercent}% off)`);
@@ -12687,9 +12690,15 @@ function moneyOffRefused(req, data, discount) {
   if (!discount || discount.kind === 'surcharge' || !(parseFloat(discount.value) > 0)) return null;
   if (managerFromReq(req, data)) return null;
   if (okValid(data, discount.ok, offScope(discount))) return null;
-  if (discount.voucherCode || (discount.loyaltyPoints && discount.customerId)) return null;
   const typeOf = t => (t === 'percent' ? 'percent' : 'fixed');
   const same = p => typeOf(p.type) === typeOf(discount.type) && Math.abs((parseFloat(p.value) || 0) - parseFloat(discount.value)) < 0.005;
+  // A voucher or the guest's points take off what THEY are worth, never more:
+  // any live code or a single point let a waiter's till close 100% off (Sep '26).
+  if (discount.voucherCode && (data.vouchers || []).some(v => v.code.toLowerCase() === String(discount.voucherCode).toLowerCase() && same(v))) return null;
+  if (discount.loyaltyPoints && discount.customerId && typeOf(discount.type) === 'fixed') {
+    const per = parseInt((data.settings || {}).loyaltyPointsPerDollar, 10) > 0 ? parseInt(data.settings.loyaltyPointsPerDollar, 10) : 20;
+    if (parseFloat(discount.value) <= (parseInt(discount.loyaltyPoints, 10) || 0) / per + 0.005) return null;
+  }
   if (discount.auto && (data.discountPresets || []).some(p => p.auto && p.enabled !== false && p.kind !== 'surcharge' && (!discount.ruleId || p.id === discount.ruleId) && same(p))) return null;
   if (typeOf(discount.type) === 'percent' && (data.happyHours || []).some(h => h.enabled && h.name === discount.reason && Math.abs((parseFloat(h.discountPercent) || 0) - parseFloat(discount.value)) < 0.005)) return null;
   return 'A manager PIN is needed for money off.';
@@ -12701,6 +12710,10 @@ function moneyOffRefused(req, data, discount) {
 // price on this ticket. A set menu is judged as the whole set: its dishes
 // ride at $0 behind the one line that carries the set's price.
 function priceFloorRefused(req, data, items, order, back) {
+  // A line is a whole number of dishes at a price of nothing or more, for
+  // everybody: a -1 or a 0.01 of a $32 martini, or a -$30 line with a made-up
+  // dish, took money off at the menu's own price (Sep '26).
+  if (Array.isArray(items) && items.some(it => it && (!Number.isInteger(Number(it.qty)) || Number(it.qty) < 1 || !(parseFloat(it.price) >= 0)))) return 'A line on this order has no proper quantity or price.';
   if (!Array.isArray(items) || !items.length || managerFromReq(req, data)) return null;
   const menu = new Map((data.menu || []).map(m => [m.id, m]));
   const groups = new Map((data.modifierGroups || []).map(g => [g.id, g]));
@@ -16520,7 +16533,10 @@ async function saveDesign(kind, name) {
   const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
   // On the Bill tab the design being saved is the BILL's, not the invoice's.
   const cfgSrc = kind === 'docket' ? (state.settings.docket || {}) : receiptCfg();
-  const designs = (state.settings[key] || []).slice(0, 11);
+  const designs = (state.settings[key] || []).slice();
+  // Twelve is what the server keeps. The thirteenth used to push the twelfth
+  // off the end without a word, and "Design saved" said it had worked.
+  if (designs.length >= 12) { state.designNaming = null; state.toast = toastFail('12 designs is the limit — delete one first'); render(); armToastTimer(TOAST_SHORT); return; }
   designs.push({ id: 'dz' + Date.now(), name: name || 'Design', cfg: JSON.parse(JSON.stringify(cfgSrc)) });
   const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: designs }) });
   state.settings = saved; state.designNaming = null;
@@ -19056,7 +19072,10 @@ function cardTakenAmount() {
   if (v === '') return amountOwing();
   return Math.max(0, Math.round((parseFloat(v) || 0) * 100) / 100);
 }
-function cardOver() { return Math.round((cardTakenAmount() - amountOwing()) * 100) / 100; }
+// Over what THIS card is for — the share on screen and its tip, else the
+// bill: $200 typed on a $179 share was never asked about, and the $21 tip
+// went on the bill as food money (Sep '26).
+function cardOver() { const due = state.payShare ? state.payShare.amount + cardTipPending() : amountOwing(); return Math.round((cardTakenAmount() - due) * 100) / 100; }
 // Cash reads the same way, except money over the bill is change, not a tip.
 // What the cash is FOR: the share picked on the split screen, else the bill.
 // A guest handing $20 for a $14 share was told "$8 left after this" and got
@@ -19212,15 +19231,24 @@ function paySplitRowHtml() {
 async function paySplitEvenly(n) {
   const o = activeOpenOrder();
   if (!o || splitPaidList().length) return;
-  if (n <= 1) { state.payShare = null; state.cardAmount = ''; state.cashGiven = ''; render(); return; }
+  // A tip typed before the split is the TABLE'S: each guest carries an even
+  // part of it on their own share, and Whole puts it back as it was.
+  // A tip changed on a share since counts as that share's, for every share.
+  const sh = state.payShare;
+  const tipAll = !sh ? cardTipPending()
+    : sh.tipAll != null && Math.abs(cardTipPending() - (sh.tipEach || 0)) < 0.005 ? sh.tipAll
+    : Math.round(cardTipPending() * ((sh.parts || []).length || 1) * 100) / 100;
+  if (n <= 1) { state.payShare = null; state.cardTip = tipAll; state.cardAmount = ''; state.cashGiven = ''; render(); return; }
   state.billSplit = { way: 'evenly', n, amounts: [''], picks: {}, printed: {}, at: 0 };
   const parts = billSplitParts();
   await saveSplitPlan();
   state.billSplit = null;
   const first = parts[0];
-  state.payShare = first ? { key: first.key, label: first.label, amount: first.amount, parts: parts.map(p => ({ key: p.key, label: p.label, amount: p.amount })) } : null;
-  state.cardAmount = state.payShare ? state.payShare.amount.toFixed(2) : '';
-  state.cashGiven = state.payShare && state.paymentMethod === 'cash' ? state.payShare.amount.toFixed(2) : '';
+  const tipEach = Math.round(tipAll / n * 100) / 100;
+  state.cardTip = tipEach;
+  state.payShare = first ? { key: first.key, label: first.label, amount: first.amount, parts: parts.map(p => ({ key: p.key, label: p.label, amount: p.amount })), tipAll, tipEach } : null;
+  state.cardAmount = state.payShare ? (state.payShare.amount + cardTipPending()).toFixed(2) : '';
+  state.cashGiven = state.payShare && state.paymentMethod === 'cash' ? cashDue().toFixed(2) : '';
   render();
 }
 function openBillSplit() {
@@ -19482,7 +19510,10 @@ function billSplitParts() {
   // Money already taken (a card, an earlier part) stays as its own row, and
   // only what is LEFT gets divided — the two screens must never disagree.
   const paidRows = splitPaidList().map(p => ({ key: p.key, label: p.label, amount: p.amount }));
-  const target = Math.round(amountOwing() * 100);
+  // The shares divide the BILL. A tip typed on Pay is not in them: it rides
+  // on each share on its own (Sep '26: 15% typed, then split 3 ways, and the
+  // tip vanished at the close while the third guest paid $59 less).
+  const target = Math.round((amountOwing() - cardTipPending()) * 100);
   if (!target && paidRows.length) return paidRows;
   if (sp.way === 'evenly') {
     const n = Math.max(2, sp.n || 2);
@@ -20115,7 +20146,9 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
   // part of what the kitchen reads. Under Auto the same dish meets itself by
   // the course it was FILED under, since the slide may have moved the first.
   const sameCourse = c => autoCourseOn() && !c.courseByHand ? (c.filedCourse || c.course) === course : c.course === course;
-  const existing = state.cart.find(c => c.id === line.id && sameCourse(c) && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
+  // …and never into a line whose price was changed: a second Sirloin tapped
+  // after the first was comped joined it at $0 (Sep '26).
+  const existing = state.cart.find(c => c.id === line.id && sameCourse(c) && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line) && c.price === line.price);
   // A line that already went out (sentQty) is never grown — the server would
   // skip its key and the extra would vanish. The extra becomes its own line.
   if (existing && existing.sentQty == null) existing.qty += qty;
@@ -24170,7 +24203,7 @@ function doAddServing(match) {
   // fifth serving came out as "4" and "1". Grow the serving already waiting,
   // exactly the way an add off the menu merges.
   const twin = state.cart.find(c => c.sentQty == null && c.id === line.id && c.course === line.course
-    && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
+    && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line) && c.price === line.price);
   if (twin) twin.qty += 1; else state.cart.push(line);
   state.toast = `Added another ${item.name}`;
   render();
@@ -25606,11 +25639,17 @@ async function takePart(amount, method, giftCardCode, change) {
   // The last share needs nothing: what is owing IS that share.
   const paidNow = splitPaidMap();
   const next = share ? (((activeOpenOrder() || {}).splitParts || []).find(p => !paidNow[p.key]) || null) : null;
+  // The next guest's part of a tip spread over the shares (the last one takes the odd cent).
+  if (next && share.tipEach && amountOwing() > 0.005) {
+    const done = (share.parts || []).filter(p => paidNow[p.key]).length;
+    const each = done >= (share.parts || []).length - 1 ? share.tipAll - share.tipEach * done : share.tipEach;
+    state.cardTip = Math.round((splitPaidList().reduce((a, p) => a + (p.tip || 0), 0) + Math.max(0, each)) * 100) / 100;
+  }
   state.payShare = next && next.amount < amountOwing() - 0.005
-    ? { key: next.key, label: next.label, amount: next.amount, parts: share.parts } : null;
+    ? { key: next.key, label: next.label, amount: next.amount, parts: share.parts, tipAll: share.tipAll, tipEach: share.tipEach } : null;
   if (state.payShare) {
-    if (method === 'cash') state.cashGiven = state.payShare.amount.toFixed(2);
-    else state.cardAmount = state.payShare.amount.toFixed(2);
+    if (method === 'cash') state.cashGiven = cashDue().toFixed(2);
+    else state.cardAmount = (state.payShare.amount + cardTipPending()).toFixed(2);
   }
   if (amountOwing() <= 0.005) {
     // The parts add up to the bill — close it, each part its own payment.
@@ -26917,7 +26956,7 @@ async function updateHappyHourField(id, patch) {
 async function duplicateSelectedHappyHours() {
   const sel = state.selectedHappyHourIds || [];
   for (const h of state.happyHours.filter(x => sel.includes(x.id))) {
-    try { await api('/api/happy-hours', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(h.name), days: h.days, startTime: h.startTime, endTime: h.endTime, discountPercent: h.discountPercent }) }); } catch (e) {}
+    try { await api('/api/happy-hours', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(h.name), days: h.days, startTime: h.startTime, endTime: h.endTime, discountPercent: h.discountPercent, enabled: h.enabled !== false }) }); } catch (e) {}
     await new Promise(r => setTimeout(r, 2)); // Date.now() ids — never mint twins
   }
   state.happyHours = await api('/api/happy-hours');
@@ -26957,6 +26996,7 @@ async function redeemLoyaltyPoints() {
     // Points leave the customer when the bill is PAID, not now.
     const amount = points / loyaltyPointsPerDollar();
     state.discount = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
+    resizeEvenSplit(); // an even split follows the bill it now is
     render();
   } catch (e) {
     state.toast = toastFail(e.message || 'Could not redeem points.');
@@ -27406,9 +27446,9 @@ function renderInventoryItemModal() {
       <label>Cost per Unit ($)</label>
       <input id="inventory-item-cost" type="number" step="0.01" value="${m.costPerUnit}" placeholder="0.00">
       <label>Minimum Stock</label>
-      <input id="inventory-item-min" type="number" step="1" value="${m.minStock}" placeholder="10">
+      <input id="inventory-item-min" type="number" step="any" min="0" value="${m.minStock}" placeholder="10">
       <label>Maximum Stock</label>
-      <input id="inventory-item-max" type="number" step="1" value="${m.maxStock}" placeholder="50">
+      <input id="inventory-item-max" type="number" step="any" min="0" value="${m.maxStock}" placeholder="50">
       <label>Supplier</label>
       <select id="inventory-item-supplier">
         <option value="">None</option>
@@ -29527,6 +29567,7 @@ async function applyVoucherCode() {
     if (voucher.used) throw new Error('This voucher has already been used');
     // Spent when the bill is PAID, not now — Cancel keeps the voucher whole.
     state.discount = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount', voucherCode: voucher.code };
+    resizeEvenSplit(); // an even split follows the bill it now is
     state.checkoutVoucherCode = '';
     state.toast = `Voucher ${voucher.code} applied`;
     render();
@@ -29561,7 +29602,8 @@ async function applyGiftCardCode() {
       // 15% tip tried to take $300 and the server said only $290 was owing, so
       // the card could not be used at all (Sep '26). It takes what is left of
       // the bill; the tip stays for card or cash.
-      const billLeft = Math.max(0, Math.round((cartTotal() - splitPaidTotal()) * 100) / 100);
+      const tipsTaken = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
+      const billLeft = Math.max(0, Math.round((cartTotal() - (splitPaidTotal() - tipsTaken)) * 100) / 100);
       if (billLeft <= 0.005) { state.toast = toastFail('A gift card pays the bill, not the tip.'); render(); return; }
       const spend = Math.min(card.balance, owed, billLeft);
       const took = await takePart(spend, 'giftcard', card.code);
@@ -34517,7 +34559,7 @@ function renderMenuModal() {
         <div style="display:flex;gap:8px;">
           <div style="flex:1;">
             <label>In stock now</label>
-            <input id="menu-stockcount-input" type="number" min="0" step="1" value="${m.stockCount}">
+            <input id="menu-stockcount-input" type="number" min="0" step="any" value="${m.stockCount}">
           </div>
           <div style="flex:1;">
             <label>Warn when below</label>
@@ -38459,6 +38501,8 @@ function dropTablesHere(fp, ids) {
   if (!fp) return;
   fp.tables = fp.tables.filter(t => !ids.includes(t.id));
   if (fp.joins) fp.joins = fp.joins.filter(j => !j.tables.some(id => ids.includes(id)));
+  // A table welded to one that went comes loose, as the server does.
+  allTables().forEach(t => { if (ids.includes(t.mergedInto)) t.mergedInto = null; });
 }
 async function deleteTableAction(id, fpId) {
   pushFloorHistory();
@@ -43089,6 +43133,14 @@ async function saveMenuModal() {
     sequence: (m.sequence === null || m.sequence === undefined || m.sequence === '') ? null : parseInt(m.sequence),
     out: !!m.out,
   };
+  // What nobody touched is not sent: the poll stands still while this popup is
+  // open, so the count and the sold-out mark read here are as old as the popup,
+  // and sending them put back every portion sold in the meantime.
+  if (m.mode === 'edit' && m.__snap) {
+    const was = JSON.parse(m.__snap);
+    if (m.stockCount === was.stockCount && m.trackStock === was.trackStock) delete payload.stockCount;
+    if (m.out === was.out) delete payload.out;
+  }
   try {
     if (m.mode === 'add') {
       await api('/api/menu', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -44607,9 +44659,9 @@ function bindEvents() {
   const inventoryItemCostInput = document.getElementById('inventory-item-cost');
   if (inventoryItemCostInput) inventoryItemCostInput.addEventListener('input', (e) => { state.inventoryItemModal.costPerUnit = parseFloat(e.target.value) || 0; });
   const inventoryItemMinInput = document.getElementById('inventory-item-min');
-  if (inventoryItemMinInput) inventoryItemMinInput.addEventListener('input', (e) => { state.inventoryItemModal.minStock = parseInt(e.target.value) || 10; });
+  if (inventoryItemMinInput) inventoryItemMinInput.addEventListener('input', (e) => { const v = parseFloat(e.target.value); state.inventoryItemModal.minStock = isNaN(v) ? 10 : Math.max(0, v); });
   const inventoryItemMaxInput = document.getElementById('inventory-item-max');
-  if (inventoryItemMaxInput) inventoryItemMaxInput.addEventListener('input', (e) => { state.inventoryItemModal.maxStock = parseInt(e.target.value) || 50; });
+  if (inventoryItemMaxInput) inventoryItemMaxInput.addEventListener('input', (e) => { const v = parseFloat(e.target.value); state.inventoryItemModal.maxStock = isNaN(v) ? 50 : Math.max(0, v); });
   const inventoryItemSupplierSelect = document.getElementById('inventory-item-supplier');
   if (inventoryItemSupplierSelect) inventoryItemSupplierSelect.addEventListener('change', (e) => { state.inventoryItemModal.supplierId = e.target.value || null; });
   const supplierNameInput = document.getElementById('supplier-name');
@@ -44832,7 +44884,7 @@ function bindEvents() {
   const menuPriceInput = document.getElementById('menu-price-input');
   if (menuPriceInput) menuPriceInput.addEventListener('input', (e) => { state.menuModal.price = e.target.value; });
   const menuStockCountInput = document.getElementById('menu-stockcount-input');
-  if (menuStockCountInput) menuStockCountInput.addEventListener('input', (e) => { state.menuModal.stockCount = parseInt(e.target.value) || 0; });
+  if (menuStockCountInput) menuStockCountInput.addEventListener('input', (e) => { state.menuModal.stockCount = Math.max(0, Math.round((parseFloat(e.target.value) || 0) * 100) / 100); });
   const menuLowStockInput = document.getElementById('menu-lowstock-input');
   if (menuLowStockInput) menuLowStockInput.addEventListener('input', (e) => { state.menuModal.lowStockThreshold = parseInt(e.target.value) || 0; });
   const menuSequenceInput = document.getElementById('menu-sequence-input');
@@ -45801,7 +45853,7 @@ function handleActClick(el, e) {
         state.cardTip = Math.round((state.cardTip + cardOver()) * 100) / 100;
         render();
       }
-      else if (act === 'card-tip-no') { state.cardAmount = ''; render(); }
+      else if (act === 'card-tip-no') { state.cardAmount = state.payShare ? (state.payShare.amount + cardTipPending()).toFixed(2) : ''; render(); }
       // ---- Splitting a bill -------------------------------------------------
       else if (act === 'split-way') {
         if (splitPaidList().length) { state.toast = toastFail('A part has been paid — finish it.'); render(); return; }
@@ -45885,8 +45937,9 @@ function handleActClick(el, e) {
           state.paymentMethod = k;
           state.cardAmount = '';
           // The share rides across: card or cash, it is still that guest's part.
-          if (state.payShare && k === 'card') state.cardAmount = state.payShare.amount.toFixed(2);
-          if (state.payShare && k === 'cash') state.cashGiven = state.payShare.amount.toFixed(2);
+          // …with the tip already on it: it dropped off, and the tip came out of the share.
+          if (state.payShare && k === 'card') state.cardAmount = (state.payShare.amount + cardTipPending()).toFixed(2);
+          if (state.payShare && k === 'cash') state.cashGiven = cashDue().toFixed(2);
           render();
         }
       }

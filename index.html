@@ -6245,6 +6245,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .race-score b{ font-size:var(--fs-xl); font-weight:800; }
 .race.behind .race-score b{ color:var(--red); }
 .race.ahead .race-score b{ color:var(--green); }
+/* Which bills and in what order: two rows of named buttons side by side. */
+.bl-band{ display:flex; flex-wrap:wrap; gap:12px; margin:0 4px 12px; }
+.bl-band .pay-options{ flex:1 1 280px; margin:0; }
+.bl-top .bl-print{ margin-left:auto; flex:none; }
 .bl-hd{ display:flex; align-items:baseline; gap:12px; margin:4px 4px 12px; color:var(--text-primary); }
 .bl-hd b{ font-size:var(--fs-lg); font-weight:800; }
 .bl-hd span{ font-size:var(--fs-md); font-weight:600; }
@@ -36068,7 +36072,7 @@ function billDocket(o, closed) {
     : !closed && o.orderType !== 'dine-in' ? `data-act="open-takeaway" data-id="${o.id}"` : `data-act="detail" data-id="${o.id}"`;
   return `
       <div class="bl-card${closed ? ' closed' : ''}" ${door}>
-        <div class="bl-top"><b>${esc(name)}</b><small>${esc(meta)}</small></div>
+        <div class="bl-top"><b>${esc(name)}</b><small>${esc(meta)}</small><button class="icon-sq bl-print" data-act="bill-print" data-id="${o.id}" aria-label="${closed ? 'Print the receipt' : 'Print the bill'}">${SYS_PRINTER_SVG}</button></div>
         <div class="bl-st ${tone}">${esc(word)}</div>
         <div class="bl-lines">${body}${hidden ? `<div class="bl-more">+ ${hidden} more line${hidden === 1 ? '' : 's'}</div>` : ''}</div>
         <div class="bl-foot">${foot}</div>
@@ -36177,21 +36181,47 @@ function wagesCardHtml() {
     ${w.lastOn ? row(`Without ${esc(w.lastOn.name)}`, w.lastOn.pct + '%') : ''}
   </div>`;
 }
+// WHAT THE BILLS SHOW AND IN WHAT ORDER (owner, Sep '26: "sort bills view.
+// Open, closed, latest, the earliest, by table number"). Two choices, each a
+// row of named buttons, remembered on this till: which bills (All, Open,
+// Closed) and their order (Latest, Earliest, Table). Both lists keep the one
+// order, so a bill never jumps between them.
+const BILLS_SHOW = [['all', 'All'], ['open', 'Open'], ['closed', 'Closed']];
+const BILLS_SORT = [['latest', 'Latest'], ['earliest', 'Earliest'], ['table', 'Table']];
+function billsPref(key, list, fallback) {
+  try { const v = localStorage.getItem(key); if (list.some(([k]) => k === v)) return v; } catch (e) {}
+  return fallback;
+}
+function billSortFn(how) {
+  const at = o => (o.status === 'paid' ? histTime(o) : o.createdAt) || 0;
+  if (how === 'latest') return (a, b) => at(b) - at(a);
+  if (how === 'earliest') return (a, b) => at(a) - at(b);
+  // Table: dine-in by the table's number the floor's way, then takeaways by name.
+  const lab = o => o.orderType === 'dine-in' ? { label: String(o.table == null ? '' : o.table) } : null;
+  return (a, b) => {
+    const ta = lab(a), tb = lab(b);
+    if (ta && tb) return tableLabelCompare(ta, tb) || at(a) - at(b);
+    if (ta || tb) return ta ? -1 : 1;
+    return String(a.customerName || '').localeCompare(String(b.customerName || '')) || at(a) - at(b);
+  };
+}
 function renderBills() {
   const live = o => !o.practice || isTrainee();
   const from = tradingDayStart(Date.now());
-  const rank = o => (o.splitPaid || []).length ? 0 : o.billPrinted ? 1 : 2;
-  const open = state.orders.filter(o => o.status === 'open' && live(o))
-    .sort((a, b) => rank(a) - rank(b) || (a.createdAt || 0) - (b.createdAt || 0));
-  const closed = state.orders.filter(o => o.status === 'paid' && live(o) && histTime(o) >= from)
-    .sort((a, b) => histTime(b) - histTime(a));
+  const show = billsPref('pos.billsShow', BILLS_SHOW, 'all');
+  const sortHow = billsPref('pos.billsSort', BILLS_SORT, 'earliest');
+  const order = billSortFn(sortHow);
+  const open = show === 'closed' ? [] : state.orders.filter(o => o.status === 'open' && live(o)).sort(order);
+  const closed = show === 'open' ? [] : state.orders.filter(o => o.status === 'paid' && live(o) && histTime(o) >= from).sort(order);
+  const band = `<div class="bl-band">${optionPair(show, 'bills-show', BILLS_SHOW)}${optionPair(sortHow, 'bills-sort', BILLS_SORT)}</div>`;
   const sum = list => list.reduce((a, o) => a + (o.status === 'paid'
     ? ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0)
     : openBillTotal(o, o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null)), 0);
   const head = (word, list, extra) => `<div class="bl-hd"><b>${word}</b><span>${list.length} bill${list.length === 1 ? '' : 's'}</span>${extra || ''}<span class="bl-sum">${money(sum(list))}</span></div>`;
-  if (!open.length && !closed.length) return `<div class="bills"><div class="pass-empty">No bills today</div></div>`;
+  if (!open.length && !closed.length) return `<div class="bills">${band}<div class="pass-empty">${show === 'open' ? 'No open bills' : show === 'closed' ? 'No bills closed today' : 'No bills today'}</div></div>`;
   return `
   <div class="bills">
+    ${band}
     ${renderRace()}
     ${open.length ? head('Open', open, wagesPillHtml()) + wagesCardHtml() + `<div class="bl-cols">${open.map(o => billDocket(o, false)).join('')}</div>` : ''}
     ${closed.length ? head('Closed today', closed) + `<div class="bl-cols">${closed.map(o => billDocket(o, true)).join('')}</div>` : ''}
@@ -45851,6 +45881,20 @@ function handleActClick(el, e) {
       }
       else if (act === 'checkout') { openCheckout(); }
       // §§ router: bills, splits, refunds
+      else if (act === 'bills-show' || act === 'bills-sort') {
+        try { localStorage.setItem(act === 'bills-show' ? 'pos.billsShow' : 'pos.billsSort', el.dataset.val); } catch (e) {}
+        render();
+      }
+      else if (act === 'bill-print') {
+        // From the Bills view: an open bill prints its bill exactly as the
+        // docket's Bill key does (and is marked printed); a closed one prints
+        // its receipt, as Table history does.
+        const o = (state.orders || []).find(x => String(x.id) === String(el.dataset.id));
+        if (!o) return;
+        if (o.status === 'paid') { printReceipt(o); return; }
+        if (!state.online) { state.toast = toastFail('No connection — the bill cannot print right now'); render(); armToastTimer(TOAST_SHORT); return; }
+        markBillPrinted(o.id);
+      }
       else if (act === 'print-bill') {
         if (_billHoldFired) { _billHoldFired = false; return; } // that press was a hold — it opened the split pane
         // A DEAD BUTTON SAYS NOTHING. Bill used to be switched off outright

@@ -1792,6 +1792,7 @@ body:has(.ticket-actions){ --toast-bottom:156px; }
    a tap now falls through it to whatever is underneath. */
 .toast{pointer-events:none;}
 .toast .toast-btn{pointer-events:auto;}
+.toast.leaving .toast-btn{pointer-events:none;} /* a key fading out is not a key */
 .toast .dot{width:9px;height:9px;border-radius:50%;background:var(--green);}
 /* A message about something that did NOT happen wears red (owner's pick,
    Sep '26 — it wore the success green). toastFail() sets the mark. */
@@ -5368,12 +5369,12 @@ select.ie-field{font-weight:700;}
 .tfx-ring{display:none;}
 /* Landed chip wears the ARMED badge's uniform (owner, Aug '26: one style for
    both moments): solid green, white full-reach arrows, same shadow. */
-.tfx-chip{position:absolute;top:-13px;right:-9px;display:flex;align-items:center;gap:4px;background:var(--green-sel,#5C9720);border:none;color:#fff;border-radius:var(--r-pill);padding:4px 8px 4px 8px;font-size:var(--fs-md);font-weight:800;box-shadow:var(--lift-1);opacity:0;animation:tfx-spring .5s cubic-bezier(.34,1.56,.64,1) .12s forwards;}
+.tfx-chip{position:absolute;top:-13px;right:-9px;display:flex;align-items:center;gap:4px;background:var(--green-sel,#5C9720);border:none;color:#fff;border-radius:var(--r-pill);padding:4px 8px 4px 8px;font-size:var(--fs-md);font-weight:800;box-shadow:var(--lift-1);opacity:0;animation:tfx-spring .5s cubic-bezier(.34,1.56,.64,1) calc(.12s - var(--tfx-gone,0ms)) forwards;}
 .tfx-chip svg{width:15px;height:15px;color:#fff;}
 .tfx.still .tfx-chip, .tfx.still .tfx-a1, .tfx.still .tfx-a2{animation:none;opacity:1;transform:none;} /* a redraw keeps it, it does not replay it */
 @keyframes tfx-spring{0%{opacity:0;transform:translateY(8px) scale(.7);}62%{opacity:1;transform:translateY(0) scale(1.07);}100%{opacity:1;transform:none;}}
-.tfx-a1{animation:tfx-crossR .8s ease-in-out .35s both;}
-.tfx-a2{animation:tfx-crossL .8s ease-in-out .35s both;}
+.tfx-a1{animation:tfx-crossR .8s ease-in-out calc(.35s - var(--tfx-gone,0ms)) both;}
+.tfx-a2{animation:tfx-crossL .8s ease-in-out calc(.35s - var(--tfx-gone,0ms)) both;}
 @keyframes tfx-crossR{0%{transform:translateX(-4px);}100%{transform:translateX(4px);}}
 @keyframes tfx-crossL{0%{transform:translateX(4px);}100%{transform:translateX(-4px);}}
 @media (prefers-reduced-motion: reduce){
@@ -20377,7 +20378,7 @@ function removeLine(idx) {
   state.toastAction = { label: 'Undo', act: 'undo-remove' };
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
-  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; state.lastRemoved = null; render(); }, 5000);
+  state._toastTimer = setTimeout(() => toastLeave(() => { state.lastRemoved = null; }), 5000);
   render();
 }
 // A TOAST SAYS HOW IT WENT (owner's pick, Sep '26). The dot is green for
@@ -20387,6 +20388,21 @@ function removeLine(idx) {
 // ordinary way, can never inherit it and no word-matching guesses at paint
 // time. `state.toast = toastFail('Could not …')` is the whole of it.
 function toastFail(msg) { state.toastFailed = msg; return msg; }
+// ONE WAY OUT FOR EVERY TOAST. It fades down the way it rose — only the armed
+// ones did; the rest (a plain toast, an Undo) vanished in one frame — and the
+// redraw after it is BACKGROUND, so it waits for the hand like the poll: it
+// landed mid-fling and stopped the menu dead.
+function toastLeave(extra) {
+  state._toastTimer = null;
+  const el = document.querySelector('.toast');
+  const gone = () => { state._toastLeaving = null; state._toastFor = null; state.toast = null; state.toastAction = null; if (extra) extra(); renderWhenStill(); };
+  if (!el || motionOff()) return gone();
+  const leaving = state.toast;
+  state._toastLeaving = leaving;
+  el.classList.add('leaving');
+  clearTimeout(state._toastLeaveTimer);
+  state._toastLeaveTimer = setTimeout(() => { if (state.toast === leaving) gone(); else { state._toastLeaving = null; renderWhenStill(); } }, 180);
+}
 // One shared toast timer, bound to the message it was armed for — an old
 // toast's timeout can never delete a newer toast early, and every toast
 // (even ones set without a timer) auto-dismisses via ensureToastTimer(),
@@ -20406,22 +20422,10 @@ function armToastTimer(ms) {
   clearTimeout(state._toastLeaveTimer);
   state._toastLeaving = null;
   state._toastFor = state.toast;
-  state._toastTimer = setTimeout(() => {
-    state._toastTimer = null;
-    // IT LEAVES THE WAY IT CAME (calm audit, Sep '26): it rose in and then
-    // vanished in one frame. The toast on screen fades down first; a redraw
-    // meanwhile writes it already gone, so nothing pops back.
-    // The fade belongs to THE TOAST IT STARTED ON: a new toast raised in
-    // those 180ms (by a path that never re-arms this timer — an Undo, a
-    // removed line) is drawn whole and is not cleared by the old fade.
-    const el = document.querySelector('.toast');
-    const gone = () => { state._toastLeaving = null; state._toastFor = null; state.toast = null; state.toastAction = null; render(); };
-    if (!el || motionOff()) return gone();
-    const leaving = state.toast;
-    state._toastLeaving = leaving;
-    el.classList.add('leaving');
-    state._toastLeaveTimer = setTimeout(() => { if (state.toast === leaving) gone(); else { state._toastLeaving = null; render(); } }, 180);
-  }, ms);
+  // IT LEAVES THE WAY IT CAME (calm audit, Sep '26) — see toastLeave. The
+  // fade belongs to THE TOAST IT STARTED ON: a new toast raised in those
+  // 180ms is drawn whole and is not cleared by the old fade.
+  state._toastTimer = setTimeout(() => toastLeave(), ms);
   if (hadAction) render();
 }
 // Put back whatever the last admin delete took out. The server holds the
@@ -20450,9 +20454,7 @@ function offerUndo(message, undoFn) {
   state.toastAction = { act: 'undo-last', label: 'Undo' };
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
-  state._toastTimer = setTimeout(() => {
-    state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; _undoAction = null; render();
-  }, 6000);
+  state._toastTimer = setTimeout(() => toastLeave(() => { _undoAction = null; }), 6000);
   render();
 }
 function ensureToastTimer() {
@@ -20463,7 +20465,7 @@ function ensureToastTimer() {
   if (state._toastTimer && state._toastFor === state.toast) return; // already counting down for this exact message
   clearTimeout(state._toastTimer);
   state._toastFor = state.toast;
-  state._toastTimer = setTimeout(() => { state._toastTimer = null; state._toastFor = null; state.toast = null; state.toastAction = null; render(); }, 4000);
+  state._toastTimer = setTimeout(() => toastLeave(), 4000);
 }
 function undoRemoveLine() {
   if (state.lastRemoved) {
@@ -22268,10 +22270,12 @@ setInterval(() => {
     if (state.sendFailed && !state.sending && n) {
       state._recoveredLines = n;
       sendToKitchen();
-    } else if (wasOffline) { state.toast = 'Online'; render(); armToastTimer(TOAST_SHORT); }
+    } else if (wasOffline) { state.toast = 'Online'; renderWhenStill(); armToastTimer(TOAST_SHORT); }
     else if (state.sendFailed && !n) state.sendFailed = null; // nothing left to send
     resendLeftRounds();
-  }).catch(() => { render(); }).finally(() => { _offlineWatch = 0; });
+    // BACKGROUND, so it waits for the hand: offline, this fired every 5s and
+    // stopped any scroll it landed in dead.
+  }).catch(() => { renderWhenStill(); }).finally(() => { _offlineWatch = 0; });
 }, 5000);
 // A ROUND LEFT BEHIND STILL GOES BY ITSELF (Sep '26). The button said "Will
 // send" and the toast "it sends by itself" — then the waiter walked on to the
@@ -23048,11 +23052,16 @@ function applyMotion(prev) {
   // Admin settles in once, on arrival — not on every tab change inside it.
   const ad = document.querySelector('.admin-shell');
   if (ad && prev.surfaces.admin) ad.style.animation = 'none';
-  if (state._moFlick && Date.now() - state._moFlick < 500) {
-    state._moFlick = 0;
+  if (state._moFlick && Date.now() - state._moFlick < 500) { state._moFlick = 0; state._moFlickAt = Date.now(); }
+  // The hop CARRIES ON through a redraw, from where it was (the sent line's
+  // trick): the bill's own "printed" refresh lands 40-110ms after this paint
+  // and rebuilt the key, so the hop was cut off at a pixel and snapped back.
+  const flickGone = state._moFlickAt ? Date.now() - state._moFlickAt : Infinity;
+  if (flickGone < 400) {
     const bb = document.querySelector('[data-act="print-bill"]'); // the docket's Bill key by its job — the seat pop's note key wears the same light family
-    if (bb) { bb.classList.add('mo-flick'); setTimeout(() => bb.classList.remove('mo-flick'), 450); }
-  }
+    const svg = bb && bb.querySelector('svg');
+    if (bb) { bb.classList.add('mo-flick'); if (svg) svg.style.animationDelay = '-' + flickGone + 'ms'; setTimeout(() => bb.classList.remove('mo-flick'), 450 - flickGone); }
+  } else state._moFlickAt = 0;
   const lines = _lineKeys();
   const sameSet = lines.map(L => L.key).sort().join('\u0001') === prev.lineSet;
   // THE ROUND THAT JUST WENT LIGHTS UP. Which lines those are is worked out
@@ -37197,10 +37206,11 @@ function pickTable(id) {
     if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers && !(oo && oo.covers)) {
       openCoversPad();
       // The seat isn't real until ✓ — remember what to put back if ✕ bails.
+      // No second render: openCoversPad has drawn it, and a second rebuild in
+      // the same breath stamped the pad's entrance off before it was painted.
       state.coversPad.fromPick = { prev: prevTable || null };
     }
     else { closeTablePicker(() => { state.pickFlashId = null; }); return; }
-    render();
   };
   // One till per table: a table open on another device is blocked — even if
   // it's nominally "our" current table (e.g. both tills defaulted to it). A
@@ -37376,12 +37386,17 @@ function transferFxHtml(t) {
   // …and the chip STAYS for the window: it returned nothing on the second
   // paint, and a redraw ~30ms in dropped it before it could be seen (Sep '26).
   // Later paints show it still, without playing it again.
-  const still = !!fx.played;
-  fx.played = true;
+  // A redraw INSIDE the window carries the spring on from where it is (the
+  // sent-line light's trick): the transfer's own refresh lands 20-150ms after
+  // the landing paint, so the chip popped in whole and never sprang.
+  const now = Date.now();
+  if (!fx.at) fx.at = now;
+  const gone = now - fx.at;
+  const still = gone > 1150; // the swap ends at .35s + .8s
   // Same full-reach arrows as the armed badge (SYS_SWAP), split into the two
   // animated groups so the one-time cross-swap still plays on landing.
   const swapSvg = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g class="tfx-a1"><path d="M15.64 2l4.55 4.55 -4.55 4.55"/><path d="M20.18 6.55H3.82"/></g><g class="tfx-a2"><path d="M8.36 12.91l-4.55 4.55 4.55 4.55"/><path d="M3.82 17.45h16.36"/></g></svg>`;
-  return `<span class="tfx${still ? ' still' : ''}"><span class="tfx-ring"></span><span class="tfx-chip">${swapSvg}${fx.from ? esc(String(fx.from)) : ''}</span></span>`;
+  return `<span class="tfx${still ? ' still' : ''}"${!still && gone ? ` style="--tfx-gone:${gone}ms"` : ''}><span class="tfx-ring"></span><span class="tfx-chip">${swapSvg}${fx.from ? esc(String(fx.from)) : ''}</span></span>`;
 }
 
 // Link fromId INTO intoId's group. Staff physically push the tables together —
@@ -47680,8 +47695,11 @@ function handleActClick(el, e) {
         if (state.showCheckout) return; // the pay screen owns the phone until Cancel or Confirm — a pager tap used to arm a jump to the floor (sweep, Sep '26)
         const v = el.dataset.val;
         if (v === 'floor') { if (state.mobileCartOpen) closeMobileCart(); openTablePicker(); }
-        else if (v === 'menu') { resetFloorPicker(); if (state.mobileCartOpen) closeMobileCart(); render(); }
-        else if (v === 'docket') { resetFloorPicker(); if (!state.mobileCartOpen) openMobileCart(); render(); }
+        // closeMobileCart and openMobileCart draw their own frames: a render
+        // straight after put .open back on the leaving docket, so it sat still
+        // and then vanished instead of sliding away.
+        else if (v === 'menu') { resetFloorPicker(); if (state.mobileCartOpen) closeMobileCart(); else render(); }
+        else if (v === 'docket') { resetFloorPicker(); if (!state.mobileCartOpen) openMobileCart(); else render(); }
       }
       else if (act === 'toggle-callaway') { toggleCallAway(); }
       else if (act === 'close-callaway') { closeCallAwayPane(); }

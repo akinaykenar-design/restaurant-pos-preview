@@ -4974,6 +4974,8 @@ body[data-theme="dark"] .qty-pop.num-pad .covers-pad-key, body[data-theme="dark"
 .tile-count.low{ background:var(--red); color:#fff; }
 /* Coming back: a dish taken back again and again tonight says so, top-left, in plain ink — news, not an alarm. */
 .tile-back{ position:absolute; top:6px; left:6px; font-size:var(--fs-chip); font-weight:800; line-height:1; background:var(--surface); color:var(--text-primary); padding:4px 8px; border-radius:var(--r-pill); pointer-events:none; }
+/* …beside the allergy mark, never under it: the mark owns the corner, and "4 back" read "! back". */
+.tile-warn + .tile-back{ left:28px; }
 /* Items with options park their ⋯ on the left when the stock pill has the right corner. */
 .item-card .item-opt-dots.shift{ right:auto; left:var(--item-pad,10px); }
 /* "Avoid" tag inside the cover-picker squares: the allergic seat's square
@@ -19156,6 +19158,10 @@ function onYourWayStops(fp) {
     if (d > OYW_REACH) return;
     const o = tableOpenOrder(t.label);
     if (!o) return;
+    // A table already wearing its own tag (Not printed, Not sent, a draft,
+    // another till's lock, a lens pill) is not a stop: the stop sits in that
+    // same slot and covered it — a Not printed alarm hidden under "Call 1st".
+    if ((tableLocksOn() && tableLockedBy(t.id)) || missedBadgeHtml(t) || draftBadgeHtml(t) || floorPillHtml(t, tableCourseStatus(t.label))) return;
     let job = '';
     if (o.billPrinted) job = 'Take payment';
     else {
@@ -19165,7 +19171,23 @@ function onYourWayStops(fp) {
     }
     if (job) stops.push({ t, d, job });
   });
-  return stops.sort((a, b) => a.d - b.d).slice(0, 3);
+  // The three nearest, numbered in the order you WALK them: numbered by
+  // distance, the route ran left to 13, back past you to 17, then over the
+  // whole row to 11.
+  const near = stops.sort((a, b) => a.d - b.d).slice(0, 3);
+  const gap = (a, b) => Math.hypot((a.x - b.x) * sq, (a.y - b.y) * sqY);
+  let best = near, bestLen = Infinity;
+  const walk = (left, done) => {
+    if (!left.length) {
+      let len = 0, at = src;
+      done.forEach(s => { len += gap(at, s.t); at = s.t; });
+      if (len < bestLen - 1e-9) { bestLen = len; best = done; }
+      return;
+    }
+    left.forEach((s, i) => walk([...left.slice(0, i), ...left.slice(i + 1)], [...done, s]));
+  };
+  walk(near, []);
+  return best;
 }
 function onYourWayHtml(fp, hug) {
   const stops = onYourWayStops(fp);
@@ -19173,7 +19195,7 @@ function onYourWayHtml(fp, hug) {
   const src = hugObject(fp.tables.find(t => t.id === state.onYourWay.from), hug);
   const pts = [src, ...stops.map(s => hugObject(s.t, hug))];
   return `<svg class="oyw-route" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polyline points="${pts.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ')}"/></svg>
-    ${stops.map((s, i) => { const h = hugObject(s.t, hug); return `<span class="oyw-stop" style="left:${h.x}%;top:${h.y + h.height / 2}%;z-index:3100;"><b>${i + 1}</b>${esc(s.job)}</span>`; /* in the table's OWN tag slot, under it: above it, it sat on the neighbour's tag (Sep '26) */ }).join('')}`;
+    ${stops.map((s, i) => { const h = hugObject(s.t, hug); return `<span class="oyw-stop" style="left:${h.x}%;top:${h.y + h.height / 2}%;"><b>${i + 1}</b>${esc(s.job)}</span>`; /* in the table's OWN tag slot, under it: above it, it sat on the neighbour's tag (Sep '26) */ }).join('')}`;
 }
 // §§ Coming back
 // COMING BACK (owner's pick, Sep '26 — borrowed from a shop's "frequently
@@ -21969,7 +21991,17 @@ function draftsMine() {
   for (const tid of Object.keys(mine)) {
     const d = mine[tid];
     if (!d || !(Date.now() - (d.ts || 0) < DRAFT_TTL)) { delete mine[tid]; changed = true; continue; }
-    if (!d.openOrderId || !state._ordersIn) continue;
+    if (!state._ordersIn) continue;
+    // RUNG BEFORE ANYTHING WENT, it belongs to the ticket this table opens
+    // next — another till may open it, and pay it. It stayed unowned, so once
+    // that party had paid and left, their draft landed on the next party.
+    if (!d.openOrderId) {
+      const tb = allTables().find(x => x.id === tid);
+      const next = tb && (state.orders || []).filter(o => o.orderType === 'dine-in' && String(o.table) === String(tb.label) && (o.createdAt || 0) >= (d.since || d.ts || 0))
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+      if (!next) continue;
+      d.openOrderId = next.id; changed = true;
+    }
     const o = ticketNow(d.openOrderId);
     if (!o) { delete mine[tid]; changed = true; continue; } // paid: the party has left
     const here = allTables().find(t => String(t.label) === String(o.table) && !(t.mergedInto && t.mergedInto !== t.id));
@@ -21995,7 +22027,7 @@ function draftStash(tableId) {
   const there = mine[tableId]; // one already waiting there (a table moved onto it) keeps its lines
   mine[tableId] = { cart: there ? [...there.cart, ...state.cart] : state.cart, activeCourse: state.activeCourse, openOrderId: state.openOrderId,
     sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
-    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now() };
+    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now(), since: (there && there.since) || Date.now() };
   draftsWrite();
   state.cart = []; clearSendState();
 }
@@ -22204,6 +22236,7 @@ async function sendToKitchen() {
 window.addEventListener('online', () => {
   if (state.sendFailed && !state.sending && state.cart.length) sendToKitchen();
   else render();  // the band's wording changes with the connection
+  resendLeftRounds();
 });
 window.addEventListener('offline', () => { if (state.sendFailed) render(); });
 // THE SERVER COMES BACK ON ITS OWN TOO (owner, Sep '26: an outage of the
@@ -22216,7 +22249,7 @@ setInterval(() => {
   // …and a send whose reply was lost resends too, even once the next check
   // says the server is up: that check used to beat the watcher to it, and the
   // round sat on "Not sent" for good (Sep '26). The send key makes it safe.
-  if ((state.online && !(state.sendFailed && state.sendFailed.net)) || _offlineWatch) return;
+  if ((state.online && !(state.sendFailed && state.sendFailed.net) && !leftRoundsDue().length) || _offlineWatch) return;
   _offlineWatch = 1;
   const wasOffline = !state.online;
   api('/api/version').then(() => {
@@ -22227,8 +22260,49 @@ setInterval(() => {
       sendToKitchen();
     } else if (wasOffline) { state.toast = 'Online'; render(); armToastTimer(TOAST_SHORT); }
     else if (state.sendFailed && !n) state.sendFailed = null; // nothing left to send
+    resendLeftRounds();
   }).catch(() => { render(); }).finally(() => { _offlineWatch = 0; });
 }, 5000);
+// A ROUND LEFT BEHIND STILL GOES BY ITSELF (Sep '26). The button said "Will
+// send" and the toast "it sends by itself" — then the waiter walked on to the
+// next table, the round became that table's "Not sent" draft, and nothing
+// ever sent it: the wifi came back and it sat there until somebody tapped the
+// table. Same keys as the first try, so a round that did land is not rung twice.
+let _leftResend = false;
+function leftRoundsDue() {
+  if (!state.currentStaff) return [];
+  const mine = draftsMine();
+  return Object.keys(mine).filter(tid => tid !== state.table && mine[tid].sendFailed && mine[tid].sendFailed.net && mine[tid].cart.length);
+}
+async function resendLeftRounds() {
+  if (_leftResend) return;
+  const mine = draftsMine(), due = leftRoundsDue();
+  if (!due.length) return;
+  _leftResend = true;
+  let lines = 0;
+  try {
+    for (const tid of due) {
+      const d = mine[tid], t = findTableById(tid);
+      if (!t) continue;
+      const body = { items: d.cart, staffName: state.currentStaff.name, staffId: state.currentStaff.id, sendKey: d.sendKey, quickNote: d.quickNote || null, quickNoteStation: d.quickNoteStation || null };
+      try {
+        const o = d.openOrderId
+          ? await api(`/api/orders/${d.openOrderId}/rounds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+          : await api('/api/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, orderType: 'dine-in', table: t.label, covers: t.covers || null, open: true }) });
+        lines += d.cart.length;
+        // A call-away staged behind it stays on the table for the waiter's tap.
+        if (d.stagedCallAway) Object.assign(d, { cart: [], sendKey: null, sendFailed: null, quickNote: '', openOrderId: o.id });
+        else delete mine[tid];
+        draftsWrite();
+      } catch (e) { if (e.status) d.sendFailed = { ...d.sendFailed, net: false }; } // refused: the tag stays, a person looks
+    }
+  } finally { _leftResend = false; }
+  if (lines) {
+    try { await refreshOrders(); } catch (e) {}
+    state.toast = `Online — ${lines} line${lines === 1 ? '' : 's'} sent`;
+    render(); armToastTimer(TOAST_LONG);
+  }
+}
 
 // Is an integrated card terminal set up?
 function terminalActive() {
@@ -36503,8 +36577,8 @@ function renderTablePickerMiddle() {
       <div class="floor-canvas" style="position:relative;--fc-ar:${(roomH / roomW).toFixed(4)};--fc-arw:${(roomW / roomH).toFixed(4)};--fm-num:${numShare.toFixed(3)};width:var(--fc-base);aspect-ratio:${roomW.toFixed(2)} / ${roomH.toFixed(2)};border-radius:var(--r-control);">
         ${fp.tables.filter(t => t.type === 'decor').map(t => hugObject(t, hug)).map(t => `
           <div class="floor-marker" style="${shapeStyle(t, false)}pointer-events:none;">${floorMarkerInner(t, fp.height, { hideStatus: true })}</div>`).join('')}
+        ${onYourWayHtml(fp, hug) /* UNDER the tables: a neighbour's Not printed paints over a stop, never the other way */}
         ${fp.tables.filter(t => t.type !== 'decor').map(t => hugObject(t, hug)).map(t => floorTableMarker(t, fp)).join('')}
-        ${onYourWayHtml(fp, hug)}
         ${fp.tables.filter(t => t.type !== 'decor').length === 0 ? `<div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--charcoal-soft);font-size:var(--fs-md);">No tables set up yet.</div>` : ''}
       </div>`; })()}
       </div>` : `<div class="ts" style="margin-top:10px;">No areas yet.</div>`}`}

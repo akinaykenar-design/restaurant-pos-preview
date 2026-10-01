@@ -10338,6 +10338,24 @@ app.get('/api/menu', (req, res) => {
   res.json(data.menu);
 });
 
+// A RECIPE IS WEIGHED IN ITS INGREDIENT'S OWN UNIT (1 Oct '26). The Unit box
+// was free text and never read, so "200 g" of an ingredient counted in kg took
+// 200 kg off stock and costed 200 kg. A g/kg or ml/l line is turned into the
+// ingredient's unit as it is saved; anything else is kept as typed.
+const UNIT_SCALE = { g: ['kg', 0.001], kg: ['g', 1000], ml: ['l', 0.001], l: ['ml', 1000] };
+function cleanRecipes(data, rows) {
+  const norm = u => String(u || '').trim().toLowerCase().replace(/^(gram|grams|gm|gms)$/, 'g').replace(/^(litre|litres|liter|liters|lt|ltr)$/, 'l').replace(/^(kilo|kilos|kgs)$/, 'kg');
+  return rows.map(r => {
+    let quantity = parseFloat(r.quantity) || 0, unit = r.unit || '';
+    const inv = (data.inventoryItems || []).find(i => i.id === r.inventoryItemId);
+    const from = norm(unit), to = norm(inv && inv.unit);
+    if (inv && from && to && from !== to && UNIT_SCALE[from] && UNIT_SCALE[from][0] === to) {
+      quantity = Math.round(quantity * UNIT_SCALE[from][1] * 1000) / 1000;
+      unit = inv.unit;
+    }
+    return { inventoryItemId: r.inventoryItemId, quantity, unit, docket: !!r.docket, label: r.label || '' };
+  });
+}
 app.post('/api/menu', (req, res) => {
   const data = readData();
   const { name, category, price, variants, subcategoryId, modifierGroupIds, image, defaultCourse, trackStock, stockCount, lowStockThreshold, color, sequence, salesCategoryId, icon, iconEnabled } = req.body;
@@ -10369,7 +10387,7 @@ app.post('/api/menu', (req, res) => {
   if (req.body.rowBreak) item.rowBreak = true;
   if (req.body.disabled) item.disabled = true;
   if (req.body.station && (data.printerStations || []).some(s => s.id === req.body.station)) item.station = req.body.station;
-  if (Array.isArray(req.body.recipes) && req.body.recipes.length) item.recipes = req.body.recipes.map(r => ({ inventoryItemId: r.inventoryItemId, quantity: parseFloat(r.quantity) || 0, unit: r.unit || '', docket: !!r.docket, label: r.label || '' }));
+  if (Array.isArray(req.body.recipes) && req.body.recipes.length) item.recipes = cleanRecipes(data, req.body.recipes);
   if (item.trackStock && item.stockCount <= 0) item.out = true;
   data.menu.push(item);
   if (item.recipes) recomputeServingsLeft(data);
@@ -10429,7 +10447,7 @@ app.put('/api/menu/:id', (req, res) => {
   // section's station mapping).
   if (req.body.station !== undefined) item.station = (req.body.station && (data.printerStations || []).some(s => s.id === req.body.station)) ? req.body.station : null;
   if (sequence !== undefined) item.sequence = (sequence !== null && sequence !== '') ? parseInt(sequence) : null;
-  if (Array.isArray(recipes)) item.recipes = recipes.map(r => ({ inventoryItemId: r.inventoryItemId, quantity: parseFloat(r.quantity) || 0, unit: r.unit || '', docket: !!r.docket, label: r.label || '' }));
+  if (Array.isArray(recipes)) item.recipes = cleanRecipes(data, recipes);
   if (price !== undefined && !isNaN(parseFloat(price)) && parseFloat(price) !== oldPrice) {
     logAudit(data, staffFromReq(req), `Changed price of "${item.name}" from $${oldPrice.toFixed(2)} to $${item.price.toFixed(2)}`);
   } else {

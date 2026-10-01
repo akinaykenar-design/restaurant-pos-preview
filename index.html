@@ -8905,6 +8905,9 @@ app.put('/api/quicknote-presets', (req, res) => {
   const data = readData();
   const { presets } = req.body;
   if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
+  // A FULL LIST REFUSES, it never drops a row (1 Oct '26): the new one went on
+  // top and the server kept the first 50, so the one at the bottom vanished.
+  if (presets.filter(Boolean).length > 50) return res.status(400).json({ error: 'That list is full — 50 at most. Delete one first.' });
   data.quickNotePresets = presets.map(p => normQuickNotePreset(p, data.printerStations)).filter(Boolean).slice(0, 50);
   logAudit(data, staffFromReq(req), 'Updated quick note presets');
   writeData(data);
@@ -8921,6 +8924,7 @@ app.put('/api/size-presets', (req, res) => {
   const data = readData();
   const { presets } = req.body;
   if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
+  if (presets.filter(p => String(p || '').trim()).length > 20) return res.status(400).json({ error: 'That list is full — 20 at most. Delete one first.' });
   const cleaned = presets.map(p => String(p || '').trim().slice(0, 40)).filter(Boolean).slice(0, 20);
   data.sizePresets = cleaned;
   logAudit(data, staffFromReq(req), 'Updated size presets');
@@ -8945,6 +8949,8 @@ app.put('/api/note-categories', (req, res) => {
   const data = readData();
   const { categories } = req.body;
   if (!Array.isArray(categories)) return res.status(400).json({ error: 'Categories must be an array' });
+  if (categories.filter(c => c && String(c.name || '').trim()).length > 20) return res.status(400).json({ error: 'That list is full — 20 at most. Delete one first.' });
+  if (categories.some(c => c && Array.isArray(c.presets) && c.presets.filter(Boolean).length > 50)) return res.status(400).json({ error: 'That list is full — 50 at most. Delete one first.' });
   const cleaned = categories
     .map(c => ({
       id: String((c && c.id) || Date.now()),
@@ -8993,6 +8999,7 @@ app.put('/api/void-reasons', (req, res) => {
   const data = readData();
   const { presets } = req.body;
   if (!Array.isArray(presets)) return res.status(400).json({ error: 'Presets must be a list' });
+  if (presets.filter(p => String(p || '').trim()).length > 20) return res.status(400).json({ error: 'That list is full — 20 at most. Delete one first.' });
   const cleaned = presets.map(p => String(p || '').trim().slice(0, 60)).filter(Boolean).slice(0, 20);
   data.voidReasons = cleaned;
   logAudit(data, staffFromReq(req), 'Updated void reasons');
@@ -37525,7 +37532,8 @@ function pickTable(id) {
     // table changes the number if more turn up.
     // A table with a tab is a party still eating, covers or not: tapping it to
     // add coffees seated the next booking on top of them (1 Oct '26).
-    const booked = state.orderType === 'dine-in' && !state.covers && !oo && !state.moveItemsPicking && !state.transferFrom
+    // …and a trainee's tap is practice: it seated the real booking (1 Oct '26).
+    const booked = state.orderType === 'dine-in' && !state.covers && !oo && !state.moveItemsPicking && !state.transferFrom && !isTrainee()
       ? upcomingBookingFor(id, 30) : null;
     if (booked) {
       state.covers = booked.partySize || 1;
@@ -42059,7 +42067,14 @@ async function saveQuickNotePresets(presets) {
   try {
     state.quickNotePresets = await api('/api/quicknote-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
     render();
-  } catch (e) { state.toast = toastFail(e.message || 'Could not save the quick notes.'); render(); armToastTimer(TOAST_LONG); }
+  } catch (e) { listRefused(e, async () => { state.quickNotePresets = await api('/api/quicknote-presets'); }); }
+}
+// A LIST THE SERVER REFUSED goes back to what the server holds, and says why:
+// a full list showed the new row here while the server had refused it (1 Oct '26).
+async function listRefused(e, reload) {
+  try { await reload(); } catch (e2) {}
+  state.toast = toastFail((e && e.message) || 'Could not save.');
+  render(); armToastTimer(TOAST_LONG);
 }
 function addQuickNotePreset() { saveQuickNotePresets([...state.quickNotePresets, { name: 'New note', color: null }]); }
 function updateQuickNotePreset(idx, value) {
@@ -42113,7 +42128,7 @@ async function saveNoteCategories(categories) {
     // A rename sweeps item tags and table notes server-side - pull them in.
     try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); } catch (e2) {}
     render();
-  } catch (e) {}
+  } catch (e) { listRefused(e, async () => { state.noteCategories = normNoteCategories(await api('/api/note-categories')); }); }
 }
 function addNoteCategory() {
   const newId = Date.now().toString();
@@ -42252,7 +42267,7 @@ async function saveVoidReasons(presets) {
   try {
     state.voidReasons = await api('/api/void-reasons', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
     render();
-  } catch (e) {}
+  } catch (e) { listRefused(e, async () => { state.voidReasons = await api('/api/void-reasons'); }); }
 }
 function addVoidReason() { saveVoidReasons(['New reason', ...state.voidReasons]); }
 const DEFAULT_VOID_REASON_NAMES = ['Order mistake', 'Customer complaint', 'Kitchen error', 'Duplicate order', 'Comp / goodwill', 'Other'];
@@ -43241,7 +43256,7 @@ async function saveSizePresets(presets) {
   try {
     state.sizePresets = await api('/api/size-presets', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ presets }) });
     render();
-  } catch (e) {}
+  } catch (e) { listRefused(e, async () => { state.sizePresets = await api('/api/size-presets'); }); }
 }
 function addSizePreset() { saveSizePresets([...state.sizePresets, 'New size']); }
 function toggleSizeSelect(idx) {

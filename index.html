@@ -9310,8 +9310,32 @@ app.put('/api/theme', (req, res) => {
 // ---------- Settings ----------
 // The stored Linkly pairing secret stays on the server; the browser only ever
 // learns whether a terminal is paired.
+// WHO SETS WHICH COLOUR (owner, 1 Oct '26: "desk should control some colours
+// related to table status and pos some colours related to the order" — and no
+// overlap). The FRONT DESK owns the party's colours — booked, seated, left,
+// no-show — and sends them here; the till owns the order's — bill printed,
+// the clocks. A colour the desk owns is painted from what it sent, on every
+// screen that draws it, and the till's own box for it is locked. A till with
+// no desk linked has nothing here and sets them all itself.
+const DESK_COLOUR_KEYS = { seated: ['occupied', 'desk-seated'], booked: ['desk-booked'], done: ['desk-done'], 'no-show': ['desk-no-show'] };
+function deskOwnedKeys(settings) {
+  const dc = (settings && settings.deskColours) || {};
+  return Object.keys(DESK_COLOUR_KEYS).filter(k => dc[k]).flatMap(k => DESK_COLOUR_KEYS[k]);
+}
+// The till's own table colours until the venue picks its own. Here, on the
+// server, so every screen and the front desk read the SAME three numbers.
+const TABLE_COLOUR_DEFAULTS = {
+  occupied: '#0A84FF',    // someone is at the table
+  billPrinted: '#34C759', // the bill has gone out
+  locked: '#8E8E93',      // another till has it — information, not an alarm
+};
 function safeSettings(settings) {
   const out = { ...settings };
+  const dc = settings.deskColours || {};
+  out.deskOwned = deskOwnedKeys(settings);
+  out.tableStatusColors = { ...(settings.tableStatusColors || {}) };
+  for (const [k, v] of Object.entries(TABLE_COLOUR_DEFAULTS)) if (!out.tableStatusColors[k]) out.tableStatusColors[k] = v;
+  for (const [k, keys] of Object.entries(DESK_COLOUR_KEYS)) if (dc[k]) keys.forEach(t => { out.tableStatusColors[t] = dc[k]; });
   if (out.terminal) {
     const l = out.terminal.linkly || {};
     out.terminal = { provider: out.terminal.provider || 'none', linkly: { username: l.username || '', paired: !!l.secret } };
@@ -9331,6 +9355,22 @@ function safeSettings(settings) {
 app.get('/api/settings', (req, res) => {
   const data = readData();
   res.json(safeSettings(data.settings));
+});
+// The front desk sends the party's colours (see WHO SETS WHICH COLOUR). The
+// whole set every time: a colour the desk no longer sets goes back to the
+// till's own, and an empty set hands every one back.
+app.put('/api/desk-colours', (req, res) => {
+  const data = readData();
+  const got = (req.body && req.body.colours) || {};
+  const keep = {};
+  for (const k of Object.keys(DESK_COLOUR_KEYS)) {
+    const v = got[k];
+    if (typeof v === 'string' && /^#[0-9A-Fa-f]{6}$/.test(v)) keep[k] = v;
+  }
+  const was = JSON.stringify(data.settings.deskColours || {});
+  data.settings.deskColours = keep;
+  if (was !== JSON.stringify(keep)) { logAudit(data, staffFromReq(req), 'Front desk colours updated'); writeData(data); }
+  res.json({ ok: true, deskOwned: deskOwnedKeys(data.settings) });
 });
 
 // MONEY SETTINGS ARE A MANAGER'S, on the server too (Sep '26): with a
@@ -9905,8 +9945,9 @@ app.put('/api/settings', (req, res) => {
     // dropped on the way in, so their colour box did nothing at all. A key is
     // kept if its value is a colour; the list stopped being the gate.
     const keep = {};
+    const desk = deskOwnedKeys(data.settings); // the desk's colours are set on the desk
     for (const k of Object.keys(tableStatusColors)) {
-      if (typeof k !== 'string' || !k || k.length > 64) continue;
+      if (typeof k !== 'string' || !k || k.length > 64 || desk.includes(k)) continue;
       const v = tableStatusColors[k];
       keep[k] = (typeof v === 'string' && /^#[0-9A-Fa-f]{3,8}$/.test(v)) ? v : null;
     }
@@ -17039,6 +17080,8 @@ function colorDotButton(kind, id, color, opts) {
   // dot on a preset row has no colour left to set — but it is also where a
   // picture goes, and nobody asked to lose that). The popover drops its
   // swatches and wheel and becomes what it is: a photo.
+  // SET ELSEWHERE: the colour shows, and nothing here can change it.
+  if (opts.locked) return `<span class="color-dot-btn" role="img" style="background:${bg};vertical-align:middle;" aria-label="${esc(opts.title || 'Set elsewhere')}" title="${esc(opts.title || 'Set elsewhere')}"></span>`;
   return `<button type="button" class="color-dot-btn ${(color || img || opts.bg) ? '' : 'empty'}" data-act="open-color-popover" data-kind="${kind}" data-id="${id}" data-color="${color || ''}" data-image="${esc(img)}" data-photo="${(opts.photo || opts.photoOnly) ? '1' : '0'}" data-photo-only="${opts.photoOnly ? '1' : '0'}" data-allow-clear="${opts.allowClear === false ? '0' : '1'}" style="background:${bg};vertical-align:middle;" aria-label="${opts.title || (opts.photoOnly ? 'Change photo' : 'Change colour or photo')}"></button>`;
 }
 function colorPopoverInnerHTML(color, allowClear, palette, photo, image, photoOnly) {
@@ -33904,10 +33947,12 @@ function renderTableStatusAdmin() {
   const sc = state.settings.tableStatusColors || {};
   // Show the colour the floor ACTUALLY paints: the custom one if set, else
   // the fixed default for that status — never a blank dot.
+  // A colour the front desk owns shows here, locked, with where to change it.
+  const desk = state.settings.deskOwned || [];
   const row = (key, fallback, label) => `
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
-        ${colorDotButton('table-status', key, sc[key] || null, { bg: sc[key] || fallback, title: 'Change colour' })}
-        <div style="font-weight:700;font-size:var(--fs-md);">${label}</div>
+        ${colorDotButton('table-status', key, sc[key] || null, { bg: sc[key] || fallback, title: desk.includes(key) ? 'Set on the desk' : 'Change colour', locked: desk.includes(key) })}
+        <div><div style="font-weight:700;font-size:var(--fs-md);">${label}</div>${desk.includes(key) ? '<div class="ts">Set on the desk</div>' : ''}</div>
       </div>`;
   const over = state.settings.courseWaitMinutes === undefined ? 15 : state.settings.courseWaitMinutes;
   const warn = state.settings.pillWarnMinutes === undefined ? Math.round(over * 0.65) : state.settings.pillWarnMinutes;
@@ -33947,8 +33992,8 @@ function renderTableStatusAdmin() {
         ${optionPair(tableColourSource(), 'set-table-colour-source', [['till', 'Till'], ['desk', 'Front desk']])}
         ${tableColourSource() === 'desk'
           ? DESK_STATES.map(([k, def, label]) => row('desk-' + k, def, label)).join('')
-          : row('occupied', PLAIN_STATUS.occupied, 'Seated — open order') + row('billPrinted', PLAIN_STATUS.billPrinted, 'Bill printed')}
-        ${row('locked', PLAIN_STATUS.locked, 'In use — another till')}
+          : row('occupied', null, 'Seated — open order') + row('billPrinted', null, 'Bill printed')}
+        ${row('locked', null, 'In use — another till')}
       </div>
       ${/* COLOUR AND TIME ON ONE ROW (owner, Sep '26), one block per clock:
             the same yellow and red everywhere, each state's own minutes. */ ''}
@@ -34959,11 +35004,6 @@ function tableNoteMark(t, includeVip) {
 // change them — they were typed out twice and drifted the first time they
 // moved. A venue that has already painted its own keeps them: these are what
 // a fresh till starts with.
-const PLAIN_STATUS = {
-  occupied: '#0A84FF',    // someone is at the table
-  billPrinted: '#34C759', // the bill has gone out
-  locked: '#8E8E93',      // another till has it — information, not an alarm: it wore the allergy's red and hid among the late tables (Sep '26)
-};
 function tableColourSource() { return state.settings.tableColourSource === 'desk' ? 'desk' : 'till'; }
 // The booking that OWNS this table right now: the one already seated, else
 // the next one due today. A cancelled booking owns nothing.
@@ -34987,7 +35027,7 @@ function tableStatusFx(t, cs, lock) {
   const op = washOpacity();
   const wash = (bg, o2) => ({ glow: '', wash: `<span class="tbl-wash" style="background:${bg};opacity:${o2 || op};"></span>` });
   const none = { wash: '', glow: '' };
-  if (lock) return wash(statusColor('locked', PLAIN_STATUS.locked), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
+  if (lock) return wash(statusColor('locked'), Math.min(op + 0.13, 0.8)); // a colleague's table — shows even with colours off
   // NOTHING PICKED IS ITSELF A READING (owner, Sep '26: "default status
   // nothing selected should have the table status active in use bill printed
   // etc"). With no key lit the tables wear the plain status every till has —
@@ -35032,14 +35072,14 @@ function tableStatusFx(t, cs, lock) {
   // regular state), GREEN = open tab running fine, BLUE = bill printed
   // (matches the blue Bill button), RED = needs you (ignored or over time).
   const st = tableStatus(t.label);
-  if (st === 'billPrinted') return wash(statusColor('billPrinted', PLAIN_STATUS.billPrinted), Math.min(op + 0.13, 0.8));
+  if (st === 'billPrinted') return wash(statusColor('billPrinted'), Math.min(op + 0.13, 0.8));
   const o = tableOpenOrder(t.label);
   // GREEN = your active open table. Urgency never recolours the table — it
   // lives in the pill alone (dark → yellow → red), so nothing mashes.
-  if (o) return wash(statusColor('occupied', PLAIN_STATUS.occupied));
+  if (o) return wash(statusColor('occupied'));
   // Seated counts as active: covers entered but nothing ordered yet wears the
   // same green — a seated party must never read as a free table (owner, Aug '26).
-  if (t.covers > 0) return wash(statusColor('occupied', PLAIN_STATUS.occupied));
+  if (t.covers > 0) return wash(statusColor('occupied'));
   return none; // empty — a table at rest is just a table
 }
 // The little pill under the table number follows the lens: course dot +

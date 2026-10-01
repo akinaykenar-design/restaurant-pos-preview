@@ -10360,6 +10360,7 @@ app.post('/api/menu', (req, res) => {
   };
   // The same three the edit route keeps, so a duplicated dish keeps them too.
   if (req.body.rowBreak) item.rowBreak = true;
+  if (req.body.disabled) item.disabled = true;
   if (req.body.station && (data.printerStations || []).some(s => s.id === req.body.station)) item.station = req.body.station;
   if (Array.isArray(req.body.recipes) && req.body.recipes.length) item.recipes = req.body.recipes.map(r => ({ inventoryItemId: r.inventoryItemId, quantity: parseFloat(r.quantity) || 0, unit: r.unit || '', docket: !!r.docket, label: r.label || '' }));
   if (item.trackStock && item.stockCount <= 0) item.out = true;
@@ -10818,7 +10819,7 @@ app.post('/api/tables/move-sitting', (req, res) => {
   // next party sat there got it and the party that moved lost it (Sep '26).
   // Onto a table with a discount of its own, that one stands.
   if (from && from !== to && from.discount && !to.discount) to.discount = from.discount;
-  if (from && from !== to) { from.covers = 0; from.notes = []; from.discount = null; }
+  if (from && from !== to) { from.covers = 0; from.notes = []; from.discount = null; tillMovesSitting(data, from.id, to.id); }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -11481,6 +11482,7 @@ async function doshiiPayAtTableOnce() {
             order.paidAt = Date.now();
             order.closedBy = 'EFTPOS terminal';
             order.doshiiSyncHash = null; // force a final status push next cycle
+            tillEndsSitting(data, order);
             logAudit(data, 'EFTPOS terminal', `Order #${order.id} paid at the terminal (${paid.toFixed(2)}) — table closed automatically`);
             changed = true;
             if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
@@ -11937,13 +11939,24 @@ function deskFollows(data, was, r, staff) {
   const tabOn = (t) => t && (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
   const hasFood = (o) => !!o && (o.items || []).some(i => (i.qty || 0) > 0);
   const seatedWas = was.status === 'seated', seatedNow = r.status === 'seated';
+  // The till's two fields on a booking (see tillEndsSitting): where the till
+  // has the party now, and whether its bill closed. A sitting the till ended is
+  // nobody's to move — the next party at that table is a stranger to the desk.
+  if (!seatedWas && seatedNow) { delete r.tillEndedAt; delete r.tillTableId; }
+  else if (r.tillEndedAt) return;
+  const at = r.tillTableId || r.tableId;
   if (seatedWas && seatedNow && was.tableId && r.tableId && was.tableId !== r.tableId) {
-    const from = find(was.tableId), to = find(r.tableId);
+    const from = find(r.tillTableId || was.tableId), to = find(r.tableId);
     const tab = tabOn(from);
     if (from && to) {
       if (tabOn(to) || (to.covers || 0) > 0) {
         r.tableId = was.tableId;
         logAudit(data, staff, `Did not move ${r.name} to Table ${to.label} — someone is sitting there`);
+      } else if (to.mergedInto && to.mergedInto !== to.id) {
+        // A table joined into another is not a place to sit: the party's covers
+        // and allergy landed on the faded half, where no till ever opens them.
+        r.tableId = was.tableId;
+        logAudit(data, staff, `Did not move ${r.name} to Table ${to.label} — it is joined to another table`);
       } else if (tab && (tab.splitPaid || []).length) {
         r.tableId = was.tableId;
         logAudit(data, staff, `Did not move ${r.name} to Table ${to.label} — part of the bill is paid`);
@@ -11953,22 +11966,53 @@ function deskFollows(data, was, r, staff) {
         if (from.discount && !to.discount) to.discount = from.discount;
         from.covers = 0; from.notes = []; from.discount = null;
         if (tab) tab.table = to.label;
+        delete r.tillTableId;
         logAudit(data, staff, `Moved ${r.name} from Table ${from.label} to Table ${to.label}${tab ? ` with Ticket #${tab.id}` : ''}`);
       }
     }
   }
   if (seatedNow && r.tableId) {
-    const t = find(r.tableId), tab = tabOn(t);
+    const t = find(r.tillTableId || r.tableId), tab = tabOn(t);
     if (t && (!seatedWas ? !(t.covers || 0) && !tab : r.partySize !== was.partySize)) {
       t.covers = r.partySize || 1;
       if (tab) tab.covers = t.covers;
     }
   }
-  if (seatedWas && r.status === 'done' && r.tableId) {
-    const t = find(r.tableId), tab = tabOn(t);
-    if (t && !hasFood(tab)) { t.covers = 0; t.notes = []; t.discount = null; }
+  if (seatedWas && r.status === 'done' && at) {
+    const t = find(at), tab = tabOn(t);
+    // A ticket with nothing on it (only the allergy sent) goes with the table,
+    // as the till's own Close table does — it held the next party's covers.
+    if (t && !hasFood(tab)) {
+      t.covers = 0; t.notes = []; t.discount = null;
+      if (tab) Object.assign(tab, { status: 'void', voidedAt: Date.now(), voidedBy: staff || 'Desk', voidReason: 'Nothing ordered', voidNote: 'Closed with the table' });
+    }
     else if (t) logAudit(data, staff, `${r.name} marked left — Table ${t.label} kept open, its bill is not paid`);
   }
+}
+
+// THE TILL ENDS THE SITTING IT RANG (1 Oct '26). A booking stays "seated" on
+// the desk after its bill is paid, and with nothing to say the sitting was
+// over, the desk's next change — "left", a new size, a move — landed on
+// whoever sat at that table next: a walk-in's covers and allergy wiped. And a
+// move on the TILL never reached the booking, so the desk kept driving the
+// empty table. The till writes two fields of its OWN on the booking, never the
+// desk's: `tillTableId` (where the party is now) and `tillEndedAt` (its last
+// ticket closed). One writer per field.
+function tillEndsSitting(data, order) {
+  if (!order || order.orderType !== 'dine-in' || order.practice) return;
+  const label = String(order.table);
+  if ((data.orders || []).some(o => o !== order && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === label)) return;
+  const ids = new Set();
+  (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (String(t.label) === label) ids.add(t.id); }));
+  (data.reservations || []).forEach(r => {
+    if (r.status === 'seated' && !r.tillEndedAt && ids.has(r.tillTableId || r.tableId)) r.tillEndedAt = Date.now();
+  });
+}
+function tillMovesSitting(data, fromId, toId) {
+  (data.reservations || []).forEach(r => {
+    if (r.status !== 'seated' || r.tillEndedAt || (r.tillTableId || r.tableId) !== fromId) return;
+    if (toId === r.tableId) delete r.tillTableId; else r.tillTableId = toId;
+  });
 }
 
 app.delete('/api/reservations/:id', (req, res) => {
@@ -12483,6 +12527,9 @@ app.post('/api/combos', (req, res) => {
     category: req.body.category || null,
     groups: groups.map((g, i) => normalizeComboGroup(g, i, 'g' + Date.now() + i)),
   };
+  // A copy is the same set menu: switched off stays off, its photo comes too.
+  if (typeof req.body.image === 'string' && req.body.image) combo.image = req.body.image;
+  if (req.body.disabled) combo.disabled = true;
   data.combos.push(combo);
   logAudit(data, staffFromReq(req), `Added set menu: ${combo.name}`);
   writeData(data);
@@ -12944,7 +12991,8 @@ app.post('/api/practice/purge', (req, res) => {
 
 app.post('/api/orders', (req, res) => {
   const data = readData();
-  const { orderType, table, customerName, customerId, items: rawItems, paymentMethod, payments, giftCardCode, staffId, staffName, covers, discount, tip, open } = req.body;
+  const { orderType, table, customerName, customerId, items: sentItems, paymentMethod, payments, giftCardCode, staffId, staffName, covers, discount, tip, open } = req.body;
+  let rawItems = sentItems;
   {
     const underPrice = priceFloorRefused(req, data, rawItems, null);
     if (underPrice) return res.status(403).json({ error: underPrice });
@@ -12964,6 +13012,15 @@ app.post('/api/orders', (req, res) => {
       if (!fresh.length) return res.json(already);
       ringRound(data, already, fresh, req.body, staffName, sendKey);
       return res.json(already);
+    }
+    // …but a retry whose first try DID land, on a ticket since paid on another
+    // till, rang the same food again on a fresh ticket and printed it twice
+    // (1 Oct '26). The lines that ticket already holds are dropped; whatever
+    // is left is new food and still opens a fresh ticket.
+    const landed = (data.orders || []).find(o => o.status !== 'open' && (o.sendKey === sendKey || (o.rounds || []).some(r => r.sendKey === sendKey)));
+    if (landed) {
+      rawItems = unseenLines(landed, rawItems);
+      if (!rawItems.length) return res.json(landed);
     }
   }
   const noteOnly = !rawItems || rawItems.length === 0;
@@ -13175,8 +13232,14 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
-  if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { items: rawItems, staffName } = req.body;
+  // A retried round that already landed before the ticket was paid is the
+  // ticket's, not an error: the till's Send stayed red "Not sent" for food the
+  // kitchen had (1 Oct '26).
+  if (order.status !== 'open') {
+    if ((rawItems || []).length && !unseenLines(order, rawItems).length) return res.json(order);
+    return res.status(400).json({ error: 'This ticket is not an open tab' });
+  }
   // A real waiter's round never lands on a trainee's practice ticket, nor a
   // trainee's on a real one (Sep '26) — judged on who sent it.
   const sender = req.body.staffId && (data.staff || []).find(x => x.id === req.body.staffId);
@@ -13507,6 +13570,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   // $60 card + $40 cash earned 100 points).
   const giftParts = (order.splitPaid || []).filter(p => p.method === 'giftcard').reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
   if (!order.practice) { order.loyaltyCredited = order.paymentMethod === 'giftcard' ? 0 : Math.max(0, total - voucherSaleTotal(order.items) - giftParts); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
+  tillEndsSitting(data, order);
   writeData(data);
   // A BILL PAID IN PARTS TOOK ITS MONEY PART BY PART, and each cash part
   // opened the drawer as it was taken. Closing it takes nothing, so it opens
@@ -13693,6 +13757,7 @@ app.post('/api/orders/:id/void', (req, res) => {
   order.voidReason = reason || null;
   order.voidNote = note || '';
   if (!order.practice) adjustStockForItems(data, order.items, 1, `Void #${order.id}`);
+  tillEndsSitting(data, order);
   logAudit(data, order.voidedBy, `Voided order #${order.id} (${order.total.toFixed(2)})${reason ? ' — ' + reason : ''}${note ? ': ' + note : ''}`);
   writeData(data);
   res.json(order);
@@ -14148,10 +14213,18 @@ function computePeriodSummary(data, fromTs, toTs) {
   const refunded = data.orders.filter(o => o.status === 'paid' && !o.practice && refundIn(o) > 0);
   // A PAID ticket voided after the period it was paid in closed is money out
   // in the period of the void — like a refund (Sep '26: it was on no report).
-  const lateVoids = data.orders.filter(o => o.status === 'void' && o.voidedPaid && !o.practice && (o.closedAt || o.createdAt) <= fromTs && inWin(o.voidedAt || 0));
+  // …and so is a PART paid before the cash-up on a bill finished and voided
+  // after it: $20 cash taken before the Z, the bill voided after, and the $20
+  // handed back was on no report at all — the drawer $20 short (1 Oct '26).
+  // What is taken AND voided inside one period cancels out, as it always has.
+  const hasParts = o => Array.isArray(o.splitPaid) && o.splitPaid.length;
+  const partsBefore = o => hasParts(o) ? o.splitPaid.filter(p => (p.at || 0) <= fromTs) : [];
+  const lateVoids = data.orders.filter(o => o.status === 'void' && o.voidedPaid && !o.practice && inWin(o.voidedAt || 0)
+    && (hasParts(o) ? partsBefore(o).length > 0 : (o.closedAt || o.createdAt) <= fromTs));
   let voidCount = orders.filter(o => o.status === 'void' && (o.items || []).length && !/^Combined into/.test(o.voidReason || '') && !/^Nothing ordered/.test(o.voidReason || '')).length;
   voidCount += lateVoids.length;
-  const lateVoidOut = o => Math.max(0, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0));
+  const lateVoidOut = o => hasParts(o) ? partsBefore(o).reduce((a, p) => a + (p.amount || 0), 0)
+    : Math.max(0, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.refundedTotal || 0));
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
@@ -14196,7 +14269,6 @@ function computePeriodSummary(data, fromTs, toTs) {
   // counts in the period it was taken in — a $40 cash part on a tab still
   // open at the cash-up was in no count, and the drawer read $40 over, then
   // $40 short the period the tab closed in (Sep '26).
-  const hasParts = o => Array.isArray(o.splitPaid) && o.splitPaid.length;
   const partsIn = data.orders.filter(o => !o.practice && (o.status === 'paid' || o.status === 'open') && hasParts(o));
   paid.forEach(o => { if (!hasParts(o)) takeBy(o, 1, null); });
   partsIn.forEach(o => o.splitPaid.forEach(p => {
@@ -14206,7 +14278,14 @@ function computePeriodSummary(data, fromTs, toTs) {
     else cardNet += p.amount || 0;
   }));
   refunded.forEach(o => takeBy(o, -1, refundIn(o)));
-  lateVoids.forEach(o => takeBy(o, -1, lateVoidOut(o)));
+  lateVoids.forEach(o => {
+    if (!hasParts(o)) { takeBy(o, -1, lateVoidOut(o)); return; }
+    partsBefore(o).forEach(p => {
+      if (p.method === 'cash') cashNet -= p.amount || 0;
+      else if (p.method === 'giftcard') giftNet -= p.amount || 0;
+      else cardNet -= p.amount || 0;
+    });
+  });
   lateTips.forEach(t => { cardNet += t.amount; });
   // Which card — Visa / Mastercard / Amex / EFTPOS — so the night's card
   // takings can be matched against the terminal's own settlement report.
@@ -14228,7 +14307,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   paid.forEach(o => { if (!hasParts(o)) cardBy(o, 1, null); });
   partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
   refunded.forEach(o => cardBy(o, -1, refundIn(o)));
-  lateVoids.forEach(o => cardBy(o, -1, lateVoidOut(o)));
+  lateVoids.forEach(o => { if (hasParts(o)) partsBefore(o).forEach(p => { if (p.method === 'card') addCard(p.cardType, -(p.amount || 0)); }); else cardBy(o, -1, lateVoidOut(o)); });
   lateTips.forEach(t => addCard(t.o.paymentMethod === 'card' ? t.o.cardType : null, t.amount));
 
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
@@ -16169,7 +16248,11 @@ function stationsForLines(lines) {
   }
   if (hasDefault) {
     if (!(state.printerStations || []).length) return '';           // no stations → generic toast
-    if (!names.includes('kitchen') && !names.some(n => /kitchen/i.test(n))) names.push('kitchen');
+    // A dish no station claims prints at a station that takes EVERYTHING —
+    // and with none of those it prints nowhere, so the toast must not say
+    // "kitchen" (1 Oct '26): the table shows Not printed instead.
+    (state.printerStations || []).filter(s => !(s.categories || []).length && !(s.subcategoryIds || []).length)
+      .forEach(s => { if (!names.includes(s.name)) names.push(s.name); });
   }
   if (!names.length) return '';
   if (names.length === 1) return names[0];
@@ -19032,6 +19115,62 @@ function syncFiredCourses() {
   Object.keys(srv).forEach(k => { if (srv[k] > 0) next[k] = srv[k]; });
   Object.keys(mine).forEach(k => { if (!(k in next) && mine[k] > 0 && now - mine[k] < 30000) next[k] = mine[k]; });
   state.firedCourses = next;
+}
+// THE TILL FOLLOWS ITS PARTY WHEN THE DESK MOVES IT (1 Oct '26). The desk
+// moved a party and its ticket from 15 to 17 while this till had 15 open: the
+// till stayed on 15, rang the next round there and, once paid, cleared 15 —
+// leaving the party's covers, allergy and discount on 17 for whoever sat there
+// next. Before the first round the ticket opened on 15 with the party on 17.
+// The open ticket is the truth; with no ticket yet, the booking that was on
+// this table at the last look is.
+let _sitWas = null;
+// The booking this till seated by itself on a tap. A stray tap on a booked
+// table seated it for good: "Close table" cleared the table but the booking
+// stayed seated, and when the party really came the table asked for covers
+// as if nobody had booked it (1 Oct '26). Closing that sitting un-seats it.
+let _autoSeat = null;
+// WHAT SITS AT EACH TABLE FOLLOWS THE SERVER (1 Oct '26). The tables were read
+// at sign-in only, so a party the desk moved from 17 to 12 still drew on 17
+// here: 12 asked for covers again, showed no allergy, and the next note saved
+// from this till wrote over the one the desk had moved. Only the sitting comes
+// in — covers, notes, discount — never the layout, and never under the editor.
+async function refreshTableSittings() {
+  if (floorEditorActive()) return;
+  let fps;
+  try { fps = await api('/api/floorplans'); } catch (e) { return; }
+  if (!Array.isArray(fps)) return;
+  const srv = new Map();
+  fps.forEach(fp => (fp.tables || []).forEach(t => srv.set(t.id, t)));
+  (state.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+    const x = srv.get(t.id);
+    if (x) { t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null; }
+  }));
+}
+async function followMovedParty() {
+  if (state.orderType !== 'dine-in' || state.table == null || state.transferFrom || state.sending) { _sitWas = null; return; }
+  const here = findTableById(state.table);
+  if (!here) return;
+  const seatedOn = (b) => b.status === 'seated' && !b.tillEndedAt ? (b.tillTableId || b.tableId) : null;
+  const o = state.openOrderId && (state.orders || []).find(x => x.id === state.openOrderId && x.status === 'open');
+  let to = null;
+  if (o) { if (String(o.table) !== String(here.label)) to = allTables().find(t => String(t.label) === String(o.table)) || null; }
+  else if (_sitWas && _sitWas.table === state.table) {
+    const b = (state.reservations || []).find(r => r.id === _sitWas.id);
+    const at = b && seatedOn(b);
+    if (at && at !== state.table) to = findTableById(at) || null;
+  }
+  if (to && to.id !== state.table) {
+    const dest = findTableById(to.id) || to;
+    releaseTableLock(state.table);
+    claimTableLock(dest.id).catch(() => {});
+    draftsMove(state.table, dest.id);
+    state.table = dest.id;
+    state.covers = dest.covers || 0; state.notes = (dest.notes || []).slice(); state.discount = dest.discount || null;
+    state.toast = `Moved to ${tableDisplayLabel(dest.id)} by the desk`;
+    armToastTimer(TOAST_SHORT);
+  }
+  const b = (state.reservations || []).find(r => seatedOn(r) === state.table);
+  _sitWas = b ? { table: state.table, id: b.id } : null;
 }
 async function refreshSummary() {
   state.summary = await api('/api/summary');
@@ -22328,6 +22467,9 @@ async function sendToKitchen() {
     // call-away — finds it (it went on the FIRST send of a new table to a
     // ticket the till did not know yet, and was dropped: Sep '26).
     { const k = state.orders.findIndex(o => o.id === order.id); if (k >= 0) state.orders[k] = order; else state.orders.push(order); }
+    // A retry that had already landed on a ticket since paid gets that ticket
+    // back: the food is in, and the table has no open tab to ring onto.
+    if (order.status !== 'open') state.openOrderId = null;
     // FOLLOW the round just sent: land the visible course tab on a course that
     // actually holds sent items. Resetting to the first course (the old
     // behaviour) — or staying on a tab the round wasn't for — made the sent
@@ -34379,11 +34521,11 @@ function renderComboEditorInline() {
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:12px;">
         <div style="display:flex;flex-direction:column;">
           <label class="field-label">Name</label>
-          <input type="text" value="${esc(m.name || '')}" placeholder="Name" style="${fld}" onblur="if (state.comboModal) state.comboModal.name = this.value;">
+          <input type="text" value="${esc(m.name || '')}" placeholder="Name" style="${fld}" onblur="if (state.comboModal) { state.comboModal.name = this.value; if (state.comboModal.mode === 'edit') saveComboQuickEdit(state.comboModal.id, 'name', this.value); }">
         </div>
         <div style="display:flex;flex-direction:column;">
           <label class="field-label">Price</label>
-          <input type="number" step="0.01" min="0" value="${(m.price || 0).toFixed ? (m.price || 0).toFixed(2) : m.price}" style="${fld}" onblur="if (state.comboModal) state.comboModal.price = parseFloat(this.value) || 0;">
+          <input type="number" step="0.01" min="0" value="${(m.price || 0).toFixed ? (m.price || 0).toFixed(2) : m.price}" style="${fld}" onblur="if (state.comboModal) { state.comboModal.price = parseFloat(this.value) || 0; if (state.comboModal.mode === 'edit') saveComboQuickEdit(state.comboModal.id, 'price', this.value); }">
         </div>
         <div style="display:flex;flex-direction:column;">
           <label class="field-label">Section</label>
@@ -37239,6 +37381,12 @@ function offerCloseEmptyTable(next) {
       await saveTableCovers(t.id, 0);
       await saveTableNotes(t.id, []);
       releaseTableLock(t.id);
+      if (_autoSeat && _autoSeat.table === t.id) {
+        const id = _autoSeat.id; _autoSeat = null;
+        const b = (state.reservations || []).find(r => r.id === id);
+        if (b && b.status === 'seated' && !b.tillEndedAt) await api(`/api/reservations/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'booked' }) });
+        state.reservations = await api('/api/reservations');
+      }
     } catch (e) {}
     state.covers = 0; state.notes = [];
     state.openOrderId = null;
@@ -37367,12 +37515,16 @@ function pickTable(id) {
     // the booking's size is the covers, the desk is told they are seated, and
     // there is no pad and no "Seat Walker?" question. The Covers key on the
     // table changes the number if more turn up.
-    const booked = state.orderType === 'dine-in' && !state.covers && !(oo && oo.covers) && !state.moveItemsPicking && !state.transferFrom
+    // A table with a tab is a party still eating, covers or not: tapping it to
+    // add coffees seated the next booking on top of them (1 Oct '26).
+    const booked = state.orderType === 'dine-in' && !state.covers && !oo && !state.moveItemsPicking && !state.transferFrom
       ? upcomingBookingFor(id, 30) : null;
     if (booked) {
       state.covers = booked.partySize || 1;
       saveTableCovers(id, state.covers);
       markReservationSeated(booked.id);
+      _sitWas = { table: id, id: booked.id }; // the till follows this party if the desk moves it
+      _autoSeat = { table: id, id: booked.id };
       if (state.floorStatusView === 'booked') state.floorStatusView = null; // seating moves off the booked lens; it never picks one
       state.toast = `${booked.name || 'Booking'} · ${state.covers} seated`;
       closeTablePicker(() => { state.pickFlashId = null; });
@@ -41716,7 +41868,7 @@ async function duplicateSelectedCombos() {
     for (const id of ids) {
       const c = state.combos.find(x => x.id === id);
       if (!c) continue;
-      await api('/api/combos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), price: c.price, color: c.color, category: c.category, groups: c.groups.map(g => ({ label: g.label, all: g.all, min: g.min, max: g.max, course: g.course, itemIds: [...g.itemIds] })) }) });
+      await api('/api/combos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), price: c.price, color: c.color, category: c.category, image: c.image || null, disabled: !!c.disabled, groups: c.groups.map(g => ({ label: g.label, all: g.all, min: g.min, max: g.max, course: g.course, itemIds: [...g.itemIds] })) }) });
     }
     state.combos = await api('/api/combos');
   } catch (e) { state.toast = toastFail('Could not duplicate some set menus.'); }
@@ -41760,7 +41912,12 @@ function deleteSelectedCourses() {
   // kitchen had already been called for and read as on its way. There is
   // nothing to get wrong in a refusal, and it is the same sentence the floor
   // uses for a table with money on it.
-  const busy = [...sel].map(i => ({ name: all[i].name, tables: tablesOnCourse(i + 1) })).filter(x => x.tables);
+  // …and nor what would be RENUMBERED: every course after the first one
+  // deleted moves down a place, and an open ticket keeps its number, so a Main
+  // already sent read "Dessert" once an empty Snacks before it went (1 Oct
+  // '26). The same check the reorder makes for every course that moves.
+  const first = Math.min(...sel);
+  const busy = all.map((c, i) => i).filter(i => i >= first).map(i => ({ name: all[i].name, tables: tablesOnCourse(i + 1) })).filter(x => x.tables);
   if (busy.length) {
     const b = busy[0];
     state.toast = toastFail(`${b.name} has food on ${b.tables} table${b.tables === 1 ? '' : 's'}. Move or serve it first.`);
@@ -42260,7 +42417,7 @@ async function duplicateSelectedDiscountPresets() {
   const sel = state.selectedDiscountPresetIds || [];
   const picks = state.discountPresets.filter(p => sel.includes(p.id));
   for (const p of picks) {
-    try { await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(p.name), kind: p.kind, type: p.type, value: p.value, color: p.color || null }) }); } catch (e) {}
+    try { await api('/api/discount-presets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...p, id: undefined, name: dupName(p.name), color: p.color || null }) }); } catch (e) {} // its WHEN too: a Sunday 10% copied as a plain hand-on surcharge (1 Oct '26)
     await new Promise(r => setTimeout(r, 2)); // ids are Date.now()-based — never mint twins
   }
   state.discountPresets = await api('/api/discount-presets');
@@ -42793,6 +42950,7 @@ function menuItemCopyPayload(it, name) {
     // (Sep '26).
     allergens: [...(it.allergens || [])], station: it.station || null,
     recipes: (it.recipes || []).map(r => ({ ...r })), rowBreak: !!it.rowBreak,
+    disabled: !!it.disabled, // a paused dish's copy came out selling (1 Oct '26)
   }, { name });
 }
 async function duplicateMenuItem(id) {
@@ -43500,7 +43658,9 @@ async function saveRecipe() {
     const updated = await api(`/api/menu/${menuItemId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...item, recipes })
+      // Only the recipe: the whole dish from this screen's copy put back
+      // portions sold since and switched a sold-out dish on again (1 Oct '26).
+      body: JSON.stringify({ recipes })
     });
     state.menu = state.menu.map(m => m.id === menuItemId ? updated : m);
     await loadRecipeCosts(menuItemId);
@@ -43747,7 +43907,10 @@ async function saveComboQuickEdit(id, field, value) {
   if (field === 'name') { const v = (value || '').trim(); if (!v || v === c.name) return; c.name = v; patch.name = v; }
   else if (field === 'price') { const p = parseFloat(value); if (isNaN(p) || p < 0 || p === c.price) return; c.price = p; patch.price = p; }
   else return;
-  try { await api(`/api/combos/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); render(); }
+  // The set menu's Name and Price boxes save on the way out of the box — they
+  // only wrote the open editor's own copy, so a typed name and price never
+  // reached the server (1 Oct '26). No repaint: the next box has the finger.
+  try { await api(`/api/combos/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); }
   catch (e) { state.toast = toastFail('Could not save set menu.'); render(); }
 }
 function openEditCombo(id) {
@@ -47914,7 +48077,7 @@ setInterval(() => {
       const same = v && _dataVersion && v.store === _dataVersion.store && v.orders === _dataVersion.orders;
       if (v) _dataVersion = v;
       if (same) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
-      return Promise.all([refreshOrders(), refreshReservations()]).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary(); return api('/api/menu'); })
+      return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings()]).then(followMovedParty).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary(); return api('/api/menu'); })
         .then(menu => { state.menu = menu; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (!typingInField()) renderWhenStill(); });
     });

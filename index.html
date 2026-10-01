@@ -27028,24 +27028,7 @@ async function loadReservations() {
   try { state.reservations = await api('/api/reservations'); } catch (e) {}
   render();
 }
-// Floor Booked mode → tap the table → the booking is seated: reservation
-// marked, party size becomes covers, straight onto the order screen.
-async function seatBookingFromFloor(tableId) {
-  const r = upcomingBookingFor(tableId);
-  if (!r) { pickTable(tableId); return; }
-  // A TABLE ANOTHER TILL HAS OPEN SEATS NOBODY (Sep '26): the booking was
-  // marked seated and the table's covers overwritten before the pick said
-  // "In use", so the booking vanished from the floor with nobody at the table.
-  const held = tableLocksOn() && tableLockedBy(tableId);
-  if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return; }
-  await markReservationSeated(r.id);
-  await saveTableCovers(tableId, r.partySize || 1);
-  // Seating a booking moves OFF the booked lens — it does not choose one for
-  // you. A floor set to read nothing stays reading nothing.
-  if (state.floorStatusView === 'booked') state.floorStatusView = null; // back to the plain status, which already says they are sitting there
-  state._pickResuming = true;
-  try { pickTable(tableId); } finally { state._pickResuming = false; }
-}
+// The desk is told a booking has sat down (§ the pick: a booked table opens itself).
 async function markReservationSeated(id) {
   try {
     await api(`/api/reservations/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'seated' }) });
@@ -37247,6 +37230,24 @@ function pickTable(id) {
     // so calling it after openCoversPad silently ate the pad and left the
     // picker stuck open ("cannot enter a table", owner, Aug '26).
     dropMobileDrawer();
+    // A BOOKED TABLE OPENS ITSELF (owner, 1 Oct '26: "booking covers should
+    // auto open table and input the covers auto"). A fresh table with a
+    // booking due — half an hour either side — is that party sitting down:
+    // the booking's size is the covers, the desk is told they are seated, and
+    // there is no pad and no "Seat Walker?" question. The Covers key on the
+    // table changes the number if more turn up.
+    const booked = state.orderType === 'dine-in' && !state.covers && !(oo && oo.covers) && !state.moveItemsPicking && !state.transferFrom
+      ? upcomingBookingFor(id, 30) : null;
+    if (booked) {
+      state.covers = booked.partySize || 1;
+      saveTableCovers(id, state.covers);
+      markReservationSeated(booked.id);
+      if (state.floorStatusView === 'booked') state.floorStatusView = null; // seating moves off the booked lens; it never picks one
+      state.toast = `${booked.name || 'Booking'} · ${state.covers} seated`;
+      closeTablePicker(() => { state.pickFlashId = null; });
+      armToastTimer(TOAST_SHORT);
+      return;
+    }
     if (state.orderType === 'dine-in' && state.settings.coversEnabled && !state.covers && !(oo && oo.covers)) {
       openCoversPad();
       // The seat isn't real until ✓ — remember what to put back if ✕ bails.
@@ -46395,16 +46396,6 @@ function handleActClick(el, e) {
         // The release of a drag-drop must not also open the table it landed on.
         if (Date.now() - _tblDropAt < 700) return;
         if (state.moveItemsPicking) doMoveItems(el.dataset.id);
-        else if (state.showTablePicker && state.floorStatusView === 'booked' && (() => {
-          const t = findTableById(el.dataset.id);
-          return t && !tableOpenOrder(t.label) && upcomingBookingFor(t.id);
-        })()) {
-          // Booked mode: tapping a free table with an upcoming booking SEATS
-          // it — party size becomes the covers, straight to the order screen.
-          const t = findTableById(el.dataset.id);
-          const r = upcomingBookingFor(t.id);
-          openConfirm({ message: `Seat ${r.name} · ${r.partySize} at table ${t.label}?`, confirmLabel: 'Seat', danger: false }, () => seatBookingFromFloor(t.id));
-        }
         else {
           // Show the pick BEFORE moving on: the tapped chip flashes the
           // selection sweep for a beat, then the order screen opens. The

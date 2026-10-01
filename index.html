@@ -6142,7 +6142,8 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   /* the dock floats over the last row's corner, so the list keeps a dock's
      height of room under it */
   padding-bottom:calc(var(--sq-ctl) + var(--hub-edge) * 2); }
-.pass-row{ flex:none; min-height:var(--pass-row); cursor:pointer; }
+.pass-row{ flex:none; min-height:var(--pass-row); }
+.pass-lead[data-act]{ cursor:pointer; } /* the number is the door in, not the row (owner, 1 Oct '26) */
 .pass-lead{ background:var(--surface); border-radius:var(--radius); box-shadow:var(--lift-1); display:flex; flex-direction:column; justify-content:center; gap:4px; padding:0 12px; min-width:0; }
 .pass-lead b{ font-family:'IBM Plex Mono',monospace; font-size:var(--fs-xl); font-weight:700; color:var(--text-primary); }
 .pass-lead small{ font-size:var(--fs-chip); font-weight:700; color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -6309,13 +6310,14 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .tl-now{ position:absolute; top:0; bottom:0; width:2px; background:var(--text-primary); transform:translateX(-1px); } /* now is information: ink, not the alarm red (calm, Sep '26) */
 .tl-now b{ position:absolute; top:0; left:0; transform:translateX(-50%); background:var(--text-primary); color:var(--surface); border-radius:var(--btn-radius);
   padding:0 8px; font-size:var(--fs-chip); font-weight:800; line-height:20px; white-space:nowrap; }
-.tl-row{ position:relative; z-index:1; flex:none; display:grid; grid-template-columns:var(--pass-lead) 1fr; gap:8px; height:72px; cursor:pointer; }
+.tl-row{ position:relative; z-index:1; flex:none; display:grid; grid-template-columns:var(--pass-lead) 1fr; gap:8px; height:72px; }
 .tl-row.picking .pass-lead{ box-shadow:var(--lift-1), var(--ring); }
 .tl-lane{ position:relative; border-radius:var(--radius); background:color-mix(in srgb, var(--surface) 25%, transparent); overflow:hidden; }
 .tl-bar{ --pc:var(--blue); position:absolute; top:8px; bottom:8px; border-radius:var(--btn-radius); overflow:hidden;
   background:color-mix(in srgb, var(--pc) 22%, var(--surface)); border-left:1px solid var(--pc); }
 .tl-bar i{ display:block; padding:4px 8px; font-style:normal; font-size:var(--fs-chip); font-weight:800;
   color:var(--text-primary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tl-bar.away{ min-width:var(--sq-ctl); } /* just called: seen at once, standing at the now line (owner, 1 Oct '26) */
 .tl-bar.done{ --pc:var(--green); background:color-mix(in srgb, var(--pc) 10%, var(--surface)); }
 .tl-bar.lvl-long{ --pc:var(--gold); }
 .tl-bar.lvl-late{ --pc:var(--red); }
@@ -6425,63 +6427,95 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
       return JSON.stringify(d);
     } catch (e) { return liveStore(); }
   }
+  // PREVIEW-ONLY DEMO SITTINGS (owner, 1 Oct '26: "add some random orders at
+  // different times, I want to see the timeline in action"). A night already
+  // under way: tables seated from two hours ago to a few minutes ago, courses
+  // called at different times, some done, some cooking, some held, a couple
+  // running late, two bills printed, two bookings coming. They are stamped
+  // against NOW every time the preview opens — so they never go stale — and
+  // they are never in the venue's real store, and never leave the preview
+  // (outStore drops them).
+  // [table, covers, seated mins ago, {course: called mins ago}, done courses, bill printed]
+  var DEMO = [
+    ['17', 4, 118, { 2: 100, 3: 80, 4: 55 }, [2, 3, 4], true],
+    ['11', 4, 96, { 2: 80, 3: 64, 4: 40 }, [2, 3, 4], true],
+    ['1', 6, 72, { 2: 58, 3: 38 }, [2], false],
+    ['45', 4, 64, { 2: 50, 3: 30, 4: 12 }, [2, 3], false],
+    ['16', 2, 52, { 2: 40, 3: 22 }, [2], false],
+    ['15', 4, 46, { 2: 38, 3: 9 }, [2], false],
+    ['13', 4, 44, { 2: 36 }, [2], false],
+    ['41', 5, 40, { 2: 30, 3: 4 }, [2], false],
+    ['14', 4, 38, { 2: 28 }, [], false],
+    ['31', 3, 31, { 2: 19 }, [], false],
+    ['21', 2, 24, { 2: 14 }, [], false],
+    ['42', 2, 15, { 2: 6 }, [], false],
+    ['24', 4, 6, {}, [], false],
+  ];
+  function addDemos(d) {
+    var now = Date.now();
+    d.orders = (d.orders || []).filter(function (o) { return !o.demo; });
+    d.reservations = (d.reservations || []).filter(function (r) { return !r.demo; });
+    var tables = {};
+    (d.floorPlans || []).forEach(function (f) { (f.tables || []).forEach(function (t) { if (t.type !== 'decor' && !tables[String(t.label)]) tables[String(t.label)] = t; }); });
+    var menu = (d.menu || []).filter(function (m) { return m.price > 0 && m.enabled !== false; });
+    if (!menu.length) return;
+    var courses = ((d.settings || {}).courses || []).length || 5;
+    var busy = {};
+    (d.orders || []).forEach(function (o) { if (o.status === 'open') busy[String(o.table)] = true; });
+    DEMO.forEach(function (row, n) {
+      var label = row[0];
+      if (!tables[label] || busy[label]) return;
+      var t0 = now - row[2] * 60000, fired = { 1: t0 + 3 * 60000 }, done = { 1: true };
+      Object.keys(row[3]).forEach(function (c) { fired[c] = now - row[3][c] * 60000; });
+      row[4].forEach(function (c) { done[c] = true; });
+      var items = [], k = 0;
+      for (var c = 1; c <= Math.min(courses, 5); c++) {
+        var many = c === 1 ? 1 : 2;
+        for (var j = 0; j < many; j++) {
+          var m = menu[(n * 7 + c * 13 + j * 5) % menu.length];
+          items.push({ lineKey: 'demo' + n + '-' + (k++), id: m.id, menuItemId: m.id, name: m.name, price: m.price,
+            qty: c === 1 ? row[1] : 1 + ((n + j) % 2), course: c, seat: null, note: '', modSelections: {}, removed: [],
+            status: done[c] ? 'served' : fired[c] ? 'preparing' : 'ordered' });
+        }
+      }
+      var sub = items.reduce(function (a, it) { return a + it.price * it.qty; }, 0);
+      d.orders.push({ id: 900000 + n, ticketNumber: 900000 + n, createdAt: t0, orderType: 'dine-in', table: label, covers: row[1],
+        items: items, rounds: [{ id: 1, sentAt: t0 + 3 * 60000, color: null, items: items }],
+        firedCourses: fired, calledAwayAt: Math.max.apply(null, Object.keys(fired).map(function (c) { return fired[c]; })),
+        billPrinted: !!row[5], subtotal: sub, discount: null, tax: 0, total: sub, tip: 0, grandTotal: sub,
+        paymentMethod: null, status: 'open', staffId: null, staffName: 'Demo', demo: true });
+    });
+    var rvFor = function (label, inMins, name, party) {
+      var tbl = tables[label];
+      if (!tbl) return null;
+      var dt = new Date(now + inMins * 60000);
+      var pad = function (x) { return (x < 10 ? '0' : '') + x; };
+      var time = dt.getFullYear() + '-' + pad(dt.getMonth() + 1) + '-' + pad(dt.getDate()) + 'T' + pad(dt.getHours()) + ':' + pad(dt.getMinutes());
+      return { id: 'rv-demo-' + label, name: name, phone: '', partySize: party, time: time, tableId: tbl.id, notes: '', status: 'booked', createdAt: now, demo: true };
+    };
+    d.reservations = d.reservations.concat([rvFor('17', 20, 'Walker', 4), rvFor('13', 45, 'Nguyen', 2), rvFor('22', 30, 'Okafor', 3)].filter(Boolean));
+  }
   var conflict = false; // new deploy data + local edits — the visitor decides
   try {
     var freshSeed = localStorage.getItem(SEED_KEY) !== window.__POS_SEED_HASH__;
     var dirty = localStorage.getItem(DIRTY_KEY) === '1';
     var saved = localStorage.getItem(LS_KEY);
     if (saved) {
-      if (!freshSeed) { JSON.parse(saved); files[DB] = saved; }
+      if (!freshSeed) { var sv = JSON.parse(saved); addDemos(sv); files[DB] = JSON.stringify(sv); }
       else if (dirty) {
         // The visitor has UNSAVED EDITS and this deploy ships different data.
         // Never silently clobber their work — keep their copy and ask.
-        JSON.parse(saved); files[DB] = saved; conflict = true;
+        var sv2 = JSON.parse(saved); addDemos(sv2); files[DB] = JSON.stringify(sv2); conflict = true;
       }
       // fresh seed + no local edits -> fall through and re-seed silently.
     }
   } catch (e) {}
   if (!files[DB]) {
     files[DB] = window.__POS_SEED__;
-    // PREVIEW-ONLY demo sittings, stamped relative to seed time, so the
-    // floor lenses (Sitting / Course / Attention / Covers) have live states
-    // to show. Never present in the venue's real store.
     try {
       var seedD = JSON.parse(files[DB]);
-      var demoNow = Date.now();
-      // dishes: [name, qty, status, course?] — statuses feed the kitchen
-      // screen (and its all-day strip) as well as the floor lenses.
-      var mkDemo = function (n, table, covers, satMins, courseMins, dishes, extra) {
-        var its = dishes.map(function (d, i) {
-          return { id: 'demo' + n + '-' + i, menuItemId: null, name: d[0], price: 18, qty: d[1], course: d[3] || 1, seat: 'all', status: d[2] || 'ordered' };
-        });
-        var sub = its.reduce(function (s, it) { return s + it.price * it.qty; }, 0);
-        var o = { id: 900000 + n, createdAt: demoNow - satMins * 60000, orderType: 'dine-in', table: String(table), covers: covers,
-          items: its, rounds: [{ id: 1, sentAt: demoNow - courseMins * 60000, color: null, items: its }],
-          subtotal: sub, discount: null, tax: 0, total: sub, tip: 0, grandTotal: sub,
-          paymentMethod: null, status: 'open', staffId: null, staffName: 'Demo', demo: true };
-        if (extra) for (var k in extra) o[k] = extra[k];
-        return o;
-      };
-      seedD.orders = (seedD.orders || []).concat([
-        mkDemo(1, '2', 2, 8, 3, [['Lamb Kofta', 2, 'ordered'], ['Halloumi', 1, 'preparing']]),   // just seated — fresh wash
-        mkDemo(2, '7', 4, 55, 20, [['Lamb Kofta', 3, 'ordered'], ['Chicken Souvla', 2, 'preparing', 2], ['Baklava', 2, 'ready', 3]]), // course past the cap + ignored 20m — glows on Course & Attention
-        mkDemo(3, '4', 6, 95, 30, [['Whole Bream', 2, 'served']], { billPrinted: true }),        // bill printed — gold glow
-        mkDemo(4, '3', 3, 40, 10, [['Halloumi', 2, 'preparing'], ['Chips', 3, 'ordered']]),      // drifting — amber attention wash (idle 10m)
-        mkDemo(5, '6', 8, 130, 5, [['Chips', 2, 'ready']]),                                      // sitting over the cap — violet glow; 8 covers
-        mkDemo(6, '1', 5, 25, 2, [['Chicken Souvla', 4, 'preparing', 2]], { calledAwayAt: demoNow - 2 * 60000 }), // called away just now
-      ]);
-      // Bookings for the Booked lens — tables with no sitting yet.
-      var rvFor = function (label, inMins, name, party) {
-        var tbl = null;
-        (seedD.floorPlans || []).forEach(function (f) { (f.tables || []).forEach(function (t) { if (String(t.label) === label && t.type !== 'decor') tbl = tbl || t; }); });
-        if (!tbl) return null;
-        var d = new Date(demoNow + inMins * 60000);
-        var pad = function (x) { return (x < 10 ? '0' : '') + x; };
-        var time = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-        return { id: 'rv-demo-' + label, name: name, phone: '', partySize: party, time: time, tableId: tbl.id, notes: '', status: 'booked', createdAt: demoNow, demo: true };
-      };
-      seedD.reservations = (seedD.reservations || []).concat([rvFor('5', 40, 'Walker', 4), rvFor('8', 10, 'Nguyen', 2)].filter(Boolean));
-      seedD.ticketCounter = Math.max(seedD.ticketCounter || 1, 900010);
+      addDemos(seedD);
+      seedD.ticketCounter = Math.max(seedD.ticketCounter || 1, 900020);
       files[DB] = JSON.stringify(seedD);
     } catch (e) {}
     try {
@@ -35970,8 +36004,8 @@ function renderPass(fp) {
     <div class="pass-head"><span></span>${courses.map((n, i) => `<span><b>${esc(courseInfo(n).name)}</b>${counts[i] ? `<small>${counts[i]}</small>` : ''}</span>`).join('')}</div>
     <div class="pass-rows">
       ${rows.map(({ t, o }) => `
-      <div class="pass-row${state.pickFlashId === t.id ? ' picking' : ''}" data-act="pick-table" data-id="${t.id}">
-        <div class="pass-lead"><b>${esc(String(t.label))}</b><small>${o ? pillDur(mins(o.createdAt)) : ''}${(o ? o.covers : t.covers) ? `${o ? ' · ' : ''}${o ? o.covers : t.covers} cover${(o ? o.covers : t.covers) === 1 ? '' : 's'}` : ''}</small></div>
+      <div class="pass-row${state.pickFlashId === t.id ? ' picking' : ''}" data-id="${t.id}">
+        <div class="pass-lead" data-act="pick-table" data-id="${t.id}" role="button" aria-label="Open table ${esc(String(t.label))}"><b>${esc(String(t.label))}</b><small>${o ? pillDur(mins(o.createdAt)) : ''}${(o ? o.covers : t.covers) ? `${o ? ' · ' : ''}${o ? o.covers : t.covers} cover${(o ? o.covers : t.covers) === 1 ? '' : 's'}` : ''}</small></div>
         ${nothingSent(o) ? `<div class="pass-cell seated"><span class="pass-st"><span class="pass-w">Seated</span></span><span class="pass-items">Nothing sent yet</span></div>` :
         cellsOf.get(o.id).map(c => {
           if (c.kind === 'none') return `<div class="pass-cell none"></div>`;
@@ -36307,7 +36341,11 @@ function tablesRunningLate() {
 // (calm, then gold, then red — the pass's own colours). A tick marks each
 // round sent and the moment the table was seated. What is held has no time
 // yet, so it waits just past the now line, next one first, with the pass's
-// Call away. Same rows as the pass, same door in: a tap opens the table.
+// Call away. Same rows as the pass, same door in: a tap on the table's
+// number opens the table. ONLY the number (owner, 1 Oct '26: "clicking
+// anywhere... auto sends into table... at the very least I should know I'm
+// clicking on the table number"): the whole row was the door, 70 to 85% of
+// the screen, so a tap to look at a course walked into the table.
 // The line moves on its own (tickTimeline), without rebuilding the screen.
 function renderTimeline(fp) {
   const courses = (state.settings.courses || []).map((c, i) => i + 1).filter(n => courseInfo(n).enabled !== false);
@@ -36356,7 +36394,11 @@ function renderTimeline(fp) {
       const k = kindOf.get(n);
       if (k === 'done' || (k === 'none' && to)) return `<div class="tl-bar done" style="left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
       const lvl = pillClockLevel(mins(now - from), 'course');
-      return `<div class="tl-bar away lvl-${lvl}" data-grow="${from}" style="left:${at(from)};width:${len(from, now)}"><i>${esc(courseInfo(n).name)} · ${pillDur(mins(now - from))}</i></div>`;
+      // A COURSE JUST CALLED IS SEEN AT ONCE (owner, 1 Oct '26: "courses
+      // dissapear when called"). It was a bar from the call to now — one pixel
+      // wide the moment it went, so the held chip vanished and nothing took
+      // its place. It stands at the now line and is never narrower than a key.
+      return `<div class="tl-bar away lvl-${lvl}" data-grow="${from}" style="right:calc(100% - ${at(now)});width:${len(from, now)}"><i>${esc(courseInfo(n).name)} · ${pillDur(mins(now - from))}</i></div>`;
     }).join('');
     // THE SITTING IS A BAND: from the moment they sat down to now, a pale
     // track under the courses — how long the table has been here, at a glance.
@@ -36399,8 +36441,8 @@ function renderTimeline(fp) {
         <div class="tl-over tl-grid">${hours.map(h => `<span class="tl-hour" style="left:${at(h)}"></span>`).join('')}</div>
         <div class="tl-over"><span class="tl-now" style="left:${at(now)}"><b>${esc(clock(now))}</b></span></div>
         ${rows.map(r => `
-        <div class="tl-row${state.pickFlashId === r.t.id ? ' picking' : ''}" data-act="pick-table" data-id="${r.t.id}">
-          <div class="pass-lead"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} cover${(r.o ? r.o.covers : r.t.covers) === 1 ? '' : 's'}` : ''}</small>${due(r)}</div>
+        <div class="tl-row${state.pickFlashId === r.t.id ? ' picking' : ''}" data-id="${r.t.id}">
+          <div class="pass-lead" data-act="pick-table" data-id="${r.t.id}" role="button" aria-label="Open table ${esc(String(r.t.label))}"><b>${esc(String(r.t.label))}</b><small>${r.o ? pillDur(mins(now - (r.o.createdAt || now))) : ''}${(r.o ? r.o.covers : r.t.covers) ? `${r.o ? ' · ' : ''}${r.o ? r.o.covers : r.t.covers} cover${(r.o ? r.o.covers : r.t.covers) === 1 ? '' : 's'}` : ''}</small>${due(r)}</div>
           <div class="tl-lane">${lane(r)}</div>
         </div>`).join('')}
       </div>
@@ -36418,6 +36460,7 @@ function tickTimeline() {
   if (now >= t0 + span) { renderWhenStill(); return; }
   const at = t => Math.max(0, Math.min(100, (t - t0) / span * 100)).toFixed(3) + '%';
   el.querySelectorAll('.tl-now').forEach(n => { n.style.left = at(now); });
+  el.querySelectorAll('.tl-bar.away').forEach(b => { b.style.right = 'calc(100% - ' + at(now) + ')'; });
   el.querySelectorAll('.tl-wait').forEach(n => { n.style.setProperty('--at', at(now)); });
   el.querySelectorAll('[data-grow]').forEach(b => { b.style.width = Math.max(0, (now - Math.max(t0, +b.dataset.grow)) / span * 100).toFixed(3) + '%'; });
   const lab = el.querySelector('.tl-now b');

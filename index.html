@@ -11843,6 +11843,7 @@ app.put('/api/reservations/:id', (req, res) => {
   const r = (data.reservations || []).find(x => x.id === req.params.id);
   if (!r) return res.status(404).json({ error: 'Reservation not found' });
   const { name, phone, partySize, time, tableId, notes, status } = req.body;
+  const was = { status: r.status, tableId: r.tableId, partySize: r.partySize };
   if (name !== undefined && name.trim()) r.name = name.trim();
   if (phone !== undefined) r.phone = String(phone).trim();
   if (partySize !== undefined) r.partySize = Math.max(1, parseInt(partySize) || 1);
@@ -11855,9 +11856,61 @@ app.put('/api/reservations/:id', (req, res) => {
     r.status = status;
     logAudit(data, staffFromReq(req), `Marked reservation for ${r.name} as ${status}`);
   }
+  deskFollows(data, was, r, staffFromReq(req));
   writeData(data);
   res.json(r);
 });
+// THE DESK MOVES THE PARTY IT SEATED (owner, 1 Oct '26: "If you change covers
+// on desk it should change it auto on pos. If you transfer on desk it should
+// transfer on pos... The only caveat: if there is money and you press left,
+// the table doesn't disappear from pos"). The desk already sends every change
+// to a booking here; the till used to file it and change nothing on the floor.
+// Now a SEATED booking drives its table:
+//   - seated: an empty table takes the party's size as its covers;
+//   - a new party size: the table and its open tab take the new covers;
+//   - a new table: the sitting moves — covers, notes, discount and the open
+//     tab — unless the new table already has a party, or money has been taken
+//     in parts (both refused: the booking stays where the party really is);
+//   - left: an empty table is cleared. A table with food on its tab stays
+//     exactly as it is — nobody leaves without paying because the desk said so.
+function deskFollows(data, was, r, staff) {
+  const find = (id) => { for (const fp of data.floorPlans || []) { const t = (fp.tables || []).find(x => x.id === id); if (t) return t; } return null; };
+  const tabOn = (t) => t && (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
+  const hasFood = (o) => !!o && (o.items || []).some(i => (i.qty || 0) > 0);
+  const seatedWas = was.status === 'seated', seatedNow = r.status === 'seated';
+  if (seatedWas && seatedNow && was.tableId && r.tableId && was.tableId !== r.tableId) {
+    const from = find(was.tableId), to = find(r.tableId);
+    const tab = tabOn(from);
+    if (from && to) {
+      if (tabOn(to) || (to.covers || 0) > 0) {
+        r.tableId = was.tableId;
+        logAudit(data, staff, `Did not move ${r.name} to Table ${to.label} — someone is sitting there`);
+      } else if (tab && (tab.splitPaid || []).length) {
+        r.tableId = was.tableId;
+        logAudit(data, staff, `Did not move ${r.name} to Table ${to.label} — part of the bill is paid`);
+      } else {
+        to.covers = from.covers || r.partySize || 0;
+        to.notes = from.notes || [];
+        if (from.discount && !to.discount) to.discount = from.discount;
+        from.covers = 0; from.notes = []; from.discount = null;
+        if (tab) tab.table = to.label;
+        logAudit(data, staff, `Moved ${r.name} from Table ${from.label} to Table ${to.label}${tab ? ` with Ticket #${tab.id}` : ''}`);
+      }
+    }
+  }
+  if (seatedNow && r.tableId) {
+    const t = find(r.tableId), tab = tabOn(t);
+    if (t && (!seatedWas ? !(t.covers || 0) && !tab : r.partySize !== was.partySize)) {
+      t.covers = r.partySize || 1;
+      if (tab) tab.covers = t.covers;
+    }
+  }
+  if (seatedWas && r.status === 'done' && r.tableId) {
+    const t = find(r.tableId), tab = tabOn(t);
+    if (t && !hasFood(tab)) { t.covers = 0; t.notes = []; t.discount = null; }
+    else if (t) logAudit(data, staff, `${r.name} marked left — Table ${t.label} kept open, its bill is not paid`);
+  }
+}
 
 app.delete('/api/reservations/:id', (req, res) => {
   const data = readData();

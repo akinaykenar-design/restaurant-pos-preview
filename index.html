@@ -11357,6 +11357,9 @@ app.get('/api/printer-stations', (req, res) => {
 // client secret only ever travels once and never comes back out.
 app.post('/api/doshii/config', (req, res) => {
   const data = readData();
+  // Where the till asks whether a table has paid is a manager's: anyone on the
+  // wifi could point it at a server that "paid" every open tab by card.
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change pay at the table' });
   const { enabled, env, clientId, clientSecret, locationId, baseUrl } = req.body || {};
   const existing = data.settings.doshii || {};
   data.settings.doshii = {
@@ -11514,6 +11517,14 @@ async function doshiiPayAtTableOnce() {
             order.paymentMethod = 'card';
             order.paidAt = Date.now();
             order.closedBy = 'EFTPOS terminal';
+            // CLOSED LIKE ANY OTHER BILL (2 Oct '26): with no closedAt it was
+            // filed under when the table opened — a bill opened before the Z
+            // and paid at the table after it was on no cash-up at all — and it
+            // carried no GST, no vouchers sold on it and no points.
+            order.closedAt = order.paidAt;
+            if (!order.tax) order.tax = computeTax(data, (order.total || order.subtotal || 0) - voucherSaleTotal(order.items || [])).tax;
+            issueSoldVouchers(data, order, 'EFTPOS terminal');
+            if (!order.practice) { order.loyaltyCredited = Math.max(0, (order.total || 0) - voucherSaleTotal(order.items || [])); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
             order.doshiiSyncHash = null; // force a final status push next cycle
             tillEndsSitting(data, order);
             logAudit(data, 'EFTPOS terminal', `Order #${order.id} paid at the terminal (${paid.toFixed(2)}) — table closed automatically`);
@@ -14060,7 +14071,15 @@ app.get('/api/summary', (req, res) => {
   const lateOf = o => (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
   const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0) - lateOf(o), 0)
     + data.orders.filter(o => o.status === 'paid' && !o.practice)
-      .reduce((s, o) => s + (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= todayFrom ? (t.amount || 0) : 0), 0), 0);
+      .reduce((s, o) => s + (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= todayFrom ? (t.amount || 0) : 0), 0), 0)
+    // …less any tip a refund handed back today (food refunded first, tip last).
+    - data.orders.filter(o => o.status === 'paid' && !o.practice).reduce((s, o) => {
+      const food = Math.max(0, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.tip || 0));
+      const rs = o.refunds || [];
+      const before = rs.reduce((a, r) => a + ((r.timestamp || periodAt(o)) < todayFrom ? (r.amount || 0) : 0), 0);
+      const all = rs.reduce((a, r) => a + (r.amount || 0), 0);
+      return s + Math.max(0, all - food) - Math.max(0, before - food);
+    }, 0);
   // Refunds by when they were GIVEN, as on the Z (Sep '26).
   const refundsToday = data.orders.filter(o => o.status === 'paid' && !o.practice)
     .reduce((s, o) => s + (o.refunds || []).reduce((a, r) => a + ((r.timestamp || periodAt(o)) >= todayFrom ? (r.amount || 0) : 0), 0), 0);
@@ -14261,11 +14280,26 @@ function computePeriodSummary(data, fromTs, toTs) {
   const subtotal = paid.reduce((s, o) => s + o.subtotal, 0);
   const discountTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind !== 'surcharge' ? o.discount.amount : 0), 0);
   const surchargeTotal = paid.reduce((s, o) => s + (o.discount && o.discount.kind === 'surcharge' ? Math.abs(o.discount.amount) : 0), 0);
-  const tax = paid.reduce((s, o) => s + o.tax, 0);
+  // A REFUND TAKES BACK ITS SHARE OF THE GST AND, PAST THE FOOD, THE TIP
+  // (2 Oct '26). A $115 refund of a $100 bill with a $15 tip left the $15 in
+  // the tips staff are paid out, and the $9.09 GST on the Z — a void took both
+  // off, a refund neither. The food is refunded first, the tip last.
+  const gtOf = o => (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0;
+  const foodOf = o => Math.max(0, gtOf(o) - (o.tip || 0));
+  const refundsBefore = o => Array.isArray(o.refunds) && o.refunds.length
+    ? o.refunds.reduce((s, r) => s + ((r.timestamp ? r.timestamp <= fromTs : periodAt(o) <= fromTs) ? (r.amount || 0) : 0), 0)
+    : (periodAt(o) <= fromTs ? (o.refundedTotal || 0) : 0);
+  const refundSplit = o => {
+    const before = refundsBefore(o), through = before + refundIn(o), food = foodOf(o);
+    return { food: Math.min(through, food) - Math.min(before, food), tip: Math.max(0, through - food) - Math.max(0, before - food) };
+  };
+  const taxBack = refunded.reduce((s, o) => s + (foodOf(o) > 0 ? (o.tax || 0) * refundSplit(o).food / foodOf(o) : 0), 0)
+    + lateVoids.reduce((s, o) => s + (gtOf(o) > 0 ? (o.tax || 0) * Math.min(1, lateVoidOut(o) / gtOf(o)) : 0), 0);
+  const tax = paid.reduce((s, o) => s + o.tax, 0) - taxBack;
   const lateTips = data.orders.filter(o => o.status === 'paid' && !o.practice)
     .flatMap(o => (o.lateTips || []).filter(t => inWin(t.at || 0)).map(t => ({ o, amount: t.amount || 0 })));
   const lateTipTotal = lateTips.reduce((a, t) => a + t.amount, 0);
-  const tips = paid.reduce((s, o) => s + (o.tip || 0), 0) + lateTipTotal;
+  const tips = paid.reduce((s, o) => s + (o.tip || 0), 0) + lateTipTotal - refunded.reduce((s, o) => s + refundSplit(o).tip, 0);
   const refunds = refunded.reduce((s, o) => s + refundIn(o), 0) + lateVoids.reduce((s, o) => s + lateVoidOut(o), 0);
   const grandTotal = paid.reduce((s, o) => s + (o.grandTotal !== undefined ? o.grandTotal : o.total), 0) + lateTipTotal;
   const netTotal = grandTotal - refunds;
@@ -14310,9 +14344,20 @@ function computePeriodSummary(data, fromTs, toTs) {
     else if (p.method === 'giftcard') giftNet += p.amount || 0;
     else cardNet += p.amount || 0;
   }));
-  refunded.forEach(o => takeBy(o, -1, refundIn(o)));
+  // A tip added AFTER the bill is card money (see lateTips): money handed back
+  // on such a bill takes the tip's share off the card first and spreads the
+  // rest the way the bill was paid. It was spread over the bill's own ways, so
+  // a full refund left Card +$10 and Gift cards -$10 (2 Oct '26).
+  const lateSplit = (o, amt) => {
+    const lt = lateOf(o), gt = gtOf(o);
+    if (!lt || !(gt > 0)) return { card: 0, rest: amt, base: o };
+    const card = Math.min(amt, amt * lt / gt);
+    return { card, rest: amt - card, base: { ...o, grandTotal: gt - lt, tip: (o.tip || 0) - lt } };
+  };
+  const giveBack = (o, amt) => { const x = lateSplit(o, amt); cardNet -= x.card; takeBy(x.base, -1, x.rest); };
+  refunded.forEach(o => giveBack(o, refundIn(o)));
   lateVoids.forEach(o => {
-    if (!hasParts(o)) { takeBy(o, -1, lateVoidOut(o)); return; }
+    if (!hasParts(o)) { giveBack(o, lateVoidOut(o)); return; }
     partsBefore(o).forEach(p => {
       if (p.method === 'cash') cashNet -= p.amount || 0;
       else if (p.method === 'giftcard') giftNet -= p.amount || 0;
@@ -14339,8 +14384,9 @@ function computePeriodSummary(data, fromTs, toTs) {
   };
   paid.forEach(o => { if (!hasParts(o)) cardBy(o, 1, null); });
   partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
-  refunded.forEach(o => cardBy(o, -1, refundIn(o)));
-  lateVoids.forEach(o => { if (hasParts(o)) partsBefore(o).forEach(p => { if (p.method === 'card') addCard(p.cardType, -(p.amount || 0)); }); else cardBy(o, -1, lateVoidOut(o)); });
+  const cardBack = (o, amt) => { const x = lateSplit(o, amt); addCard(o.paymentMethod === 'card' ? o.cardType : null, -x.card); cardBy(x.base, -1, x.rest); };
+  refunded.forEach(o => cardBack(o, refundIn(o)));
+  lateVoids.forEach(o => { if (hasParts(o)) partsBefore(o).forEach(p => { if (p.method === 'card') addCard(p.cardType, -(p.amount || 0)); }); else cardBack(o, lateVoidOut(o)); });
   lateTips.forEach(t => addCard(t.o.paymentMethod === 'card' ? t.o.cardType : null, t.amount));
 
   // Paid-outs: cash taken FROM the drawer mid-period (supplies, refund in
@@ -31187,8 +31233,18 @@ function tipsCollected(period) {
     .reduce((s, o) => {
       const late = (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
       const lateIn = (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= start ? (t.amount || 0) : 0), 0);
-      return s + ((o.closedAt || o.createdAt || 0) >= start ? (o.tip || 0) - late : 0) + lateIn;
+      return s + ((o.closedAt || o.createdAt || 0) >= start ? (o.tip || 0) - late : 0) + lateIn - tipRefundedSince(o, start);
     }, 0);
+}
+// The tip a refund handed back, from `start` on. The food is refunded first,
+// the tip last: a full refund of a $100 bill with a $15 tip still paid the $15
+// out to staff the venue no longer held (2 Oct '26). The cash-up does the same.
+function tipRefundedSince(o, start) {
+  const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0, food = Math.max(0, gt - (o.tip || 0));
+  const rs = Array.isArray(o.refunds) && o.refunds.length ? o.refunds : (o.refundedTotal ? [{ amount: o.refundedTotal, timestamp: o.closedAt || o.createdAt }] : []);
+  const before = rs.reduce((a, r) => a + ((r.timestamp || 0) < start ? (r.amount || 0) : 0), 0);
+  const all = rs.reduce((a, r) => a + (r.amount || 0), 0);
+  return Math.max(0, all - food) - Math.max(0, before - food);
 }
 function renderTipsSettingsAdmin() {
   const period = state.tipPayoutPeriod || 'today';

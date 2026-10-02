@@ -8447,6 +8447,7 @@ const os = require('os');
 const path = require('path');
 const fs = require('fs');
 const { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion } = require('./db');
+const BUILT_IN_ROLES = ['manager', 'chef', 'trainee']; // titles the code reads by name
 const printing = require('./printing');
 const terminal = require('./terminal');
 const doshii = require('./doshii');
@@ -9575,7 +9576,10 @@ app.put('/api/settings', (req, res) => {
   if (printColorMode !== undefined) data.settings.printColorMode = printColorMode === 'color' ? 'color' : 'thermal';
   if (printFontScale !== undefined) data.settings.printFontScale = printFontScale === 'large' ? 'large' : 'normal';
   if (req.body.docket !== undefined && typeof req.body.docket === 'object' && req.body.docket) {
-    const dk = req.body.docket, cur = data.settings.docket || {};
+    // A saved DESIGN is the whole docket: what it does not carry is at its
+    // default, not "keep what is there" — applying "Plain" left the "T" table
+    // word typed since, and the toast said Applied (2 Oct '26).
+    const dk = req.body.docket, cur = req.body.docketWhole ? {} : (data.settings.docket || {});
     // ONE list of the docket's styleable lines. It used to be written out five
     // times — red, sizes, bold, under, align — and the copies drifted: a new
     // element could be styled in the designer and the style was dropped here
@@ -10008,8 +10012,20 @@ app.put('/api/settings', (req, res) => {
   }
   // The venue's own job titles. Six were fixed in the code.
   if (Array.isArray(req.body.staffRoles)) {
-    data.settings.staffRoles = req.body.staffRoles
-      .map(r => String(r || '').trim().slice(0, 40)).filter(Boolean).slice(0, 40);
+    const before = (data.settings.staffRoles && data.settings.staffRoles.length) ? data.settings.staffRoles : STAFF_ROLE_OPTIONS;
+    const next = req.body.staffRoles.map(r => String(r || '').trim().slice(0, 40)).filter(Boolean).slice(0, 40);
+    // THREE TITLES ARE WHAT THEY DO (2 Oct '26): a manager's PIN, a chef's
+    // kitchen screen and a trainee's practice all key off the word itself.
+    // Renamed to "Venue manager", the title still read as a title but gave no
+    // manager powers, and everyone who held "chef" was left on a word that no
+    // longer existed. They stay; everything else is the venue's.
+    BUILT_IN_ROLES.forEach(r => { if (before.includes(r) && !next.includes(r)) next.push(r); });
+    // A rename carries the people who hold the title with it.
+    const ren = req.body.staffRoleRename;
+    if (ren && typeof ren === 'object' && !BUILT_IN_ROLES.includes(ren.from) && next.includes(String(ren.to || '').trim())) {
+      (data.staff || []).forEach(st => { if (st.role === ren.from) st.role = String(ren.to).trim(); });
+    }
+    data.settings.staffRoles = next;
   }
   if (managerApprovalForVoid !== undefined) data.settings.managerApprovalForVoid = !!managerApprovalForVoid;
   if (allergyCustomEnabled !== undefined) data.settings.allergyCustomEnabled = !!allergyCustomEnabled;
@@ -10933,6 +10949,14 @@ app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
+  // …and never out from under an unpaid bill, as an area does not: the only
+  // check was on the editing till's own copy of the orders, up to 15s old, so
+  // a table opened on another till in that time was deleted with its bill
+  // left on no table at all (2 Oct '26).
+  if (table && table.type === 'table') {
+    const stuck = (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table.label));
+    if (stuck) return res.status(400).json({ error: `Table ${stuck.table} has an unpaid bill. Settle or move it first.` });
+  }
   floorPlan.tables = floorPlan.tables.filter(t => t.id !== req.params.id);
   // A combination is its tables. Lose one and the combination is not a
   // combination any more — it goes, rather than sitting in the desk's list
@@ -12975,7 +12999,11 @@ function priceFloorRefused(req, data, items, order, back) {
     // Undo of a void puts back exactly what the void took, at its price —
     // a set menu's $0 dish included (Sep '26: Undo was refused).
     if (back && back.has(it.menuItemId + '|' + price.toFixed(2))) continue;
-    if (it.comboRef && combos.has(it.comboRef)) { const k = it.comboRef + '|' + (it.comboStamp || ''); sets.set(k, (sets.get(k) || 0) + price * (it.qty || 1)); continue; }
+    if (it.comboRef && combos.has(it.comboRef)) {
+      // A set's $0 dish is one dish: two of them was a free second Labneh.
+      if (!(price > 0) && (it.qty || 1) > 1) return `A manager PIN is needed for a second ${String(it.name || 'dish').replace(/^.*·\s*/, '')} from a set menu.`;
+      const k = it.comboRef + '|' + (it.comboStamp || ''); sets.set(k, (sets.get(k) || 0) + price * (it.qty || 1)); continue;
+    }
     const mi = menu.get(it.menuItemId);
     if (!mi) continue;
     if (setByManager.has(it.menuItemId + '|' + price.toFixed(2))) continue;
@@ -16866,7 +16894,7 @@ async function applyDesign(kind, id) {
   const key = kind === 'docket' ? 'docketDesigns' : 'receiptDesigns';
   const d = (state.settings[key] || []).find(x => x.id === id);
   if (!d) return;
-  const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(kind === 'docket' ? { docket: d.cfg } : { [rcWhich()]: d.cfg }) });
+  const saved = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(kind === 'docket' ? { docket: d.cfg, docketWhole: true } : { [rcWhich()]: d.cfg }) });
   state.settings = saved;
   state.toast = `Applied "${d.name}"`; render(); armToastTimer(TOAST_SHORT);
 }
@@ -17175,7 +17203,23 @@ function saveStaffRoles(list) {
   render();
 }
 function addStaffRole() { saveStaffRoles([...staffRoles(), 'New role']); }
-function updateStaffRole(idx, v) { saveStaffRoles(staffRoles().map((r, i) => i === idx ? v : r)); }
+// Manager, chef and trainee are what they DO — the PIN, the kitchen screen,
+// practice — so they keep their names (see BUILT_IN_ROLES on the server).
+const BUILT_IN_ROLES = ['manager', 'chef', 'trainee'];
+function builtInRoleRefused() {
+  state.toast = toastFail('Manager, chef and trainee stay — add a new title instead');
+  render(); armToastTimer(TOAST_LONG);
+}
+function updateStaffRole(idx, v) {
+  const was = staffRoles()[idx], to = String(v || '').trim();
+  if (was === to || !to) return;
+  if (BUILT_IN_ROLES.includes(was)) { builtInRoleRefused(); return; }
+  const list = staffRoles().map((r, i) => i === idx ? to : r);
+  state.settings.staffRoles = list;
+  (state.staffList || []).forEach(st => { if (st.role === was) st.role = to; });
+  saveTicketSetting({ staffRoles: list, staffRoleRename: { from: was, to } });
+  render();
+}
 function duplicateSelectedStaffRoles() {
   const sel = state.selectedStaffRoleIdxs || [];
   const all = staffRoles();
@@ -17185,7 +17229,9 @@ function duplicateSelectedStaffRoles() {
 function deleteSelectedStaffRoles() {
   const sel = state.selectedStaffRoleIdxs || [];
   state.selectedStaffRoleIdxs = [];
-  saveStaffRoles(staffRoles().filter((_, i) => !sel.includes(i)));
+  const all = staffRoles();
+  if (sel.some(i => BUILT_IN_ROLES.includes(all[i]))) builtInRoleRefused();
+  saveStaffRoles(all.filter((r, i) => !sel.includes(i) || BUILT_IN_ROLES.includes(r)));
 }
 function reorderStaffRoles(from, to) {
   const list = staffRoles().slice();
@@ -19226,14 +19272,30 @@ async function refreshDeskColours() {
 }
 async function refreshTableSittings() {
   if (floorEditorActive()) return;
+  // A NEWER SAVE HERE WINS (2 Oct '26): an answer that left before this till
+  // saved an allergy landed after it, put the old list back, and the next note
+  // written from that list wiped the allergy off the server. A table saved
+  // here since just before the ask is left alone.
+  const asked = Date.now();
   let fps;
   try { fps = await api('/api/floorplans'); } catch (e) { return; }
   if (!Array.isArray(fps)) return;
   const srv = new Map();
   fps.forEach(fp => (fp.tables || []).forEach(t => srv.set(t.id, t)));
+  const same = (a, b) => JSON.stringify(a || null) === JSON.stringify(b || null);
   (state.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
     const x = srv.get(t.id);
-    if (x) { t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null; }
+    if (!x || (t._savedAt && t._savedAt > asked - 3000)) return;
+    const was = { covers: t.covers || 0, notes: t.notes || [], discount: t.discount || null };
+    t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null;
+    // …and the table this till has OPEN follows too, where the waiter has not
+    // changed it here: the desk made the party 6, the open table kept 4 and
+    // the first round put 4 on the bill.
+    if (t.id === state.table && !state.coversPad) {
+      if (state.covers === was.covers && t.covers !== was.covers && t.covers) state.covers = t.covers;
+      if (same(state.notes, was.notes) && !same(t.notes, was.notes)) state.notes = t.notes.slice();
+      if (same(state.discount, was.discount) && !same(t.discount, was.discount)) state.discount = t.discount;
+    }
   }));
 }
 async function followMovedParty() {
@@ -20594,7 +20656,17 @@ function lineWaitingToSend(idx) {
   render(); armToastTimer(TOAST_SHORT);
   return true;
 }
+// A SET MENU'S DISHES COME ONE EACH (2 Oct '26): ＋ on "Banquet · Labneh"
+// sent a second Labneh at $0 — the set's price rides on its first dish only.
+// Another of the set is the set again; another Labneh is a Labneh.
+function setDishLocked(line, delta) {
+  if (!(delta > 0 && line && line.comboRef && !(line.price > 0))) return false;
+  state.toast = toastFail('A set menu dish comes one each — add the dish on its own');
+  render(); armToastTimer(TOAST_SHORT);
+  return true;
+}
 function changeQty(idx, delta) {
+  if (setDishLocked(state.cart[idx], delta)) return;
   if (delta < 0 && lineWaitingToSend(idx)) return;
   if (!growCartLine(idx, delta)) state.cart[idx].qty += delta;
   if (state.cart[idx].qty <= 0) state.cart.splice(idx, 1);
@@ -20675,6 +20747,7 @@ function editLineQty(delta) {
   const idx = state.editLine ? state.editLine.idx : -1;
   const line = state.cart[idx];
   if (!line) { state.editLine = null; render(); return; }
+  if (setDishLocked(line, delta)) return;
   // Zero takes the line off (owner, Sep '26: "the count should be able to
   // go to zero as well, to remove") and the editor closes with it — there is
   // nothing left to edit.
@@ -21022,7 +21095,7 @@ async function saveTableCovers(tableId, covers) {
   const fp = findFloorPlanForTable(tableId);
   if (!fp) return;
   const t = fp.tables.find(x => x.id === tableId);
-  if (t) t.covers = covers;
+  if (t) { t.covers = covers; t._savedAt = Date.now(); }
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ covers }) });
   } catch (e) {}
@@ -21237,7 +21310,7 @@ async function saveTableNotes(tableId, notes) {
   const fp = findFloorPlanForTable(tableId);
   if (!fp) return;
   const t = fp.tables.find(x => x.id === tableId);
-  if (t) t.notes = notes;
+  if (t) { t.notes = notes; t._savedAt = Date.now(); }
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }) });
   } catch (e) {}
@@ -21386,7 +21459,7 @@ async function saveTableDiscount(tableId, discount) {
   const t = fp && fp.tables.find(x => x.id === tableId);
   if (!t) return;
   const d = discount && !discount.auto ? discount : null;
-  t.discount = d;
+  t.discount = d; t._savedAt = Date.now();
   try {
     await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discount: d }) });
   } catch (e) {}
@@ -29479,7 +29552,7 @@ function rcToolbar(opts) {
   // wears the same Aa glyph as the docket's; dimmed with the glyph when no
   // line is picked, never a lone dash in a wide box (owner, Sep '26: "some of
   // the icons in dockets look like shit").
-  const sizeLabel = DKT_TEXTSIZE_SVG + '<b>' + (meta && meta.size ? String(partSize || (p === 'header' ? 2 : 1)) : '') + '</b>';
+  const sizeLabel = DKT_TEXTSIZE_SVG + '<b>' + (meta && meta.size ? String(partSize || (p === 'header' || p === 'logo' ? 2 : 1)) : '') + '</b>';
   // THE SLAB IS GONE HERE TOO (owner, Sep '26): the customer papers get the
   // same numbered cards the docket designer got — and this one was a repair,
   // not a restyle: the bar's controls were never wrapped in rows, so they
@@ -29539,7 +29612,7 @@ function rcToolbar(opts) {
         // changes nothing, so the control says so instead of pretending.
         const bigTotals = (r.layout === 'bigtotal') && p === 'totals';
         return dd('size', sizeLabel, !!(meta && meta.size) && !bigTotals, [['1', '1'], ['1.5', '1.5'], ['2', '2'], ['3', '3']].map(([v, l]) =>
-        ({ v, l, on: (partSize || (p === 'header' ? 2 : 1)) === parseFloat(v) })), 'Text size', bigTotals ? 'Fills the paper on this layout' : (p ? 'No size for this part' : whyNoPart), true);
+        ({ v, l, on: (partSize || (p === 'header' || p === 'logo' ? 2 : 1)) === parseFloat(v) })), 'Text size', bigTotals ? 'Fills the paper on this layout' : (p ? 'No size for this part' : whyNoPart), true);
       })()}
       ${(() => {
         const RC_EDIT_FIELD = { header: 'ticketHeader', abn: 'venueAbn', address: 'venueAddress', phone: 'venuePhone', staff: 'staffLabel' };
@@ -30136,7 +30209,7 @@ function renderHouseAdmin(section) {
       const chip = n <= 0 ? `<span class="status-chip void">Sold out</span>` : n <= (m.lowStockThreshold || 5) ? `<span class="status-chip course">low</span>` : '';
       return `<div class="stock-count-row">
         <div class="scr-name">${esc(m.name)} ${chip}</div>
-        <input type="number" min="0" step="1" value="${n}" onblur="saveMenuItemCountdown('${m.id}', this.value)" class="scr-input">
+        <input type="number" min="0" step="1" value="${n}" onblur="if (this.value !== this.defaultValue) saveMenuItemCountdown('${m.id}', this.value)" class="scr-input">
         <button class="icon-sq" data-act="stock-clear" data-id="${m.id}">${ACT_X_SVG}</button>
       </div>`;
     }).join('')}
@@ -31583,7 +31656,7 @@ function rcLogoImg(n) {
     }
     return '<span class="pp-empty" style="font-size:var(--fs-md);">no logo yet</span>';
   }
-  const pct = n === 1 ? 40 : n === 3 ? 100 : 70;
+  const pct = n === 1 ? 40 : n === 1.5 ? 55 : n === 3 ? 100 : 70; // the printer's LOGO_WIDTH_PCT
   const key = r.w + 'x' + r.h + ':' + r.d.length;
   if (rcLogoImg._key !== key) {
     const bin = atob(r.d), row = Math.ceil(r.w / 8);
@@ -32548,7 +32621,7 @@ function menuItemRowHtml(m) {
                   ${state.printerStations.map(s => `<option value="${s.id}" ${m.station === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
                 </select></label>` : ''}
               <label class="ie-chip"><small>Count</small>
-                <input type="number" min="0" step="1" style="${selStyle}" value="${m.trackStock ? (m.stockCount || 0) : ''}" placeholder="Off" onblur="saveMenuItemCountdown('${m.id}', this.value)"></label>
+                <input type="number" min="0" step="1" style="${selStyle}" value="${m.trackStock ? (m.stockCount || 0) : ''}" placeholder="Off" onblur="if (this.value !== this.defaultValue) saveMenuItemCountdown('${m.id}', this.value)"></label>
               <label class="ie-chip"><small>Category</small>
                 <select class="menu-item-salescat-edit" data-id="${m.id}" style="${selStyle}" onchange="saveMenuItemQuickEdit('${m.id}', 'salesCategoryId', this.value)">
                   <option value="">None</option>
@@ -35887,6 +35960,7 @@ async function claimTableLock(tableId, force, retake) {
     await api('/api/table-locks/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID, force: !!force, retake: !!retake }) });
     state.tableLocks = { ...(state.tableLocks || {}), [String(tableId)]: { staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID } };
     if (state._lockReleased === String(tableId)) state._lockReleased = null;
+    if (state._lostTable === String(tableId)) state._lostTable = null;
     return true;
   } catch (e) {
     if (e.status === 409 && e.body && e.body.released) {
@@ -35916,6 +35990,18 @@ async function unlockTable(tableId, staffName) {
   state.toast = `Table unlocked${staffName ? ` (was ${staffName})` : ''}`;
   render();
   armToastTimer(TOAST_SHORT);
+}
+// A TABLE TAKEN WHILE THIS TILL SLEPT (2 Oct '26): a phone asleep past the
+// lock's minute came back still on 12 while another till had opened it and
+// taken an allergy; the phone's next note wrote over it. Said once, and the
+// floor comes up — the unsent round stays as this table's draft.
+function lostTable(who) {
+  if (!state.currentStaff || state.showTablePicker || state._lostTable === String(state.table)) return;
+  state._lostTable = String(state.table);
+  const t = findTableById(state.table);
+  state.toast = toastFail(`Table ${t ? t.label : ''} is open on ${who || 'another'}'s till`);
+  armToastTimer(TOAST_LONG);
+  openTablePicker();
 }
 async function refreshTableLocks() {
   try { state.tableLocks = await api('/api/table-locks'); } catch (e) {}
@@ -38435,9 +38521,20 @@ function addComboToCart() {
   // rang as nameless group lines, so it printed on no station, moved no
   // stock and reported as "Other"). The set's price sits on the first line.
   let priced = false;
+  const picks = combo.groups.map(g => (comboGroupForced(g) ? g.itemIds : (b.selections[g.id] || [])).map(id => state.menu.find(m => m.id === id)).filter(Boolean));
+  // A SET MENU ASKS ABOUT ALLERGIES LIKE ANY DISH (2 Oct '26): Hummus on its
+  // own warned about the sesame on the table, Hummus inside the Banquet went
+  // to the kitchen without a word. One Add anyway answers for the whole set.
+  if (!state._allergenAck) {
+    for (const it of picks.flat()) {
+      const hits = allergenMatches(it, null);
+      if (hits.length) { state.allergenWarnModal = { itemId: it.id, hits, resume: 'combo' }; render(); return; }
+    }
+  }
+  state._allergenAck = false;
+  const firstAt = state.cart.length;
   combo.groups.forEach((g, gi) => {
-    const pickedIds = comboGroupForced(g) ? g.itemIds : (b.selections[g.id] || []);
-    const items = pickedIds.map(id => state.menu.find(m => m.id === id)).filter(Boolean);
+    const items = picks[gi];
     items.forEach((it, ii) => {
       state.cart.push({
         lineKey: mintLineKey(),
@@ -38454,6 +38551,10 @@ function addComboToCart() {
       priced = true;
     });
   });
+  // …and the docket turns to it, as it does for any dish: on Drinks the set
+  // went onto pages nobody was looking at and seemed not to have gone on.
+  const first = state.cart[firstAt];
+  if (first && (autoCourseOn() || state.settings.coursePagedDocket === true)) { state.activeCourse = first.course; state.docketShowAll = false; }
   state.comboBuilder = null;
   render();
 }
@@ -41776,7 +41877,7 @@ async function setTipsEnabled(val) {
   try {
     const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tipsEnabled: val }) });
     state.settings = s;
-  } catch (e) {}
+  } catch (e) { settingRefused(e); }
 }
 async function setManagerApprovalForVoid(val) {
   state.settings.managerApprovalForVoid = val;
@@ -41784,7 +41885,7 @@ async function setManagerApprovalForVoid(val) {
   try {
     const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ managerApprovalForVoid: val }) });
     state.settings = s;
-  } catch (e) {}
+  } catch (e) { settingRefused(e); }
 }
 async function saveTipPresets(presets) {
   state.settings.tipPresets = presets;
@@ -41792,7 +41893,7 @@ async function saveTipPresets(presets) {
   try {
     const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tipPresets: presets }) });
     state.settings = s;
-  } catch (e) {}
+  } catch (e) { settingRefused(e); }
 }
 function addTipPreset() { saveTipPresets([...state.settings.tipPresets, 20]); }
 function updateTipPreset(idx, value) {
@@ -42580,7 +42681,15 @@ async function saveTicketSetting(patch) {
   try {
     const s = await api('/api/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     state.settings = s;
-  } catch (e) {}
+  } catch (e) { settingRefused(e); }
+}
+// A SETTING THE SERVER REFUSED goes back to what it holds, and says why: a
+// waiter switched off "Manager approval to void", the switch moved, nothing
+// was saved and nothing was said (2 Oct '26).
+async function settingRefused(e) {
+  try { state.settings = await api('/api/settings'); } catch (e2) {}
+  state.toast = toastFail((e && e.message) || 'Could not save.');
+  render(); armToastTimer(TOAST_LONG);
 }
 
 async function saveAppearance() {
@@ -46135,6 +46244,7 @@ function handleActClick(el, e) {
           state._allergenAck = true;
           if (m.resume === 'io-seat' && state.itemOptions) pickIoSeat(m.seat);
           else if (m.resume === 'io-confirm' && state.itemOptions) confirmItemOptions();
+          else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
         }
       }
@@ -47731,7 +47841,9 @@ function handleActClick(el, e) {
           const next = Object.assign({}, receiptCfg().sizes);
           rcSelection().forEach((pk) => {
             if (!(RC_PARTS[pk] && RC_PARTS[pk].size)) return;
-            if (parseFloat(v) === (pk === 'header' ? 2 : 1)) delete next[pk]; else next[pk] = parseFloat(v);
+            // The venue name and the logo stand at 2 with nothing stored — so
+            // picking 1 for the logo deleted it, and it went on printing at 2.
+            if (parseFloat(v) === (pk === 'header' || pk === 'logo' ? 2 : 1)) delete next[pk]; else next[pk] = parseFloat(v);
           });
           setReceiptOpt({ sizes: next });
         }
@@ -48179,8 +48291,8 @@ setInterval(() => {
   if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal && !state.printerStationModal) {
     // Table-lock heartbeat: keep our claim on the current table alive, and
     // pick up other tills' locks for the picker.
-    if (tableLocksOn() && state.table != null && !tableLockedBy(state.table) && state._lockReleased !== String(state.table)) claimTableLock(state.table);
-    refreshTableLocks();
+    if (tableLocksOn() && state.table != null && !tableLockedBy(state.table) && state._lockReleased !== String(state.table)) claimTableLock(state.table).then(r => { if (r === 'busy') lostTable(state._lockBusyStaff); });
+    refreshTableLocks().then(() => { const l = tableLocksOn() && state.table != null && tableLockedBy(state.table); if (l) lostTable(l.staff); });
     api('/api/version').catch(() => null).then(v => {
       const same = v && _dataVersion && v.store === _dataVersion.store && v.orders === _dataVersion.orders;
       if (v) _dataVersion = v;

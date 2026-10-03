@@ -6343,11 +6343,14 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    KEYS sit on it bare. NO OUTLINE, not even for a table running over (owner,
    1 Oct '26: "some pills have outlines some dont") — the row's own label says
    late, in the alarm's dot. Corner 10, the menu tile's. */
-.tl-sit{ position:absolute; inset:0; --pend:max(var(--pe), calc(var(--at) + 8px + var(--kn, 0) * 48px)); }
-.tl-pill-base{ position:absolute; top:8px; bottom:8px; left:var(--ps); width:calc(var(--pend) - var(--ps)); border-radius:var(--radius); box-sizing:border-box; pointer-events:none; }
+/* A table sat a minute ago with its 1st already away (it goes with the send,
+   3 Oct '26) still shows that course: the pill reaches back one key's width
+   from now, so the just-called bar is never clipped to nothing. */
+.tl-sit{ position:absolute; inset:0; --pend:max(var(--pe), calc(var(--at) + 8px + var(--kn, 0) * 48px)); --pst:min(var(--ps), calc(var(--at) - var(--sq-ctl))); }
+.tl-pill-base{ position:absolute; top:8px; bottom:8px; left:var(--pst); width:calc(var(--pend) - var(--pst)); border-radius:var(--radius); box-sizing:border-box; pointer-events:none; }
 .tl-pill-base{ background:var(--surface); box-shadow:var(--lift-1); }
 .tl-pill{ position:absolute; top:8px; bottom:8px; left:0; right:0; background:color-mix(in srgb, var(--fut, var(--surface)) 45%, var(--surface));
-  clip-path:inset(0 calc(100% - var(--pend)) 0 var(--ps) round var(--radius)); }
+  clip-path:inset(0 calc(100% - var(--pend)) 0 var(--pst) round var(--radius)); }
 .tl-pill .tl-bar{ top:0; bottom:0; border-radius:0; border-left:0; box-shadow:none; }
 .tl-keys{ position:absolute; z-index:2; top:8px; bottom:8px; left:min(calc(var(--at) + 8px), calc(100% - var(--kn, 0) * 48px)); display:flex; align-items:center; gap:4px; } /* never off the right edge: with no room past now, it backs up over the bar */
 .tl-keys .tl-key{ position:relative; width:var(--sq-ctl); height:var(--sq-ctl); margin:0; padding:0; display:flex; align-items:center; justify-content:center;
@@ -10044,9 +10047,10 @@ app.put('/api/settings', (req, res) => {
       // Allowed sections: null = every section welcome; an array of category
       // ids = only dishes from those sections may file under this course.
       sections: Array.isArray(c.sections) ? c.sections.map(s => String(s)).slice(0, 64) : null,
-      // Does this course's food count on the Pass's kitchen traffic? Unset =
-      // yes, unless it is the drinks course.
-      ...(typeof c.kitchen === 'boolean' ? { kitchen: c.kitchen } : {}),
+      // FOOD OR BEVERAGE (owner, 3 Oct '26) — one answer per course, set on
+      // the course itself. It decides kitchen traffic, the Timeline (a
+      // beverage course is not drawn) and which course a send calls away.
+      kind: courseKind(c),
     }));
   }
   if (ticketHeader !== undefined) data.settings.ticketHeader = ticketHeader;
@@ -13162,6 +13166,7 @@ app.post('/api/orders', (req, res) => {
       customerId: customerId || null,
     };
     if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
+    callFirstFood(data, order, order.rounds[0].sentAt);
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
@@ -13259,6 +13264,31 @@ function carryCallAways(dest, src, courses) {
   if (dest.firedCourses && Object.keys(dest.firedCourses).length && src.calledAwayAt) dest.calledAwayAt = Math.max(dest.calledAwayAt || 0, src.calledAwayAt);
 }
 function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); }
+// A course is FOOD or BEVERAGE. Saved as `kind`; a course from before the
+// choice existed answers from its old kitchen switch, then from its name.
+function courseKind(c) {
+  c = c || {};
+  if (c.kind === 'food' || c.kind === 'beverage') return c.kind;
+  if (typeof c.kitchen === 'boolean') return c.kitchen ? 'food' : 'beverage';
+  return /\bdrinks?\b|\bbar\b|\bbev/i.test(c.name || '') ? 'beverage' : 'food';
+}
+// THE FIRST FOOD COURSE IS AWAY THE MOMENT IT IS SENT (owner, 3 Oct '26: "1st
+// should auto be called... no need to call to activate the timeline"). Only
+// while no food course has been called on the table: the lowest food course
+// on the ticket is stamped with the send's own time. Nothing prints — the
+// kitchen already has the docket. Dine-in only; a takeaway has no pacing.
+function callFirstFood(data, order, at) {
+  if (order.orderType !== 'dine-in') return;
+  const courses = (data.settings && data.settings.courses) || [];
+  const isFood = n => courseKind(courses[n - 1] || { name: '' }) === 'food';
+  const fired = order.firedCourses || {};
+  if (Object.keys(fired).some(n => fired[n] > 0 && isFood(+n))) return;
+  const first = [...new Set((order.items || []).filter(i => i.qty > 0 && !i.giftcardSale).map(i => i.course || 1))]
+    .filter(isFood).sort((a, b) => a - b)[0];
+  if (!first) return;
+  order.firedCourses = { ...fired, [first]: at };
+  order.calledAwayAt = Math.max(order.calledAwayAt || 0, at);
+}
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
   // A RESTORE (undo of a removed sent line) puts the line back on the ticket
@@ -13286,6 +13316,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
     const worth = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100) / 100;
     for (let k = order.lineVoids.length - 1; k >= 0; k--) if (Math.abs(order.lineVoids[k].value - worth) < 0.01) { order.lineVoids.splice(k, 1); break; }
   }
+  if (!restore) callFirstFood(data, order, round.sentAt);
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
   writeData(data);
   // Later rounds ALWAYS print only the added items — reprinting the whole
@@ -20185,7 +20216,7 @@ function sameAgainMode() { const v = state.settings.sameAgain; return v === 'dri
 function sameAgainLines(n) {
   const mode = sameAgainMode();
   if (!mode || state.docketShowAll) return [];
-  if (mode === 'drinks' && !/drink|bar|bev/i.test(courseInfo(n).name || '')) return [];
+  if (mode === 'drinks' && !courseIsDrinks(n)) return [];
   const o = activeOpenOrder();
   if (!o) return [];
   const live = new Set((o.items || []).filter(i => i.qty > 0).map(i => i.uid || i.lineKey));
@@ -20198,7 +20229,7 @@ function sameAgainKey(n) {
   const lines = sameAgainLines(n);
   if (!lines.length) return '';
   const q = lines.reduce((a, i) => a + (i.qty || 1), 0);
-  const word = /drink|bar|bev/i.test(courseInfo(n).name || '') ? (q === 1 ? 'drink' : 'drinks') : (q === 1 ? 'dish' : 'dishes');
+  const word = courseIsDrinks(n) ? (q === 1 ? 'drink' : 'drinks') : (q === 1 ? 'dish' : 'dishes');
   return `<button class="same-again" data-act="same-again" data-course="${n}">${SYS_REPEAT_SVG}<span>Same again</span><small>${q} ${word}</small></button>`;
 }
 function doSameAgain(n) {
@@ -20594,7 +20625,7 @@ function cascadeAutoCourses(openOrder) {
   // course, a group only slides into a course of its own kind — mains never
   // land under "Drinks" just because Drinks is course 1 and empty. An explicit
   // sections list on the target overrides the name and decides alone.
-  const kindOf = (c) => /drink/i.test(c.name) ? 'drinks' : /dessert|sweet/i.test(c.name) ? 'dessert' : 'food';
+  const kindOf = (c) => courseKind(c) === 'beverage' ? 'drinks' : /dessert|sweet/i.test(c.name) ? 'dessert' : 'food';
   present.forEach(n => {
     let target = Math.min(next, n);
     const groupFits = (t) => {
@@ -26885,7 +26916,7 @@ const ROSTER_DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 async function autoAssignCourses() {
   const courses = state.settings.courses || [];
   const findCourse = (re) => { const i = courses.findIndex(c => re.test(c.name)); return i >= 0 ? i + 1 : null; };
-  const drinks = findCourse(/drink/i) || 1;
+  const drinks = (courses.findIndex(c => courseKind(c) === 'beverage') + 1) || 1;
   const dessert = findCourse(/dessert|sweet/i);
   const foodCourses = courses.map((c, i) => i + 1).filter(n => n !== drinks && n !== dessert && courses[n - 1].enabled !== false);
   const food1 = foodCourses[0] || drinks, food2 = foodCourses[1] || food1;
@@ -30970,6 +31001,8 @@ function renderCoursesSettingsAdmin() {
             <label class="field-label">Name</label>
             <input class="course-template-name-quick-input" data-idx="${idx}" type="text" value="${esc(c.name)}" style="width:100%;">
           </div>
+          <label class="field-label" style="margin-top:12px;">Type</label>
+          ${optionPair(courseKind(c), 'set-course-kind', [['food', 'Food'], ['beverage', 'Beverage']], `data-idx="${idx}" style="max-width:280px;"`)}
           ${state.categories.length ? `
           <label class="field-label" style="margin-top:12px;">Allowed sections</label>
           <div class="ts" style="margin-bottom:8px;">Dishes slide to the nearest allowed course.</div>
@@ -35579,7 +35612,7 @@ const PILL_CLOCKS = [
 ];
 // When the table's last drink went out: the newest round carrying anything
 // from a drinks course — or, with none yet, when the party sat down.
-const courseIsDrinks = n => /drink|bar|bev/i.test(courseInfo(n).name || '');
+const courseIsDrinks = n => !courseInKitchen(n);
 // A GIFT VOUCHER IS NOT A COURSE. Sold at the table it had no course, so it
 // read as course 1 everywhere: a held Drinks course on the Pass with a Call
 // away key, the table's last drink on the Drinks clock, a Drinks tab on the
@@ -36382,10 +36415,16 @@ function kitchenTrafficCfg() {
   const k = state.settings.kitchenTraffic || {};
   return { on: !!k.on, fullAt: k.fullAt > 0 ? k.fullAt : 30, cookMins: k.cookMins > 0 ? k.cookMins : 15 };
 }
-function courseInKitchen(n) {
-  const c = (state.settings.courses || [])[n - 1] || {};
-  return typeof c.kitchen === 'boolean' ? c.kitchen : !/drink|bar|bev/i.test(c.name || '');
+// A course is FOOD or BEVERAGE (owner, 3 Oct '26) — the one answer behind
+// kitchen traffic, the Timeline, same-again and the auto fill. Same reading
+// as the server's: the saved kind, else the old kitchen switch, else the name.
+function courseKind(c) {
+  c = c || {};
+  if (c.kind === 'food' || c.kind === 'beverage') return c.kind;
+  if (typeof c.kitchen === 'boolean') return c.kitchen ? 'food' : 'beverage';
+  return /\bdrinks?\b|\bbar\b|\bbev/i.test(c.name || '') ? 'beverage' : 'food';
 }
+function courseInKitchen(n) { return courseKind((state.settings.courses || [])[n - 1] || { name: courseInfo(n).name }) === 'food'; }
 const dishesIn = items => (items || []).reduce((a, i) => a + (i.status === 'served' || !(i.qty > 0) ? 0 : i.qty), 0);
 // The dishes a ticket has cooking at `now`: every course called away within
 // the cook time that the Pass does not already call done.
@@ -36808,7 +36847,9 @@ function tablesRunningLate() {
 // the screen, so a tap to look at a course walked into the table.
 // The line moves on its own (tickTimeline), without rebuilding the screen.
 function renderTimeline(fp) {
-  const courses = (state.settings.courses || []).map((c, i) => i + 1).filter(n => courseInfo(n).enabled !== false);
+  // FOOD ONLY (owner, 3 Oct '26: "Yes remove drinks"): a beverage course is
+  // not drawn — no bar, no held key. The Pass still shows it.
+  const courses = (state.settings.courses || []).map((c, i) => i + 1).filter(n => courseInfo(n).enabled !== false && courseInKitchen(n));
   const pool = state.settings.tableMode === 'simple' ? allTables() : ((fp && fp.tables) || []).filter(t => t.type !== 'decor');
   const rows = pool.slice().sort(tableLabelCompare).map(t => ({ t, o: tableOpenOrder(t.label) }))
     // A TABLE WITH A BOOKING COMING IS ON THE TIMELINE TOO (owner, 1 Oct '26:
@@ -36853,7 +36894,7 @@ function renderTimeline(fp) {
     if (!o) { const b = nextBookingFor(t); return b ? bookingBar(b) : ''; }
     if (nothingSent(o)) return `<div class="tl-wait" style="--at:${at(now)}"><span class="tl-chip seated"><i>Seated</i>Nothing sent</span></div>`;
     const fired = o.firedCourses || {};
-    const calls = Object.keys(fired).map(Number).filter(n => fired[n] > 0).sort((a, b) => fired[a] - fired[b]);
+    const calls = Object.keys(fired).map(Number).filter(n => fired[n] > 0 && courseInKitchen(n)).sort((a, b) => fired[a] - fired[b]);
     // DONE IS THE PASS'S WORD, NOT THE ORDER OF CALLS (Sep '26): two courses
     // called together — the 2nd, then the 3rd a few minutes on — showed 2nd
     // as finished here while the Pass said it was still away.
@@ -36870,12 +36911,14 @@ function renderTimeline(fp) {
       const from = i === 0 ? Math.min(fired[n], sat0) : fired[n], to = i + 1 < calls.length ? fired[calls[i + 1]] : null;
       const k = kindOf.get(n), pc = paint(n);
       if (k === 'done' || (k === 'none' && to)) return `<div class="tl-bar done${pc.cls}" style="${pc.css}left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
-      const lvl = pillClockLevel(mins(now - from), 'course');
+      // The clock is the course's own — from its call, not from the sitting
+      // the first bar is stretched back to.
+      const lvl = pillClockLevel(mins(now - fired[n]), 'course');
       // A COURSE JUST CALLED IS SEEN AT ONCE (owner, 1 Oct '26: "courses
       // dissapear when called"). It was a bar from the call to now — one pixel
       // wide the moment it went, so the held chip vanished and nothing took
       // its place. It stands at the now line and is never narrower than a key.
-      return `<div class="tl-bar away lvl-${lvl}${pc.cls}" data-grow="${from}" style="${pc.css}right:calc(100% - ${at(now)});width:${len(from, now)}"><i>${esc(courseInfo(n).name)} · ${pillDur(mins(now - from))}</i></div>`;
+      return `<div class="tl-bar away lvl-${lvl}${pc.cls}" data-grow="${from}" style="${pc.css}right:calc(100% - ${at(now)});width:${len(from, now)}"><i>${esc(courseInfo(n).name)} · ${pillDur(mins(now - fired[n]))}</i></div>`;
     }).join('');
     const sat = sat0;
     const held = passCells(o, courses).filter(c => c.kind === 'hold');
@@ -46682,9 +46725,14 @@ function handleActClick(el, e) {
         }
         saveTicketSetting({ kitchenTraffic: kt });
       }
+      else if (act === 'set-course-kind') {
+        const i = parseInt(el.parentElement.dataset.idx, 10);
+        const courses = state.settings.courses.map((c, j) => j === i ? { ...c, kind: el.dataset.val } : c);
+        saveTicketSetting({ courses });
+      }
       else if (act === 'toggle-course-kitchen') {
         const i = parseInt(el.dataset.idx, 10);
-        const courses = state.settings.courses.map((c, j) => j === i ? { ...c, kitchen: !courseInKitchen(i + 1) } : c);
+        const courses = state.settings.courses.map((c, j) => j === i ? { ...c, kind: courseInKitchen(i + 1) ? 'beverage' : 'food' } : c);
         saveTicketSetting({ courses });
       }
       else if (act === 'same-again') { doSameAgain(parseInt(el.dataset.course, 10) || 1); }

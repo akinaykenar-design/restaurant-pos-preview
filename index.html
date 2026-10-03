@@ -13299,6 +13299,23 @@ function carryCallAways(dest, src, courses) {
   // The party's first food already went: nothing that follows it is auto-called.
   if (src.firstFoodCalled) dest.firstFoodCalled = true;
 }
+// A CALLED COURSE WITH NOTHING LEFT IN IT IS NOT AWAY (3 Oct '26): its only
+// dish taken off or moved, the stamp stayed, so the Timeline ran the empty
+// course into late while the Pass said it had nothing on it. The stamp is
+// kept aside so an Undo that puts the dish back puts the call back too.
+function dropEmptyCalls(order) {
+  const fired = order.firedCourses || {};
+  const live = new Set((order.items || []).filter(i => i.qty > 0).map(i => i.course || 1));
+  let dropped = false;
+  Object.keys(fired).forEach(n => {
+    if (live.has(+n)) return;
+    order.emptiedCalls = { ...(order.emptiedCalls || {}), [n]: fired[n] };
+    delete fired[n]; dropped = true;
+  });
+  if (!dropped) return;
+  const standing = Object.values(fired).filter(Number.isFinite);
+  if (standing.length) order.calledAwayAt = Math.max(...standing); else delete order.calledAwayAt;
+}
 function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8))); }
 // THE FIRST FOOD COURSE IS AWAY THE MOMENT IT IS SENT (owner, 3 Oct '26: "1st
 // should auto be called... no need to call to activate the timeline"). ONCE
@@ -13343,6 +13360,10 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   // the guest held a total missing the last round (owner, Sep '26).
   if (!restore && order.billPrinted) order.billPrinted = false;
   // An Undo takes the void back, so it stops counting as one (§ Is this you?).
+  if (restore && order.emptiedCalls) {
+    items.forEach(i => { const n = i.course || 1, at = order.emptiedCalls[n];
+      if (at && !((order.firedCourses || {})[n] > 0)) { order.firedCourses = { ...(order.firedCourses || {}), [n]: at }; order.calledAwayAt = Math.max(order.calledAwayAt || 0, at); } });
+  }
   if (restore && (order.lineVoids || []).length) {
     const worth = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100) / 100;
     for (let k = order.lineVoids.length - 1; k >= 0; k--) if (Math.abs(order.lineVoids[k].value - worth) < 0.01) { order.lineVoids.splice(k, 1); break; }
@@ -13569,6 +13590,7 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   order.subtotal = (order.items || []).reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
+  dropEmptyCalls(order);
   writeData(data);
   res.json(order);
 });
@@ -14134,6 +14156,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
     order.voidedBy = staffName || 'Unknown';
     order.voidReason = `All items moved to Table ${targetTable}`;
   }
+  dropEmptyCalls(order);
   logAudit(data, staffName || 'Unknown', `Moved ${moving.length} item${moving.length > 1 ? 's' : ''} from Table ${order.table} to Table ${targetTable} (Ticket #${order.id} → #${dest.id})`);
   writeData(data);
   res.json({ source: order, dest });
@@ -20259,8 +20282,10 @@ function sameAgainLines(n) {
   const live = new Set((o.items || []).filter(i => i.qty > 0).map(i => i.uid || i.lineKey));
   const last = [...(o.rounds || [])].reverse().find(r => (r.items || []).some(i => (i.course || 1) === n && live.has(i.uid || i.lineKey)));
   // A voucher sold is not a round to repeat — it has no course, so it read as
-  // Drinks and went out again as a plain $50 charge (Sep '26).
-  return last ? last.items.filter(i => (i.course || 1) === n && live.has(i.uid || i.lineKey) && !i.giftcardSale) : [];
+  // Drinks and went out again as a plain $50 charge (Sep '26). Nor is a dish
+  // from a set menu: it came back as a plain dish carrying the whole set's
+  // price, or at $0 (3 Oct '26).
+  return last ? last.items.filter(i => (i.course || 1) === n && live.has(i.uid || i.lineKey) && !i.giftcardSale && !i.comboRef) : [];
 }
 function sameAgainKey(n) {
   const lines = sameAgainLines(n);
@@ -22621,7 +22646,9 @@ function draftsMove(fromId, toId) {
 function landingBadgeHtml(t) {
   const o = tableOpenOrder(t.label);
   if (!o || o.billPrinted) return '';
-  const courses = (state.settings.courses || []).map((c, i) => i + 1);
+  // FOOD courses only (3 Oct '26): drinks read Done the moment the 1st went
+  // with the send, so beer + a starter said Landing on the first round.
+  const courses = (state.settings.courses || []).map((c, i) => i + 1).filter(courseInKitchen);
   const cells = passCells(o, courses).filter(c => c.kind !== 'none');
   if (!cells.length || cells.some(c => c.kind === 'hold')) return '';
   const last = cells[cells.length - 1];
@@ -27405,7 +27432,8 @@ function kdsItemRows() {
         // is one of the called ones. Tickets carry their called courses now,
         // and a held 3rd sat under "Called away" with a Preparing key (Sep '26).
         calledAway: !!o.calledAwayAt,
-        held: Object.keys(o.firedCourses || {}).some(k => o.firedCourses[k] > 0) && !((o.firedCourses || {})[item.course || 1] > 0),
+        // A drink is never held — only a food course waits for its call.
+        held: courseInKitchen(item.course || 1) && Object.keys(o.firedCourses || {}).some(k => o.firedCourses[k] > 0) && !((o.firedCourses || {})[item.course || 1] > 0),
         table: o.orderType === 'dine-in' ? 'Table ' + (o.table == null ? '' : o.table) : (o.customerName || o.orderType),
       });
     });
@@ -36952,6 +36980,7 @@ function renderTimeline(fp) {
       // for the minutes before anything was called read as a second object.
       const from = i === 0 ? Math.min(fired[n], sat0) : fired[n], to = i + 1 < calls.length ? fired[calls[i + 1]] : null;
       const k = kindOf.get(n), pc = paint(n);
+      if (k === 'none' && !to) return ''; // called, then emptied: nothing is away
       if (k === 'done' || (k === 'none' && to)) return `<div class="tl-bar done${pc.cls}" style="${pc.css}left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
       // The clock is the course's own — from its call, not from the sitting
       // the first bar is stretched back to.

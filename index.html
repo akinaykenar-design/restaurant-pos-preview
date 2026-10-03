@@ -13587,7 +13587,12 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
   } else {
     return res.status(400).json({ error: 'Unknown action' });
   }
+  // A printed bill that no longer matches the ticket is out of date — it
+  // un-prints, as a new round does (3 Oct '26: a dish taken off left the bill
+  // marked printed, the guest holding a total too high).
+  const wasSub = order.subtotal;
   order.subtotal = (order.items || []).reduce((sum, i) => sum + i.price * i.qty, 0);
+  if (order.billPrinted && Math.abs(order.subtotal - (wasSub || 0)) > 0.001) order.billPrinted = false;
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
   dropEmptyCalls(order);
@@ -14157,6 +14162,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
     order.voidReason = `All items moved to Table ${targetTable}`;
   }
   dropEmptyCalls(order);
+  order.billPrinted = false; // its printed bill still holds the dishes that left
   logAudit(data, staffName || 'Unknown', `Moved ${moving.length} item${moving.length > 1 ? 's' : ''} from Table ${order.table} to Table ${targetTable} (Ticket #${order.id} → #${dest.id})`);
   writeData(data);
   res.json({ source: order, dest });
@@ -14167,6 +14173,9 @@ app.post('/api/orders/:id/customer', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  // A paid bill's guest is settled: points were credited to them, and a later
+  // refund takes them back from whoever is on it now (3 Oct '26).
+  if (order.status !== 'open') return res.status(400).json({ error: 'That bill is already closed' });
   const customerId = req.body.customerId || null;
   if (customerId && !(data.customers || []).some(c => c.id === customerId)) return res.status(400).json({ error: 'Customer not found' });
   order.customerId = customerId;

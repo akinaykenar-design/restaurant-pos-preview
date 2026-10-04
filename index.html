@@ -9424,7 +9424,9 @@ app.put('/api/desk-colours', (req, res) => {
 // MONEY SETTINGS ARE A MANAGER'S, on the server too (Sep '26): with a
 // waiter's name and no PIN, "manager PIN for void" could be switched off and
 // then a food ticket voided with no manager at all.
-const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'tipPresets', 'terminal', 'cardTypes'];
+// What a loyalty point is worth is money off too (4 Oct '26: a waiter's till set
+// it to 1 point = $1, and the close trusts that rate).
+const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'tipPresets', 'terminal', 'cardTypes', 'loyaltyPointsPerDollar'];
 app.put('/api/settings', (req, res) => {
   const data = readData();
   if (MONEY_SETTINGS.some(k => req.body && req.body[k] !== undefined) && !managerFromReq(req, data)) {
@@ -11831,7 +11833,9 @@ app.post('/api/printers/print-sample', (req, res) => {
   if (!order) return res.status(400).json({ error: 'No orders yet to sample from' });
   if (kind === 'receipt' || kind === 'bill') {
     if (!(data.printerStations || []).some(s => s.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
-    printing.printReceiptForOrder(data, order, kind === 'bill' ? 'bill' : undefined);
+    // A proof is paper, not a sale: it never kicks the drawer (4 Oct '26 — the
+    // latest bill paid in cash popped it with no sale and no log line).
+    printing.printReceiptForOrder(data, { ...order, drawerDone: true }, kind === 'bill' ? 'bill' : undefined);
     return res.json({ ok: true });
   }
   if (!(data.printerStations || []).length) return res.status(400).json({ error: 'Add a printer station first' });
@@ -12133,14 +12137,20 @@ app.get('/api/expenses', (req, res) => {
   res.json(readData().expenses || []);
 });
 
+// The venue's own day, not the UTC one: in Sydney a morning expense filed
+// under yesterday (4 Oct '26).
+function localDayKey(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
+// EXPENSES AND HOURS ARE A MANAGER'S (4 Oct '26): a waiter's till logged itself
+// a 23-hour paid shift and deleted an expense without a trace.
 app.post('/api/expenses', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change that' });
   const { date, category, amount, note, staffName } = req.body;
   const value = parseFloat(amount);
   if (isNaN(value) || value <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
   const expense = {
     id: 'ex' + Date.now(),
-    date: date || new Date().toISOString().slice(0, 10),
+    date: date || localDayKey(new Date()),
     category: String(category || 'Other').trim(),
     amount: value,
     note: String(note || '').trim(),
@@ -12155,7 +12165,10 @@ app.post('/api/expenses', (req, res) => {
 
 app.delete('/api/expenses/:id', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change that' });
+  const gone = (data.expenses || []).find(e => e.id === req.params.id);
   data.expenses = (data.expenses || []).filter(e => e.id !== req.params.id);
+  if (gone) logAudit(data, staffFromReq(req), `Deleted expense: ${gone.category} ($${Number(gone.amount || 0).toFixed(2)})`);
   writeData(data);
   res.json({ ok: true });
 });
@@ -12543,6 +12556,7 @@ app.get('/api/shifts', (req, res) => {
 // explicit clock-in/out, for the one someone forgot to clock.
 app.post('/api/shifts', (req, res) => {
   const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can add hours' });
   const { staffId, clockIn, clockOut } = req.body;
   const staff = (data.staff || []).find(s => s.id === staffId);
   if (!staff) return res.status(400).json({ error: 'Unknown staff member' });
@@ -12553,7 +12567,7 @@ app.post('/api/shifts', (req, res) => {
   if (outTs - inTs > 24 * 3600000) return res.status(400).json({ error: 'Shift longer than 24h' });
   const shift = { id: 'sh' + Date.now(), staffId, staffName: staff.name, clockIn: inTs, clockOut: outTs };
   data.shifts = [...(data.shifts || []), shift];
-  logAudit(data, staff.name, `Shift added manually (${((outTs - inTs) / 3600000).toFixed(2)}h)`);
+  logAudit(data, staffFromReq(req), `Shift added manually for ${staff.name} (${((outTs - inTs) / 3600000).toFixed(2)}h)`);
   writeData(data);
   res.json(shift);
 });
@@ -13992,7 +14006,11 @@ app.post('/api/orders/:id/refund', (req, res) => {
   order.refundedTotal = alreadyRefunded + value;
   // Money back is points back, in the same share (Sep '26: a full refund of
   // $200 left the guest 200 points — $10 off next time — for nothing).
-  if (grandTotal > 0) takeBackLoyalty(data, order, Math.min(1, order.refundedTotal / grandTotal), staff, 'refund');
+  // Measured on the FOOD, as the cash-up refunds it (food first, tip last): a
+  // whole meal refunded with the tip left to staff read as less than all of
+  // it, so the points the guest spent never came back (4 Oct '26).
+  const food = grandTotal - (order.tip || 0);
+  if (grandTotal > 0) takeBackLoyalty(data, order, food > 0 ? Math.min(1, order.refundedTotal / food) : 1, staff, 'refund');
   logAudit(data, staff, `Refunded $${value.toFixed(2)} on Ticket #${order.id}${reason ? ' — ' + reason : ''}`);
   writeData(data);
   res.json(order);
@@ -14076,6 +14094,8 @@ app.post('/api/orders/:id/add-tip', (req, res) => {
 // No Sale — open the cash drawer (best-effort) and log it.
 app.post('/api/no-sale', (req, res) => {
   const data = readData();
+  // The drawer is a manager's, like the paid-out beside it (4 Oct '26).
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can open the drawer' });
   let drawer = false;
   try { drawer = printing.openCashDrawer(data); } catch (e) { drawer = false; }
   // The log says what HAPPENED, not what was asked for: a No Sale with no
@@ -14436,7 +14456,10 @@ function computePeriodSummary(data, fromTs, toTs) {
   const taxBack = refunded.reduce((s, o) => s + (foodOf(o) > 0 ? (o.tax || 0) * refundSplit(o).food / foodOf(o) : 0), 0)
     + lateVoids.reduce((s, o) => s + (gtOf(o) > 0 ? (o.tax || 0) * Math.min(1, lateVoidOut(o) / gtOf(o)) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0) - taxBack;
-  const lateTips = data.orders.filter(o => o.status === 'paid' && !o.practice)
+  // …and a bill voided here after its cash-up hands back its late tips with
+  // the rest (lateVoidOut is the whole grandTotal), so a tip added in this
+  // period counts in too, or the card read short by it (4 Oct '26).
+  const lateTips = data.orders.filter(o => (o.status === 'paid' || lateVoids.includes(o)) && !o.practice)
     .flatMap(o => (o.lateTips || []).filter(t => inWin(t.at || 0)).map(t => ({ o, amount: t.amount || 0 })));
   const lateTipTotal = lateTips.reduce((a, t) => a + t.amount, 0);
   const tips = paid.reduce((s, o) => s + (o.tip || 0), 0) + lateTipTotal - refunded.reduce((s, o) => s + refundSplit(o).tip, 0);
@@ -27399,8 +27422,14 @@ async function rosterCopyLastWeek() {
   const weekStart = state.rosterWeekStart || rosterMonday(Date.now());
   const prevStart = weekStart - 7 * 86400000;
   const prevKeys = ROSTER_DAYS.map((_, i) => { const d = new Date(prevStart); d.setDate(d.getDate() + i); return rosterDateKey(d); });
-  const src = (state.roster || []).filter(r => prevKeys.includes(r.date));
-  if (src.length === 0) { state.toast = toastFail('Last week has no shifts to copy.'); render(); return; }
+  // A second tap copied every shift again — everyone rostered twice (4 Oct
+  // '26). A shift already on this week is left alone.
+  const plus7 = r => { const d = new Date(r.date + 'T00:00:00'); d.setDate(d.getDate() + 7); return rosterDateKey(d); };
+  const there = new Set((state.roster || []).map(r => [r.staffId, r.date, r.start, r.end].join('|')));
+  const lastWeek = (state.roster || []).filter(r => prevKeys.includes(r.date));
+  if (lastWeek.length === 0) { state.toast = toastFail('Last week has no shifts to copy.'); render(); return; }
+  const src = lastWeek.filter(r => !there.has([r.staffId, plus7(r), r.start, r.end].join('|')));
+  if (src.length === 0) { state.toast = 'Last week is already copied.'; render(); armToastTimer(TOAST_SHORT); return; }
   try {
     await Promise.all(src.map(r => {
       const shifted = new Date(r.date + 'T00:00:00'); shifted.setDate(shifted.getDate() + 7);
@@ -27678,7 +27707,7 @@ async function submitExpense() {
   try {
     await api('/api/expenses', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: f.date || new Date().toISOString().slice(0, 10), category: f.category || 'Other', amount, note: f.note, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+      body: JSON.stringify({ date: f.date || rosterDateKey(new Date()), category: f.category || 'Other', amount, note: f.note, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
     });
     state.expenses = await api('/api/expenses');
     state.expenseForm = { date: '', category: '', amount: '', note: '' };
@@ -27689,7 +27718,8 @@ async function submitExpense() {
   }
 }
 async function deleteExpenseAction(id) {
-  try { await api(`/api/expenses/${id}`, { method: 'DELETE' }); state.expenses = await api('/api/expenses'); render(); } catch (e) {}
+  try { await api(`/api/expenses/${id}`, { method: 'DELETE' }); state.expenses = await api('/api/expenses'); render(); }
+  catch (e) { state.toast = toastFail((e && e.body && e.body.error) || 'Could not delete the expense.'); render(); armToastTimer(TOAST_SHORT); }
 }
 function renderExpensesAdmin() {
   const total = state.expenses.reduce((s, e) => s + e.amount, 0);

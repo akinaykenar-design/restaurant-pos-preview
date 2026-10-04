@@ -8640,6 +8640,16 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 function staffFromReq(req) {
   return req.get('X-Staff-Name') || 'Unknown';
 }
+// A TRAINEE NEVER TOUCHES A REAL TABLE, nor a real waiter a practice one
+// (4 Oct '26): the trainee was refused the table but could still call its
+// course away from the Pass — a real slip at the kitchen — and print its bill.
+// Judged on who sent it: the staff id in the body, else the till's name.
+function practiceRefused(req, data, order) {
+  const id = req.body && req.body.staffId, name = req.get('X-Staff-Name');
+  const sender = (data.staff || []).find(x => (id && x.id === id) || (!id && name && x.name === name));
+  if (!sender || !!sender.trainee === !!order.practice) return null;
+  return order.practice ? 'That is a practice table' : `Table ${order.table} is in real service`;
+}
 // A manager PROVES it: the PIN a signed-in manager's till sends with every
 // request, or a manager PIN typed into a popup. Anything on the wifi could
 // read every PIN and void paid tickets until Sep '26 — the checks were only
@@ -11752,6 +11762,11 @@ app.post('/api/orders/:id/print-course', (req, res) => {
   const data = readData();
   const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  // A till a poll behind called away a table another till had just paid: a
+  // CALL AWAY slip at the kitchen for a party that had left (4 Oct '26).
+  if (order.status !== 'open') return res.status(400).json({ error: 'That table has already been paid' });
+  const practiceNo = practiceRefused(req, data, order);
+  if (practiceNo) return res.status(400).json({ error: practiceNo });
   const course = parseInt(req.body && req.body.course) || 1;
   const items = (order.items || []).filter(i => (i.course || 1) === course && !i.giftcardSale);
   if (!items.length) return res.status(400).json({ error: 'No items in that course yet' });
@@ -11773,6 +11788,8 @@ app.post('/api/orders/:id/print-bill', (req, res) => {
   const data = readData();
   const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  const practiceNo = practiceRefused(req, data, order);
+  if (practiceNo) return res.status(400).json({ error: practiceNo });
   if (!(data.printerStations || []).some(s => s.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
   // The bill is its own paper: it says BILL, not TAX INVOICE, and it never
   // kicks the drawer.
@@ -13621,6 +13638,8 @@ app.post('/api/orders/:id/call-away', (req, res) => {
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
+  const practiceNo = practiceRefused(req, data, order);
+  if (practiceNo) return res.status(400).json({ error: practiceNo });
   const course = parseInt(req.body && req.body.course, 10);
   // TAKING IT BACK is the same stamp, removed — so every till and the pass
   // agree it is held again (Sep '26: the take-back only cleared the till it
@@ -13650,6 +13669,8 @@ app.post('/api/orders/:id/bill-printed', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
+  const practiceNo = practiceRefused(req, data, order);
+  if (practiceNo) return res.status(400).json({ error: practiceNo });
   order.billPrinted = req.body && req.body.printed === false ? false : true;
   writeData(data);
   res.json(order);
@@ -21082,9 +21103,12 @@ function clearCart() {
   state.activeSeat = null;
   state.covers = (findTableById(state.table) || {}).covers || 0;
   state.notes = (findTableById(state.table) || {}).notes || [];
-  state.discount = null;
+  // Discard drops the UNSENT round, not the account: the table's discount and
+  // the courses already called stay (4 Oct '26 — a surcharge vanished from
+  // the bill and the 1st lost its called mark).
+  state.discount = (findTableById(state.table) || {}).discount || null;
   state.activeCourse = firstEnabledCourseNumber();
-  state.firedCourses = {};
+  state.firedCourses = { ...((activeOpenOrder() || {}).firedCourses || {}) };
   // Keep the waiter's mid-order Auto-course toggle across a discard — they
   // turned it off on purpose; wiping unsent items shouldn't silently flip it
   // back to the admin default. (A fresh table still resets it in openTable.)
@@ -22168,6 +22192,9 @@ function cancelCoversPad() {
     state.notes = (pt && pt.notes) || [];
     state.discount = (pt && pt.discount) || null;
     state.openOrderId = (po && po.id) || null;
+    // …and what the pick overwrote: its called courses and its guest (4 Oct '26).
+    state.firedCourses = { ...((po && po.firedCourses) || {}) };
+    state.attachedCustomerId = (po && po.customerId) || null;
     if (fp.prev) draftTake(fp.prev);
     if (fp.prev) claimTableLock(fp.prev);
     state.showTablePicker = true; // still choosing a table
@@ -37114,6 +37141,8 @@ setInterval(tickTimeline, 10000);
 // pass all fire through here: the server prints the slip and stamps the
 // course, so every till sees it go.
 function callAwayFromFloor(o, t, course) {
+  // A trainee calls nothing on a real table (and nobody on a practice one).
+  if (!!o.practice !== isTrainee()) { state.toast = toastFail(o.practice ? 'That is a practice table' : `Table ${tableDisplayLabel(t.id)} is in real service`); render(); armToastTimer(TOAST_SHORT); return Promise.resolve(); }
   return api(`/api/orders/${o.id}/print-course`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course }) })
     .then(() => refreshOrders())
     .then(() => { state.toast = `${courseInfo(course).name} called away — ${tableDisplayLabel(t.id)}`; render(); armToastTimer(TOAST_SHORT); })
@@ -46390,6 +46419,7 @@ function handleActClick(el, e) {
         const o = (state.orders || []).find(x => String(x.id) === String(el.dataset.id));
         if (!o) return;
         if (o.status === 'paid') { printReceipt(o); return; }
+        if (!!o.practice !== isTrainee()) { state.toast = toastFail(o.practice ? 'That is a practice table' : `${o.orderType === 'dine-in' ? 'Table ' + o.table : 'That order'} is in real service`); render(); armToastTimer(TOAST_SHORT); return; }
         if (!state.online) { state.toast = toastFail('No connection — the bill cannot print right now'); render(); armToastTimer(TOAST_SHORT); return; }
         markBillPrinted(o.id);
       }
@@ -46576,6 +46606,7 @@ function handleActClick(el, e) {
         if (el.dataset.val !== 'dine-in' && state.table) {
           draftStash(state.table); releaseTableLock(state.table);
           state.table = null; state.openOrderId = null; state.discount = null; state.firedCourses = {};
+          state.attachedCustomerId = null; // the table's loyalty guest stays with the table (4 Oct '26)
         }
         if (el.dataset.val !== 'dine-in') state.showTablePicker = false;
         setOrderType(el.dataset.val);
@@ -46589,6 +46620,9 @@ function handleActClick(el, e) {
           if (state.table && state.cart.length) draftStash(state.table); else if (state.cart.length) { state.cart = []; clearSendState(); }
           if (state.table) releaseTableLock(state.table);
           state.table = null; setOrderType(o.orderType); state.openOrderId = o.id; state.customerName = o.customerName || '';
+          // ITS guest and no money off of its own — it carried the last
+          // table's guest and surcharge onto the takeaway (4 Oct '26).
+          state.attachedCustomerId = o.customerId || null; state.discount = null;
           state.firedCourses = { ...(o.firedCourses || {}) }; state.showTablePicker = false; state.view = 'order';
         }
         render();

@@ -1070,6 +1070,9 @@ body[data-tile-valign="bottom"] .item-card .item-tile-price{margin-top:0;}
 .tkt-icon-btn.has-fired{ position:relative; }
 .tkt-icon-btn.has-fired::after{ content:""; position:absolute; top:5px; right:5px; width:8px; height:8px; border-radius:50%; background:var(--orange); box-shadow:0 0 0 var(--ring) var(--surface); }
 /* One continuous ticket: sent items fade back, new (unfired) items stand out. */
+/* NEW SINCE YOU LOOKED: a dish another waiter rang wears one small dot in the
+   line's left margin — drawn over the edge, so nothing moves (5 Oct '26). */
+.dk-fresh::after{content:'';position:absolute;left:3px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;background:var(--blue);pointer-events:none;}
 .ticket-line.sent{opacity:0.5;cursor:pointer;transition:opacity var(--t-state) ease,border-color var(--t-state) ease;}
 .ticket-line.new{cursor:pointer;transition:background-color var(--t-state) ease,border-color var(--t-state) ease;}
 .course-group{margin-bottom:6px;}
@@ -19389,6 +19392,27 @@ async function refreshOrders() {
 // till never showed here — no tick, a second call possible, no take-back
 // (Sep '26). The ticket is the truth; a call this till made in the last few
 // seconds, not yet on the ticket, is kept.
+// NEW SINCE YOU LOOKED (owner, 5 Oct '26 — email's unread dot): a dish another
+// waiter rang on this table since YOU last had it open wears a small dot, so
+// nobody rings the same drinks twice. Each person's "last looked" is kept on
+// this device; it moves on while the table is open, so the dots are the ones
+// that were new when you came in (or arrived while you were here) and they are
+// gone next time. Your own rounds never wear one.
+function seenRoundsKey() { return 'pos.seenRounds.' + ((state.currentStaff && state.currentStaff.id) || 'anon'); }
+function freshRoundTest(o) {
+  if (!o || !state.currentStaff) return () => false;
+  let map = {};
+  try { map = JSON.parse(localStorage.getItem(seenRoundsKey()) || '{}') || {}; } catch (e) { map = {}; }
+  if (!state._lookedFrom || state._lookedFrom.id !== o.id) state._lookedFrom = { id: o.id, seen: map[o.id] || 0 };
+  const top = Math.max(0, ...(o.rounds || []).map(r => r.id || 0));
+  if (map[o.id] !== top) {
+    map[o.id] = top;
+    const keys = Object.keys(map); if (keys.length > 300) keys.slice(0, keys.length - 300).forEach(k => delete map[k]);
+    try { localStorage.setItem(seenRoundsKey(), JSON.stringify(map)); } catch (e) {}
+  }
+  const seen = state._lookedFrom.seen, me = state.currentStaff.name;
+  return r => (r.id || 0) > seen && !!r.staffName && r.staffName !== me;
+}
 function syncFiredCourses() {
   const o = state.openOrderId && (state.orders || []).find(x => x.id === state.openOrderId);
   if (!o) return;
@@ -21430,6 +21454,16 @@ function saveCustomNoteDraft() {
   // EVERY pick is saved, each as its own note — one chip each on the docket,
   // one line each on the print, the way allergies have always read.
   const texts = [...new Set([...(m.picks || []), text].filter(t => t && t.trim()))];
+  // A NOTE IS TAKEN OFF WHERE IT IS CHANGED (owner, 5 Oct '26): the chip's
+  // own little ✕ wiped an allergy on one stray tap, with no undo. Now the chip
+  // opens its note, and Save with nothing picked takes it off — one door.
+  if (!texts.length && m.editIdx !== undefined) {
+    const updated = state.notes.filter((_, i) => i !== m.editIdx);
+    state.notes = updated;
+    saveTableNotes(state.table, updated);
+    closeNotesPanel();
+    return;
+  }
   if (!texts.length) { state.adminError = 'Type a note.'; render(); return; }
   if (!m.wholeTable && m.seats.length === 0) {
     // Same grammar as adding an item: the centred seat pop asks which
@@ -21463,13 +21497,6 @@ function saveCustomNoteDraft() {
   state.adminError = '';
   render();
 }
-function removeNoteEntry(idx) {
-  const updated = state.notes.filter((_, i) => i !== idx);
-  state.notes = updated;
-  render();
-  saveTableNotes(state.table, updated);
-}
-
 async function saveTableNotes(tableId, notes) {
   if (!tableId) return;
   const fp = findFloorPlanForTable(tableId);
@@ -23243,6 +23270,9 @@ function animateExpansions(prev) {
 let _pressState = null;
 // §§ render() — the whole screen, rebuilt on every state change
 function render() {
+  // A visit to a table ends when the till leaves it: the next visit starts its
+  // "new since you looked" from what this one saw.
+  if (state._lookedFrom && state._lookedFrom.id !== state.openOrderId) state._lookedFrom = null;
   // NEVER rebuild the DOM while a drag-to-reorder is live — doing so destroys the
   // element under the pointer, which drops the drag "on its own". Background
   // refreshes (the 15s poll), toast timers and async saves all funnel through
@@ -25684,6 +25714,7 @@ function renderTicketPanel() {
   const isManager = state.currentStaff && state.currentStaff.role === 'manager';
   const openOrder = activeOpenOrder();
   cascadeAutoCourses(openOrder); // pre-send only: slide course groups down into empty slots
+  const freshRound = freshRoundTest(openOrder);
   // Items already sent to the kitchen (from the open order's rounds), aggregated
   // per course. They stay on the ticket, faded, so the waiter can tell what's
   // gone from what's still being built.
@@ -25695,6 +25726,7 @@ function renderTicketPanel() {
       const bucket = (sentByCourse[c] = sentByCourse[c] || {});
       if (bucket[key]) bucket[key].qty += it.qty;
       else bucket[key] = { ...it };
+      if (freshRound(r)) bucket[key].fresh = true;
     }));
   }
   // THE TAB ROW IS THE COURSE LIST. It used to be the list OR a running count
@@ -25774,7 +25806,7 @@ function renderTicketPanel() {
             const cc = cat && (cat.color || noteTypeColour(cat.id));
             const style = cc ? `background:${cc};color:${contrastTextColor(cc)};border-color:${cc};` : '';
             const held = state.notesPanel && state.customNoteDraft && state.customNoteDraft.editIdx === idx ? ' chip-held' : '';
-            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}">${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)}${n.note ? ' — ' + esc(n.note) : ''}${n.seat && n.seat !== 'all' && seatText(n.seat) ? ' · ' + esc(seatText(n.seat)) : ''} <button data-act="remove-note" data-idx="${idx}" data-stop="1" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 4px;">✕</button></span>`;
+            return `<span class="seat-chip${held}" style="${style}cursor:pointer;" data-act="edit-note-entry" data-idx="${idx}">${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)}${n.note ? ' — ' + esc(n.note) : ''}${n.seat && n.seat !== 'all' && seatText(n.seat) ? ' · ' + esc(seatText(n.seat)) : ''}</span>`;
           }).join('')}
         </div>` : ''}
       ` : ''}
@@ -25885,7 +25917,7 @@ function renderTicketPanel() {
             ? !!(state.editSent && sentItemMatches(e, state.editSent))
             : !!(state.editLine && state.editLine.idx === e.cartIdx);
           return `
-            <div class="ticket-line ${hasNew ? 'new' : 'sent'}${isEditingThis ? ' editing' : ''}" ${lineAct}>
+            <div class="ticket-line ${hasNew ? 'new' : 'sent'}${e.fresh && !hasNew ? ' dk-fresh' : ''}${isEditingThis ? ' editing' : ''}" ${lineAct}>
               ${qtyBtn}
               <div class="tl-body"><div class="tl-name">${esc(e.name)}</div>${sub}</div>
               ${priceHtml}
@@ -25896,7 +25928,7 @@ function renderTicketPanel() {
           const info = courseInfo(n);
           const fired = state.firedCourses[n];
           const merged = new Map();
-          Object.values(sentByCourse[n] || {}).forEach(s => { merged.set(keyOf(s), { name: s.name, seat: s.seat, note: s.note, price: s.price, course: n, menuItemId: s.menuItemId, modSelections: s.modSelections || {}, removed: s.removed || [], origPrice: s.origPrice, discountReason: s.discountReason, sentQty: s.qty, newQty: 0, cartIdx: null }); });
+          Object.values(sentByCourse[n] || {}).forEach(s => { merged.set(keyOf(s), { name: s.name, seat: s.seat, note: s.note, price: s.price, course: n, menuItemId: s.menuItemId, modSelections: s.modSelections || {}, removed: s.removed || [], origPrice: s.origPrice, discountReason: s.discountReason, sentQty: s.qty, newQty: 0, cartIdx: null, fresh: !!s.fresh }); });
           const freshKeys = [];
           (cartByCourse[n] || []).forEach(c => {
             // A line the waiter deliberately split ("Split into 2") stays its own
@@ -48243,7 +48275,6 @@ function handleActClick(el, e) {
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
       else if (act === 'open-note-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); } }
-      else if (act === 'remove-note') { removeNoteEntry(parseInt(el.dataset.idx)); }
       else if (act === 'edit-note-entry') {
         // Tap a note chip -> its tab opens prefilled; saving replaces the entry.
         const idx = parseInt(el.dataset.idx);

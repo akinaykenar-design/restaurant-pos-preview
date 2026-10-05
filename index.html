@@ -4044,6 +4044,7 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
 .tbl-res{ display:inline-flex; align-items:center; gap:4px; padding:4px 8px; font-family:var(--font-body); border-radius:var(--r-pill); background:var(--surface); color:var(--text-primary);
   box-shadow:var(--lift-1); font-size:var(--fs-chip); font-weight:800; line-height:1.4; white-space:nowrap; pointer-events:none; }
 .tbl-res-more{ font-weight:600; }
+.simple-table-btn > .tbl-res{ margin-top:4px; box-shadow:none; } /* the numbers view: inside its button, where it cannot land on the next row */
 .tbl-marks{ position:absolute; top:4px; right:4px; z-index:3; display:inline-flex; gap:4px; pointer-events:none; }
 .tbl-mark{ width:20px; height:20px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:var(--fs-md); font-weight:900; line-height:1; }
 /* The badges ride the zoom automatically now — the whole map is scaled by one
@@ -8104,6 +8105,22 @@ function loadAndMigrate() {
     data.settings.courses.forEach(c => { if (c.enabled === undefined) c.enabled = true; });
     writeData(data);
   }
+  // A COLOUR IS A COLOUR (5 Oct '26): a stored colour was painted straight
+  // into the floor's styles, so one carrying page code ran on every till that
+  // opened it. The server now keeps only #hex; anything already stored that
+  // is not one is dropped here, once, so an old store is safe too.
+  {
+    const HEX = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+    let dirty = false;
+    const clean = (rows) => (rows || []).forEach(r => { if (r && r.color != null && !(typeof r.color === 'string' && HEX.test(r.color))) { r.color = null; dirty = true; } });
+    ['menu', 'categories', 'salesCategories', 'subcategories', 'combos', 'modifierGroups'].forEach(k => clean(data[k]));
+    clean(data.settings.courses);
+    (data.floorPlans || []).forEach(fp => clean(fp.tables));
+    if (Array.isArray(data.settings.roundColors) && data.settings.roundColors.some(c => !(typeof c === 'string' && HEX.test(c)))) {
+      data.settings.roundColors = data.settings.roundColors.filter(c => typeof c === 'string' && HEX.test(c)); dirty = true;
+    }
+    if (dirty) writeData(data);
+  }
   // Every course says Food or Beverage from the first start (3 Oct '26). A
   // course saved before the choice existed was guessed from its name at its
   // next save — the NEW name, so renaming Drinks to "Wine list" made it food.
@@ -8471,7 +8488,10 @@ function courseKind(c) {
   if (typeof c.kitchen === 'boolean') return c.kitchen ? 'food' : 'beverage';
   return /\bdrinks?\b|\bbar\b|\bbev/i.test(c.name || '') ? 'beverage' : 'food';
 }
-module.exports = { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion, courseKind };
+// The courses a restaurant starts with — one list, for a new till and for a
+// till later set up as a restaurant (5 Oct '26).
+const defaultCourses = () => JSON.parse(JSON.stringify(DEFAULT_SETTINGS.courses));
+module.exports = { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion, courseKind, defaultCourses };
 
   })(module, module.exports, window.__POS__.requireShim, '', window.__POS__.process);
   window.__POS__.modules['./db'] = module;
@@ -8490,7 +8510,7 @@ const express = require('express');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion, courseKind } = require('./db');
+const { readData, writeData, forgetCache, STAFF_ROLE_OPTIONS, dataVersion, courseKind, defaultCourses } = require('./db');
 const BUILT_IN_ROLES = ['manager', 'chef', 'trainee']; // titles the code reads by name
 const printing = require('./printing');
 const terminal = require('./terminal');
@@ -8642,6 +8662,14 @@ app.post('/api/undo', (req, res) => {
     } else if (k === 'menu') {
       // A dish comes back as it was set up; what has been SOLD since stays sold.
       d.menu = _undoSnap.menu.map(m => { const cur = live.get(m.id); if (!cur) return m; const out = { ...m }; STOCK_FIELDS.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; }); return out; });
+    } else if (Array.isArray(_undoSnap[k]) && Array.isArray(d[k]) && _undoSnap[k].every(r => r && r.id != null)) {
+      // A LIST TAKES BACK ONLY WHAT WENT (5 Oct '26): the whole list came back,
+      // so a voucher spent in those seconds read unused again and a booking
+      // made since was gone. Rows keep how they are now, in their old places,
+      // and anything added since stays.
+      const cur = new Map(d[k].map(r => [r && r.id, r]));
+      const was = new Set(_undoSnap[k].map(r => r.id));
+      d[k] = [..._undoSnap[k].map(r => cur.get(r.id) || r), ...d[k].filter(r => !was.has(r && r.id))];
     } else d[k] = _undoSnap[k];
   }
   _undoSnap = null; _undoKeys = new Set();
@@ -8662,6 +8690,13 @@ try { fs.mkdirSync(UPLOADS_DIR, { recursive: true }); } catch (e) {}
 app.use('/uploads', express.static(UPLOADS_DIR, {
   setHeaders: (res) => { res.setHeader('Cache-Control', 'public, max-age=31536000'); },
 }));
+
+// A COLOUR IS A COLOUR (5 Oct '26). A table's, a course's, a dish's or a
+// section's colour went into the store as whatever was sent and the floor
+// painted it straight into a style — so a "colour" carrying page code ran on
+// the next till that opened the floor. Only #rgb, #rrggbb or #rrggbbaa is kept.
+const COLOUR_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
+const cleanColour = v => (typeof v === 'string' && COLOUR_RE.test(v.trim())) ? v.trim() : null;
 
 // The client's api() wrapper attaches this header on every mutating request,
 // so every endpoint can log "who did it" without every call site needing to
@@ -9099,7 +9134,7 @@ app.post('/api/discount-presets', (req, res) => {
     kind: kind === 'surcharge' ? 'surcharge' : 'discount',
     type: type === 'fixed' ? 'fixed' : 'percent',
     value: parseFloat(value),
-    color: (typeof color === 'string' && color) || null,
+    color: cleanColour(color),
     // The WHEN. No field = always offered. With a field, `auto` decides
     // whether it goes on by itself or is simply offered when it fits.
     field: '', op: '', value1: '', value2: '', auto: false, enabled: true,
@@ -9129,7 +9164,7 @@ app.put('/api/discount-presets/:id', (req, res) => {
   if (kind !== undefined) preset.kind = kind === 'surcharge' ? 'surcharge' : 'discount';
   if (type !== undefined) preset.type = type === 'fixed' ? 'fixed' : 'percent';
   if (value !== undefined && !isNaN(parseFloat(value))) preset.value = parseFloat(value);
-  if (color !== undefined) preset.color = (typeof color === 'string' && color) || null;
+  if (color !== undefined) preset.color = cleanColour(color);
   const next = cleanCondition(req.body, preset);
   const condErr = conditionError(next);
   if (condErr) return res.status(400).json({ error: condErr });
@@ -9214,7 +9249,7 @@ app.post('/api/categories', (req, res) => {
   if (data.categories.some(c => c.name.toLowerCase() === name.trim().toLowerCase())) {
     return res.status(400).json({ error: 'That category already exists' });
   }
-  const cat = { id: 'cat' + Date.now(), name: name.trim(), color: color || null, icon: icon || null, iconEnabled: iconEnabled !== false };
+  const cat = { id: 'cat' + Date.now(), name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
   data.categories.push(cat);
   logAudit(data, staffFromReq(req), `Added category: ${cat.name}`);
   writeData(data);
@@ -9249,7 +9284,7 @@ app.put('/api/categories/:id', (req, res) => {
     return res.status(400).json({ error: 'That section already exists' });
   }
   cat.name = name.trim();
-  if (color !== undefined) { cat.color = color || null; }
+  if (color !== undefined) { cat.color = cleanColour(color); }
   if (icon !== undefined) cat.icon = icon || null;
   if (iconEnabled !== undefined) cat.iconEnabled = !!iconEnabled;
   // Keep menu items pointed at the right category after a rename.
@@ -9301,7 +9336,7 @@ app.post('/api/sales-categories', (req, res) => {
   if (data.salesCategories.some(c => c.name.toLowerCase() === name.trim().toLowerCase())) {
     return res.status(400).json({ error: 'That sales group already exists' });
   }
-  const cat = { id: 'sc' + Date.now(), name: name.trim(), color: color || null };
+  const cat = { id: 'sc' + Date.now(), name: name.trim(), color: cleanColour(color) };
   data.salesCategories.push(cat);
   logAudit(data, staffFromReq(req), `Added sales category: ${cat.name}`);
   writeData(data);
@@ -9329,7 +9364,7 @@ app.put('/api/sales-categories/:id', (req, res) => {
   // A rename onto a name in use is refused, as adding one is (Sep '26).
   if (data.salesCategories.some(c => c !== cat && c.name.toLowerCase() === name.trim().toLowerCase())) return res.status(400).json({ error: 'That sales group already exists' });
   cat.name = name.trim();
-  if (color !== undefined) { cat.color = color || null; }
+  if (color !== undefined) { cat.color = cleanColour(color); }
   logAudit(data, staffFromReq(req), `Renamed sales category to "${cat.name}"`);
   writeData(data);
   res.json(cat);
@@ -9518,6 +9553,10 @@ app.put('/api/settings', (req, res) => {
   if (req.body.venueType !== undefined) {
     const v = String(req.body.venueType || '');
     data.settings.venueType = ['restaurant', 'cafe', 'bar', 'takeaway'].includes(v) ? v : '';
+    // A RESTAURANT GETS ITS COURSES (5 Oct '26): a till first set up as a
+    // cafe or bar kept its single course when it later became a restaurant.
+    // Only a till still on one course and sending none of its own.
+    if (v === 'restaurant' && req.body.courses === undefined && (data.settings.courses || []).length <= 1) data.settings.courses = defaultCourses();
   }
   if (tableMode !== undefined) data.settings.tableMode = tableMode === 'simple' ? 'simple' : 'floorplan';
   if (simpleTableCount !== undefined) {
@@ -10061,7 +10100,7 @@ app.put('/api/settings', (req, res) => {
   if (sharedSeatLabel !== undefined) data.settings.sharedSeatLabel = String(sharedSeatLabel).trim().slice(0, 20);
   if (req.body.warnOverSeats !== undefined) data.settings.warnOverSeats = !!req.body.warnOverSeats;
   if (Array.isArray(roundColors)) {
-    data.settings.roundColors = roundColors.map(c => String(c || '').trim()).filter(Boolean).slice(0, 10);
+    data.settings.roundColors = roundColors.map(cleanColour).filter(Boolean).slice(0, 10);
   }
   if (tipsEnabled !== undefined) data.settings.tipsEnabled = !!tipsEnabled;
   if (Array.isArray(tipPresets)) {
@@ -10104,7 +10143,7 @@ app.put('/api/settings', (req, res) => {
   if (Array.isArray(courses)) {
     data.settings.courses = courses.slice(0, 12).map((c, i) => ({
       name: (c.name && String(c.name).trim()) || `Course ${i + 1}`,
-      color: c.color || null,
+      color: cleanColour(c.color),
       image: (typeof c.image === 'string' && c.image) || null,
       enabled: c.enabled !== false,
       // Allowed sections: null = every section welcome; an array of category
@@ -10312,7 +10351,7 @@ app.post('/api/subcategories', (req, res) => {
     if (!parent) return res.status(400).json({ error: 'Parent subsection not found' });
     rootCategoryId = parent.categoryId;
   }
-  const sub = { id: 'sub' + Date.now(), categoryId: rootCategoryId, parentSubcategoryId: parentId, name: name.trim(), color: color || null, icon: icon || null, iconEnabled: iconEnabled !== false };
+  const sub = { id: 'sub' + Date.now(), categoryId: rootCategoryId, parentSubcategoryId: parentId, name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
   data.subcategories.push(sub);
   logAudit(data, staffFromReq(req), `Added subcategory: ${sub.name}`);
   writeData(data);
@@ -10379,7 +10418,7 @@ app.put('/api/subcategories/:id', (req, res) => {
     return res.json(sub);
   }
   if (name && name.trim()) sub.name = name.trim();
-  if (color !== undefined) { sub.color = color || null; }
+  if (color !== undefined) { sub.color = cleanColour(color); }
   if (image !== undefined) sub.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) sub.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
   if (icon !== undefined) sub.icon = icon || null;
@@ -10463,7 +10502,7 @@ app.post('/api/menu', (req, res) => {
     trackStock: !!trackStock,
     stockCount: trackStock ? Math.max(0, Math.round((parseFloat(stockCount) || 0) * 100) / 100) : 0,
     lowStockThreshold: Math.max(0, parseInt(lowStockThreshold) || 5),
-    color: color || null,
+    color: cleanColour(color),
     icon: icon || null,
     iconEnabled: !!iconEnabled,
     sequence: (sequence !== undefined && sequence !== null && sequence !== '') ? parseInt(sequence) : null,
@@ -10525,7 +10564,7 @@ app.put('/api/menu/:id', (req, res) => {
   if (stockCount !== undefined) item.stockCount = Math.max(0, Math.round((parseFloat(stockCount) || 0) * 100) / 100);
   if (lowStockThreshold !== undefined) item.lowStockThreshold = Math.max(0, parseInt(lowStockThreshold) || 0);
   if (item.trackStock) item.out = item.stockCount <= 0;
-  if (color !== undefined) { item.color = color || null; }
+  if (color !== undefined) { item.color = cleanColour(color); }
   if (icon !== undefined) item.icon = icon || null;
   if (iconEnabled !== undefined) item.iconEnabled = !!iconEnabled;
   if (req.body.rowBreak !== undefined) item.rowBreak = !!req.body.rowBreak;
@@ -10709,7 +10748,7 @@ function snapshotTables(fp) {
       label: String(t.label == null ? '' : t.label).slice(0, 24),
       seats: num(t.seats, 0, 99, 4),
     };
-    if (t.color) o.color = String(t.color).slice(0, 32);
+    if (cleanColour(t.color)) o.color = cleanColour(t.color);
     if (t.mergedInto && ids.has(t.mergedInto)) o.mergedInto = t.mergedInto;
     if (t.prevX !== undefined && t.prevX !== null) o.prevX = num(t.prevX, 0, 100, 50);
     if (t.prevY !== undefined && t.prevY !== null) o.prevY = num(t.prevY, 0, 100, 50);
@@ -10817,7 +10856,7 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
     decorType: decorType || null,
     icon: icon || null,
     rotation: rotation || 0,
-    color: color || null,
+    color: cleanColour(color),
   };
   floorPlan.tables.push(table);
   logAudit(data, staffFromReq(req), `Added ${table.type === 'decor' ? 'floor object' : 'table'} "${table.label}" to ${floorPlan.name}`);
@@ -10880,7 +10919,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (height !== undefined) table.height = height;
   if (seats !== undefined) table.seats = seats;
   if (rotation !== undefined) table.rotation = ((rotation % 360) + 360) % 360;
-  if (color !== undefined) table.color = color || null;
+  if (color !== undefined) table.color = cleanColour(color);
   if (decorType !== undefined && table.type === 'decor') table.decorType = decorType;
   if (icon !== undefined && table.type === 'decor') table.icon = icon || null;
   const hadCovers = (table.covers || 0) > 0;
@@ -11300,8 +11339,13 @@ app.post('/api/customers/:id/redeem-points', (req, res) => {
 });
 
 // ---------- Gift cards ----------
+// THE LIST IS A MANAGER'S (5 Oct '26): every code and balance answered any
+// device on the wifi, which could then spend a guest's card. The till looks a
+// single card up by its code instead.
 app.get('/api/gift-cards', (req, res) => {
-  res.json(readData().giftCards || []);
+  const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can see gift cards' });
+  res.json(data.giftCards || []);
 });
 
 const VOUCHER_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -11397,7 +11441,9 @@ app.put('/api/gift-cards/:id', (req, res) => {
 
 // ---------- Vouchers ----------
 app.get('/api/vouchers', (req, res) => {
-  res.json(readData().vouchers || []);
+  const data = readData();
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can see vouchers' });
+  res.json(data.vouchers || []);
 });
 
 app.post('/api/vouchers', (req, res) => {
@@ -11578,6 +11624,19 @@ setInterval(doshiiPollOnce, 8000);
 // list the tables, then watch for payments taken on the terminal and close the
 // matching order automatically.
 let doshiiPayBusy = false;
+// WHAT THE TERMINAL CHARGES IS WHAT THE TILL WOULD (5 Oct '26): it sent the
+// dishes alone, so a table's surcharge or discount never reached it and a
+// table that had paid part in cash was charged the whole bill again. Worked
+// out the way the bill paper is: dishes, the table's money off or on, tax —
+// less what the parts already paid.
+function payAtTableBill(data, o) {
+  const sub = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
+  const t = (data.floorPlans || []).flatMap(f => f.tables || []).find(x => String(x.label) === String(o.table));
+  const { discountRecord, discountAmount } = computeDiscount(sub, t && t.discount, o.items, data);
+  const tx = computeTax(data, sub - discountAmount - voucherSaleTotal(o.items || []));
+  const bill = Math.round((sub - discountAmount + tx.add) * 100) / 100;
+  return { sub, bill, discountRecord, tax: tx.tax, due: Math.max(0, Math.round((bill - splitPaidNet(o)) * 100) / 100) };
+}
 async function doshiiPayAtTableOnce() {
   if (doshiiPayBusy) return;
   doshiiPayBusy = true;
@@ -11593,11 +11652,12 @@ async function doshiiPayAtTableOnce() {
 
       // 1) Keep Doshii's copy of every open order fresh (and tell it when a
       //    locally-closed order is done, so the terminal drops the table).
-      const syncHash = JSON.stringify([order.status, order.table, order.grandTotal, (order.items || []).length]);
+      const pb = order.status === 'open' ? payAtTableBill(data, order) : null;
+      const syncHash = JSON.stringify([order.status, order.table, pb ? pb.due : order.grandTotal, (order.items || []).length]);
       if (order.status === 'open' || (order.doshiiSyncId && order.doshiiSyncHash !== syncHash)) {
         if (order.doshiiSyncHash !== syncHash) {
           try {
-            const id = await doshii.pushOrder(config, order, order.doshiiSyncId || null);
+            const id = await doshii.pushOrder(config, pb ? { ...order, grandTotal: pb.due } : order, order.doshiiSyncId || null);
             if (id) order.doshiiSyncId = id;
             order.doshiiSyncHash = syncHash;
             changed = true;
@@ -11612,18 +11672,31 @@ async function doshiiPayAtTableOnce() {
       if (order.status === 'open' && order.doshiiSyncId) {
         try {
           const paid = await doshii.getPaidTotal(config, order.doshiiSyncId);
-          const due = order.grandTotal || order.total || 0;
+          const due = pb ? pb.due : 0;
           if (due > 0 && paid >= due - 0.005) {
+            const now = Date.now();
+            // Money past what was owed is the guest's tip on the terminal.
+            const tip = Math.max(0, Math.round((paid - due) * 100) / 100);
+            if ((order.splitPaid || []).length) {
+              // The terminal finishes a bill already part paid: it is the last
+              // PART, and the parts are the payment — as the till's close does.
+              order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: Math.round(paid * 100) / 100, method: 'card', giftCardCode: null, cardType: null, tip, at: now, staffName: 'EFTPOS terminal' });
+              const byMethod = {};
+              order.splitPaid.forEach(p => { byMethod[p.method || 'card'] = (byMethod[p.method || 'card'] || 0) + (p.amount || 0); });
+              order.payments = Object.entries(byMethod).map(([method, amount]) => ({ method, amount: Math.round(amount * 100) / 100 }));
+              order.paymentMethod = 'split';
+              order.tip = Math.round(order.splitPaid.reduce((a, p) => a + (p.tip || 0), 0) * 100) / 100;
+            } else { order.paymentMethod = 'card'; order.tip = tip; }
+            order.subtotal = pb.sub; order.discount = pb.discountRecord; order.tax = pb.tax; order.total = pb.bill;
+            order.grandTotal = Math.round((pb.bill + order.tip) * 100) / 100;
             order.status = 'paid';
-            order.paymentMethod = 'card';
-            order.paidAt = Date.now();
+            order.paidAt = now;
             order.closedBy = 'EFTPOS terminal';
             // CLOSED LIKE ANY OTHER BILL (2 Oct '26): with no closedAt it was
             // filed under when the table opened — a bill opened before the Z
             // and paid at the table after it was on no cash-up at all — and it
             // carried no GST, no vouchers sold on it and no points.
             order.closedAt = order.paidAt;
-            if (!order.tax) order.tax = computeTax(data, (order.total || order.subtotal || 0) - voucherSaleTotal(order.items || [])).tax;
             issueSoldVouchers(data, order, 'EFTPOS terminal');
             if (!order.practice) { order.loyaltyCredited = Math.max(0, (order.total || 0) - voucherSaleTotal(order.items || [])); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
             order.doshiiSyncHash = null; // force a final status push next cycle
@@ -12692,7 +12765,7 @@ app.post('/api/combos', (req, res) => {
     id: 'c' + Date.now(),
     name,
     price: parseFloat(price),
-    color: req.body.color || null,
+    color: cleanColour(req.body.color),
     // Section this set menu is sold under; null = the dedicated "Set menus" tab.
     category: req.body.category || null,
     groups: groups.map((g, i) => normalizeComboGroup(g, i, 'g' + Date.now() + i)),
@@ -12713,7 +12786,7 @@ app.put('/api/combos/:id', (req, res) => {
   const { name, price, groups, color, category } = req.body;
   if (name) combo.name = name;
   if (price !== undefined && !isNaN(parseFloat(price))) combo.price = parseFloat(price);
-  if (color !== undefined) { combo.color = color || null; }
+  if (color !== undefined) { combo.color = cleanColour(color); }
   if (req.body.image !== undefined) combo.image = (typeof req.body.image === 'string' && req.body.image) || null;
   if (req.body.disabled !== undefined) combo.disabled = !!req.body.disabled;
   if (category !== undefined) combo.category = category || null;
@@ -14703,7 +14776,7 @@ function computeReportsOverview(data) {
       && (o.items || []).length && !/^(Combined into|All items moved|Nothing ordered)/.test(o.voidReason || ''))
     .map(o => ({ when: o.voidedAt || o.createdAt, by: o.voidedBy || o.staffName || '—', total: o.total || 0 }));
   const discounts = week.filter(o => o.discount && o.discount.kind !== 'surcharge')
-    .map(o => ({ when: o.createdAt, by: o.staffName || '—', amount: o.discount.amount, reason: o.discount.reason || '' }));
+    .map(o => ({ when: o.closedAt || o.createdAt, by: o.closedBy || o.staffName || '—', amount: o.discount.amount, reason: o.discount.reason || '' })); // who took the bill and gave it, not who opened the table (5 Oct '26)
   // A fortnight of daily nets for the trend, and the month's running total.
   const days = [];
   for (let i = 13; i >= 0; i--) {
@@ -36139,7 +36212,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // own corner, so it turned with a turned table, lay over the number and
   // clipped the name to "Jam…" (owner's walk, Sep '26).
   const lockHtml = opts.lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(opts.lock.staff)}</span>` : '';
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock ? '' : tableResChip(t)); })())}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
 }
 
 // EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
@@ -36574,7 +36647,11 @@ function passCells(o, courses) {
   // passed once a later course was called well after it — or it was never
   // called and a later one was.
   const TOGETHER = 5 * 60000;
-  const passed = n => firedNs.some(m => m > n && fired[m] - (fired[n] || 0) > TOGETHER);
+  // …but a FOOD course nobody called is still owed (5 Oct '26): with Call
+  // away only on the next course, calling the 3rd from its tapped key turned
+  // the skipped 2nd into a tick and its food never reached the kitchen. A
+  // drinks course nobody called still steps back.
+  const passed = n => firedNs.some(m => m > n && (fired[n] > 0 ? fired[m] - fired[n] > TOGETHER : !courseInKitchen(n)));
   const sentAt = {};
   (o.rounds || []).forEach(r => courseLines(r.items).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; }));
   let next = false;
@@ -36590,7 +36667,10 @@ function passCells(o, courses) {
 }
 // The one later course whose Call away a tap has brought out, on the Pass and
 // the Timeline alike — one at a time, so the screen goes back to one key a row.
-function passKeyShown(o, n) { return state.passKeyFor === `${o.id}:${n}`; }
+// It is tied to the calls on the order when it was shown, so a call made
+// anywhere else (the docket, another till) puts the row back to one key.
+const passKeySig = o => Object.keys(o.firedCourses || {}).filter(k => o.firedCourses[k] > 0).sort().join(',');
+function passKeyShown(o, n) { return state.passKeyFor === `${o.id}:${n}:${passKeySig(o)}`; }
 // A called course's corner on the docket, the peek and Call away: a clock
 // while the kitchen has it, a quiet Done once the Pass calls it done (calm
 // audit c2, Sep '26 — three ticking chips on one docket said nothing about
@@ -36664,7 +36744,14 @@ function kitchenPeakLastWeek() {
   calls.forEach(([at, q]) => { sum += q; while (calls[lo][0] <= at - cook) sum -= calls[lo++][1]; peak = Math.max(peak, sum); });
   return peak;
 }
-const kitchenLevel = (load, fullAt) => load >= fullAt ? 'full' : load >= fullAt * 0.7 ? 'busy' : 'calm';
+// The word follows the road's thirds (5 Oct '26: the bars went green /
+// yellow / red by thirds while the word kept its own 70% line, so 20 of 30
+// read "quiet" over yellow and 29 of 30 "busy" over a red road).
+// The word is read off the bars themselves — the last lit bar's third — so
+// the two can never be counted two ways.
+const kitchenLit = (load, fullAt) => Math.min(LOAD_BARS, Math.round(load / fullAt * LOAD_BARS));
+const kitchenLevel = (load, fullAt) => { const lit = kitchenLit(load, fullAt);
+  return load >= fullAt ? 'full' : lit > LOAD_BARS * 2 / 3 ? 'heavy' : lit > LOAD_BARS / 3 ? 'busy' : 'calm'; };
 // BARS, AND ONLY NOW (owner, Sep '26: "the first iteration was bars which I
 // prefer", then "i dont need to know busy for the past"). Fifteen bars fill
 // up to how full the kitchen is right now, in its traffic colour — a half
@@ -36673,14 +36760,14 @@ const LOAD_BARS = 15;
 function kitchenStrip() {
   const { fullAt } = kitchenTrafficCfg(), load = kitchenLoad();
   const lvl = kitchenLevel(load, fullAt);
-  const lit = Math.min(LOAD_BARS, Math.round(load / fullAt * LOAD_BARS));
+  const lit = kitchenLit(load, fullAt);
   // LIKE TRAFFIC LIGHTS (owner, 5 Oct '26: "it should go from green yellow to
   // red like traffic", then "I wanna them solid colours"): the first third of
   // the road is green, the middle yellow, the last red — three solid colours,
   // no blends, so how far it is lit IS the colour. The whole strip went one
   // mustard gold the moment it was busy.
   const tone = i => ['var(--green)', 'var(--pay-yellow)', 'var(--alarm)'][Math.min(2, Math.floor(i * 3 / LOAD_BARS))];
-  return `<div class="pass-traffic lvl-${lvl}" style="--pc:${{ calm: tone(0), busy: tone(LOAD_BARS / 2), full: tone(LOAD_BARS - 1) }[lvl]}"><b>Kitchen · ${{ calm: 'quiet', busy: 'busy', full: 'full' }[lvl]}</b>
+  return `<div class="pass-traffic lvl-${lvl}" style="--pc:${tone(Math.max(0, lit - 1))}"><b>Kitchen · ${{ calm: 'quiet', busy: 'busy', heavy: 'nearly full', full: 'full' }[lvl]}</b>
     <small>${load} of ${fullAt} dishes cooking</small>
     <span class="pt-road">${Array.from({ length: LOAD_BARS }, (_, i) => i < lit ? `<i class="on" style="background:${tone(i)}"></i>` : '<i></i>').join('')}</span></div>`;
 }
@@ -37420,7 +37507,13 @@ function renderTablePickerMiddle() {
                 const oo = state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
                 return oo && oo.covers ? oo.covers + (oo.covers === 1 ? ' cover' : ' covers') : '';
               })()}</span>
-              ${uprightBadges(t, (() => { const loud = missedBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return (loud || (!lock ? landingBadgeHtml(t) : '')) + (!lock ? tableResChip(t) : ''); })())}
+              ${/* THE NUMBERS VIEW NEVER TURNS (5 Oct '26): its buttons stand
+                   upright whatever angle the plan gives the table, so the
+                   badges do too — a turned plan table hung its stack upside
+                   down above the button. The booking countdown sits INSIDE
+                   the button here: under it, it landed on the next row. */ ''}
+              ${!lock && state.floorStatusView !== 'booked' ? tableResChip(t) : ''}
+              ${uprightBadges({ ...t, rotation: 0 }, (() => { const loud = missedBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return loud || (!lock ? landingBadgeHtml(t) : ''); })())}
               ${transferFxHtml(t)}
             </div>`;
           }).join('')}
@@ -47195,7 +47288,8 @@ function handleActClick(el, e) {
         if (o && t && course) callAwayFromFloor(o, t, course);
       }
       else if (act === 'pass-show-key') {
-        const k = `${el.dataset.order}:${el.dataset.course}`;
+        const po = (state.orders || []).find(x => String(x.id) === String(el.dataset.order));
+        const k = `${el.dataset.order}:${el.dataset.course}:${po ? passKeySig(po) : ''}`;
         state.passKeyFor = state.passKeyFor === k ? null : k;
         render();
       }

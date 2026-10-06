@@ -11865,6 +11865,11 @@ app.post('/api/orders/:id/print-course', (req, res) => {
   const course = parseInt(req.body && req.body.course) || 1;
   const items = (order.items || []).filter(i => (i.course || 1) === course && !i.giftcardSale);
   if (!items.length) return res.status(400).json({ error: 'No items in that course yet' });
+  // The same course called again within seconds is the same tap twice (two
+  // tills, or a retry on slow wifi): one slip, and the away clock keeps its
+  // start (Oct '26 hunt).
+  const prev = (order.firedCourses || {})[course];
+  if (prev > 0 && Date.now() - prev < 10000) return res.json({ ok: true, again: true });
   const courseName = (((data.settings || {}).courses || [])[course - 1] || {}).name || `Course ${course}`;
   // A call-away prints a SLIM slip (banner + course + table) — not the whole
   // course again; the kitchen already has those items from the send.
@@ -21350,13 +21355,23 @@ function clearFiredCourse(n) {
 // One-tap call-away straight from the floor map: stamp the order and reset its
 // table-map timer. Optimistically updates locally, then confirms with the server.
 
+// One bill per tap: a second tap while the first is still on its way is the
+// same tap (Oct '26 hunt: two quick taps on slow wifi printed two bills).
+const _billPrinting = new Set();
 async function markBillPrinted(orderId) {
   const order = (state.orders || []).find(o => String(o.id) === String(orderId));
-  if (!order) return;
+  if (!order || _billPrinting.has(String(orderId))) return;
+  _billPrinting.add(String(orderId));
+  try { await printBillAndMark(order, orderId); } finally { _billPrinting.delete(String(orderId)); }
+}
+async function printBillAndMark(order, orderId) {
   if ((state.settings.printColorMode || 'thermal') !== 'color') {
-    // Thermal: the server prints the bill on the receipt station(s).
-    api(`/api/orders/${orderId}/print-bill`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discount: billDiscount(order, billTableOf(order)) }) })
-      .catch(e => { state.toast = toastFail(e.message || 'Could not print the bill.'); render(); armToastTimer(TOAST_LONG); });
+    // Thermal: the server prints the bill on the receipt station(s). A bill
+    // that did not print is NOT printed — the table said "Bill printed" under
+    // a red "No station is marked for receipts" (Oct '26 hunt).
+    try {
+      await api(`/api/orders/${orderId}/print-bill`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ discount: billDiscount(order, billTableOf(order)) }) });
+    } catch (e) { state.toast = toastFail(e.message || 'Could not print the bill.'); render(); armToastTimer(TOAST_LONG); return; }
   } else {
     try { printReceipt(order); } catch (e) {}
   }
@@ -23361,6 +23376,8 @@ function animateExpansions(prev) {
 // the rebuilt node so a poll mid-hold can't visually "release" the button.
 let _pressState = null;
 // §§ render() — the whole screen, rebuilt on every state change
+const FLOOR_LISTS = ['.pass-rows', '.tl-rows', '.bills'];
+const _floorListAt = {};
 function render() {
   // A visit to a table ends when the till leaves it: the next visit starts its
   // "new since you looked" from what this one saw.
@@ -23433,14 +23450,21 @@ function render() {
   // map back to the left and the options to the top — and the compat click
   // that follows a touch then landed on bare floor and UNPICKED the table
   // (owner, Sep '26: "tapping the floor layout snaps it back to the left").
+  // '.roster-scroll', '.ts-lens-row', '.paper-desk': found by the Oct '26
+  // sweep that scrolls every pane and redraws — the roster's week, the table
+  // status chips and the docket designer all went back to the start.
   // '.pass-rows' + '.tl-rows' + '.bills': the floor's other views. None was
   // kept, so a Call away low on the Pass threw the list back to the top
   // (owner, Oct '26: "calling away courses in pass view snaps the screen back").
-  const SCROLL_KEEP = ['.np-scroll', '.modal', '.admin-content', '.screen-ctl-scroll', '.menu-scroll', '.admin-sidebar', '.catrail', '.subcat-seg', '.qty-pad', '.ticket-items', '.course-tabs', '.pay-pane', '.kds-board', '.middle-view', '.dk-menu', '.tp-canvas-wrap', '.fp-main', '.fp-rail-side', '.pass-rows', '.tl-rows', '.bills'];
+  const SCROLL_KEEP = ['.np-scroll', '.modal', '.admin-content', '.screen-ctl-scroll', '.menu-scroll', '.admin-sidebar', '.catrail', '.subcat-seg', '.qty-pad', '.ticket-items', '.course-tabs', '.pay-pane', '.kds-board', '.middle-view', '.dk-menu', '.tp-canvas-wrap', '.fp-main', '.fp-rail-side', '.pass-rows', '.tl-rows', '.bills', '.roster-scroll', '.ts-lens-row', '.paper-desk'];
   const savedScroll = SCROLL_KEEP.map(sel => {
     const el = document.querySelector(sel);
     return el && (el.scrollTop || el.scrollLeft) ? { sel, top: el.scrollTop, left: el.scrollLeft } : null;
   }).filter(Boolean);
+  // The floor's lists remember their place while the floor is away: a waiter
+  // working the bottom of the Pass opened a table, sent, came back — and was
+  // at the top again, every table (Oct '26 hunt).
+  FLOOR_LISTS.forEach(sel => { const el = document.querySelector(sel); if (el) _floorListAt[sel] = { top: el.scrollTop, left: el.scrollLeft }; });
   // Some devices scroll the WINDOW rather than an inner pane — keep that too, so
   // a change never yanks the admin page back to the top.
   const savedWin = (window.scrollY || window.scrollX) ? { x: window.scrollX, y: window.scrollY } : null;
@@ -23525,12 +23549,21 @@ function render() {
   bindEvents();
   oskMarkInputs();
   markAdminKeyboardFocusable();
+  // Dress the dropdowns NOW, not when the watcher gets round to it: a bare
+  // select is wider than its chip, so on a phone the menu page's toolbar drew
+  // two rows tall, the scroll was put back against that, and then it shrank
+  // to one — every tap moved the list 52px (Oct '26 sweep).
+  dressSelects(app);
   // Flag up while the panes are put back, so the scroll events these
   // assignments fire are not read as the owner scrolling away.
   _scrollRestoring++;
   savedScroll.forEach(({ sel, top, left }) => {
     const el = document.querySelector(sel);
     if (el) { el.scrollTop = top; el.scrollLeft = left; }
+  });
+  FLOOR_LISTS.forEach(sel => {
+    const at = _floorListAt[sel], el = document.querySelector(sel);
+    if (at && el && !savedScroll.some(x => x.sel === sel) && !el.scrollTop && !el.scrollLeft) { el.scrollTop = at.top; el.scrollLeft = at.left; }
   });
   if (savedWin) window.scrollTo(savedWin.x, savedWin.y);
   if (fpAnchor != null) {
@@ -23562,13 +23595,23 @@ function render() {
   syncPopupTileGrids();
   applyGridDims();
   // The popup only JUST got its final size from the sync — before that its
-  // scroll area had no overflow, so the restore above clamped to 0. Put the
-  // popup's scroll back now that there is something to scroll.
+  // scroll area had no overflow, so the restore above clamped to 0. And the
+  // fits above resize tiles and names, so a long page restored before them
+  // landed 35-50 off (Oct '26 sweep: admin menu, the screen designer). Put
+  // every pane back once more now that the page has its final shape — but
+  // not the two the code above moves on purpose.
+  _scrollRestoring++;
   savedScroll.forEach(({ sel, top, left }) => {
-    if (sel !== '.np-scroll' && sel !== '.modal') return;
+    if (fpAnchor != null && sel === '.admin-content') return;
+    if (state.showCheckout && sel === '.catrail') return;
     const el = document.querySelector(sel);
-    if (el) { el.scrollTop = top; el.scrollLeft = left; }
+    if (el && (el.scrollTop !== top || el.scrollLeft !== left)) { el.scrollTop = top; el.scrollLeft = left; }
   });
+  FLOOR_LISTS.forEach(sel => {
+    const at = _floorListAt[sel], el = document.querySelector(sel);
+    if (at && el && !savedScroll.some(x => x.sel === sel) && (el.scrollTop !== at.top || el.scrollLeft !== at.left)) { el.scrollTop = at.top; el.scrollLeft = at.left; }
+  });
+  setTimeout(() => { _scrollRestoring = Math.max(0, _scrollRestoring - 1); }, 0);
   // Table select owns the WHOLE screen: while it's the visible middle pane
   // the rail and docket hide (they're dead during picking) and the grid
   // upsizes — see body[data-fs-picker] rules. Exit stays: pick / Close /
@@ -33747,6 +33790,7 @@ function renderModifierGroupModal() {
 // measuring the room the hub actually has; the preview was estimating it from
 // the frame height. Same sum here, on the mock's own menu, so the picture in
 // Design is the picture on the floor.
+const _mkRowMeasured = {};
 function sizeMockRows() {
   document.querySelectorAll('.mk-wrap[data-fixed-rows="1"]').forEach((wrap) => {
     const rows = parseInt(wrap.dataset.mkRows, 10) || 0;
@@ -33761,6 +33805,7 @@ function sizeMockRows() {
     const gap = parseFloat(getComputedStyle(grid).rowGap) || 6;
     const avail = box.clientHeight - top - 18;
     const h = Math.max(GRID_ROW_MIN_H, Math.floor((avail - (rows - 1) * gap) / rows));
+    if (wrap.dataset.mkKey) _mkRowMeasured[wrap.dataset.mkKey] = h;
     if (String(h) !== String(parseFloat(wrap.style.getPropertyValue('--mk-row-h')))) {
       wrap.style.setProperty('--mk-row-h', h + 'px');
     }
@@ -34157,7 +34202,12 @@ function renderScreenMockup() {
   // drew 130-tall tiles where the phone drew 135. It is only a first paint
   // now - sizeMockRows() measures the mock's own room straight after and
   // works the height out with the SAME sum the till uses.
-  const mkRowH = mkRows ? Math.max(48, Math.floor(((frame.h - 116 - 26) - (mkRows - 1) * 6) / mkRows)) : 0;
+  // The row height sizeMockRows MEASURED last time, when the frame and the
+  // rows are the same — the estimate was a few px off, so every redraw drew
+  // the tiles tall, put the scroll back, and shrank them a frame later: the
+  // preview's menu crept on every tap (Oct '26 sweep).
+  const mkRowKey = `${dev}:${frame.w}x${frame.h}:${mkRows}`;
+  const mkRowH = mkRows ? (_mkRowMeasured[mkRowKey] || Math.max(48, Math.floor(((frame.h - 116 - 26) - (mkRows - 1) * 6) / mkRows))) : 0;
   // ONE box, however many screens are in it (owner, Aug '26: "act as one
   // image instead of two"). The Mobile tab's menu + docket phones live in a
   // single frame, so a pinch zooms them together and a drag moves them
@@ -34168,7 +34218,7 @@ function renderScreenMockup() {
       ? `<div class="mk-sizer mk-duo-in">${arr.map(m => `<div class="mk-cell"><div class="scrmock">${m}</div></div>`).join('')}</div>`
       : `<div class="mk-sizer"><div class="scrmock">${arr[0]}</div></div>`;
     return `
-    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-mk-rows="${mkRows || 0}" data-fw="${frame.w}" data-cap="${frame.cap}" data-fh="${frame.h}" data-frames="${arr.length}" ${sizeAttrs} data-fixed-cols="${mkCols ? '1' : '0'}" data-fixed-rows="${mkRows ? '1' : '0'}" style="--mkn:${arr.length};--mkfit:${_mkFitScale || MK_SCALE};--mks:${(_mkFitScale || MK_SCALE) * (window.innerWidth <= 768 ? _mkZoom : 1)};--mkw:${frame.w}px;--mkh:${frame.h}px;--rail-w:${railWidthPx(dev, frame.w)}px;--ticket-w:${Math.round(frame.w * mkTktShare)}px;${mkCols ? `--grid-cols:${mkCols};` : ''}${mkRows ? `--mk-row-h:${mkRowH}px;` : ''}">
+    <div class="mk-wrap" data-devframe="${dev === 'mobile' ? 'phone' : 'till'}" data-mk-rows="${mkRows || 0}" data-mk-key="${mkRowKey}" data-fw="${frame.w}" data-cap="${frame.cap}" data-fh="${frame.h}" data-frames="${arr.length}" ${sizeAttrs} data-fixed-cols="${mkCols ? '1' : '0'}" data-fixed-rows="${mkRows ? '1' : '0'}" style="--mkn:${arr.length};--mkfit:${_mkFitScale || MK_SCALE};--mks:${(_mkFitScale || MK_SCALE) * (window.innerWidth <= 768 ? _mkZoom : 1)};--mkw:${frame.w}px;--mkh:${frame.h}px;--rail-w:${railWidthPx(dev, frame.w)}px;--ticket-w:${Math.round(frame.w * mkTktShare)}px;${mkCols ? `--grid-cols:${mkCols};` : ''}${mkRows ? `--mk-row-h:${mkRowH}px;` : ''}">
       ${body}
     </div>`;
   };
@@ -37326,10 +37376,17 @@ setInterval(tickTimeline, 10000);
 // ONE CALL-AWAY FROM THE FLOOR — the peek's course tabs, its Next key and the
 // pass all fire through here: the server prints the slip and stamps the
 // course, so every till sees it go.
+// One call per tap: a second tap while the first is on its way is the same tap
+// (Oct '26 hunt: two quick taps on slow wifi sent the kitchen two slips).
+const _callingAway = new Set();
 function callAwayFromFloor(o, t, course) {
   // A trainee calls nothing on a real table (and nobody on a practice one).
   if (!!o.practice !== isTrainee()) { state.toast = toastFail(o.practice ? 'That is a practice table' : `Table ${tableDisplayLabel(t.id)} is in real service`); render(); armToastTimer(TOAST_SHORT); return Promise.resolve(); }
+  const k = `${o.id}:${course}`;
+  if (_callingAway.has(k)) return Promise.resolve();
+  _callingAway.add(k);
   return api(`/api/orders/${o.id}/print-course`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ course }) })
+    .finally(() => _callingAway.delete(k))
     .then(() => refreshOrders())
     .then(() => { state.toast = `${courseInfo(course).name} called away — ${tableDisplayLabel(t.id)}`; render(); armToastTimer(TOAST_SHORT); })
     .catch(e => { state.toast = toastFail(e.message || 'Could not call away'); render(); armToastTimer(TOAST_LONG); });

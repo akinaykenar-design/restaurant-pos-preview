@@ -8600,7 +8600,7 @@ app.use((req, res, next) => {
 // stock fields, and a snapshot older than ten minutes is gone.
 const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
 const UNDO_TTL = 10 * 60 * 1000;
-let _undoSnap = null, _undoSnapAt = 0, _undoKeys = new Set();
+let _undoSnap = null, _undoSnapAt = 0, _undoKeys = new Set(), _undoByManager = false, _undoEdited = {};
 app.use((req, res, next) => {
   if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
     // A bulk delete is many DELETEs in a burst. Snapshot before the FIRST of
@@ -8613,6 +8613,10 @@ app.use((req, res, next) => {
         for (const k of UNDO_KEEP) if (d[k] !== undefined) snap[k] = d[k];
         _undoSnap = JSON.parse(JSON.stringify(snap));
         _undoKeys = new Set();
+        _undoEdited = {};
+        // Who could make this delete is who can undo it (Oct '26 hunt): a bare
+        // request put back a staff member a manager had removed, PIN and all.
+        _undoByManager = !!managerFromReq(req, d);
       } catch (e) { _undoSnap = null; }
     }
     _undoSnapAt = Date.now();
@@ -8625,7 +8629,17 @@ app.use((req, res, next) => {
       try {
         if (_undoSnap && !(body && body.error)) {
           const d = readData();
-          UNDO_KEEP.forEach(k => { if (JSON.stringify(d[k]) !== JSON.stringify(_undoSnap[k])) _undoKeys.add(k); });
+          UNDO_KEEP.forEach(k => {
+            if (JSON.stringify(d[k]) === JSON.stringify(_undoSnap[k])) return;
+            _undoKeys.add(k);
+            // The rows the delete itself EDITED, not just the one it removed:
+            // a set menu that lost the deleted dish from its choices, a note
+            // type pointed away from a deleted printer (Oct '26 hunt).
+            if (Array.isArray(d[k]) && Array.isArray(_undoSnap[k])) {
+              const was = new Map(_undoSnap[k].map(r => [r && r.id, JSON.stringify(r)]));
+              d[k].forEach(r => { if (r && r.id != null && was.has(r.id) && was.get(r.id) !== JSON.stringify(r)) (_undoEdited[k] = _undoEdited[k] || new Set()).add(r.id); });
+            }
+          });
           if (_undoKeys.size) res.setHeader('X-Undo', '1');
         }
       } catch (e) {}
@@ -8638,6 +8652,7 @@ const STOCK_FIELDS = ['stockCount', 'servingsLeft', 'out', 'trackStock', 'lowSto
 app.post('/api/undo', (req, res) => {
   if (!_undoSnap || Date.now() - _undoSnapAt > UNDO_TTL) { _undoSnap = null; return res.status(404).json({ error: 'Nothing to undo' }); }
   const d = readData();
+  if (_undoByManager && !managerFromReq(req, d)) return res.status(403).json({ error: 'Only a manager can undo that' });
   const live = new Map((d.menu || []).map(m => [m.id, m]));
   // ONLY WHAT THE DELETE TOUCHED COMES BACK (Sep '26): Undo wrote the whole
   // setup back, so covers and an allergy another till put on a table in those
@@ -8661,10 +8676,12 @@ app.post('/api/undo', (req, res) => {
       // and anything added since stays.
       const cur = new Map(d[k].map(r => [r && r.id, r]));
       const was = new Set(_undoSnap[k].map(r => r.id));
-      d[k] = [..._undoSnap[k].map(r => cur.get(r.id) || r), ...d[k].filter(r => !was.has(r && r.id))];
+      // A row the delete itself edited goes back to how it was before the delete.
+      const edited = _undoEdited[k] || new Set();
+      d[k] = [..._undoSnap[k].map(r => (edited.has(r.id) ? r : cur.get(r.id) || r)), ...d[k].filter(r => !was.has(r && r.id))];
     } else d[k] = _undoSnap[k];
   }
-  _undoSnap = null; _undoKeys = new Set();
+  _undoSnap = null; _undoKeys = new Set(); _undoEdited = {};
   writeData(d);
   res.json({ ok: true });
 });
@@ -9505,7 +9522,9 @@ app.put('/api/desk-colours', (req, res) => {
 // then a food ticket voided with no manager at all.
 // What a loyalty point is worth is money off too (4 Oct '26: a waiter's till set
 // it to 1 point = $1, and the close trusts that rate).
-const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'tipPresets', 'terminal', 'cardTypes', 'loyaltyPointsPerDollar'];
+// Job titles are here because a title IS a power (Oct '26 hunt): a waiter's
+// till renamed "staff" to "manager" and every waiter came back a manager.
+const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'tipPresets', 'terminal', 'cardTypes', 'loyaltyPointsPerDollar', 'staffRoles', 'staffRoleRename'];
 app.put('/api/settings', (req, res) => {
   const data = readData();
   if (MONEY_SETTINGS.some(k => req.body && req.body[k] !== undefined) && !managerFromReq(req, data)) {
@@ -10135,7 +10154,11 @@ app.put('/api/settings', (req, res) => {
     BUILT_IN_ROLES.forEach(r => { if (before.includes(r) && !next.includes(r)) next.push(r); });
     // A rename carries the people who hold the title with it.
     const ren = req.body.staffRoleRename;
-    if (ren && typeof ren === 'object' && !BUILT_IN_ROLES.includes(ren.from) && next.includes(String(ren.to || '').trim())) {
+    // Nobody is renamed INTO a built-in title either: that hands its powers to
+    // everyone who held the old one.
+    const into = String((ren && ren.to) || '').trim();
+    if (ren && typeof ren === 'object' && BUILT_IN_ROLES.includes(into.toLowerCase())) return res.status(400).json({ error: 'Manager, chef and trainee are given person by person, not by renaming a title' });
+    if (ren && typeof ren === 'object' && !BUILT_IN_ROLES.includes(ren.from) && next.includes(into)) {
       (data.staff || []).forEach(st => { if (st.role === ren.from) st.role = String(ren.to).trim(); });
     }
     data.settings.staffRoles = next;
@@ -13361,6 +13384,7 @@ app.post('/api/orders', (req, res) => {
     };
     if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
     callFirstFood(data, order, items, order.rounds[0].sentAt);
+    order.notesSig = tableNotesSig(data, order);
     data.orders.push(order);
     data.ticketCounter += 1;
     writeData(data);
@@ -13505,6 +13529,14 @@ function callFirstFood(data, order, roundItems, at) {
   order.firedCourses = { ...fired, [first]: at };
   order.calledAwayAt = Math.max(order.calledAwayAt || 0, at);
 }
+// The table's notes as the kitchen last saw them: a notes-only round rides out
+// only when they changed (Oct '26 hunt — every tap of an idle Send printed the
+// allergy slip again and un-printed the bill).
+function tableNotesSig(data, order) {
+  if (!order || order.orderType !== 'dine-in') return '';
+  for (const fp of data.floorPlans || []) for (const t of fp.tables || []) if (String(t.label) === String(order.table)) return JSON.stringify(t.notes || []);
+  return '';
+}
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
   // A RESTORE (undo of a removed sent line) puts the line back on the ticket
@@ -13526,7 +13558,9 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   // A NEW ROUND UN-PRINTS THE BILL. The mark stayed lit after more was
   // ordered, so Bill looked done and the table kept its bill colour while
   // the guest held a total missing the last round (owner, Sep '26).
-  if (!restore && order.billPrinted) order.billPrinted = false;
+  // Only DISHES un-print it: a notes-only round changes nothing on the bill.
+  if (!restore && order.billPrinted && items.length) order.billPrinted = false;
+  order.notesSig = tableNotesSig(data, order);
   // An Undo takes the void back, so it stops counting as one (§ Is this you?).
   if (restore && order.emptiedCalls) {
     items.forEach(i => { const n = i.course || 1, at = order.emptiedCalls[n];
@@ -13597,6 +13631,8 @@ app.post('/api/orders/:id/rounds', (req, res) => {
       !(String(req.body.quickNote || '').trim() || (order.orderType === 'dine-in' && order.table))) {
     return res.status(400).json({ error: 'Round has no items' });
   }
+  // Notes the kitchen already has go nowhere: the ticket comes back untouched.
+  if ((!fresh || fresh.length === 0) && !String(req.body.quickNote || '').trim() && order.notesSig != null && order.notesSig === tableNotesSig(data, order)) return res.json(order);
   ringRound(data, order, fresh, req.body, staffName, sendKey);
   res.json(order);
 });
@@ -15851,6 +15887,9 @@ const MONEY_FMT = new Intl.NumberFormat('en-AU', { minimumFractionDigits: 2, max
 function amtBox(n) { return MONEY_FMT.format(Math.max(0, n || 0)); }
 function unComma(v) { return String(v == null ? '' : v).replace(/[,\s$]/g, ''); }
 function money(n) { return (n < -0.005 ? '-$' : '$') + MONEY_FMT.format(Math.abs(n)); }
+// A price on a list of prices (the docket, a bill): money's own figures, comma and
+// all, without the $ every line would otherwise repeat (6 Oct '26).
+function priceNum(n) { return (n < -0.005 ? '-' : '') + MONEY_FMT.format(Math.abs(n)); }
 
 // One consistent on/off control everywhere: the same green/red "On/Off" pill the
 // menu/category list rows use. `isOn` = current state; the pill sends the
@@ -17536,7 +17575,7 @@ function builtInRoleRefused() {
 function updateStaffRole(idx, v) {
   const was = staffRoles()[idx], to = String(v || '').trim();
   if (was === to || !to) return;
-  if (BUILT_IN_ROLES.includes(was)) { builtInRoleRefused(); return; }
+  if (BUILT_IN_ROLES.includes(was) || BUILT_IN_ROLES.includes(to.toLowerCase())) { builtInRoleRefused(); return; }
   const list = staffRoles().map((r, i) => i === idx ? to : r);
   state.settings.staffRoles = list;
   (state.staffList || []).forEach(st => { if (st.role === was) st.role = to; });
@@ -22118,6 +22157,8 @@ function closeCheckout() {
   // A tip typed on a part-paid bill waits for the last part (the parts fill
   // the bill first), so it is kept for this bill, not binned on the way out.
   state._keptTip = splitPaidList().length && state.openOrderId ? { orderId: state.openOrderId, tip: parseFloat(state.cardTip) || 0 } : null;
+  // The card picked is this payment's: an Amex picked and cancelled stayed lit for the next table (Oct '26 hunt).
+  state.cardType = null;
   state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.cardAmount = ''; state.cardTip = 0; render();
 }
 
@@ -22725,7 +22766,11 @@ function cartSendable() {
   if (state.cart.length) return true;
   if (state.stagedCallAway) return true; // a staged call-away rides the Send
   if ((state.quickNote || '').trim()) return true;
-  return state.orderType === 'dine-in' && !!state.table && (state.notes.length > 0);
+  // Notes the kitchen already has are not news: Send stayed lit on every
+  // table with an allergy, and each tap printed the slip again (Oct '26 hunt).
+  if (!(state.orderType === 'dine-in' && !!state.table && state.notes.length > 0)) return false;
+  const oo = activeOpenOrder();
+  return !oo || oo.notesSig == null || oo.notesSig !== JSON.stringify(state.notes);
 }
 function mintLineKey() { return 'ln-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8); }
 // A failed send is spent the moment the cart is dropped or the person leaves:
@@ -23599,6 +23644,26 @@ function render() {
       const rr = rail.getBoundingClientRect(), cr = onChip.getBoundingClientRect();
       const padL = parseFloat(getComputedStyle(rail).paddingLeft) || 0;
       if (cr.left < rr.left + padL - 1 || cr.right > rr.right - 1) rail.scrollLeft += cr.left - rr.left - padL;
+    }
+  }
+  // THE LIT COURSE KEY IS ON SCREEN (Oct '26 hunt): the row slides now, and a
+  // dessert added jumped the docket to Dessert with its key off the edge. Only
+  // when the lit key or the table changed, so a waiter's own slide stays.
+  {
+    const on = document.querySelector('.dkt-courses .course-tab.active');
+    const sig = state.table + '|' + (on ? on.textContent.trim() : '');
+    if (sig !== window._dktCourseSig) {
+      window._dktCourseSig = sig;
+      const row = document.querySelector('.dkt-courses');
+      if (row && row.scrollWidth > row.clientWidth + 2) {
+        if (!on) row.scrollLeft = 0;
+        else {
+          const rr = row.getBoundingClientRect(), cr = on.getBoundingClientRect();
+          const pad = parseFloat(getComputedStyle(row).paddingLeft) || 0;
+          if (cr.left < rr.left + pad - 1) row.scrollLeft += cr.left - rr.left - pad;
+          else if (cr.right > rr.right - pad + 1) row.scrollLeft += cr.right - rr.right + pad;
+        }
+      }
     }
   }
   // Cleared after the events these assignments queued have been delivered.
@@ -26063,12 +26128,12 @@ function renderTicketPanel() {
           // struck through, and the reason rides with it. Otherwise a comped
           // dish just looks like a dish that costs less than the menu says.
           const wasHtml = e.origPrice && e.origPrice > e.price
-            ? `<span class="tl-was">${money(e.origPrice * total)}</span>` : '';
+            ? `<span class="tl-was">${priceNum(e.origPrice * total)}</span>` : '';
           const priceHtml = (isManager
             ? (isSent
-                ? `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="sent" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-oldprice="${e.price}" data-qty="${total}" data-course="${e.course}" data-rm="${esc(removedSig(e))}" onclick="event.stopPropagation();">${(e.price * total).toFixed(2)}</button>`
-                : `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="cart" data-idx="${e.cartIdx}" data-name="${esc(e.name)}" data-oldprice="${e.price}" data-qty="${total}" onclick="event.stopPropagation();">${(e.price * total).toFixed(2)}</button>`)
-            : `${wasHtml}<div class="tl-price">${(e.price * total).toFixed(2)}</div>`);
+                ? `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="sent" data-name="${esc(e.name)}" data-seat="${seatAttr}" data-note="${esc(e.note || '')}" data-oldprice="${e.price}" data-qty="${total}" data-course="${e.course}" data-rm="${esc(removedSig(e))}" onclick="event.stopPropagation();">${priceNum(e.price * total)}</button>`
+                : `${wasHtml}<button class="tl-price tl-price-btn" data-act="edit-docket-price" data-scope="cart" data-idx="${e.cartIdx}" data-name="${esc(e.name)}" data-oldprice="${e.price}" data-qty="${total}" onclick="event.stopPropagation();">${priceNum(e.price * total)}</button>`)
+            : `${wasHtml}<div class="tl-price">${priceNum(e.price * total)}</div>`);
           // Remove control is a cross (✕), not a bin. An UNSENT line — an item
           // "just put through" that hasn't gone to the kitchen — carries the ✕
           // for EVERYONE: any waiter can pull back what they haven't sent yet.
@@ -27292,7 +27357,7 @@ function renderBriefingAdmin() {
   if (!state._briefingLoaded) loadBriefingData();
   const now = new Date();
   const todayKey = rosterDateKey(now);
-  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const dayStart = tradingDayStart(now.getTime()); // the venue's day, as every other "today"
   const dayEnd = dayStart + 86400000;
   const bookings = (state.reservations || [])
     .filter(r => { const t = new Date(r.time).getTime(); return t >= dayStart && t < dayEnd && r.status !== 'cancelled'; })
@@ -27334,7 +27399,14 @@ function renderBriefingAdmin() {
     </div>` : `<div class="ts">Everything available.</div>`}
   </div>
   <div class="settings-card">
-    <div class="th">Staff on — ${onToday.length || 'none rostered'}</div>
+    <div class="th">Staff on — ${(() => {
+      // With the roster linked, who is on is the roster's clock-ins — the
+      // card read "none rostered" over the wages of the people who were on
+      // (Oct '26 hunt). The till's own roster stays for a venue not linked.
+      const w = state.wagesNow;
+      if (isManagerHere() && w && w.linked && !w.error && w.on != null) return w.on || 'nobody clocked in';
+      return onToday.length || 'none rostered';
+    })()}</div>
     ${wagesHtml()}
     ${onToday.map(r => `
       <div class="detail-line" style="align-items:center;gap:8px;">
@@ -30608,8 +30680,8 @@ function clearGiftCardPayment() { state.paymentMethod = 'card'; state.giftCardAp
 // §§ House admin: the day, cash-up, wastage
 function renderHouseAdmin(section) {
   const log = (state.houseLog || []).slice().sort((a, b) => b.at - a.at);
-  const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-  const today = log.filter(e => e.at >= startOfDay.getTime());
+  // The venue's day, not the calendar's: the total dropped to $0 at midnight mid-service (Oct '26 hunt).
+  const today = log.filter(e => e.at >= tradingDayStart(Date.now()));
   const byReason = {};
   today.forEach(e => { byReason[e.reason] = (byReason[e.reason] || 0) + (e.value || 0); });
   const totalToday = today.reduce((s, e) => s + (e.value || 0), 0);
@@ -37022,7 +37094,7 @@ function billDocket(o) {
     const key = i.name + '|' + i.price; const was = by.get(key);
     by.set(key, { name: i.name, qty: (was ? was.qty : 0) + i.qty, price: i.price });
   });
-  const lines = [...by.values()].map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${(l.price * l.qty).toFixed(2)}</span></div>`).join('');
+  const lines = [...by.values()].map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${priceNum(l.price * l.qty)}</span></div>`).join('');
   const paid = (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
   // ONE DOOR, AND YOU CAN SEE IT (owner, 6 Oct '26: "there needs to be clear
   // defined areas"): the table's number, drawn as a key, as the Pass's is.
@@ -46927,6 +46999,10 @@ function handleActClick(el, e) {
         if (back) { state.adminTab = back.tab; state.adminOpenGroups = back.groups || [back.tab]; }
         else { state.adminTab = 'service'; state.adminOpenGroups = ['service']; }
         render();
+        // Its figures are fetched fresh, as the rail's own tile fetches them:
+        // back on Cash-up it showed the takings from before the last sale
+        // while the drawer was being counted (Oct '26 hunt).
+        if (state.adminTab) loadAdminTabData(state.adminTab);
         if (back && back.scroll != null) requestAnimationFrame(() => {
           const sc = document.querySelector('.admin-content'); if (sc) sc.scrollTop = back.scroll;
         });

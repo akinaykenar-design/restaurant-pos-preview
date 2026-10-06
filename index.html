@@ -8710,9 +8710,18 @@ function practiceRefused(req, data, order) {
 // request, or a manager PIN typed into a popup. Anything on the wifi could
 // read every PIN and void paid tickets until Sep '26 — the checks were only
 // in the browser.
+// AND IT CANNOT BE GUESSED (Oct '26 hunt): the header was read with no limit,
+// so a script could try every PIN against any manager route. A PIN that
+// matches nobody on staff counts towards the same lockout as the PIN pad, and
+// a locked-out device proves nothing until it lifts. A waiter's till sends no
+// PIN, so normal use never counts.
 function managerFromReq(req, data) {
   const pins = [req.get('X-Staff-Pin'), req.body && req.body.managerPin].filter(p => typeof p === 'string' && p);
-  return data.staff.find(s => s.role === 'manager' && pins.includes(s.pin)) || null;
+  if (!pins.length) return null;
+  if (pinLockedNow(req)) return null;
+  const m = data.staff.find(s => s.role === 'manager' && pins.includes(s.pin)) || null;
+  if (!m && !data.staff.some(s => pins.includes(s.pin))) pinRecordFailure(req);
+  return m;
 }
 
 // Save a photo the client resized + base64-encoded, writing it as a real file and
@@ -8755,6 +8764,10 @@ function pinRateBlocked(req, res) {
   return false;
 }
 
+function pinLockedNow(req) {
+  const rec = pinAttempts.get(req.ip || req.connection?.remoteAddress || 'unknown');
+  return !!(rec && rec.lockUntil > Date.now());
+}
 function pinRecordFailure(req) {
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   const now = Date.now();
@@ -11173,7 +11186,8 @@ app.post('/api/approve', (req, res) => {
   if (pinRateBlocked(req, res)) return;
   const data = readData();
   const m = managerFromReq(req, data);
-  if (!m) { if (req.body && req.body.managerPin) pinRecordFailure(req); return res.status(401).json({ error: 'Incorrect manager PIN' }); }
+  // A PIN that matches nobody was counted by managerFromReq; a waiter's PIN typed here counts too.
+  if (!m) { if (req.body && req.body.managerPin && data.staff.some(x => x.pin === req.body.managerPin)) pinRecordFailure(req); return res.status(401).json({ error: 'Incorrect manager PIN' }); }
   if (req.body && req.body.managerPin) pinRecordSuccess(req);
   const scopes = Array.isArray(req.body && req.body.scopes) ? req.body.scopes.slice(0, 60).map(String) : [];
   res.json({ by: m.name, tokens: scopes.map(sc => okSign(m, sc)) });
@@ -11722,6 +11736,9 @@ app.get('/api/terminal/purchase/:sid', (req, res) => {
 // the merchant's Linkly username/password for a stored long-lived secret.
 app.post('/api/terminal/pair', async (req, res) => {
   const data = readData();
+  // A manager's job, like every other terminal setting (Oct '26 hunt): anyone
+  // could re-pair card payments to another merchant's account.
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can pair the card terminal' });
   const { username, password, pairCode } = req.body || {};
   if (!username || !password || !pairCode) return res.status(400).json({ error: 'Username, password and the pairing code from the terminal are all required' });
   try {
@@ -13119,7 +13136,40 @@ function checkDiscountExtras(data, discount) {
 // guest's own points (both checked on their own). Anything else carries a
 // manager's PIN — the manager's own till sends it on every request, and a
 // waiter's sends the one the manager typed into the Discount pane.
-function moneyOffRefused(req, data, discount) {
+// Does an automatic rule's WHEN fit THIS bill? The server's copy of the till's
+// ruleMatches: a till saying "this is the staff-meal rule" proved nothing, so a
+// waiter's till closed table 33 at half price under a rule written for one
+// table only (Oct '26 hunt). A public holiday is read off the till's own
+// calendar, which the server does not hold, so that one when is taken on trust.
+function autoRuleFits(p, bill, now) {
+  if (!p.field) return true;
+  if (!bill) return false;
+  const cmp = (a, w, op) => { a = parseFloat(a); w = parseFloat(w); if (isNaN(a) || isNaN(w)) return false; return op === 'atleast' ? a >= w : op === 'atmost' ? a <= w : a === w; };
+  const same = (a, w, op) => (String(a) === String(w)) !== (op === 'isnot');
+  const key = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  switch (p.field) {
+    case 'covers': return cmp(bill.covers || 0, p.value1, p.op);
+    case 'subtotal': return cmp(bill.subtotal, p.value1, p.op);
+    case 'orderType': return same(bill.orderType, p.value1, p.op);
+    case 'weekday': return same(now.getDay(), p.value1, p.op);
+    case 'holiday': return true;
+    case 'table': return same(bill.table == null ? '' : bill.table, p.value1, p.op);
+    case 'date': {
+      const ok = v => /^\d{4}-\d{2}-\d{2}$/.test(String(v || '')); const today = key(now);
+      if (!ok(p.value1)) return false;
+      return p.op === 'between' ? ok(p.value2) && today >= p.value1 && today <= p.value2 : today === p.value1;
+    }
+    case 'time': {
+      const mins = now.getHours() * 60 + now.getMinutes();
+      const parse = v => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(v || '')); return m ? (+m[1]) * 60 + (+m[2]) : null; };
+      const from = parse(p.value1), to = parse(p.value2);
+      if (from === null || to === null) return false;
+      return from <= to ? (mins >= from && mins <= to) : (mins >= from || mins <= to);
+    }
+    default: return false;
+  }
+}
+function moneyOffRefused(req, data, discount, bill) {
   if (!discount || discount.kind === 'surcharge' || !(parseFloat(discount.value) > 0)) return null;
   if (managerFromReq(req, data)) return null;
   if (okValid(data, discount.ok, offScope(discount))) return null;
@@ -13132,7 +13182,7 @@ function moneyOffRefused(req, data, discount) {
     const per = parseInt((data.settings || {}).loyaltyPointsPerDollar, 10) > 0 ? parseInt(data.settings.loyaltyPointsPerDollar, 10) : 20;
     if (parseFloat(discount.value) <= (parseInt(discount.loyaltyPoints, 10) || 0) / per + 0.005) return null;
   }
-  if (discount.auto && (data.discountPresets || []).some(p => p.auto && p.enabled !== false && p.kind !== 'surcharge' && (!discount.ruleId || p.id === discount.ruleId) && same(p))) return null;
+  if (discount.auto && (data.discountPresets || []).some(p => p.auto && p.enabled !== false && p.kind !== 'surcharge' && (!discount.ruleId || p.id === discount.ruleId) && same(p) && autoRuleFits(p, bill, new Date()))) return null;
   if (typeOf(discount.type) === 'percent' && (data.happyHours || []).some(h => h.enabled && h.name === discount.reason && Math.abs((parseFloat(h.discountPercent) || 0) - parseFloat(discount.value)) < 0.005)) return null;
   return 'A manager PIN is needed for money off.';
 }
@@ -13337,7 +13387,7 @@ app.post('/api/orders', (req, res) => {
   if (payKey) { const dup = (data.orders || []).find(o => o.payKey === payKey); if (dup) return res.json(dup); }
   const extrasError = checkDiscountExtras(data, discount);
   if (extrasError) return res.status(400).json({ error: extrasError });
-  const offRefused = moneyOffRefused(req, data, discount);
+  const offRefused = moneyOffRefused(req, data, discount, { covers, subtotal, orderType, table });
   if (offRefused) return res.status(403).json({ error: offRefused });
   const giftCardResult = redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal, isPractice);
   if (giftCardResult.error) return res.status(400).json({ error: giftCardResult.error });
@@ -13806,7 +13856,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   }
   const extrasError = checkDiscountExtras(data, discount);
   if (extrasError) return res.status(400).json({ error: extrasError });
-  const offRefused = moneyOffRefused(req, data, discount);
+  const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table });
   if (offRefused) return res.status(403).json({ error: offRefused });
   // A bill in parts closes only when every part has been taken — otherwise a
   // stray Pay would charge the table for money it has already handed over.
@@ -13951,7 +14001,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // refused on its last part and could never close (Sep '26).
   const itemsTotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   // The discount that sizes a part is held to the same rule as the close's.
-  const partOff = moneyOffRefused(req, data, (req.body || {}).discount);
+  const partOff = moneyOffRefused(req, data, (req.body || {}).discount, { covers: order.covers, subtotal: itemsTotal, orderType: order.orderType, table: order.table });
   if (partOff) return res.status(403).json({ error: partOff });
   const { discountAmount } = computeDiscount(itemsTotal, (req.body || {}).discount, order.items, data);
   const billNow = Math.round((itemsTotal - discountAmount
@@ -14874,6 +14924,13 @@ app.post('/api/register/close', (req, res) => {
   const { cashCounted, staffName } = req.body;
   const closes = data.registerCloses || [];
   const fromTs = closes.length ? closes[closes.length - 1].periodEnd : 0;
+  // ONE CASH-UP PER PERIOD (Oct '26 hunt): a double tap, a retry or a second
+  // manager made a second Z of nothing — the new float "expected", the count
+  // typed against it, a fake +$50 Over, and both printed. The till sends the
+  // period it showed; a period already closed is refused.
+  if (req.body && req.body.periodStart != null && Number(req.body.periodStart) !== fromTs) {
+    return res.status(409).json({ error: 'Already cashed up — this period was closed' });
+  }
   const toTs = Date.now();
   const summary = computePeriodSummary(data, fromTs, toTs);
   const counted = parseFloat(cashCounted);
@@ -19695,6 +19752,8 @@ async function closeRegister() {
           // it before this read it — every cash-up saved a float of 0 (Sep '26).
           nextFloat: state.registerNextFloat != null ? state.registerNextFloat : (document.getElementById('register-next-float-input') || {}).value,
           staffName: state.currentStaff ? state.currentStaff.name : 'Unknown',
+          // The period on screen, so a second tap or a second till cannot close it twice.
+          periodStart: state.registerCurrent ? state.registerCurrent.periodStart : undefined,
         }),
       });
       await loadRegisterData();
@@ -19702,8 +19761,9 @@ async function closeRegister() {
       render();
       armToastTimer(TOAST_LONG);
     } catch (e) {
-      state.toast = toastFail('Could not cash up — check the server.');
-      render();
+      // Already closed elsewhere: say so, and show the period that is open now.
+      state.toast = toastFail(/already cashed up/i.test(e.message || '') ? e.message : 'Could not cash up — check the server.');
+      if (/already cashed up/i.test(e.message || '')) await loadRegisterData(); else render();
     }
   });
 }
@@ -46785,7 +46845,16 @@ function handleActClick(el, e) {
       // on top of a tip an earlier part already carried away (the chips
       // stacked and never lit once a part had gone through, Sep '26). Tip
       // already taken cannot be un-taken, so the total never drops below it.
-      else if (act === 'tip-preset') { const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); const before = cardTipPending(); state.cardTip = Math.round(Math.max(already, p ? (state.payShare ? already + state.payShare.amount * p / 100 : cartTotal() * p / 100) : 0) * 100) / 100; shareCardFollowsTip(before); render(); }
+      else if (act === 'tip-preset') {
+        const p = parseFloat(el.dataset.val) || 0; const already = splitPaidList().reduce((a, x) => a + (x.tip || 0), 0); const before = cardTipPending();
+        // A % OF WHAT THIS CARD PAYS (Oct '26 hunt): with $50 typed for one
+        // guest of a $127 table, 15% put the whole table's $19.05 tip on that
+        // card. A typed part (no ÷ share) is the base, as a share is.
+        const typed = state.paymentMethod === 'card' && !state.payShare && String(state.cardAmount || '') !== '' ? Math.max(0, (parseFloat(state.cardAmount) || 0) - before) : null;
+        const part = state.payShare ? state.payShare.amount : typed != null && typed > 0.005 && typed < amountOwing() - 0.005 ? typed : null;
+        state.cardTip = Math.round(Math.max(already, p ? (part != null ? already + part * p / 100 : cartTotal() * p / 100) : 0) * 100) / 100;
+        shareCardFollowsTip(before); render();
+      }
       else if (act === 'ordertype') {
         // Mode chips live in the bar now — tapping one from ANY view lands on
         // the order screen in that mode. Dine-in has no chip: Order IS dine-in.

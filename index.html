@@ -4870,6 +4870,7 @@ input.tn-field::placeholder{ color:var(--text-secondary); }
 /* On a pad whose only action is Cancel, ✕ takes the corner itself. */
 .qty-pop.covers-pop .qp-actions .icon-action.discard:only-child{ grid-column:-2 / -1; }
 .qty-pop.covers-pop .qp-actions .icon-action.send{ grid-column:-2 / -1; }
+.qty-pop.covers-pop .qp-actions .icon-action.bill{ grid-column:-2 / -1; } /* Dockets' Print all: the action side, across from Close */
 .qty-pop .icon-action svg{ width:18px; height:18px; }
 /* The centred Covers/Seat pops go BIG (owner, 2026-08-08) — service keys,
    not popover keys. Below the compact rules on purpose: these win. */
@@ -4955,6 +4956,8 @@ body[data-theme="dark"] .qty-pop.num-pad .covers-pad-key, body[data-theme="dark"
 .peek-list{ flex:1 1 auto; min-height:0; overflow:auto; width:100%; text-align:left; }
 .peek-course{ font-size:var(--fs-md); font-weight:800; color:var(--charcoal-soft); margin:10px 0 4px; }
 .peek-list .peek-course:first-child{ margin-top:0; }
+/* Dockets: each sent docket's heading carries its own print key. */
+.peek-course.peek-docket{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .peek-line{ display:flex; align-items:baseline; gap:8px; padding:4px 0; font-size:var(--fs-md); }
 .peek-qty{ flex:0 0 auto; font-weight:800; color:var(--green); min-width:28px; font-variant-numeric:tabular-nums; }
 .peek-name{ flex:1; min-width:0; font-weight:600; color:var(--text-primary); }
@@ -20514,7 +20517,10 @@ function seatRowStyle() { const v = state.settings.seatRow; return ['slide', 'wr
 // round back in the cart, seats and prices carried, and nothing goes until
 // Send. The setting says which tabs carry it: none, the drinks tab, or every
 // course. The All tab never does — there "again" could mean anything.
-function sameAgainMode() { const v = state.settings.sameAgain; return v === 'drinks' || v === 'every' ? v : null; }
+// ON FOR DRINKS UNLESS A VENUE SAID OFF (owner, 6 Oct '26: "Build all four",
+// from the tap count — a round of drinks went 7 taps to 4). Off is stored as
+// null; never having been asked is not the same as no.
+function sameAgainMode() { const v = state.settings.sameAgain; if (v === undefined) return 'drinks'; return v === 'drinks' || v === 'every' ? v : null; }
 function sameAgainLines(n) {
   const mode = sameAgainMode();
   if (!mode || state.docketShowAll) return [];
@@ -22594,36 +22600,17 @@ function renderTableNumPop() {
 // entering the table — no lock is taken, nothing changes. Same stationary
 // centred pop as everything else; unlike the must-choose pads, tapping the
 // scrim closes it (it's read-only, there's nothing to decide).
-// Account → Show order: the table's FULL history in the order it happened —
-// one block per docket, stamped with who rang it and at what time.
-// Reprint: sends ONE round (or the whole ticket) back to the printers.
+// Tools → Dockets: the table's FULL history in the order it happened — one
+// block per docket, stamped with who rang it and when, each with its own
+// print key, and Print all at the foot. ONE TILE, NOT TWO (owner, 6 Oct '26:
+// "Build all four"): Show order listed every docket, and Reprint docket
+// listed every docket again to print one. Reading a docket and printing it
+// are one place now.
 function reprintDocket(round) {
-  state.reprintPick = false;
   api(`/api/orders/${state.openOrderId}/reprint-docket`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffName: state.currentStaff ? state.currentStaff.name : 'Unknown', round: round == null ? undefined : round }) })
     .then(() => { state.toast = round && round !== 'all' ? `Round ${round} reprinted.` : 'Docket reprinted.'; render(); armToastTimer(TOAST_SHORT); })
     .catch(e => { state.toast = toastFail(e.message || 'Could not reprint.'); render(); armToastTimer(TOAST_SHORT); });
   render();
-}
-// "Which docket?" — the ticket's rounds, newest first, and the whole ticket.
-function renderReprintPop() {
-  const o = state.orders.find(x => x.id === state.openOrderId);
-  if (!o) return '';
-  const rounds = (o.rounds || []).slice().reverse();
-  return `
-      <div class="pop-scrim"></div>
-      <div class="qty-pop covers-pop peek-pop reprint-pop">
-        <div class="sp-item">Reprint which docket?</div>
-        <div class="peek-list">
-          ${rounds.map(r => `<button type="button" class="peek-round-btn" data-act="acct-go" data-target="reprint-round" data-round="${r.id}">
-            <span class="peek-course" style="margin:0;">Round ${r.id} · ${fmtTime(r.sentAt)}${r.staffName ? ' · ' + esc(r.staffName) : ''}</span>
-            <span class="peek-name" style="display:block;">${(r.items || []).map(i => `${i.qty} × ${esc(i.name)}`).join(', ')}</span>
-          </button>`).join('')}
-          <button type="button" class="peek-round-btn" data-act="acct-go" data-target="reprint-round" data-round="all"><span class="peek-course" style="margin:0;">Whole order</span><span class="peek-name" style="display:block;">${(o.items || []).length} line${(o.items || []).length === 1 ? '' : 's'}</span></button>
-        </div>
-        <div class="qp-actions" style="margin-top:8px;">
-          <button class="icon-action discard" data-act="acct-go" data-target="close-reprint-pick">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        </div>
-      </div>`;
 }
 function renderOrderHistoryPop() {
   const o = state.orders.find(x => x.id === state.openOrderId) || null;
@@ -22654,7 +22641,7 @@ function renderOrderHistoryPop() {
     });
     byCourse.sort((a, b) => a.c - b.c);
     return `
-      <div class="peek-course">Sent · ${fmtTime(r.sentAt)}${(r.staffName || o.staffName) ? ' · ' + esc(r.staffName || o.staffName) : ''}</div>
+      <div class="peek-course peek-docket"><span>Sent · ${fmtTime(r.sentAt)}${(r.staffName || o.staffName) ? ' · ' + esc(r.staffName || o.staffName) : ''}</span><button type="button" class="icon-sq" data-act="acct-go" data-target="reprint-round" data-round="${r.id}" aria-label="Print this docket again">${SYS_PRINTER_SVG}</button></div>
       ${byCourse.map(g => `
         ${g.c ? `<div class="peek-subcourse">${esc(courseInfo(g.c).name)}</div>` : ''}
         ${g.items.map(line).join('')}`).join('')}
@@ -22680,6 +22667,7 @@ function renderOrderHistoryPop() {
         <div class="peek-total"><span>Total</span><span>${money(total)}</span></div>
         <div class="qp-actions" style="margin-top:8px;">
           <button class="icon-action neutral" data-act="close-order-history">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
+          ${o && (o.items || []).length ? `<button class="icon-action bill" data-act="acct-go" data-target="reprint-round" data-round="all">${SYS_PRINTER_SVG}<span class="ia-label">Print all</span></button>` : ''}
         </div>
       </div>`;
 }
@@ -23605,7 +23593,6 @@ function render() {
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
     ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
-    ${state.reprintPick ? renderReprintPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.splitAmtPad ? renderSplitAmtPop() : ''}
     ${state.callAway ? renderCallAwayPop() : ''}
@@ -24706,24 +24693,25 @@ new MutationObserver(() => { if (_ddOpen && !document.body.contains(_ddOpen.sel)
 function renderBarPager() {
   // EVERY KEY SAYS WHAT IT IS (owner, Sep '26, from a drawing: "I love it"
   // → "Yes"). It was three bare dots: they said there were pages, never
-  // which, and the table you were on sat off to the right as a tools key
-  // that did not look like a way back. Now the pages are named — Floor, the
-  // table, and on a phone the docket with its count — the lit one is where
-  // you are, and the table's key, pressed where you already are, opens that
-  // table's tools (the old number key's job; one key, not two).
-  const page = state.showTablePicker ? 'floor' : (state.mobileCartOpen ? 'docket' : 'menu');
+  // which. Now the pages are named — Floor, the table, on a phone the docket
+  // with its count — and the lit one is where you are.
+  // TOOLS IS A KEY OF ITS OWN (owner, 6 Oct '26: "Build all four", from the
+  // drawn map). The table's tools hid behind a SECOND tap on the table's key,
+  // and nothing on the screen said so — every waiter, every table. The table
+  // key now only takes you to the table; Tools opens its tools from any page.
+  // (The bar only carries these keys while a table is open — barPagerOn.)
+  const tools = !state.showTablePicker && !state.mobileCartOpen && state.accountMenuOpen;
+  const page = state.showTablePicker ? 'floor' : (state.mobileCartOpen ? 'docket' : (tools ? 'tools' : 'menu'));
   const t = findTableById(state.table);
   const phone = payPhone();
   const tableWord = t ? (phone ? String(t.label) : 'Table ' + t.label) : 'Menu';
   const n = phone ? state.cart.reduce((a, l) => a + (l.qty || 0), 0) : 0;
-  const key = (k, label, extra) => {
-    const tools = k === 'menu' && page === 'menu' && t;
-    return `<button class="${page === k ? 'active' : ''}${tools && state.accountMenuOpen ? ' held-open' : ''}" data-act="${tools ? 'toggle-account-menu' : 'bar-page'}" data-val="${k}" aria-label="${esc(tools ? 'Table ' + t.label + ' tools' : label)}">${esc(label)}${extra || ''}</button>`;
-  };
+  const key = (k, label, extra) => `<button class="${page === k ? 'active' : ''}" data-act="bar-page" data-val="${k}" aria-label="${esc(label)}">${esc(label)}${extra || ''}</button>`;
   return `<span class="staff-badge bar-pager track">
     ${key('floor', 'Floor')}
     ${key('menu', tableWord)}
     ${phone ? key('docket', 'Docket', n ? `<span class="bar-count">${n}</span>` : '') : ''}
+    <button class="${tools ? 'active' : ''}" data-act="toggle-account-menu" aria-label="${esc(t ? 'Table ' + t.label + ' tools' : 'Tools')}">Tools</button>
   </span>`;
 }
 function renderTopbar() {
@@ -25776,7 +25764,7 @@ const SYS_COINS_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke
 const SYS_DRAWER_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3.11" width="20" height="17.78" rx="2.22"/><path d="M2 12h20"/><path d="M9.78 16.44h4.44"/></svg>`;
 const SYS_MEGAPHONE_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 10.9v2.21a1.1 1.1 0 0 0 1.1 1.1h2.21l4.41 4.41V5.38L5.31 9.79H3.1a1.1 1.1 0 0 0 -1.1 1.1z"/><path d="M14.14 7.59a4.41 4.41 0 0 1 0 8.83"/><path d="M17.45 4.28a8.83 8.83 0 0 1 0 15.45"/></svg>`;
 const SYS_KITCHEN_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11h16v5a4 4 0 0 1 -4 4H8a4 4 0 0 1 -4 -4z"/><path d="M2 11h20"/><path d="M9 7V5M12.5 7V4M16 7V5"/></svg>`;
-// Shifts. The hourglass is spoken for by Stale tables.
+// Shifts.
 const SYS_CLOCK_SVG = `<svg class="sys-i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6.5V12l4 2.5"/></svg>`;
 // Roster — who works when. A person inside the month block keeps it
 // clear of Bookings (a plain calendar) and Import (a bare grid).
@@ -25855,11 +25843,9 @@ const ACCT_PIN_KEY = {
   'toggle-notes-panel': 'notes',
   'toggle-quick-note': 'quickNote', 'toggle-callaway': 'callAway',
   'toggle-auto-course-order': 'auto', 'open-customer-pane': 'customer',
-  'reprint-docket': 'reprint', 'open-move-items': 'move',
-  // Show order had no pin key, so its tile could not be held to pin and wore
-  // no badge — the one tile in the account that could not go on the docket
-  // (owner, Aug '26). Off by default, like customer, reprint and move.
-  'show-order-history': 'showOrder',
+  // Dockets is Show order and Reprint in one tile (6 Oct '26); it keeps the
+  // reprint pin, and a docket that had either pinned shows the one key.
+  'dockets': 'reprint', 'open-move-items': 'move',
 };
 function docketPinned(key) {
   // The Covers PIN is a pin like the others. It used to BE the venue's covers
@@ -26037,9 +26023,8 @@ function renderTicketPanel() {
           ${sc.callAway !== false ? `<button class="tkt-icon-btn lg glyph-btn ${state.callAway ? 'active held-open' : ''}${Object.keys(state.firedCourses).length ? ' has-fired' : ''}" data-act="toggle-callaway" aria-label="Call away">${DKT_FLAME_SVG}</button>` : ''}
           ${sc.auto === true ? `<button class="tkt-icon-btn lg glyph-btn ${autoCourseOn() ? 'active' : ''}" data-act="toggle-auto-course-order" aria-label="Auto course">${DKT_AUTO_SVG}</button>` : ''}
           ${sc.customer === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.customerPane ? 'active held-open' : state.attachedCustomerId ? 'active' : ''}" data-act="acct-go" data-target="open-customer-pane" aria-label="Customer">${DKT_CUSTOMER_SVG}</button>` : ''}
-          ${sc.reprint === true ? `<button class="tkt-icon-btn lg glyph-btn" data-act="acct-go" data-target="reprint-docket" aria-label="Reprint">${SYS_PRINTER_SVG}</button>` : ''}
+          ${sc.reprint === true || sc.showOrder === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.orderHistoryPop ? 'active held-open' : ''}" data-act="acct-go" data-target="dockets" aria-label="Dockets">${SYS_PRINTER_SVG}</button>` : ''}
           ${sc.move === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.moveItems ? 'active held-open' : ''}" data-act="acct-go" data-target="open-move-items" aria-label="Move items">${SYS_SWAP_SVG}</button>` : ''}
-          ${sc.showOrder === true ? `<button class="tkt-icon-btn lg glyph-btn ${state.orderHistoryPop ? 'active held-open' : ''}" data-act="acct-go" data-target="show-order-history" aria-label="Show order">${SYS_CLIPBOARD_SVG}</button>` : ''}
         </div>`;
         // All shortcuts off → no row at all, so the head can collapse too.
         return row.includes('<button') ? row : '';
@@ -30871,7 +30856,6 @@ const ADMIN_SECTIONS = [
   { group: 'Dashboard', children: [
     { key: 'briefing', label: 'Briefing' },
     { key: 'register', label: 'Cash-up' },
-    { key: 'stale', label: 'Stale tables' },
     { key: 'orders', label: 'Sales' },
     { key: 'table-history', label: 'Table history' },
     { key: 'kitchen', label: 'Kitchen' },
@@ -30995,7 +30979,6 @@ const svgInner = (s) => s.replace(/^[\s\S]*?<svg[^>]*>/, '').replace(/<\/svg>[\s
 const PIN_PAGE_ICON = {
   'briefing': svgInner(SYS_BRIEF_SVG),
   'register': svgInner(SYS_COINS_SVG),
-  'stale': svgInner(SYS_HOURGLASS_SVG),
   'orders': svgInner(SYS_CHART_SVG),
   'table-history': svgInner(SYS_RECEIPT_SVG),
   'reservations': svgInner(SYS_CALENDAR_SVG),
@@ -31237,7 +31220,6 @@ function renderAdminView() {
         : state.adminTab === 'table-history' ? renderTableHistoryView()
         : state.adminTab === 'house' ? renderHouseAdmin('wastage')
         : state.adminTab === 'stock-count' ? renderHouseAdmin('stock')
-        : state.adminTab === 'stale' ? renderStaleAccounts()
         : state.adminTab === 'register' ? renderRegisterAdmin()
         : state.adminTab === 'expenses' ? renderExpensesAdmin()
         : (typeof state.adminTab === 'string' && state.adminTab.endsWith('-hub')) ? renderAdminGroupHub(state.adminTab.slice(0, -4))
@@ -36542,45 +36524,6 @@ async function refreshTableLocks() {
 // Admin "Service" page — the two floor actions that live nowhere else.
 // Everything that duplicated another admin page was cut (owner, Sep '26):
 // this page holds ONLY jobs without a home, not shortcuts.
-// A tab's last activity = the most recent round it sent (fresh tables that
-// have rung nothing fall back to when they opened). Stale = nothing's moved on
-// it for a while, so a table's likely finished but never cashed out.
-function orderLastActivity(o) {
-  let last = o.createdAt || 0;
-  (o.rounds || []).forEach(rd => { if ((rd.sentAt || 0) > last) last = rd.sentAt; });
-  return last;
-}
-function staleTickets(thresholdMin) {
-  const cut = thresholdMin * 60000;
-  const now = Date.now();
-  return state.orders
-    .filter(o => o.status === 'open' && o.orderType === 'dine-in' && (now - orderLastActivity(o)) >= cut)
-    .map(o => ({ o, idle: Math.floor((now - orderLastActivity(o)) / 60000) }))
-    .sort((a, b) => b.idle - a.idle);
-}
-// Open tables that have gone quiet — a nudge to cash them out or check in.
-function renderStaleAccounts() {
-  const threshold = 30;
-  const rows = staleTickets(threshold);
-  return `
-    <div class="th">Stale tables</div>
-    ${rows.length === 0 ? `<div class="empty-hist">No stale tables.</div>` : `
-    <div style="max-width:var(--admin-list-w,640px);">
-      ${rows.map(({ o, idle }) => {
-        const t = allTables().find(x => String(x.label) === String(o.table));
-        const total = o.items ? o.items.reduce((s, i) => s + i.price * i.qty, 0) : 0;
-        const idleLabel = idle >= 60 ? `${Math.floor(idle / 60)}h ${idle % 60}m` : `${idle}m`;
-        return `
-        <button class="order-row" data-act="stale-go" data-id="${t ? t.id : ''}" style="width:100%;text-align:left;cursor:pointer;">
-          <div class="order-info">
-            <div class="t1">Table ${esc(o.table)}${o.covers ? ` · ${o.covers} cover${o.covers === 1 ? '' : 's'}` : ''}${o.staffName ? ` · ${esc(o.staffName)}` : ''}</div>
-            <div class="t2">${o.items ? o.items.reduce((s, i) => s + i.qty, 0) : 0} items · ${money(total)} · opened ${fmtTime(o.createdAt)}</div>
-          </div>
-          <span class="status-chip ${idle >= 60 ? 'void' : 'course'}">idle ${idleLabel}</span>
-        </button>`;
-      }).join('')}
-    </div>`}`;
-}
 // No Sale — open the cash drawer without a transaction (make change, etc.).
 async function noSaleDrawer() {
   try {
@@ -36644,9 +36587,8 @@ function renderAccountMiddle() {
     ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
     ['toggle-auto-course-order', DKT_AUTO_SVG, 'Auto course', autoCourseOn() ? 'On' : 'Off'],
     ['open-customer-pane', DKT_CUSTOMER_SVG, 'Customer', attached ? attached.name : '—'],
-    ['reprint-docket', SYS_PRINTER_SVG, 'Reprint docket', ''],
+    ['dockets', SYS_PRINTER_SVG, 'Dockets', sentCount ? 'read or reprint' : 'nothing sent'],
     ['open-move-items', SYS_SWAP_SVG, 'Move items', sentCount ? `${sentCount} sent` : 'nothing sent'],
-    ['show-order-history', SYS_CLIPBOARD_SVG, 'Show order', sentCount ? `${sentCount} sent` : 'nothing sent'],
   ];
   return `
   <div class="middle-view">
@@ -47045,9 +46987,14 @@ function handleActClick(el, e) {
         state._tillReturn = { onOrder: state.view === 'order' && !state.showTablePicker && !!state.table, table: state.table };
         state.view = 'admin';
         // Come back to where you WERE — page and exact scroll spot (owner,
-        // Aug '26). First visit of the session starts on Service as before.
+        // Aug '26). The first visit opens on the page this device used LAST
+        // (owner, 6 Oct '26: "Build all four") — it always opened on Service,
+        // two tiles, so every trip to Admin began with a tap to leave it.
+        // Service is only the start for a device that has never been in.
         const back = state._adminReturn;
+        let last = null; try { last = localStorage.getItem('pos-admin-tab'); } catch (e) {}
         if (back) { state.adminTab = back.tab; state.adminOpenGroups = back.groups || [back.tab]; }
+        else if (last && adminPageMeta(last)) { state.adminTab = last; openAdminGroupFor(last); }
         else { state.adminTab = 'service'; state.adminOpenGroups = ['service']; }
         render();
         // Its figures are fetched fresh, as the rail's own tile fetches them:
@@ -47385,7 +47332,13 @@ function handleActClick(el, e) {
       else if (act === 'pick-callaway') { const n = parseInt(el.dataset.val); state.callAwayPick = state.callAwayPick === n ? null : n; render(); }
       else if (act === 'fire-course') { const n = parseInt(el.dataset.val); if (!n) return; state.callAwayPick = null; stageCourse(n); }
       else if (act === 'open-table-picker') { openTablePicker(); }
-      else if (act === 'toggle-account-menu') { state.accountMenuOpen = !state.accountMenuOpen; render(); }
+      else if (act === 'toggle-account-menu') {
+        // From the floor or the phone's docket, Tools goes to the table AND
+        // opens its tools — the same doors the bar's other keys use.
+        if (!state.accountMenuOpen && state.showTablePicker) { if (state.moveItemsPicking || !state.table) return; state.accountMenuOpen = true; closeTablePicker(() => { state.pickFlashId = null; }); return; }
+        if (!state.accountMenuOpen && state.mobileCartOpen) { state.accountMenuOpen = true; closeMobileCart(); return; }
+        state.accountMenuOpen = !state.accountMenuOpen; render();
+      }
       else if (act === 'acct-go') {
         if (_suppressLineTap) { _suppressLineTap = false; return; } // a hold pinned it — don't also run it
         const target = el.dataset.target;
@@ -47400,20 +47353,11 @@ function handleActClick(el, e) {
           render();
           api('/api/customers').then(c => { state.customers = c; render(); }).catch(() => {});
         }
-        else if (target === 'reprint-docket') {
-          const o = state.orders.find(x => x.id === state.openOrderId);
-          if (!o || !(o.items || []).length) { state.toast = toastFail('Nothing sent yet.'); render(); armToastTimer(TOAST_SHORT); }
-          // WHICH docket (owner, Sep '26): with more than one round on the
-          // ticket a pop asks; a single round goes straight to the printer.
-          else if ((o.rounds || []).length > 1) { state.reprintPick = true; render(); }
-          else reprintDocket(null);
-        }
-        else if (target === 'reprint-round') { reprintDocket(el.dataset.round === 'all' ? 'all' : parseInt(el.dataset.round)); }
-        else if (target === 'close-reprint-pick') { state.reprintPick = false; render(); }
-        else if (target === 'show-order-history') {
+        else if (target === 'dockets') {
           if (!state.openOrderId && !state.cart.length) { state.toast = toastFail('Nothing on the order yet.'); render(); armToastTimer(TOAST_SHORT); }
           else { state.orderHistoryPop = true; if (state.openOrderId) refreshOrders().then(() => render()).catch(() => {}); render(); }
         }
+        else if (target === 'reprint-round') { reprintDocket(el.dataset.round === 'all' ? 'all' : parseInt(el.dataset.round)); }
         else if (target === 'open-move-items') {
           const o = state.orders.find(x => x.id === state.openOrderId);
           if (!o || !(o.items || []).length) { state.toast = toastFail('Nothing sent yet.'); render(); armToastTimer(TOAST_SHORT); }
@@ -47445,12 +47389,6 @@ function handleActClick(el, e) {
         state.showTablePicker = false; state.view = 'admin'; state.adminTab = tab;
         render();
         loadAdminTabData(tab);
-      }
-      else if (act === 'stale-go') {
-        const t = findTableById(el.dataset.id);
-        state.view = 'order'; state.orderType = 'dine-in'; state.showTablePicker = false;
-        render();
-        if (t) pickTable(t.id);
       }
       else if (act === 'close-motd-modal') { state.motdModal = null; render(); }
       else if (act === 'save-motd') { saveVenueSettings({ messageOfTheDay: (document.getElementById('motd-input') || {}).value || '' }); state.motdModal = null; state.toast = 'Message of the day saved'; armToastTimer(TOAST_SHORT); }
@@ -48596,7 +48534,7 @@ function handleActClick(el, e) {
         // Off the floor by the bar is THE way back now the swipe is gone (1 Oct
         // '26), so it slides away like a pick does instead of simply vanishing.
         else if (v === 'menu' && state.showTablePicker) closeTablePicker(() => { state.pickFlashId = null; });
-        else if (v === 'menu') { resetFloorPicker(); if (state.mobileCartOpen) closeMobileCart(); else render(); }
+        else if (v === 'menu') { resetFloorPicker(); state.accountMenuOpen = false; if (state.mobileCartOpen) closeMobileCart(); else render(); }
         else if (v === 'docket') { resetFloorPicker(); if (!state.mobileCartOpen) openMobileCart(); else render(); }
       }
       else if (act === 'toggle-callaway') { toggleCallAway(); }

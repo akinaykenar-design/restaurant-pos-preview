@@ -43869,7 +43869,8 @@ async function saveStaffRole(id, role) {
     state.staffList = await api('/api/staff');
     state.toast = 'Job title updated';
   } catch (e) {
-    state.toast = toastFail('Could not update role.');
+    // The server's reason, when it has one ("Keep at least one manager") — it was thrown away (Oct '26 hunt).
+    state.toast = toastFail(e.message && e.message !== 'Request failed' ? e.message : 'Could not update role.');
   }
   render();
 }
@@ -43938,15 +43939,19 @@ async function saveBulkStaff() {
   const role = state.bulkStaffModal && state.bulkStaffModal.role;
   const ids = (state.selectedStaffIds || []).slice();
   if (!role || !ids.length) { state.bulkStaffModal = null; render(); return; }
-  try {
-    for (const id of ids) {
-      const s = state.staffList.find(x => x.id === id);
-      if (s) await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: s.name, role }) });
-    }
-    state.bulkStaffModal = null; // selection stays for chaining more actions
-    state.staffList = await api('/api/staff');
-    render();
-  } catch (e) { state.toast = toastFail('Could not update roles.'); render(); }
+  // EVERY ONE IS TRIED, and what was refused says why (Oct '26 hunt): the first
+  // refusal stopped the loop, leaving half the selection changed and no word why.
+  let refused = 0, why = '';
+  for (const id of ids) {
+    const s = state.staffList.find(x => x.id === id);
+    if (!s) continue;
+    try { await api(`/api/staff/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: s.name, role }) }); }
+    catch (e) { refused++; why = why || (e.message && e.message !== 'Request failed' ? e.message : ''); }
+  }
+  state.bulkStaffModal = null; // selection stays for chaining more actions
+  try { state.staffList = await api('/api/staff'); } catch (e) {}
+  if (refused) { state.toast = toastFail(`${refused} not changed${why ? ' — ' + why : ''}`); armToastTimer(TOAST_LONG); }
+  render();
 }
 
 function openAddMenuItem() {

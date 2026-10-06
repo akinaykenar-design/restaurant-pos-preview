@@ -20348,7 +20348,7 @@ function billSplitParts() {
     billItems().forEach(i => {
       const mi = state.menu.find(m => m.name === i.name);
       const id = (mi && mi.salesCategoryId) || null;
-      const amt = i.price * i.qty;
+      const amt = chargedLineWeight(i);
       if (id) byCat.set(id, (byCat.get(id) || 0) + amt); else other += amt;
     });
     const rows = (state.salesCategories || []).filter(c => byCat.get(c.id))
@@ -20368,7 +20368,7 @@ function billSplitParts() {
     const picks = sp.picks || {};
     const raws = Array(n).fill(0);
     billItems().forEach((it, idx) => {
-      const amt = it.price * it.qty;
+      const amt = chargedLineWeight(it);
       const pick = picks[splitItemKey(it, idx)];
       // A pick outside 1..n-1 (stale after the count shrank, or none) falls
       // to the last bill — the rest is the rest, whatever happened before.
@@ -20407,13 +20407,32 @@ function billSplitParts() {
 // Each seat's share of what is owing: seated lines to their seat, shared
 // lines spread across the seats, cents balanced so the shares add up. The
 // The split pane's split-by-seat paper reads this.
+// WHAT A LINE IS ACTUALLY CHARGED, for weighing one person's share against
+// another's (Oct '26 hunt): shares were weighed on the menu price and the
+// discounted, taxed total spread over them, but a gift voucher is never
+// discounted or taxed and a section-only discount touches its own lines —
+// with a $100 voucher on a 50%-off bill its buyer was asked $74.51 and the
+// other guest $77.49, instead of $100 and $52.
+function chargedLineWeight(i) {
+  const raw = i.price * i.qty;
+  if (i.giftcardSale) return raw;
+  let w = raw;
+  const d = state.discount;
+  if (d && d.value) {
+    const scope = Array.isArray(d.scope) ? d.scope.filter(Boolean) : [];
+    const mi = state.menu.find(m => m.id === i.menuItemId);
+    const base = cartDiscountBase();
+    if (base > 0 && (!scope.length || (mi && scope.includes(mi.category)))) w = raw * (1 - cartDiscountAmount() / base);
+  }
+  return taxCfg().mode === 'exclusive' ? w + taxOn(Math.max(0, w)) : w;
+}
 function seatShares() {
   const openOrder = activeOpenOrder();
   const all = [...(openOrder ? openOrder.items : []), ...state.cart];
   const bySeat = {};
   let shared = 0;
   all.forEach(i => {
-    const amt = i.price * i.qty;
+    const amt = chargedLineWeight(i);
     if (typeof i.seat === 'number') bySeat[i.seat] = (bySeat[i.seat] || 0) + amt;
     else shared += amt;
   });

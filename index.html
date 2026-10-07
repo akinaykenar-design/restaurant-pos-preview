@@ -7778,6 +7778,20 @@ function loadAndMigrate() {
     ['panelOrders', 'railPositions', 'ticketPos', 'appBarPos'].forEach(k => fold(s[k]));
     if (folded) writeData(data);
   }
+  // The layout editor's chain stops welding tables (7 Oct '26). It made the
+  // desk's combination AND welded the tables on tonight's floor, dimmed and
+  // dead for the waiter and never let go. The plan stays (fp.joins); every
+  // weld the editor left behind is let go once.
+  if (!(data.settings || {}).editorWeldsLetGo) {
+    let freed = 0;
+    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+      if (t.mergedInto) { t.mergedInto = null; freed++; }
+      if (t.prevX != null || t.prevY != null) { delete t.prevX; delete t.prevY; }
+    }));
+    data.settings = Object.assign({}, data.settings, { editorWeldsLetGo: true });
+    writeData(data);
+    if (freed) console.log(`Let go of ${freed} welded table(s) — combinations kept`);
+  }
   // Round tables step down once (Sep '26): the circle template went from 8
   // wide to 7.5, and every round already on a floor follows it, or the old
   // tables would sit bigger than new ones of the same size step.
@@ -33463,7 +33477,6 @@ function floorEditorCaption(fp) {
   // Seven words is the admin's cap — say it in six.
   if (state.floorPlacing) return 'tap the floor to place it';
   if (state.floorLinkMode === 'link' || state.linkTapFrom) return 'tap the table to join';
-  if (state.floorLinkMode === 'unlink') return 'tap a joined table to separate';
   return '';   // "N picked · drag one to move all" removed on the owner's word, Sep '26
 }
 function floorLayoutsStrip(fp) {
@@ -33751,12 +33764,6 @@ function renderFloorPlanAdmin(inPlace) {
         ${picking ? `<div class="fp-sub">${selTable ? 'This table' : 'These tables'}</div>` + `<div class="fp-act-row">
         ${/* THE ROW IS ONE FAMILY: every key in it is the 44 square control.
               Four keys, in the order the selection bar uses them. */ ''}
-        ${/* WELDED IS WELDED, FROM EITHER END. The key only offered to UNDO
-              the weld on the follower; on the table that LEADS the pair it
-              still read "link", and the toast pointed you at that leader —
-              so the one table you were told to go to could not undo it
-              (Sep '26). unlinkTapTable already breaks the whole group from
-              the leader; only this key was missing. */ ''}
         ${/* SEVERAL PICKED, ONE PRESS JOINS THEM ALL (owner, Sep '26: "should
               work by selecting tables first then clicking the link icon").
               The last table tapped is also the one this card names, so the
@@ -33765,14 +33772,25 @@ function renderFloorPlanAdmin(inPlace) {
         ${selMany.length > 1
           ? `<button class="icon-sq" data-act="floor-link-mode" data-mode="link">${SYS_LINK_SVG}</button>`
           : selTable
-          ? ((selTable.mergedInto && selTable.mergedInto !== selTable.id) || fp.tables.some(x => x.mergedInto === selTable.id && x.id !== selTable.id)
-            ? `<button class="icon-sq" data-act="unlink-table" data-id="${selected.id}" style="border-color:var(--orange);color:var(--orange);">${SYS_LINK_SVG}</button>`
-            : `<button class="icon-sq" data-act="link-tap-arm" data-id="${selected.id}" style="${state.linkTapFrom === selTable.id ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`)
+          ? `<button class="icon-sq" data-act="link-tap-arm" data-id="${selected.id}" style="${state.linkTapFrom === selTable.id ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`
           : `<button class="icon-sq" data-act="floor-link-mode" data-mode="link" style="${state.floorLinkMode === 'link' ? 'border-color:var(--orange);color:var(--orange);' : ''}">${SYS_LINK_SVG}</button>`}
         <button class="icon-sq" data-act="duplicate-selected-tables" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_COPY_SVG}</button>
         <button class="icon-sq" data-act="${selTable ? 'delete-table' : 'delete-selected-tables'}" ${selTable ? `data-id="${selected.id}" data-fp="${fp.id}"` : ''}>${ACT_TRASH_SVG}</button>
         <button class="icon-sq" data-act="clear-table-selection">${ACT_X_SVG}</button>
       </div>` : ''}
+      ${/* A COMBINATION OPENS FROM ANY OF ITS TABLES (7 Oct '26). The only
+            way back into one was the list on the Admin page, so on the floor
+            in edit mode a saved combination could not be changed or removed
+            at all. The picked table lists the ones it is in; a row is the
+            same door the page's list is — the pad, with Delete in it. */ ''}
+      ${selTable && multi <= 1 ? (() => { const mine = (fp.joins || []).filter(c => c.tables.includes(selTable.id));
+        return mine.length ? `<div class="fp-sub">Joins</div>` + mine.map(c => `
+        <div class="fp-inline-row">
+          <button class="fp-join-row" data-act="join-edit" data-id="${c.id}" data-fp="${fp.id}">
+            <span class="fp-join-name">${esc(joinLabel(fp, c))}</span>
+            <span class="fp-join-seats">${c.min}–${c.max}</span>
+          </button>
+        </div>`).join('') : ''; })() : ''}
       </div>`;
       // A STRUCTURE WEARS THE TABLE'S CARD (owner, Sep '26: "I want structures
       // to have the same editing ability as tables — integrate them into
@@ -38650,185 +38668,6 @@ function transferFxHtml(t) {
 // Link fromId INTO intoId's group. Staff physically push the tables together —
 // the map does the same: the linked table snaps against the main one (same
 // layout only), remembering where it came from so unlink puts it back.
-// Link two tables (or their whole groups). The LOWEST table number runs the
-// joined group — everyone else re-points to it and fades. The dragged table
-// snaps against the one it was dropped on (same layout only), remembering its
-// old spot so unlink puts it back.
-async function linkTables(fromId, intoId, drop, opts) {
-  opts = opts || {};
-  const a = findTableById(fromId);
-  const b = findTableById(intoId);
-  if (!a || !b || a.id === b.id) { render(); return false; }
-  const mainOf = (t) => (t.mergedInto && t.mergedInto !== t.id && findTableById(t.mergedInto)) || t;
-  const ma = mainOf(a), mb = mainOf(b);
-  if (ma.id === mb.id) {
-    // Silent no-ops read as "linking is broken" — say why nothing happened.
-    state.toast = toastFail(`Tables ${String(a.label)} and ${String(b.label)} are already joined.`);
-    render();
-    armToastTimer(TOAST_SHORT);
-    return false;
-  }
-  // A TABLE ANOTHER TILL HAS OPEN IS NOT JOINED (Sep '26): its round, sent
-  // after the join, made a ticket on a table every tap now sends to the other
-  // one — the food had no way in. A manager unlocks it first, as for a move.
-  const held = tableLocksOn() && [a, b, ma, mb].map(t => tableLockedBy(t.id)).find(Boolean);
-  if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return false; }
-  // Lowest number runs the group — UNLESS one side already has an open order:
-  // that table stays in charge so its docket never becomes unreachable. Two
-  // open orders can't be welded; one has to be paid or transferred first.
-  const hasOrder = (t) => state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label));
-  const oa = hasOrder(ma), ob = hasOrder(mb);
-  if (oa && ob) {
-    state.toast = toastFail(`Tables ${String(ma.label)} and ${String(mb.label)} both have open orders — pay or transfer one first.`);
-    render();
-    armToastTimer(TOAST_LONG);
-    return false;
-  }
-  const main = oa ? ma : ob ? mb : (tableLabelCompare(ma, mb) <= 0 ? ma : mb);
-  const demoted = main.id === ma.id ? mb : ma;
-  // Everyone in the demoted side's group (its main included) joins under main.
-  const joining = [demoted, ...allTables().filter(t => t.mergedInto === demoted.id && t.id !== main.id)];
-  const fpB = findFloorPlanForTable(b.id);
-  const fpA = findFloorPlanForTable(a.id);
-  // NOTHING MOVES WHEN TABLES JOIN (owner, Sep '26: "fuck the snapping idea
-  // ... the tables just stay where they are"). A weld used to drag the joined
-  // table against its partner — edge to edge, and later along the row's own
-  // line — and the owner binned the whole idea: a combination is a fact about
-  // the tables, not a rearrangement of the room. The venue laid the room out;
-  // joining two of its tables is not the till's cue to move them. What says
-  // they are joined is a LINE drawn between them, in the picked blue.
-  const weld = null;
-  // Dragging a group's MAIN brings its members along — same shift, so the
-  // arrangement survives instead of the members being stranded behind.
-  const posPatch = new Map();
-  if (weld) {
-    posPatch.set(a.id, weld);
-    const dxw = weld.x - a.x, dyw = weld.y - a.y;
-    for (const m of allTables().filter(m => m.mergedInto === a.id && m.id !== a.id)) {
-      const mfp = findFloorPlanForTable(m.id);
-      if (!mfp || mfp.id !== fpA.id) continue;
-      const mv = clampToFloor(m.x + dxw, m.y + dyw, m.width, m.height, m.rotation, fpA.height);
-      posPatch.set(m.id, { x: mv.x, y: mv.y });
-    }
-  }
-  pushFloorHistory();
-  try {
-    const done = new Set();
-    for (const t of joining) {
-      const fp = findFloorPlanForTable(t.id);
-      if (!fp) continue;
-      const pp = posPatch.get(t.id);
-      const patch = { mergedInto: main.id, ...(pp || {}) };
-      // Remember where it sat before the weld so Unlink can send it home.
-      if (pp && t.prevX == null) { patch.prevX = t.x; patch.prevY = t.y; }
-      await api(`/api/floorplans/${fp.id}/tables/${t.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      Object.assign(t, patch);
-      done.add(t.id);
-    }
-    // …and so do its unsent rounds (§ Drafts): tapping a joined table opens
-    // the main, so a draft left on the partner could never come back.
-    for (const t of joining) if (t.id !== main.id) draftsMove(t.id, main.id);
-    // The joined table's party joins too: its covers and notes (an allergy!)
-    // stayed on the faded table while the order ran on the main, so a dish
-    // went on with no warning (Sep '26). The same call a transfer makes.
-    for (const t of joining) {
-      if (t.id === main.id || !((t.covers || 0) > 0 || (t.notes || []).length || t.discount)) continue;
-      await api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fromId: t.id, toId: main.id, covers: t.covers || 0, notes: t.notes || [], combine: true }) });
-      main.covers = (main.covers || 0) + (t.covers || 0);
-      main.notes = [...(main.notes || []), ...(t.notes || [])];
-      if (t.discount && !main.discount) main.discount = t.discount;
-      t.covers = 0; t.notes = []; t.discount = null;
-      if (state.table === main.id) { state.covers = main.covers; state.notes = main.notes; }
-    }
-    // The dragged side won mainship — its tables aren't in the joining list
-    // but still move to the weld spot.
-    for (const [id, pp] of posPatch) {
-      if (done.has(id)) continue;
-      const fp = findFloorPlanForTable(id);
-      if (!fp) continue;
-      const tt = findTableById(id);
-      const patch = { ...pp };
-      if (tt && tt.prevX == null) { patch.prevX = tt.x; patch.prevY = tt.y; }
-      await api(`/api/floorplans/${fp.id}/tables/${id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
-      if (tt) Object.assign(tt, patch);
-    }
-  } catch (e) { render(); return false; }
-  const n = allTables().filter(t => t.mergedInto === main.id).length;
-  // THE CHAIN IS THE COMBINATION (owner, Sep '26). In the LAYOUT EDITOR,
-  // joining tables is the venue saying "these go together" — so it asks what
-  // the run seats and writes that down for the front desk. On the floor,
-  // joining is just tonight's weld and asks nothing.
-  // A caller joining a whole selection links them a pair at a time and opens
-  // the pad itself, once, over the finished group — so each step here is quiet.
-  if (opts.quiet) { render(); return true; }
-  const inEditor = floorEditorActive();
-  const group = [main.id, ...allTables().filter(t => t.mergedInto === main.id && t.id !== main.id).map(t => t.id)];
-  const fpMain = findFloorPlanForTable(main.id);
-  if (inEditor && fpMain && group.length > 1) {
-    // One piece of news at a time: the pad IS the confirmation here.
-    openJoinPad(fpMain.id, group);
-    return true;
-  }
-  // Plain words: "runs the group of 2" is not how anyone says it (Sep '26).
-  state.toast = `${n + 1} tables joined — order on ${String(main.label)}`;
-  render();
-  armToastTimer(TOAST_SHORT);
-  return true;
-}
-// Unlink tool (Table Layout): tap a faded member to detach just it, tap the
-// lit main to dissolve its whole group. The tool stays armed for chaining and
-// disarms itself once the last link is gone.
-async function unlinkTapTable(tableId) {
-  const t = findTableById(tableId);
-  if (!t) return;
-  if (t.mergedInto && t.mergedInto !== t.id) {
-    pushFloorHistory();
-    await unmergeTable(t.id);
-    state.toast = `Table ${String(t.label)} separated.`;
-  } else {
-    const members = allTables().filter(x => x.mergedInto === t.id && x.id !== t.id);
-    if (!members.length) {
-      state.toast = toastFail(`Table ${String(t.label)} isn't joined.`);
-      render(); armToastTimer(TOAST_SHORT);
-      return;
-    }
-    pushFloorHistory();
-    for (const m of members) await unmergeTable(m.id);
-    state.toast = `Table ${String(t.label)} separated.`;
-  }
-  if (state.floorLinkMode === 'unlink' && !allTables().some(x => x.mergedInto && x.mergedInto !== x.id)) state.floorLinkMode = null;
-  render();
-  armToastTimer(TOAST_SHORT);
-}
-
-async function unmergeTable(tableId) {
-  const table = findTableById(tableId);
-  const fp = findFloorPlanForTable(tableId);
-  if (!table || !fp) return;
-  // Unlink sends the table back to where it sat BEFORE it welded to its
-  // partner (prevX/prevY captured at link time), then clears that memory.
-  const patch = { mergedInto: null };
-  if (table.prevX != null) { patch.x = table.prevX; patch.y = table.prevY; patch.prevX = null; patch.prevY = null; }
-  try {
-    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(patch),
-    });
-    Object.assign(table, patch);
-  } catch (e) {}
-  render();
-}
-
 function renderItemOptionsPop() {
   const item = state.menu.find(m => m.id === state.itemOptions.itemId);
   if (!item) return '';
@@ -39585,7 +39424,12 @@ async function applyFloorSnapshot(fpId, target) {
         fp.joins = (fp.joins || []).concat(made);
       } catch (e) {}
     }
-    // and ones the snapshot never had went with their table on the server
+    // and ones the snapshot never had go: made since, so undone (they used to
+    // stay in the desk's list after the line had gone)
+    const want = new Set(target.joins.map(j => key(j.tables)));
+    for (const j of (fp.joins || []).filter(j => !want.has(key(j.tables)))) {
+      try { await api(`/api/floorplans/${fpId}/joins/${j.id}`, { method: 'DELETE' }); fp.joins = fp.joins.filter(x => x.id !== j.id); } catch (e) {}
+    }
     fp.joins = (fp.joins || []).filter(j => j.tables.every(id => ids.has(id)));
   }
   render();
@@ -39606,10 +39450,14 @@ function floorUndo() {
 // zooms with it; its thickness is held at the picked ring's, whatever the
 // room is magnified to.
 function joinLinesSvg(fp) {
+  // FROM THE PLAN, NOT A WELD (7 Oct '26): every combination draws its run,
+  // neighbour to neighbour, and a pair two combinations share is drawn once.
   const ts = (fp.tables || []).filter(t => t.type !== 'decor');
-  const pairs = ts.filter(t => t.mergedInto && t.mergedInto !== t.id)
-    .map(t => [t, ts.find(x => x.id === t.mergedInto)])
-    .filter(([, main]) => main);
+  const byId = new Map(ts.map(t => [t.id, t]));
+  const seen = new Set(), pairs = [];
+  (fp.joins || []).forEach(c => { const run = joinRunOrder(fp, c.tables);
+    for (let i = 1; i < run.length; i++) { const k = [run[i - 1], run[i]].sort().join('|');
+      if (seen.has(k) || !byId.has(run[i - 1]) || !byId.has(run[i])) continue; seen.add(k); pairs.push([byId.get(run[i - 1]), byId.get(run[i])]); } });
   if (!pairs.length) return '';
   const H = STD_FLOOR_H * FLOOR_ROOM, W = 900 * FLOOR_ROOM;
   return `<svg class="fp-joins" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
@@ -39621,28 +39469,24 @@ function joinLinesSvg(fp) {
 
 // UNLIMITED, IN ONE PRESS (owner, Sep '26: "you can join an unlimited number
 // of tables together, not just two. You select the tables and then you press
-// the link button and then it gives you the combination options"). The tables
-// go under the lowest-numbered one and NOBODY MOVES; the pad then asks what
-// the group seats.
-async function joinTablesTogether(ids) {
-  const ts = ids.map(findTableById).filter(t => t && t.type !== 'decor');
+// the link button and then it gives you the combination options").
+// THE CHAIN WRITES THE PLAN AND NOTHING ELSE (7 Oct '26). It used to weld the
+// tables on tonight's floor as well — dimmed and dead for the waiter, their
+// taps sent to another bill, never let go — and the weld and the plan then
+// drifted apart: Cancel left the weld, Undo took one and kept the other, a
+// refused join stayed half done. The editor says what the tables CAN be; the
+// floor is untouched. The same tables twice open the record they already have.
+function joinTablesTogether(ids) {
+  const ts = [...new Set(ids)].map(findTableById).filter(t => t && t.type !== 'decor');
   if (ts.length < 2) return;
-  const main = ts.slice(1).reduce((low, t) => tableLabelCompare(t, low) < 0 ? t : low, ts[0]);
-  for (const t of ts) {
-    if (t.id === main.id) continue;
-    const ok = await linkTables(t.id, main.id, null, { quiet: true });
-    if (ok === false) return;   // it said why — a second open bill, usually
-  }
-  // WHO LEADS IS NOT ALWAYS THE LOWEST NUMBER: a table with an open bill stays
-  // in charge of its group, so the leader is read back off the tables after the
-  // links land, never assumed.
-  const first = findTableById(ts[0].id);
-  const lead = (first && first.mergedInto && findTableById(first.mergedInto)) || first;
-  const fp = findFloorPlanForTable(lead.id);
-  const group = [lead.id, ...allTables().filter(t => t.mergedInto === lead.id && t.id !== lead.id).map(t => t.id)];
+  const fps = new Set(ts.map(t => (findFloorPlanForTable(t.id) || {}).id));
+  state.floorLinkMode = null; state.linkTapFrom = null;
+  if (fps.size > 1) { state.toast = toastFail('Tables in different rooms can\'t be joined.'); render(); armToastTimer(TOAST_SHORT); return; }
+  const fp = findFloorPlanForTable(ts[0].id);
+  const key = (arr) => [...arr].sort().join('+');
+  const same = (fp.joins || []).find(j => key(j.tables) === key(ts.map(t => t.id)));
   state.selectedAdminTableIds = []; state.selectedAdminTableId = null;
-  if (fp && group.length > 1) openJoinPad(fp.id, group);
-  else render();
+  openJoinPad(fp.id, ts.map(t => t.id), same ? same.id : undefined);
 }
 
 // §§ Table combinations: the join the venue meant
@@ -39656,7 +39500,7 @@ function joinTables(fp, combo) {
   return (combo.tables || []).map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
 }
 function joinLabel(fp, combo) {
-  return joinTables(fp, combo).map(t => String(t.label)).join(' + ');
+  return joinRunOrder(fp, combo.tables || []).map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean).map(t => String(t.label)).join(' + ');
 }
 // THE RUN'S OWN LINE (owner, Sep '26: "those tables are aligned diagonally
 // along an imaginary line"). Order the tables the way they actually sit —
@@ -39664,14 +39508,18 @@ function joinLabel(fp, combo) {
 // means runs of NEIGHBOURS, not every combination of numbers.
 function joinRunOrder(fp, ids) {
   const ts = ids.map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
-  if (ts.length < 3) return ts.map(t => t.id);
+  if (ts.length < 3) return ts.slice().sort(tableLabelCompare).map(t => t.id);
   let a = ts[0], b = ts[1], far = -1;
   for (const p of ts) for (const q of ts) {
     const d = Math.hypot(p.x - q.x, p.y - q.y);
     if (d > far) { far = d; a = p; b = q; }
   }
   const ux = (b.x - a.x) / (far || 1), uy = (b.y - a.y) / (far || 1);
-  return ts.slice().sort((p, q) => (p.x * ux + p.y * uy) - (q.x * ux + q.y * uy)).map(t => t.id);
+  const run = ts.slice().sort((p, q) => (p.x * ux + p.y * uy) - (q.x * ux + q.y * uy));
+  // Read from the low number end, whichever end of the line that is: "21 +
+  // 22 + 23", never "23 + 22 + 21" because 23 happened to sit further left.
+  if (tableLabelCompare(run[0], run[run.length - 1]) > 0) run.reverse();
+  return run.map(t => t.id);
 }
 // Every run of neighbours two long or more, the whole set included.
 function joinRuns(ordered) {
@@ -39709,7 +39557,7 @@ function renderJoinPop() {
   <div class="modal-bg">
     <div class="modal" data-stop="1">
       <h2>${esc(names)}</h2>
-      <div class="sub">Joined. How many does it seat?</div>
+      <div class="sub">How many does it seat?</div>
       <div class="fp-inline-row"><span class="fp-sub fp-sub-flat">Seats from</span>${step('min', p.min, 1)}</div>
       <div class="fp-inline-row"><span class="fp-sub fp-sub-flat">up to</span>${step('max', p.max, p.min)}</div>
       ${p.tables.length > 2 && !p.id ? `<div class="fp-sub">Also make</div>
@@ -39733,6 +39581,7 @@ function joinStep(k, d) {
 async function joinSave() {
   const p = state.tableJoinPad;
   if (!p) return;
+  pushFloorHistory();
   const sets = p.every === 'all' && !p.id ? joinRuns(p.tables) : [p.tables];
   try {
     for (const tables of sets) {
@@ -39755,6 +39604,7 @@ async function joinSave() {
 async function joinDelete() {
   const p = state.tableJoinPad;
   if (!p || !p.id) return;
+  pushFloorHistory();
   try {
     await api(`/api/floorplans/${p.fpId}/joins/${p.id}`, { method: 'DELETE' });
   } catch (e) {
@@ -40491,8 +40341,8 @@ function endFloorDrag() {
     const hit = adminLinkTarget(floorDrag);
     if (hit) {
       state.linkTapFrom = null;
-      linkTables(tableId, hit.t.id, { x: lastX, y: lastY });
       floorDrag = null;
+      joinTablesTogether([tableId, hit.t.id]);
       return;
     }
   }
@@ -40501,17 +40351,12 @@ function endFloorDrag() {
   if (!moved && state.linkTapFrom) {
     const from = state.linkTapFrom;
     state.linkTapFrom = null; state.floorLinkMode = null;
-    if (String(from) !== String(tableId)) linkTables(from, tableId);
+    if (String(from) !== String(tableId)) joinTablesTogether([from, tableId]);
     else render();
     floorDrag = null;
     return;
   }
-  // Unlink tool: a plain tap on a table unlinks it (drag still moves).
-  if (!moved && state.floorLinkMode === 'unlink') {
-    unlinkTapTable(tableId);
-    floorDrag = null;
-    return;
-  }
+
   // A hold that never moved already did its picking; the screen catches up now.
   if (moved && floorDrag.group) {
     // Group move: the members moved rigidly together, so they may not veto
@@ -48012,7 +47857,11 @@ function handleActClick(el, e) {
         const t = findTableById(el.dataset.id);
         const id = el.dataset.id, fp = el.dataset.fp;
         if (refuseDeleteWithBill([id])) return;
-        openConfirm({ message: t && t.type !== 'decor' ? `Delete table ${t.label}?` : `Delete this ${floorThingWord(t)}?`, confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
+        // ITS COMBINATIONS GO WITH IT, AND THE QUESTION SAYS SO (7 Oct '26):
+        // "Delete table 14?" took 13 + 14 with it, unasked.
+        const fpT = findFloorPlanForTable(id);
+        const goes = fpT && t ? (fpT.joins || []).filter(c => c.tables.includes(id)).map(c => joinLabel(fpT, c)) : [];
+        openConfirm({ message: t && t.type !== 'decor' ? `Delete table ${t.label}${goes.length ? ` and ${goes.join(', ')}` : ''}?` : `Delete this ${floorThingWord(t)}?`, confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
       }
       else if (act === 'delete-selected-tables') { deleteSelectedTables(); }
       else if (act === 'pick-table-shape') {
@@ -48067,7 +47916,6 @@ function handleActClick(el, e) {
       else if (act === 'table-size') { stepTableSize(el.dataset.dim, parseInt(el.dataset.d, 10)); }
       else if (act === 'table-nudge') { nudgeSelectedTables(parseInt(el.dataset.dx, 10), parseInt(el.dataset.dy, 10)); }
       else if (act === 'table-seats') { stepTableSeats(parseInt(el.dataset.d, 10)); }
-      else if (act === 'unlink-table') { unlinkTapTable(el.dataset.id); }
       else if (act === 'join-edit') { openJoinPad(el.dataset.fp, [], el.dataset.id); }
       else if (act === 'join-step') { joinStep(el.dataset.k, parseInt(el.dataset.d)); }
       else if (act === 'join-every') { state.tableJoinPad.every = el.dataset.val; render(); }

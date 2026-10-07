@@ -4123,6 +4123,9 @@ body[data-fs-picker] .tbl-cpill i{ width:12px; height:12px; }
    like the band's other icon keys — the mode switch used to hang off the
    right edge, its second key cut in half (measured 301–393 on a 390 screen). */
 @media (max-width:768px){ .fp-band-adm .btn-add.inline{ min-width:44px; width:44px; padding:0; } .fp-band-adm .ba-word{ display:none; } }
+/* EDIT MODE ON THE FLOOR: the floor's pane holds the layout editor, in the
+   admin page's own frame, filling the pane. Done stands at the band's far end. */
+.fp-band-adm .btn-add.inline.fp-done{ margin-left:auto; width:auto; padding:0 16px; flex:none; }
 /* ONE GLYPH SIZE in the square family — icons in these buttons were 18 in some
    places and 20 in others (owner, Aug '26: "icons ... all diff shapes and
    sizes"). The square-controls rule says 20. */
@@ -6439,6 +6442,35 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .ff-key.ff-pay{ background:var(--pay-yellow); border-color:var(--pay-yellow); color:#3A2C00; } /* the same Pay as Bills: yellow, dark ink */
 .ff-none{ padding:12px; font-size:var(--fs-md); color:var(--charcoal-soft); }
 .floor-marker.mk-found{ outline:var(--tbl-sel-ring) solid var(--orange); outline-offset:var(--tbl-sel-gap); }
+
+/* §§ Edit mode: the floor edited in its place
+   The room keeps the whole pane at the size the waiter's floor drew it; the
+   band floats over its top edge and ONE card over its foot — the picked
+   thing's own card, or a single row of everything you can put down. The
+   floor's set-once settings stay on Admin › Floor layout, the same editor. */
+.fp-editing{ position:relative; }
+.fp-edit-pane{ position:absolute; inset:0; }
+.fp-wrap.fp-split.fp-in-place{ position:absolute; inset:0; display:block; margin:0; }
+.fp-split.fp-in-place .fp-card{ position:absolute; inset:0; margin:0; padding:0; border:none; border-radius:0; box-shadow:none; background:var(--steel-100); }
+.fp-split.fp-in-place .fp-main{ position:absolute; inset:0; max-height:none; height:auto;
+  padding:calc(var(--hub-edge) * 2 + 60px) var(--hub-edge) calc(var(--hub-edge) * 2 + 72px); } /* the ground under the band (60) and the tray (72): the room scrolls clear of both */
+.fp-split.fp-in-place .fp-card > .fp-band-adm{ position:absolute; z-index:var(--z-menu);
+  top:var(--hub-edge); left:var(--hub-edge); right:var(--hub-edge); padding:8px;
+  background:var(--surface); border-radius:var(--r-surface); box-shadow:var(--lift-1); }
+.fp-split.fp-in-place #admin-floor-canvas{ width:var(--fp-edit-w, 1600px) !important; max-width:none !important; } /* the room at the floor's own size, measured as the pencil is pressed; the phone's fixed 760 drew its tables at 22 */
+.fp-split.fp-in-place .fp-cap{ position:absolute; z-index:var(--z-menu); left:50%; transform:translateX(-50%);
+  bottom:calc(var(--hub-edge) * 2 + 72px); margin:0; padding:8px 12px; /* just over the tray it came from, never on the tables under the band */
+  background:var(--surface); border-radius:var(--r-surface); box-shadow:var(--lift-1); }
+.fp-split.fp-in-place .fp-rail-side{ position:absolute; z-index:var(--z-menu); order:0;
+  right:var(--hub-edge); bottom:var(--hub-edge); width:clamp(300px, var(--ticket-w, 360px), 460px);
+  max-width:calc(100% - var(--hub-edge) * 2); max-height:calc(100% - 60px - var(--hub-edge) * 3);
+  overflow:auto; margin:0; padding:0; }
+.fp-split.fp-in-place .fp-rail-side > .pp-group{ box-shadow:var(--lift-1); }
+.fp-split.fp-in-place .fp-rail-side.fp-card-up{ bottom:auto; top:calc(var(--hub-edge) * 2 + 60px); } /* a table picked low gets its card high (placeFloorEditCard) */
+.fp-split.fp-in-place .fp-rail-side > .pp-group > .pp-label::before{ content:none; }
+.fp-split.fp-in-place .fp-rail-side:has(.fp-tray){ width:auto; left:var(--hub-edge); right:auto; }
+.fp-split.fp-in-place .fp-tray{ flex-direction:row; flex-wrap:nowrap; align-items:center; overflow-x:auto; padding:8px; height:72px; box-sizing:border-box; } /* one height whichever kind is out, so switching never moves the room's edge */
+.fp-split.fp-in-place .fp-tray > *{ flex:none; display:flex; flex-wrap:nowrap; gap:8px; margin:0; }
 </style>
 <div id="app">Loading…</div>
 <div class="turn-card" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="M12 2v3M10 3.5l2 1.5 2-1.5"/></svg><b>Turn it sideways</b><span>The till works lying down</span></div>
@@ -23474,6 +23506,8 @@ function render() {
   // render(), so guarding here covers every trigger. The pending render is
   // replayed the moment the drag ends (see endSortDrag/up()).
   if (state._sortDragging || state._mockDragging) { state._renderQueuedDuringDrag = true; return; }
+  // Edit mode belongs to the floor: leave the floor and it is over.
+  if (state.floorEdit && !floorEditOn()) leaveFloorEdit();
   // A LENS SWITCHED OFF IS NOT LEFT LIT. Switching Drinks off while it was
   // picked (here or on another till) left the floor washed in it with no key
   // to tap it off (Sep '26). The floor goes back to plain.
@@ -23559,7 +23593,7 @@ function render() {
   // layout jump under the finger (owner: "selecting an item snaps the table
   // layout back"). Anchor the canvas's screen position across the render.
   const fpAnchor = (() => {
-    if (!(state.view === 'admin' && state.adminTab === 'floorplan')) return null;
+    if (!floorEditorActive()) return null;
     const sc = document.querySelector('.admin-content');
     const cv = document.getElementById('admin-floor-canvas');
     return sc && cv ? cv.getBoundingClientRect().top - sc.getBoundingClientRect().top : null;
@@ -23761,6 +23795,7 @@ function render() {
   // A finger still holding a button keeps its sunk look on the rebuilt node.
   tpRepaintAfterRender();   // a poll must not drop the zoom mid-pinch
   fpFitToTables();          // the layout editor lands on the tables, once per floor
+  placeFloorEditCard();     // in place, the picked table's card keeps off the table
   if (state.view === 'admin' && state.adminTab === 'screen') attachPreviewHooks();
   if (_pressState && _pressState.sel && _pressState.sunk) {
     // Exactly one match, or nothing: an ambiguous selector used to light the
@@ -24821,6 +24856,7 @@ function renderTopbar() {
         // menu, which is not there; it searches what the screen shows now —
         // a table by its number, its bill, a seated booking by the guest's
         // name — and the tables it finds light up.
+        if (floorEditOn()) return `<span class="staff-badge bar-search"><button disabled aria-label="Search">${SYS_SEARCH_SVG}</button></span>`;
         if (state.view === 'order' && state.showTablePicker && state.orderType === 'dine-in') {
           const on = state.floorFindOpen || state.floorFind;
           return `<span class="staff-badge bar-search floor-find"><button class="${on ? 'active' : ''}" data-act="floor-find" aria-label="Find a table">${SYS_SEARCH_SVG}</button><input id="floor-find-input" type="text" class="${on ? 'open' : ''}" placeholder="Table or guest…" value="${esc(state.floorFind || '')}" ${on ? '' : 'tabindex="-1"'} autocomplete="off"></span>`;
@@ -33429,7 +33465,7 @@ function floorLayoutsStrip(fp) {
   </div>`;
 }
 
-function renderFloorPlanAdmin() {
+function renderFloorPlanAdmin(inPlace) {
   if (!state.floorPlans.find(f => f.id === state.adminFloorPlanId)) {
     state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
   }
@@ -33496,7 +33532,9 @@ function renderFloorPlanAdmin() {
         ? `<button type="button" class="active" data-act="edit-floorplan" data-id="${f.id}">${esc(f.name)}</button>`
         : `<button type="button" data-act="admin-floorplan-tab" data-id="${f.id}">${esc(f.name)}</button>`).join('')}
     </div>
-    <button type="button" class="btn-add inline" data-act="add-floorplan" aria-label="Add area">+<span class="ba-word"> Area</span></button>
+    ${/* A new area is set up once, so in place it stays on the Admin page and
+          the band keeps its room for Done — a phone could not hold both. */ ''}
+    ${inPlace ? '' : `<button type="button" class="btn-add inline" data-act="add-floorplan" aria-label="Add area">+<span class="ba-word"> Area</span></button>`}
 
     ${/* UNDO WHERE THE HAND IS (Sep '26). After a bad drag the key you want is
           Undo; it was the LAST card in the options column, about 250 below the
@@ -33511,6 +33549,8 @@ function renderFloorPlanAdmin() {
         + `<button class="icon-sq" data-act="floor-redo" aria-label="Redo" ${cr ? '' : 'disabled'} style="${cr ? '' : 'opacity:var(--dim);cursor:default;'}">${ACT_REDO_SVG}</button>`
         + `</div>`;
     })()}
+    ${/* On the floor, the way back out of edit mode — far end of the band. */ ''}
+    ${inPlace ? `<button type="button" class="btn-add inline fp-done" data-act="floor-edit-done">Done</button>` : ''}
   </div>`;
   return fp ? `
   ${/* THE ROOM IN THE MIDDLE, THE OPTIONS DOWN THE RIGHT (owner, Aug '26:
@@ -33519,7 +33559,7 @@ function renderFloorPlanAdmin() {
         options"). Same two columns as the Design page, same card column - the
         map is the work, everything that changes it stands beside it instead of
         in a strip over the top of it. */ ''}
-  <div class="fp-wrap fp-split">
+  <div class="fp-wrap fp-split${inPlace ? ' fp-in-place' : ''}">
     <div class="fp-rail fp-rail-side">
       ${/* TABLES FIRST. The first card a new manager met was about SAVED
             COPIES of the room — a list called "Layouts", on a page called
@@ -33743,6 +33783,19 @@ function renderFloorPlanAdmin() {
         </div>` : ''}
       </div>`;
       };
+      // IN PLACE ON THE FLOOR the room keeps the screen: one card floats over
+      // it, saying only what the moment needs — the picked thing's own card,
+      // or with nothing picked one row of everything you can put down.
+      if (inPlace) {
+        if (selDecor) return decorCard(selStructure ? 'structure' : 'label', '', selDecor);
+        if (picking) return tableCard;
+        // One kind at a time, picked on the tray's own switch: twenty keys in
+        // one row was a palette to read, not a tray to reach into.
+        const grp = ['structure', 'label'].includes(state.fpTrayGroup) ? state.fpTrayGroup : 'tables';
+        const seg = `<div class="seg fp-tray-seg">${[['tables', 'Tables'], ['structure', 'Structure'], ['label', 'Label']].map(([k, l]) =>
+          `<button type="button" class="${grp === k ? 'active' : ''}" data-act="fp-tray-group" data-val="${k}">${l}</button>`).join('')}</div>`;
+        return `<div class="pp-group fp-tray">${seg}${grp === 'tables' ? chipsHtml('') : placeChips(grp)}</div>`;
+      }
       return tableCard + tableJoinCard(fp) + decorCard('structure', 'Structure', selStructure) + decorCard('label', 'Label', selLabel);
     })()}
     ${/* THE COLOUR A NEW TABLE GETS BELONGS WITH ADDING ONE, not in a card of
@@ -33768,6 +33821,7 @@ function renderFloorPlanAdmin() {
     ${/* A CARD EACH AGAIN (owner, Aug '26: "I like the 7 options before").
           Merging them into one "This floor" card saved height but buried three
           separate decisions behind a single heading. */ ''}
+    ${inPlace ? '' : `
     <div class="pp-group">
       <div class="pp-label" data-sub="Every table on this floor at once.">Table size</div>
       ${/* A STEPPER, like every number on the Design page (owner, Aug '26:
@@ -33805,7 +33859,7 @@ function renderFloorPlanAdmin() {
       ${/* Everything that changes the room stands in this one column, in the
             order you would reach for it: what to add, the floor's own
             settings, and last the copies of the room you have kept. */ ''}
-      ${floorLayoutsStrip(fp)}
+      ${floorLayoutsStrip(fp)}`}
     </div>
     ${/* THE ROOM IS A CARD, THE DESIGN PAGE'S OWN (owner, Sep '26: "make it
           look similar, box colours etc"): the area chips on top, the room, a
@@ -37648,7 +37702,10 @@ function fpFloatHtml(fp) {
   const mapKey = `<button class="fp-chip${pass ? '' : ' active'}" data-act="floor-view" data-view="map" data-val="map">Map</button>`;
   const views = state.moveItemsPicking || state.transferFrom ? '' :
     `<div class="fp-float-card fp-float-views track">${mapKey}${viewKey('pass', 'Pass')}${viewKey('timeline', 'Timeline')}${viewKey('bills', 'Bills')}</div>`;
-  const side = `${pass ? '' : stackKey}${billsOn() ? '' : rooms}`;
+  // THE PENCIL (managers): the door into edit mode, beside the room it edits.
+  const editKey = isManagerHere() && !pass && !state.moveItemsPicking && !state.transferFrom && state.settings.tableMode !== 'simple'
+    ? `<div class="fp-float-card fp-float-edit"><button class="fp-chip icon-only" data-act="floor-edit" aria-label="Edit the floor">${SYS_EDIT_SVG}</button></div>` : '';
+  const side = `${pass ? '' : stackKey}${editKey}${billsOn() ? '' : rooms}`;
   if (!side && !views) return '';
   return `
   <div class="fp-float">
@@ -37659,6 +37716,12 @@ function fpFloatHtml(fp) {
 }
 
 function renderTablePickerMiddle() {
+  // EDIT MODE: the floor's own pane holds the layout editor. It wears the
+  // admin page's frame so it is laid out by the same rules, not a copy of them.
+  if (floorEditOn()) return `
+  <div class="middle-view tp-view fp-editing">
+    <div class="fp-edit-pane">${renderFloorPlanAdmin(true)}</div>
+  </div>`;
   const fp = state.floorPlans.find(f => f.id === state.pickerFloorPlanId) || state.floorPlans[0];
   return `
   <div class="middle-view tp-view${state._tpEntering ? ' tp-entering' : ''} fp-floating">
@@ -38104,12 +38167,60 @@ function fpFitToTables() {
   // far enough that the floor's usual table is at least a finger across, and
   // pans from there. On a till it changes nothing: the tables are already
   // bigger than that.
-  const z = fpOpenZoom(main, canvas, fp);
+  // IN PLACE, THE TABLES STAY WHERE THEY WERE: the room is zoomed so the
+  // tables fill the frame exactly as the waiter's floor fits them, so pressing
+  // the pencil does not shrink the room under the manager's eye.
+  // The frame's padding is the ground the band and the tray float over, so
+  // the tables are fitted into what is left between them.
+  const mcs = getComputedStyle(main);
+  const availW = main.clientWidth - (parseFloat(mcs.paddingLeft) || 0) - (parseFloat(mcs.paddingRight) || 0);
+  const availH = main.clientHeight - (parseFloat(mcs.paddingTop) || 0) - (parseFloat(mcs.paddingBottom) || 0);
+  // Never smaller than a finger, though: a phone fitting the whole room drew
+  // its tables at 22, so there it opens at a finger and pans, as its floor does.
+  // Coming from the floor: the room is already drawn at the floor's own size
+  // (--fp-edit-w), so it opens unzoomed with the table that was in the middle
+  // of the floor back under the same spot. Nothing moves when the pencil is pressed.
+  const from = floorEditOn() && state._fpEditFrom; state._fpEditFrom = null;
+  const fromEl = from && canvas.querySelector(`.admin-floor-marker[data-id="${from.id}"]`);
+  if (fromEl) {
+    document.documentElement.style.setProperty('--fp-zoom', 1);
+    document.documentElement.style.setProperty('--fp-w', baseW + 'px');
+    document.documentElement.style.setProperty('--fp-h', baseH + 'px');
+    const r = fromEl.getBoundingClientRect();
+    main.scrollLeft += (r.left + r.width / 2) - from.cx;
+    main.scrollTop += (r.top + r.height / 2) - from.cy;
+    return;
+  }
+  const realW = (fp.tables || []).filter(t => t.type !== 'decor' && t.width > 0).map(t => t.width).sort((a, b) => a - b);
+  const fingerZ = realW.length ? FP_FINGER / (realW[Math.floor(realW.length / 2)] / 100 * baseW) : 0.1;
+  const z = floorEditOn()
+    ? Math.max(0.1, Math.min(3, Math.max(fingerZ, Math.min(availW / (hug.w / 100 * baseW), availH / (hug.h / 100 * baseH)))))
+    : fpOpenZoom(main, canvas, fp);
   document.documentElement.style.setProperty('--fp-zoom', z);
   document.documentElement.style.setProperty('--fp-w', baseW + 'px');
   document.documentElement.style.setProperty('--fp-h', baseH + 'px');
-  main.scrollLeft = Math.max(0, (hug.x0 + hug.w / 2) / 100 * baseW * z - main.clientWidth / 2);
-  main.scrollTop = Math.max(0, (hug.y0 + hug.h / 2) / 100 * baseH * z - main.clientHeight / 2);
+  main.scrollLeft = Math.max(0, (hug.x0 + hug.w / 2) / 100 * baseW * z - availW / 2);
+  main.scrollTop = Math.max(0, (hug.y0 + hug.h / 2) / 100 * baseH * z - availH / 2);
+}
+// IN PLACE THE PICKED TABLE'S CARD NEVER SITS ON THE TABLE. It floats over the
+// foot of the room; a table picked in the lower half would be under its own
+// card, so for that one the card stands at the top instead. Decided ONCE, when
+// the pick is made — a card that flipped after every drag would land under
+// the next finger.
+function placeFloorEditCard() {
+  const rail = document.querySelector('.fp-in-place .fp-rail-side');
+  if (!rail) return;
+  const ids = state.selectedAdminTableIds || [];
+  const id = state.selectedAdminTableId || ids[ids.length - 1] || null;
+  if (!id) { state._fpCardUp = null; rail.classList.remove('fp-card-up'); return; }
+  if (!state._fpCardUp || state._fpCardUp.id !== id) {
+    const m = document.querySelector(`#admin-floor-canvas .admin-floor-marker[data-id="${id}"]`);
+    const main = document.querySelector('.fp-in-place .fp-main');
+    let up = false;
+    if (m && main) { const r = m.getBoundingClientRect(), mr = main.getBoundingClientRect(); up = r.top + r.height / 2 > mr.top + mr.height / 2; }
+    state._fpCardUp = { id, up };
+  }
+  rail.classList.toggle('fp-card-up', !!state._fpCardUp.up);
 }
 function tpCentreOnOpen() {
   const w = document.querySelector('.middle-view .tp-canvas-wrap');
@@ -38633,7 +38744,7 @@ async function linkTables(fromId, intoId, drop, opts) {
   // A caller joining a whole selection links them a pair at a time and opens
   // the pad itself, once, over the finished group — so each step here is quiet.
   if (opts.quiet) { render(); return true; }
-  const inEditor = state.view === 'admin' && state.adminTab === 'floorplan';
+  const inEditor = floorEditorActive();
   const group = [main.id, ...allTables().filter(t => t.mergedInto === main.id && t.id !== main.id).map(t => t.id)];
   const fpMain = findFloorPlanForTable(main.id);
   if (inEditor && fpMain && group.length > 1) {
@@ -39338,7 +39449,22 @@ function jumpToAdminRow(id) {
 const FLOOR_HISTORY_CAP = 50;
 const floorHistory = { fpId: null, undo: [], redo: [] };
 let _floorHistBatch = false;
-function floorEditorActive() { return state.view === 'admin' && state.adminTab === 'floorplan'; }
+// EDIT MODE ON THE FLOOR (owner, 7 Oct '26: "Imagine i could edit the floor
+// layout in its place"). A manager presses the pencil on the floor's dock and
+// the room they are looking at becomes the layout editor — the SAME editor
+// Admin › Floor layout draws, not a second one: one mechanism, two doors. It
+// saves as it goes, exactly as that page does; Done goes back to the floor.
+function floorEditOn() { return !!state.floorEdit && state.view === 'order' && !!state.showTablePicker && isManagerHere(); }
+function floorEditorActive() { return (state.view === 'admin' && state.adminTab === 'floorplan') || floorEditOn(); }
+// Out of edit mode: the floor shows the room that was being edited, and
+// nothing picked or armed in the editor rides along to the next visit.
+function leaveFloorEdit() {
+  if (state.floorEdit && state.adminFloorPlanId) state.pickerFloorPlanId = state.adminFloorPlanId;
+  state.floorEdit = false;
+  state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
+  state.floorPlacing = null; state.floorLinkMode = null; state.linkTapFrom = null;
+  _fpFitFor = null;
+}
 // The snapshot carries the plan's combinations too: deleting a table takes
 // its combination with it, so undo has to be able to put that back as well.
 function _cloneTables(fp) {
@@ -40215,7 +40341,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Delete') return;
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-  if (state.view === 'admin' && state.adminTab === 'floorplan' && (state.selectedAdminTableIds.length || state.selectedAdminTableId)) {
+  if (floorEditorActive() && (state.selectedAdminTableIds.length || state.selectedAdminTableId)) {
     const btn = document.querySelector('[data-act="delete-selected-tables"], [data-act="delete-table"]');
     if (btn) btn.click();
     return;
@@ -42067,7 +42193,7 @@ function typeTableNumber(ch) {
   _numTypeTimer = setTimeout(commitTableNumberTyping, 650);
 }
 document.addEventListener('keydown', (e) => {
-  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField()) return;
+  if (!floorEditorActive() || typingInField()) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (!state.selectedAdminTableId) return; // one table selected → type its number
   const k = e.key;
@@ -42111,7 +42237,7 @@ document.addEventListener('keydown', (e) => {
   // Tab, the arrows, Ctrl+D and Escape are not the floor's: Escape used to
   // empty the pick BEHIND "Delete 2 tables?", leaving its Delete key to
   // close and delete nothing (Sep '26).
-  if (!(state.view === 'admin' && state.adminTab === 'floorplan') || typingInField() || state.confirmDialog) return;
+  if (!floorEditorActive() || typingInField() || state.confirmDialog) return;
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp || !fp.tables.length) return;
   const k = e.key;
@@ -47505,6 +47631,38 @@ function handleActClick(el, e) {
         state.passKeyFor = state.passKeyFor === k ? null : k;
         render();
       }
+      else if (act === 'floor-edit') {
+        // NOTHING JUMPS: before the floor turns into the editor, note the room's
+        // full width as the floor draws it and where the table nearest the
+        // middle sits on screen. The editor draws the room at that width and
+        // scrolls that table back under the same spot (fpFitToTables).
+        const wc = document.querySelector('.middle-view .tp-canvas-wrap .floor-canvas');
+        const fpW = state.floorPlans.find(f => f.id === state.pickerFloorPlanId) || state.floorPlans[0];
+        state._fpEditFrom = null;
+        if (wc && fpW) {
+          const wr = wc.closest('.tp-canvas-wrap').getBoundingClientRect();
+          const mx = wr.left + wr.width / 2, my = wr.top + wr.height / 2;
+          let best = null;
+          wc.querySelectorAll('.floor-marker[data-id]').forEach(m => { const r = m.getBoundingClientRect();
+            const d = Math.hypot(r.left + r.width / 2 - mx, r.top + r.height / 2 - my);
+            if (!best || d < best.d) best = { d, id: m.dataset.id, cx: r.left + r.width / 2, cy: r.top + r.height / 2 }; });
+          const hugW = floorHug(fpW).w;
+          if (best && hugW > 0) {
+            state._fpEditFrom = best;
+            document.documentElement.style.setProperty('--fp-edit-w', Math.round(wc.offsetWidth * tpZoom() / (hugW / 100)) + 'px');
+          }
+        }
+        state.floorEdit = true;
+        const fpE = state.floorPlans.find(f => f.id === state.pickerFloorPlanId) || state.floorPlans[0];
+        state.adminFloorPlanId = fpE ? fpE.id : null;
+        state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
+        state.floorPlacing = null; state.floorLinkMode = null; state.linkTapFrom = null;
+        state.floorFindOpen = false; state.floorFind = ''; state.fpViewOpen = null;
+        _fpFitFor = null;
+        render();
+      }
+      else if (act === 'fp-tray-group') { state.fpTrayGroup = el.dataset.val; state.floorPlacing = null; render(); }
+      else if (act === 'floor-edit-done') { leaveFloorEdit(); render(); tpCentreOnOpen(); }
       else if (act === 'floor-view') {
         state.floorView = ['pass', 'timeline', 'bills'].includes(el.dataset.val) ? el.dataset.val : 'map'; state.billsFilterOpen = false; state.billFindOpen = false; state.billFind = ''; state.floorFindOpen = false; state.floorFind = '';
         try { localStorage.setItem('pos.floorView', state.floorView); } catch (e) {}

@@ -6469,8 +6469,10 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .fp-split.fp-in-place .fp-rail-side.fp-card-up{ bottom:auto; top:calc(var(--hub-edge) * 2 + 60px); } /* a table picked low gets its card high (placeFloorEditCard) */
 .fp-split.fp-in-place .fp-rail-side > .pp-group > .pp-label::before{ content:none; }
 .fp-split.fp-in-place .fp-rail-side:has(.fp-tray){ width:auto; left:var(--hub-edge); right:auto; }
-.fp-split.fp-in-place .fp-tray{ flex-direction:row; flex-wrap:nowrap; align-items:center; overflow-x:auto; padding:8px; height:72px; box-sizing:border-box; --rail-axis:90deg; } /* a row: on a phone its cut end fades like every rail's (data-more) */ /* one height whichever kind is out, so switching never moves the room's edge */
-.fp-split.fp-in-place .fp-tray > *{ flex:none; display:flex; flex-wrap:nowrap; gap:8px; margin:0; }
+.fp-split.fp-in-place .fp-tray{ flex-direction:row; flex-wrap:nowrap; align-items:center; overflow:hidden; padding:8px; height:72px; box-sizing:border-box; } /* one height whichever kind is out */
+.fp-split.fp-in-place .fp-tray-row{ flex:1 1 auto; min-width:0; display:flex; align-items:center; overflow-x:auto; scrollbar-width:none; --rail-axis:90deg; } /* only the pieces slide; its cut end fades like every rail's (data-more) */ /* one height whichever kind is out, so switching never moves the room's edge */
+.fp-split.fp-in-place .fp-tray > .seg{ flex:none; margin:0; }
+.fp-split.fp-in-place .fp-tray-row > *{ flex:none; display:flex; flex-wrap:nowrap; gap:8px; margin:0; }
 
 /* §§ Edit mode: the menu edited in its place
    The pencil closes the section rail; while it is lit the hub wears a band
@@ -15386,6 +15388,12 @@ function tableDims(shape, w, h) {
   return { width: Math.round(w * FLOOR_GRID * 100) / 100, height: Math.round(hh * FLOOR_GRID_Y * 100) / 100 };
 }
 function templateDims(tpl) { return tableDims(tpl.shape, tpl.w, tpl.h); }
+// A WALL OR A LABEL IS A DISTANCE TOO (Big floor law, 7 Oct '26). Their
+// templates were written as shares of the old room, so in a room four times
+// bigger every one dropped four times too big — a Corner 22 squares a side,
+// a "Text" box eight tables wide. The share is taken of the room they were
+// drawn for.
+function decorDims(tpl) { return { width: Math.round(tpl.width / FLOOR_ROOM * 100) / 100, height: Math.round(tpl.height / FLOOR_ROOM * 100) / 100 }; }
 // A new shape keeps the size the owner set: the squares carry over.
 function tableShapePatch(t, shape) { const u = tableUnits(t); return { shape, ...tableDims(shape, u.w, u.h) }; }
 // The size the FLOOR is on: the length most of its tables share (decor
@@ -24065,7 +24073,7 @@ let _lastMenuGridGeom = null;
 async function stepTableSeats(d) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
-  const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : (state.selectedAdminTableIds || []);
+  const ids = floorPickIds();
   for (const id of ids) {
     const t = fp.tables.find(x => x.id === id);
     if (!t || t.type === 'decor') continue;
@@ -24287,7 +24295,7 @@ const _fitCache = new Map();
 // scroll; nothing is written when nothing changed.
 // THE ONE LIST of scrollers that fade at a cut end (DESIGN.md § Fade law).
 // The stylesheet keys on data-more alone, so joining is one entry here.
-const RAIL_ENDS = '.dkt-courses, .kds-view, .kds-allday, .catrail, .seat-pop .seat-grid, .date-pad .hist-days, .fp-band, .fp-float-side, .admin-sidebar, .subcat-seg, .ticket-items, .bill-lines, .middle-view:has(> .pay-pane), .admin-content, .fp-rail-side, .fp-tray, .paper-desk, .screen-ctl-scroll, .roster-scroll, .pass-rows, .tl-rows, .bills, .seat-row.slide, .lg-names';
+const RAIL_ENDS = '.dkt-courses, .kds-view, .kds-allday, .catrail, .seat-pop .seat-grid, .date-pad .hist-days, .fp-band, .fp-float-side, .admin-sidebar, .subcat-seg, .ticket-items, .bill-lines, .middle-view:has(> .pay-pane), .admin-content, .fp-rail-side, .fp-tray-row, .paper-desk, .screen-ctl-scroll, .roster-scroll, .pass-rows, .tl-rows, .bills, .seat-row.slide, .lg-names';
 // THE ENTRANCE IS MEASURED, THEN IT LETS GO (owner, Sep '26: "status icons in
 // floor jitter after expansion... when you hover over them", then "shadow gets
 // activated once expanded"). Two halves of one fault.
@@ -33536,8 +33544,7 @@ function renderFloorPlanAdmin(inPlace) {
   // phone a 28px table wore three 44px keys. One bar, two states — rooms when
   // nothing is picked, the table's own keys when something is. Dragging still
   // moves a table; the arrows are for when a finger is too big for the gap.
-  const pickedIds = state.selectedAdminTableIds.length ? state.selectedAdminTableIds
-    : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
+  const pickedIds = floorPickIds();
   const pickedTables = pickedIds.map(id => (fp.tables || []).find(t => t.id === id)).filter(Boolean);
   const canTurn = pickedTables.some(turnableTable);
   const sizeTables = pickedTables.filter(t => t.type !== 'decor');
@@ -33608,10 +33615,14 @@ function renderFloorPlanAdmin(inPlace) {
   ${(() => {
     // Tool bar (above the canvas): with nothing selected the controls set up
     // what you'll place; select something on the floor and they edit it.
-    const selTable = selected && selected.type !== 'decor' ? selected : null;
-    const selDecor = selected && selected.type === 'decor' ? selected : null;
-    const multi = state.selectedAdminTableIds.length;
-    const selMany = state.selectedAdminTableIds.map(id => fp.tables.find(t => t.id === id)).filter(t => t && t.type !== 'decor');
+    // SEVERAL PICKED IS SEVERAL (7 Oct '26): the card named the last one
+    // tapped — "Table 44 / This table" with three picked — and its keys took
+    // only that one. The card speaks for one thing only when one is picked.
+    const many = floorPickIds().length > 1;
+    const selTable = !many && selected && selected.type !== 'decor' ? selected : null;
+    const selDecor = !many && selected && selected.type === 'decor' ? selected : null;
+    const multi = many ? floorPickIds().length : 0;
+    const selMany = floorPickIds().map(id => fp.tables.find(t => t.id === id)).filter(t => t && t.type !== 'decor');
     const same = (vals) => vals.length && vals.every(v => v === vals[0]) ? vals[0] : null;
     const decorTpl = selDecor ? DECOR_TEMPLATES.find(t => t.key === selDecor.decorType) : null;
     return `
@@ -33838,7 +33849,9 @@ function renderFloorPlanAdmin(inPlace) {
         const grp = ['structure', 'label'].includes(state.fpTrayGroup) ? state.fpTrayGroup : 'tables';
         const seg = `<div class="seg fp-tray-seg">${[['tables', 'Tables'], ['structure', 'Structure'], ['label', 'Label']].map(([k, l]) =>
           `<button type="button" class="${grp === k ? 'active' : ''}" data-act="fp-tray-group" data-val="${k}">${l}</button>`).join('')}</div>`;
-        return `<div class="pp-group fp-tray">${seg}${grp === 'tables' ? chipsHtml('') : placeChips(grp)}</div>`;
+        // The switch stands still and only the pieces slide: the whole tray
+        // used to scroll, carrying Tables · Structure · Label off with it.
+        return `<div class="pp-group fp-tray">${seg}<div class="fp-tray-row">${grp === 'tables' ? chipsHtml('') : placeChips(grp)}</div></div>`;
       }
       return tableCard + tableJoinCard(fp) + decorCard('structure', 'Structure', selStructure) + decorCard('label', 'Label', selLabel);
     })()}
@@ -33918,7 +33931,7 @@ function renderFloorPlanAdmin(inPlace) {
       const [kind, key] = state.floorPlacing.split(':');
       const tpl = kind === 'decor' ? DECOR_TEMPLATES.find(t => t.key === key) : TABLE_TEMPLATES.find(t => t.key === key);
       if (!tpl) return '';
-      const gd = kind === 'decor' ? { width: tpl.width, height: tpl.height } : templateDims(tpl);
+      const gd = kind === 'decor' ? decorDims(tpl) : templateDims(tpl);
       const radius = kind === 'decor' ? '8px' : tableRadiusFor({ shape: tpl.shape, ...gd });
       return `<div id="floor-place-ghost" style="position:absolute;left:-9999px;top:0;width:${gd.width}%;height:${gd.height}%;transform:translate(-50%,-50%);border:2px ${kind === 'decor' ? 'dashed' : 'solid'} var(--orange);border-radius:${radius};background:var(--orange-dim);opacity:0.65;pointer-events:none;z-index:6;display:flex;align-items:center;justify-content:center;font-size:var(--fs-xl);">${kind === 'decor' ? (DECOR_ART[tpl.key] ? `<span style="width:80%;height:80%;display:flex;">${DECOR_ART[tpl.key]}</span>` : (tpl.icon || '')) : ''}</div>`;
     })() : ''}
@@ -38177,6 +38190,7 @@ function fpZoomFloor(wrap, canvas) {
   return Math.max(0.1, Math.min(3, z));
 }
 let _fpFitFor = null;
+let _fpPannedAt = 0;   // a mouse that just panned the room is not a tap on its floor
 function fpFitToTables() {
   const main = document.querySelector('.fp-main');
   const canvas = document.getElementById('admin-floor-canvas');
@@ -38224,22 +38238,34 @@ function fpFitToTables() {
   // Coming from the floor: the room is already drawn at the floor's own size
   // (--fp-edit-w), so it opens unzoomed with the table that was in the middle
   // of the floor back under the same spot. Nothing moves when the pencil is pressed.
-  const from = floorEditOn() && state._fpEditFrom; state._fpEditFrom = null;
-  const fromEl = from && canvas.querySelector(`.admin-floor-marker[data-id="${from.id}"]`);
-  if (fromEl) {
-    document.documentElement.style.setProperty('--fp-zoom', 1);
+  // IN PLACE THE ROOM KEEPS THE FLOOR'S SCALE, IN EVERY ROOM (7 Oct '26).
+  // Another room was fitted afresh — an empty Outside drew a few squares
+  // across the screen, a new table at 16px, and coming back made every table
+  // smaller than it was. The canvas is already drawn at the floor's own size
+  // (--fp-edit-w), so it stays unzoomed — never under a finger, though (Big
+  // floor law: a sideways phone drew its tables at 18).
+  if (floorEditOn()) {
+    const from = state._fpEditFrom; state._fpEditFrom = null;
+    const realW = (fp.tables || []).filter(t => t.type !== 'decor' && t.width > 0).map(t => t.width).sort((a, b) => a - b);
+    const fingerZ = realW.length ? FP_FINGER / (realW[Math.floor(realW.length / 2)] / 100 * baseW) : 1;
+    const z = Math.max(1, Math.min(3, fingerZ));
+    document.documentElement.style.setProperty('--fp-zoom', z);
     document.documentElement.style.setProperty('--fp-w', baseW + 'px');
     document.documentElement.style.setProperty('--fp-h', baseH + 'px');
-    const r = fromEl.getBoundingClientRect();
-    main.scrollLeft += (r.left + r.width / 2) - from.cx;
-    main.scrollTop += (r.top + r.height / 2) - from.cy;
+    const fromEl = from && canvas.querySelector(`.admin-floor-marker[data-id="${from.id}"]`);
+    if (fromEl) {
+      // Coming from the floor: the table that was in the middle of it lands
+      // back under the same spot, so nothing jumps.
+      const r = fromEl.getBoundingClientRect();
+      main.scrollLeft += (r.left + r.width / 2) - from.cx;
+      main.scrollTop += (r.top + r.height / 2) - from.cy;
+    } else if ((fp.tables || []).length) {
+      main.scrollLeft = Math.max(0, (hug.x0 + hug.w / 2) / 100 * baseW * z - availW / 2);
+      main.scrollTop = Math.max(0, (hug.y0 + hug.h / 2) / 100 * baseH * z - availH / 2);
+    } else { main.scrollLeft = 0; main.scrollTop = 0; }
     return;
   }
-  const realW = (fp.tables || []).filter(t => t.type !== 'decor' && t.width > 0).map(t => t.width).sort((a, b) => a - b);
-  const fingerZ = realW.length ? FP_FINGER / (realW[Math.floor(realW.length / 2)] / 100 * baseW) : 0.1;
-  const z = floorEditOn()
-    ? Math.max(0.1, Math.min(3, Math.max(fingerZ, Math.min(availW / (hug.w / 100 * baseW), availH / (hug.h / 100 * baseH)))))
-    : fpOpenZoom(main, canvas, fp);
+  const z = fpOpenZoom(main, canvas, fp);
   document.documentElement.style.setProperty('--fp-zoom', z);
   document.documentElement.style.setProperty('--fp-w', baseW + 'px');
   document.documentElement.style.setProperty('--fp-h', baseH + 'px');
@@ -39152,8 +39178,9 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
   if (kind === 'decor') {
     const tpl = DECOR_TEMPLATES.find(t => t.key === key);
     if (!tpl) return;
-    const cd = clampToFloor(xPct, yPct, tpl.width, tpl.height, 0, fp.height);
-    payload = { label: tpl.label, x: cd.x, y: cd.y, shape: tpl.shape || 'square', width: tpl.width, height: tpl.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon || '', color: tpl.color || null, rotation: 0 };
+    const dd = decorDims(tpl);
+    const cd = clampToFloor(xPct, yPct, dd.width, dd.height, 0, fp.height);
+    payload = { label: tpl.label, x: cd.x, y: cd.y, shape: tpl.shape || 'square', width: dd.width, height: dd.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon || '', color: tpl.color || null, rotation: 0 };
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
     if (!tpl) return;
@@ -39182,7 +39209,7 @@ async function addObject(fpId) {
   let payload;
   if (kind === 'decor') {
     const tpl = DECOR_TEMPLATES.find(t => t.key === key);
-    payload = { label: tpl.label, x: 50, y: 50, shape: 'square', width: tpl.width, height: tpl.height, seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon, rotation: 0 };
+    payload = { label: tpl.label, x: 50, y: 50, shape: 'square', ...decorDims(tpl), seats: 0, type: 'decor', decorType: tpl.key, icon: tpl.icon, rotation: 0 };
   } else {
     const tpl = TABLE_TEMPLATES.find(t => t.key === key);
     const td = templateDims(tpl);
@@ -39242,8 +39269,7 @@ async function stepTableUnits(tables, dim, d) {
 async function nudgeSelectedTables(dx, dy) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
-  const ids = state.selectedAdminTableIds.length ? state.selectedAdminTableIds.slice()
-    : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
+  const ids = floorPickIds();
   const picked = ids.map(id => fp.tables.find(x => x.id === id)).filter(Boolean);
   if (!picked.length) return;
   // THE PICK MOVES AS ONE (owner, Sep '26: "selecting all and pressing the
@@ -39282,10 +39308,19 @@ async function nudgeSelectedTables(dx, dy) {
     render();
   }
 }
+// EVERY PICKED THING, ONE LIST (7 Oct '26). Taps add up, and the last one
+// tapped is also the one the card names — so the size, seats, the arrows and
+// the bin all took THAT one alone: three picked, size +, and one table grew.
+// Whatever acts on "the pick" reads it here.
+function floorPickIds() {
+  const ids = (state.selectedAdminTableIds || []).slice();
+  if (state.selectedAdminTableId && !ids.includes(state.selectedAdminTableId)) ids.push(state.selectedAdminTableId);
+  return ids;
+}
 function stepTableSize(dim, d) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp) return;
-  const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : (state.selectedAdminTableIds || []);
+  const ids = floorPickIds();
   return stepTableUnits(ids.map(id => fp.tables.find(x => x.id === id)), dim, d);
 }
 // Every table on the floor one square bigger or smaller, each keeping its shape.
@@ -40106,7 +40141,8 @@ function floorThingWord(t) {
   return isLabelType(t.decorType) ? 'label' : 'wall';
 }
 function deleteSelectedTables() {
-  const ids = state.selectedAdminTableIds || [];
+  const ids = floorPickIds();
+  state.selectedAdminTableIds = ids;
   const n = ids.length;
   if (!n) return;
   if (refuseDeleteWithBill(ids)) return;
@@ -40379,7 +40415,7 @@ function endFloorDrag() {
     }
     pushFloorHistory();
     for (const g of floorDrag.group) {
-      if (g.lastX !== undefined) saveTablePosition(g.id, Math.round(g.lastX * 10) / 10, Math.round(g.lastY * 10) / 10);
+      if (g.lastX !== undefined) saveTablePosition(g.id, Math.round(g.lastX * 1000) / 1000, Math.round(g.lastY * 1000) / 1000);
     }
     floorDrag = null;
     return;
@@ -40394,7 +40430,10 @@ function endFloorDrag() {
       return;
     }
     pushFloorHistory();
-    saveTablePosition(tableId, Math.round(lastX * 10) / 10, Math.round(lastY * 10) / 10);
+    // WHAT CLICKED IS WHAT IS SAVED (7 Oct '26): the drop was rounded to a tenth
+    // of a share of the room — 1–2px in a room four times bigger — so a table
+    // that clicked to its neighbour's line was saved just off it.
+    saveTablePosition(tableId, Math.round(lastX * 1000) / 1000, Math.round(lastY * 1000) / 1000);
   } else {
     // No real movement — a tap. Every tap is the same door: in, or out.
     toggleTableMultiSelect(tableId);
@@ -40412,8 +40451,7 @@ function endFloorDrag() {
 async function rotateSelectedTables() {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId) || state.floorPlans[0];
   if (!fp) return;
-  const ids = state.selectedAdminTableIds.length ? state.selectedAdminTableIds.slice()
-    : (state.selectedAdminTableId ? [state.selectedAdminTableId] : []);
+  const ids = floorPickIds();
   // Every picked table turns in the same frame, one undo step — the same as
   // the arrows (they turned one after another, each saved before the next).
   const turns = ids.map(id => fp.tables.find(x => x.id === id)).filter(turnableTable).map(t => {
@@ -42044,11 +42082,16 @@ function commitTableNumberTyping() {
   const id = state.selectedAdminTableId;
   const fp = id && state.floorPlans.find(f => f.tables.some(t => t.id === id));
   const t = fp && fp.tables.find(x => x.id === id);
-  if (t) {
-    if (_numTypeBuf) patchFloorObject(fp.id, id, { label: _numTypeBuf });
-    else if (_numTypeOrig != null) { t.label = _numTypeOrig; render(); } // never save an empty number
-  }
+  const typed = _numTypeBuf, was = _numTypeOrig;
   _numTypeBuf = null; _numTypeOrig = null;
+  if (!t) return;
+  // THE SAME SAVE AS THE PAD (7 Oct '26): a number typed straight onto a
+  // picked table skipped the clash question — two tables both read 43 on the
+  // screen while the server had refused. The table shows its own number again
+  // and the typed one goes through saveTableNumber, which asks to trade.
+  if (was != null) t.label = was;
+  render();
+  if (typed && String(typed) !== String(was)) saveTableNumber(fp.id, id, typed);
 }
 function typeTableNumber(ch) {
   const id = state.selectedAdminTableId; if (!id) return;
@@ -42066,7 +42109,12 @@ function typeTableNumber(ch) {
 document.addEventListener('keydown', (e) => {
   if (!floorEditorActive() || typingInField()) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  if (!state.selectedAdminTableId) return; // one table selected → type its number
+  // THE KEYBOARD BELONGS TO WHAT IS ON TOP (7 Oct '26): with the number pad
+  // up, a typed key renamed the table BEHIND it and then the pad asked to
+  // trade the wrong number. Keys type into the pad; Enter is its tick.
+  if (state.tableNumPad) return; // the pad's own keys (below) type into it
+  if (state.confirmDialog) return;
+  if (!state.selectedAdminTableId || floorPickIds().length > 1) return; // one table selected → type its number
   const k = e.key;
   if (/^[0-9a-zA-Z]$/.test(k)) { e.preventDefault(); typeTableNumber(k); }
   else if (k === 'Backspace') { e.preventDefault(); typeTableNumber('back'); }
@@ -42108,7 +42156,7 @@ document.addEventListener('keydown', (e) => {
   // Tab, the arrows, Ctrl+D and Escape are not the floor's: Escape used to
   // empty the pick BEHIND "Delete 2 tables?", leaving its Delete key to
   // close and delete nothing (Sep '26).
-  if (!floorEditorActive() || typingInField() || state.confirmDialog) return;
+  if (!floorEditorActive() || typingInField() || state.confirmDialog || state.tableNumPad || e.defaultPrevented) return; // a key the pad took is the pad's
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   if (!fp || !fp.tables.length) return;
   const k = e.key;
@@ -42135,25 +42183,14 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (k.indexOf('Arrow') === 0) {
-    const ids = state.selectedAdminTableId ? [state.selectedAdminTableId] : state.selectedAdminTableIds;
-    if (!ids.length) return;
+    if (!floorPickIds().length) return;
     e.preventDefault();
-    // Snap-to-grid rules the arrows too (owner, Aug '26): with the grid on,
-    // each press walks ONE grid line (Shift jumps two), and an off-grid
-    // table lands on the grid at the first press. Grid off: 1% (Shift 5%).
-    const snap = !!fp.snapToGrid;
-    const stepX = snap ? FLOOR_GRID * (e.shiftKey ? 2 : 1) : (e.shiftKey ? 5 : 1);
-    const stepY = snap ? FLOOR_GRID_Y * (e.shiftKey ? 2 : 1) : (e.shiftKey ? 5 : 1);
-    const dx = k === 'ArrowLeft' ? -stepX : k === 'ArrowRight' ? stepX : 0;
-    const dy = k === 'ArrowUp' ? -stepY : k === 'ArrowDown' ? stepY : 0;
-    for (const id of ids) {
-      const t = fp.tables.find(x => x.id === id);
-      if (!t) continue;
-      let nx = (t.x || 0) + dx, ny = (t.y || 0) + dy;
-      if (snap) { nx = snapFloorPos(nx, FLOOR_GRID); ny = snapFloorPos(ny, FLOOR_GRID_Y); }
-      const ck = clampToFloor(nx, ny, t.width, t.height, t.rotation, fp && fp.height);
-      patchFloorObject(fp.id, id, { x: ck.x, y: ck.y });
-    }
+    // THE KEYS ARE THE BAND'S ARROWS (7 Oct '26). They had their own step and
+    // their own rules: they moved only the last table tapped, by a share of the
+    // room, and walked it straight through its neighbours to save it on top of
+    // another. One square (Shift two), the pick as one, landing on nobody.
+    const n = e.shiftKey ? 2 : 1;
+    nudgeSelectedTables(k === 'ArrowLeft' ? -n : k === 'ArrowRight' ? n : 0, k === 'ArrowUp' ? -n : k === 'ArrowDown' ? n : 0);
     return;
   }
 });
@@ -42246,8 +42283,9 @@ document.addEventListener('keydown', (e) => {
   }
   if (state.tableNumPad) {
     const p = state.tableNumPad;
-    if (digit || (k.length === 1 && /[a-z]/i.test(k))) { if (p.buf.length < tnMax(p)) { p.buf += k.toUpperCase(); render(); } }
-    else if (k === 'Backspace') { p.buf = p.buf.slice(0, -1); render(); }
+    // A label is words: its spaces and its small letters type as they are.
+    if (digit || (k.length === 1 && (p.decor || /[a-z]/i.test(k)))) { p.touched = true; if (p.buf.length < tnMax(p)) { p.buf += p.decor ? k : k.toUpperCase(); render(); } }
+    else if (k === 'Backspace') { p.touched = true; p.buf = p.buf.slice(0, -1); render(); }
     // ONE DOOR OUT OF THE PAD. Enter used to write the name straight to the
     // server, so a real keyboard skipped the clash question the tick asks and
     // a swap came back as a refusal instead of an offer.
@@ -45640,7 +45678,9 @@ function bindEvents() {
   const tnField = document.querySelector('.tn-field');
   if (tnField) tnField.addEventListener('input', (e) => {
     const p = state.tableNumPad; if (!p) return;
-    const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
+    // A LABEL IS WORDS (7 Oct '26): the field held every name to a table
+    // number's five letters and digits, so "Terrace" saved as "TERRA".
+    const v = p.decor ? e.target.value.slice(0, tnMax(p)) : e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5);
     if (v !== e.target.value) e.target.value = v;
     p.buf = v; p.touched = true;
     const ok = document.querySelector('[data-act="tablenum-ok"]'); if (ok) ok.disabled = !v;
@@ -46001,6 +46041,14 @@ function bindEvents() {
         canvas.addEventListener('touchmove', (e) => { const t = e.touches[0]; if (t) follow(t.clientX, t.clientY); }, { passive: true });
       }
       canvas.addEventListener('click', (e) => {
+        // A TAP ON SOMETHING ALREADY THERE PICKS IT (7 Oct '26). The tool
+        // stayed armed and dropped another one under the finger: a red "can't
+        // overlap" over a table, a silent second label stacked on the first —
+        // and a touch screen has no Escape. The tool lets go, the tap picks.
+        // (The tables let a placing finger through to the floor, so the one
+        // under it is found by where it is, not by what was hit.)
+        const hit = [...canvas.querySelectorAll('.admin-floor-marker')].find(m => { const r = m.getBoundingClientRect(); return e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom; });
+        if (hit) { state.floorPlacing = null; state.selectedAdminTableId = hit.dataset.id; state.selectedAdminTableIds = [hit.dataset.id]; render(); return; }
         const rect = canvas.getBoundingClientRect();
         const xPct = ((e.clientX - rect.left) / rect.width) * 100;
         const yPct = ((e.clientY - rect.top) / rect.height) * 100;
@@ -46012,7 +46060,23 @@ function bindEvents() {
     // all the empty floor does now — the drag-a-box went with the hold.
     const adminCanvas = document.getElementById('admin-floor-canvas');
     if (adminCanvas) {
-      adminCanvas.addEventListener('click', (e) => { if (e.target === adminCanvas) deselectOnEmptyCanvas(); });
+      adminCanvas.addEventListener('click', (e) => { if (e.target === adminCanvas && Date.now() - _fpPannedAt > 300) deselectOnEmptyCanvas(); });
+      // A MOUSE PANS THE ROOM (7 Oct '26). The room is four times the screen
+      // and the scrollbars are hidden, so on a till a mouse could never reach
+      // most of it: dragging the empty floor did nothing. It grabs the room
+      // now, the way a finger already does; a press that does not move is
+      // still the tap that lets the pick go.
+      const fpMain = adminCanvas.closest('.fp-main');
+      if (fpMain) fpMain.addEventListener('mousedown', (e) => {
+        if (e.button !== 0 || (e.target.closest && e.target.closest('.admin-floor-marker, button, input'))) return;
+        const sx = e.clientX, sy = e.clientY, l0 = fpMain.scrollLeft, t0 = fpMain.scrollTop;
+        let moved = false;
+        const mv = (ev) => { const dx = ev.clientX - sx, dy = ev.clientY - sy;
+          if (!moved && Math.hypot(dx, dy) < 4) return; moved = true;
+          fpMain.scrollLeft = l0 - dx; fpMain.scrollTop = t0 - dy; };
+        const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); if (moved) _fpPannedAt = Date.now(); };
+        document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+      });
     }
   }
   const popoverCustomIconInput = document.getElementById('icon-popover-custom-input');
@@ -47873,7 +47937,7 @@ function handleActClick(el, e) {
           state.selectedAdminTableId = null; state.selectedAdminTableIds = [];
           render();
         } else if (id === 'multi') {
-          state.selectedAdminTableIds.forEach(tid => { const t = findTableById(tid); if (t) patchFloorObject(fpId, tid, shapeFor(t)); });
+          floorPickIds().forEach(tid => { const t = findTableById(tid); if (t && t.type !== 'decor') patchFloorObject(fpId, tid, shapeFor(t)); });
         } else {
           const t = findTableById(id); if (t) patchFloorObject(fpId, id, shapeFor(t));
         }

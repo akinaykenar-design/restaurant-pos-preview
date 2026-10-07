@@ -13389,7 +13389,15 @@ app.post('/api/practice/purge', (req, res) => {
 
 app.post('/api/orders', (req, res) => {
   const data = readData();
-  const { orderType, table, customerName, customerId, items: sentItems, paymentMethod, payments, giftCardCode, staffId, staffName, covers, discount, tip, open } = req.body;
+  const { orderType, table: tableSent, customerName, customerId, items: sentItems, paymentMethod, payments, giftCardCode, staffId, staffName, covers, discount, tip, open } = req.body;
+  // THE TABLE IS THE ONE THE WAITER TAPPED, NOT ITS NUMBER (7 Oct '26). Two
+  // tables traded numbers on the floor; a till fifteen seconds behind sent
+  // "14", and the round joined the other party's bill under that number. The
+  // till sends the table's own id too, and its number is read from the floor.
+  let table = tableSent;
+  if (req.body.tableId && (orderType || 'dine-in') === 'dine-in') {
+    for (const fp of data.floorPlans || []) { const t = (fp.tables || []).find(x => x.id === String(req.body.tableId) && x.type !== 'decor'); if (t) { table = String(t.label); break; } }
+  }
   let rawItems = sentItems;
   {
     const underPrice = priceFloorRefused(req, data, rawItems, null);
@@ -23162,7 +23170,7 @@ async function sendToKitchen() {
       const payload = {
         sendKey: state.sendKey,
         orderType: state.orderType,
-        table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null,
+        table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null, tableId: state.orderType === 'dine-in' && findTableById(state.table) ? state.table : null,
         customerName: state.customerName,
         items: state.cart,
         covers: state.orderType === 'dine-in' ? (state.covers || null) : null,
@@ -23520,7 +23528,7 @@ async function confirmPaymentInner() {
   const payload = {
     payKey: state.payKey,
     orderType: state.orderType,
-    table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null,
+    table: state.orderType === 'dine-in' ? (findTableById(state.table)?.label || state.table) : null, tableId: state.orderType === 'dine-in' && findTableById(state.table) ? state.table : null,
     customerName: state.customerName,
     items: state.cart,
     covers: state.orderType === 'dine-in' ? (state.covers || null) : null,
@@ -25066,7 +25074,8 @@ function floorFindHits() {
   if (!q) return [];
   const tables = allTables();
   const lab = t => String(t.label).toLowerCase();
-  const out = [...tables.filter(t => lab(t) === q), ...tables.filter(t => lab(t) !== q && lab(t).startsWith(q))].map(t => ({ t }));
+  // in number order, as the waiter counts them — they came in floor order: 11, 12, 16, 13 (7 Oct '26)
+  const out = [...tables.filter(t => lab(t) === q), ...tables.filter(t => lab(t) !== q && lab(t).startsWith(q)).sort(tableLabelCompare)].map(t => ({ t }));
   if (q.length >= 2) (state.reservations || []).forEach(r => {
     if (r.status !== 'seated' || r.tillEndedAt || !String(r.name || '').toLowerCase().includes(q)) return;
     const t = findTableById(r.tillTableId || r.tableId);
@@ -25080,7 +25089,7 @@ function floorFindHitsHtml() {
   if (!hits.length) return `<div class="ff-none">No table or guest matches</div>`;
   return hits.map(({ t, o, guest }) => `
     <div class="ff-row">
-      <span class="ff-main">${guest ? esc(guest.name) : 'Table ' + esc(String(t.label))}<span class="ff-sub">${guest ? `Table ${esc(String(t.label))} · seated` : o ? `${o.covers ? o.covers + ' covers · ' : ''}${esc(o.staffName || '')} · ${money(billTotal(o))}` : 'free'}</span></span>
+      <span class="ff-main">${guest ? esc(guest.name) : 'Table ' + esc(String(t.label))}<span class="ff-sub">${guest ? `Table ${esc(String(t.label))} · seated` : o ? `${o.covers ? o.covers + (o.covers === 1 ? ' cover · ' : ' covers · ') : ''}${esc(o.staffName || '')} · ${money(billTotal(o))}` : (t.covers || 0) > 0 ? `seated · ${t.covers} ${t.covers === 1 ? 'cover' : 'covers'}` : 'free'}</span></span>
       <button type="button" class="ff-key" data-act="ff-open" data-id="${t.id}">Open</button>
       ${o ? `<button type="button" class="ff-key ff-pay" data-act="bill-pay" data-id="${o.id}">Pay</button>` : ''}
     </div>`).join('');
@@ -28228,8 +28237,13 @@ async function kdsTicketReady(orderId) {
   const o = (state.orders || []).find(x => x.id === orderId);
   const card = kdsTickets(kdsItemRows()).find(t => t.orderId === orderId);
   if (!o || !card) return;
-  const left = card.rows.filter(r => r.item.status !== 'ready');
-  const res = await Promise.allSettled(left.map(r => api(`/api/orders/${orderId}/items/${r.idx}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'ready', uid: r.item.uid || null }) })));
+  // READY IS SERVED (7 Oct '26). The old Serve step went with the paper rail,
+  // and nothing set "served" after it: the Pass kept the course away and late,
+  // Kitchen traffic kept counting it, and the card came back on the next call
+  // with its dishes crossed off. Every dish on the card that is cooking — a
+  // crossed-off one too — goes; a held course stays for its call.
+  const left = card.rows.filter(r => !r.held);
+  const res = await Promise.allSettled(left.map(r => api(`/api/orders/${orderId}/items/${r.idx}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'served', uid: r.item.uid || null }) })));
   if (res.some(x => x.status === 'rejected')) state.toast = toastFail('Could not send every dish.');
   try { await refreshOrders(); } catch (e) {}
   render();
@@ -36199,9 +36213,9 @@ function tableColourSource() { return state.settings.tableColourSource === 'desk
 function deskBookingFor(tableId) {
   const now = Date.now();
   const mine = (state.reservations || []).filter(r => r.tableId === tableId && r.status !== 'cancelled');
-  const seated = mine.find(r => r.status === 'seated');
+  const seated = (state.reservations || []).find(r => r.status === 'seated' && !r.tillEndedAt && (r.tillTableId || r.tableId) === tableId);
   if (seated) return seated;
-  const soon = mine.filter(r => r.status !== 'done' && new Date(r.time).getTime() > now - 15 * 60000)
+  const soon = mine.filter(r => r.status !== 'done' && r.status !== 'seated' && new Date(r.time).getTime() > now - 15 * 60000)
     .sort((a, b) => new Date(a.time) - new Date(b.time))[0];
   if (soon) return soon;
   // A booking that just finished still owns the table for an hour, so "Done"
@@ -37429,10 +37443,15 @@ function payFromBills(id) {
   if (t) pickTable(t.id);
   else if (o.orderType !== 'dine-in') { const k = document.querySelector(`.bl-door[data-act="open-takeaway"][data-id="${o.id}"]`); if (k) k.click(); }
   else return;
-  const until = Date.now() + 4000;
+  // A QUESTION ON THE WAY IS ANSWERED, THEN PAY OPENS (7 Oct '26): "Table 15
+  // is seated — close it or leave it?" stopped the wait, so the answer landed
+  // on table 16's order screen and Pay never came up. While a question is up
+  // the wait waits for it; four seconds after the last one it gives up.
+  let until = Date.now() + 4000;
   const wait = () => {
-    if (state.openOrderId === o.id && !state.showTablePicker && !state.missedPop && !state.coversPad) { openCheckout(); return; }
-    if (Date.now() < until && !state.missedPop && !state.confirmDialog) setTimeout(wait, 60);
+    if (state.openOrderId === o.id && !state.showTablePicker && !state.missedPop && !state.coversPad && !state.confirmDialog) { openCheckout(); return; }
+    if (state.missedPop || state.confirmDialog) until = Date.now() + 4000;
+    if (Date.now() < until) setTimeout(wait, 60);
   };
   wait();
 }
@@ -37565,7 +37584,10 @@ function repaintBills() {
 function sittingMinutesDefault() { const n = parseInt(state.settings.seatingMinutes, 10); return n > 0 ? n : 90; }
 function sittingBooking(t, o) {
   const sat = (o && o.createdAt) || Date.now();
-  return (state.reservations || []).filter(r => r.tableId === t.id && r.status === 'seated')
+  // Where the party IS: a booking the till moved sits on its new table, and a
+  // sitting the till ended owns neither (7 Oct '26: the moved party lost its
+  // 180 minutes and the walk-in at the old table inherited them).
+  return (state.reservations || []).filter(r => (r.tillTableId || r.tableId) === t.id && r.status === 'seated' && !r.tillEndedAt)
     .filter(r => Math.abs(new Date(r.time).getTime() - sat) < 3 * 3600000)
     .sort((a, b) => Math.abs(new Date(a.time) - sat) - Math.abs(new Date(b.time) - sat))[0] || null;
 }
@@ -37656,7 +37678,10 @@ function renderTimeline(fp) {
   const bookingBar = (b) => { const at0 = new Date(b.time).getTime(), mins0 = b.durationMin > 0 ? b.durationMin : sittingMinutesDefault();
     return `<div class="tl-res" style="--bk:${bookedC};left:${at(at0)};width:${len(at0, at0 + mins0 * 60000)}"><b>${esc(clock(at0))}</b>${esc(b.name || '')}${b.partySize ? ` · ${b.partySize}` : ''}</div>`; };
   const lane = ({ t, o }) => {
-    if (!o) { const b = nextBookingFor(t); return b ? bookingBar(b) : ''; }
+    // Seated with nothing rung says so here as it does on the Pass — the row
+    // was blank while the Pass read "Seated · Nothing sent yet" (7 Oct '26).
+    const seatedChip = `<div class="tl-wait" style="--at:${at(now)}"><span class="tl-chip seated"><i>Seated</i>Nothing sent</span></div>`;
+    if (!o) { if ((t.covers || 0) > 0) return seatedChip; const b = nextBookingFor(t); return b ? bookingBar(b) : ''; }
     if (nothingSent(o)) return `<div class="tl-wait" style="--at:${at(now)}"><span class="tl-chip seated"><i>Seated</i>Nothing sent</span></div>`;
     const fired = o.firedCourses || {};
     const calls = Object.keys(fired).map(Number).filter(n => fired[n] > 0 && courseInKitchen(n)).sort((a, b) => fired[a] - fired[b]);
@@ -39602,9 +39627,13 @@ async function applyFloorSnapshot(fpId, target) {
     try {
       const obj = await api(`/api/floorplans/${fpId}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_floorCreateBody(t)) });
       // POST can't carry link state — restore it with a follow-up PUT.
-      if (t.mergedInto || t.prevX != null || t.prevY != null) {
+      // …and the party sitting at it: an Undo of a delete brought the table
+      // back bare — its covers and its allergy gone from the floor (7 Oct '26).
+      const seated = (t.covers || 0) > 0 || (t.notes || []).length || t.discount;
+      if (t.mergedInto || t.prevX != null || t.prevY != null || seated) {
         const patch = { mergedInto: t.mergedInto || null };
         if (t.prevX != null) { patch.prevX = t.prevX; patch.prevY = t.prevY; }
+        if (seated) { patch.covers = t.covers || 0; patch.notes = t.notes || []; if (t.discount) patch.discount = t.discount; }
         try { await api(`/api/floorplans/${fpId}/tables/${obj.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); Object.assign(obj, patch); } catch (e) {}
       }
       _remapFloorId(fp, t.id, obj.id, obj);
@@ -49217,6 +49246,12 @@ document.addEventListener('scroll', (e) => { if (e.target && e.target.classList 
 // A server without /api/version (the preview) falls back to the old path.
 let _dataVersion = null, _lastBgRender = 0;
 setInterval(() => {
+  // THE HOLD ON A TABLE OUTLIVES A PANE (7 Oct '26). The heartbeat lived
+  // inside the poll, which sleeps while Pay is open — 75s on the pay screen and
+  // the table looked free, so a second till opened it and rang onto the bill
+  // being paid. The claim alone goes on; everything else still waits.
+  if (state.currentStaff && (state.showCheckout || state.detailOrder || state.staffModal || state.menuModal || state.printerStationModal)
+    && tableLocksOn() && state.table != null && state._lockReleased !== String(state.table)) claimTableLock(state.table).catch(() => {});
   if (state.currentStaff && !state.showCheckout && !state.detailOrder && !state.staffModal && !state.menuModal && !state.printerStationModal) {
     // Table-lock heartbeat: keep our claim on the current table alive, and
     // pick up other tills' locks for the picker.

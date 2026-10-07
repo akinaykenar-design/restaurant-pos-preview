@@ -9343,6 +9343,8 @@ app.post('/api/categories', (req, res) => {
   }
   const cat = { id: 'cat' + Date.now(), name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
   data.categories.push(cat);
+  // welcome on every course that keeps a list of sections, as it would be on one that keeps none (7 Oct '26)
+  ((data.settings || {}).courses || []).forEach(k => { if (k && Array.isArray(k.sections)) k.sections.push(cat.id); });
   logAudit(data, staffFromReq(req), `Added category: ${cat.name}`);
   writeData(data);
   res.json(cat);
@@ -10222,6 +10224,9 @@ app.put('/api/settings', (req, res) => {
     // manager powers, and everyone who held "chef" was left on a word that no
     // longer existed. They stay; everything else is the venue's.
     BUILT_IN_ROLES.forEach(r => { if (before.includes(r) && !next.includes(r)) next.push(r); });
+    // …and so does any title somebody holds (7 Oct '26), unless a rename below carries them off it.
+    const renFrom = req.body.staffRoleRename && req.body.staffRoleRename.from;
+    (data.staff || []).forEach(st => { if (st.role && st.role !== renFrom && before.includes(st.role) && !next.includes(st.role)) next.push(st.role); });
     // A rename carries the people who hold the title with it.
     const ren = req.body.staffRoleRename;
     // Nobody is renamed INTO a built-in title either: that hands its powers to
@@ -11046,7 +11051,10 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
     table.discount = d && ['percent', 'fixed'].includes(d.type) && parseFloat(d.value) > 0
       ? { type: d.type, value: parseFloat(d.value), reason: String(d.reason || '').slice(0, 80), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount',
           // the manager's okay rides with it (§ approval stamps) — checked where it is spent, never here
-          ...(typeof d.ok === 'string' ? { ok: d.ok.slice(0, 120) } : {}) } : null;
+          ...(typeof d.ok === 'string' ? { ok: d.ok.slice(0, 120) } : {}),
+          // a voucher or points ride too — they are checked and spent at the bill
+          ...(d.voucherCode ? { voucherCode: String(d.voucherCode).slice(0, 40) } : {}),
+          ...(parseInt(d.loyaltyPoints, 10) > 0 ? { loyaltyPoints: parseInt(d.loyaltyPoints, 10), customerId: d.customerId ? String(d.customerId).slice(0, 60) : null } : {}) } : null;
   }
   if (Array.isArray(notes)) {
     table.notes = notes.slice(0, 50)
@@ -11376,6 +11384,12 @@ app.delete('/api/staff/:id', (req, res) => {
   // A person removed while clocked in is clocked out now: nothing on any
   // screen could close that shift, and its hours climbed for ever (Sep '26).
   (data.shifts || []).forEach(sh => { if (sh.staffId === req.params.id && sh.clockOut === null) sh.clockOut = Date.now(); });
+  // …and their shifts to come go with them (7 Oct '26): the briefing listed a
+  // "?" on tonight's roster and Copy last week carried it forward for ever.
+  // Past shifts stay — they are what was worked.
+  const today = localDayKey(new Date());
+  data.roster = (data.roster || []).filter(r => r.staffId !== req.params.id || r.date < today);
+  data.timeOff = (data.timeOff || []).filter(t => t.staffId !== req.params.id || t.end < today);
   if (staff) logAudit(data, staffFromReq(req), `Removed staff member: ${staff.name}`);
   writeData(data);
   res.json({ ok: true });
@@ -11792,6 +11806,7 @@ async function doshiiPayAtTableOnce() {
             // and paid at the table after it was on no cash-up at all — and it
             // carried no GST, no vouchers sold on it and no points.
             order.closedAt = order.paidAt;
+            discountSpent(data, order);
             issueSoldVouchers(data, order, 'EFTPOS terminal');
             if (!order.practice) { order.loyaltyCredited = Math.max(0, (order.total || 0) - voucherSaleTotal(order.items || [])); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
             order.doshiiSyncHash = null; // force a final status push next cycle
@@ -13412,9 +13427,8 @@ app.post('/api/orders', (req, res) => {
   // which opened a second bill beside the party's real one.
   // Money taken at once is never refused for it — the bill closes as it opens.
   if (open && (orderType || 'dine-in') === 'dine-in' && table != null && String(table) !== '') {
-    const here = new Set();
-    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (t.type !== 'decor') { here.add(String(t.label)); here.add(String(t.id)); } }));
-    if (here.size && !here.has(String(table))) return res.status(409).json({ error: `Table ${table} is no longer on the floor — pick the table again.` });
+    const gone = tableOffFloor(data, table);
+    if (gone) return res.status(409).json({ error: gone });
   }
   const noteOnly = !rawItems || rawItems.length === 0;
   if (noteOnly && !(open && (String(req.body.quickNote || '').trim() || (orderType || 'dine-in') === 'dine-in' && table))) {
@@ -13535,6 +13549,7 @@ app.post('/api/orders', (req, res) => {
   };
   order.closedBy = order.staffName;
   order.closedAt = order.createdAt;
+  discountSpent(data, order);
 
   if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
   spendDiscountExtras(data, order, discountRecord, order.staffName);
@@ -14028,6 +14043,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   order.payKey = payKey;
   order.closedBy = staffName || order.staffName;
   order.closedAt = Date.now();
+  discountSpent(data, order);
   spendDiscountExtras(data, order, discountRecord, staffName || order.staffName);
   if (customerId !== undefined) order.customerId = customerId || null;
 
@@ -14310,12 +14326,29 @@ function practiceClash(a, b) {
   if (!!a.practice === !!b.practice) return null;
   return `Table ${b.table} has a ${b.practice ? 'practice' : 'real'} bill — ${a.practice ? 'practice' : 'real'} food can't join it`;
 }
+// One check for every door that puts a bill on a table: a new ticket, a
+// moved table, moved dishes (7 Oct '26 — the move doors skipped it, so a till
+// behind the layout parked a bill on a deleted table, where nobody would find
+// it to pay).
+// A TABLE'S MONEY OFF IS SPENT WHEN ITS BILL CLOSES (7 Oct '26). It stayed
+// on the table, so a party that stayed for a drink got the $20 off again on
+// the next bill — and the manager's okay still covered it.
+function discountSpent(data, order) {
+  if (!order || order.orderType !== 'dine-in' || order.table == null) return;
+  (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (String(t.label) === String(order.table) && t.discount) t.discount = null; }));
+}
+function tableOffFloor(data, table) {
+  const here = new Set();
+  (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (t.type !== 'decor') { here.add(String(t.label)); here.add(String(t.id)); } }));
+  return here.size && !here.has(String(table)) ? `Table ${table} is no longer on the floor — pick the table again.` : null;
+}
 app.post('/api/orders/:id/transfer', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
   if (!order) return res.status(404).json({ error: 'Order not found' });
   const { table, staffName } = req.body;
   if (!table) return res.status(400).json({ error: 'Missing destination table' });
+  { const gone = tableOffFloor(data, table); if (gone) return res.status(409).json({ error: gone }); }
   // A till a poll behind could move a ticket another till had just paid: its
   // food landed on the new table's bill again and its cash left the cash-up
   // (3 Oct '26). Only an open tab moves.
@@ -14421,6 +14454,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   const ids = (Array.isArray(itemIds) ? itemIds : []).map(String);
   if (!ids.length) return res.status(400).json({ error: 'Pick items to move' });
   if (!targetTable || String(targetTable) === String(order.table)) return res.status(400).json({ error: 'Pick a different table' });
+  { const gone = tableOffFloor(data, targetTable); if (gone) return res.status(409).json({ error: gone }); }
   const keyOf = i => String(i.uid || i.id);
   const moving = (order.items || []).filter(i => ids.includes(keyOf(i)));
   if (!moving.length) return res.status(400).json({ error: 'Those items are no longer on the ticket' });
@@ -17689,7 +17723,17 @@ function deleteSelectedStaffRoles() {
   state.selectedStaffRoleIdxs = [];
   const all = staffRoles();
   if (sel.some(i => BUILT_IN_ROLES.includes(all[i]))) builtInRoleRefused();
-  saveStaffRoles(all.filter((r, i) => !sel.includes(i) || BUILT_IN_ROLES.includes(r)));
+  // A TITLE SOMEBODY HOLDS STAYS (7 Oct '26): deleting "waiter" left Jamie on a
+  // word that was gone, and their Job title box fell back to its first
+  // option — it said Manager. Say who holds it; they move first.
+  const held = sel.map(i => all[i]).filter(r => !BUILT_IN_ROLES.includes(r))
+    .map(r => ({ r, who: (state.staffList || []).filter(st => st.role === r).map(st => st.name) })).filter(x => x.who.length);
+  if (held.length) {
+    state.toast = toastFail(`${held[0].who.join(', ')} ${held[0].who.length > 1 ? 'are' : 'is'} ${held[0].r} — give them another title first`);
+    render(); armToastTimer(TOAST_LONG);
+  }
+  const keep = new Set(held.map(x => x.r));
+  saveStaffRoles(all.filter((r, i) => !sel.includes(i) || BUILT_IN_ROLES.includes(r) || keep.has(r)));
 }
 function reorderStaffRoles(from, to) {
   const list = staffRoles().slice();
@@ -21019,6 +21063,14 @@ function itemDefaultCourse(item) {
 // Allowed sections per course (owner ask, Aug '26): a course template can name
 // which menu sections its dishes may come from — so a Coke can't file under
 // Mains. sections: null (or a missing state.categories match) = no restriction.
+// A NEW SECTION IS WELCOME WHERE EVERY SECTION WAS (7 Oct '26). A course
+// that had a section ticked off keeps a fixed list, and a section made later
+// was on none of them — a mocktail rung on Drinks landed on the 1st food
+// course. The server adds it to each list; this till's copy follows.
+function sectionMade(c) {
+  if (c && c.id) (state.settings.courses || []).forEach(k => { if (k && Array.isArray(k.sections) && !k.sections.includes(c.id)) k.sections.push(c.id); });
+  return c;
+}
 function courseAllowsItem(n, item) {
   const c = state.settings.courses[n - 1];
   if (!c || !Array.isArray(c.sections) || !item) return true;
@@ -22277,6 +22329,9 @@ function openCheckout() {
   state.showCheckout = true;
   maybeApplyAutoSurcharge();
   state.paymentMethod = 'card';
+  // Every bill picks its own card: the pay-without-send close never let go of
+  // the last one, so an Amex rode onto the next table's bill (7 Oct '26).
+  state.cardType = null;
   // A share picked on the split screen fills the amount; any other way in
   // opens on the whole bill, as it always did.
   state.payShare = state._payShareNext || null;
@@ -23158,7 +23213,7 @@ async function sendToKitchen() {
     // SUCCESS: a failed send must never dump someone onto the lock screen.
     // _logoffOnce is the hold-Send gesture: same handover, just this once.
     // (Not when Pay pressed Send for us — the person is paying, not handing over.)
-    if ((state.settings.logoffAfterSend || state._logoffOnce) && !state._payAfterSend) {
+    if ((state.settings.logoffAfterSend || state._logoffOnce) && !state._payAfterSend && !state._voucherSend) {
       state._logoffOnce = false;
       logOut();
       return;
@@ -23334,6 +23389,17 @@ function confirmPaymentNow() { return state.paying ? confirmPaymentInner() : con
 async function confirmPaymentInner() {
   // A bill being split is settled part by part, never in one lump.
   if (state.billSplit) return;
+  // A VOUCHER SOLD ON THE PAY SCREEN GOES ON THE TICKET FIRST (7 Oct '26).
+  // It sat in the unsent lines while the close took only what was sent: the
+  // screen said $71, the bill closed at $21 and no voucher was made — the
+  // guest's $50 bought nothing. It rides a round (no docket prints for it),
+  // then the payment goes ahead on the whole bill.
+  if (state.openOrderId && state.cart.length && state.cart.every(l => l.giftcardSale)) {
+    state._voucherSend = true;
+    try { await sendToKitchen(); } finally { state._voucherSend = false; }
+    if (state.cart.length) return; // the send said why it did not go
+    state.showCheckout = true;
+  }
   // A card taking less than the whole bill — or landing on a table that has
   // already had money taken — goes on as a part, not as a fresh whole bill.
   const nothingOwing = amountOwing() <= 0.005;
@@ -23364,10 +23430,21 @@ async function confirmPaymentInner() {
     // A card the terminal already APPROVED for this bill is not charged again
     // when the till lost the reply and Confirm is pressed a second time — the
     // guest's card was charged twice (Sep '26). The pay key names the bill.
+    // …and only for the SAME amount (7 Oct '26): a round rung on another till
+    // while the terminal waited grew the bill, the retry skipped the terminal,
+    // and $40 was recorded on card against a $21 charge.
+    if (state._terminalPaidKey === state.payKey && Math.abs((state._terminalPaidAmt || 0) - grandTotal) > 0.005) {
+      const was = state._terminalPaidAmt || 0;
+      state._terminalPaidKey = null; state._terminalPaidAmt = 0;
+      state.toast = toastFail(`The bill changed after the card was charged ${money(was)}. Refund that on the terminal, then Confirm again.`);
+      render(); armToastTimer(TOAST_LONG);
+      return;
+    }
     if (state._terminalPaidKey !== state.payKey) {
       const ok = await runTerminalPurchase(grandTotal);
       if (!ok) return;
       state._terminalPaidKey = state.payKey;
+      state._terminalPaidAmt = grandTotal;
     }
     state._terminalApproved = true;
     try { await confirmPaymentNow(); } finally { state._terminalApproved = false; }
@@ -23403,6 +23480,7 @@ async function confirmPaymentInner() {
       state.covers = (findTableById(state.table) || {}).covers || 0;
   state.notes = (findTableById(state.table) || {}).notes || [];
       state.discount = null;
+      { const tD = findTableById(state.table); if (tD) tD.discount = null; } // spent with the bill, as the server does
       state.activeCourse = firstEnabledCourseNumber();
         state.firedCourses = {};
       state.showCheckout = false;
@@ -23466,6 +23544,8 @@ async function confirmPaymentInner() {
     state.covers = (findTableById(state.table) || {}).covers || 0;
   state.notes = (findTableById(state.table) || {}).notes || [];
     state.discount = null;
+    { const tD = findTableById(state.table); if (tD) tD.discount = null; }
+    state.cardType = null;
     state.activeCourse = firstEnabledCourseNumber();
     state.firedCourses = {};
     state.showCheckout = false;
@@ -25065,7 +25145,9 @@ function renderMenuScrollBody() {
           const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
           const items = hubOrder(sortMenuItems(filtered.filter(m => m.category === cat)));
           const catCombos = state.search ? [] : state.combos.filter(c => c.category === cat && !c.disabled);
-          if (items.length === 0 && catCombos.length === 0) return '';
+          // An empty section still takes its first dish in edit mode (7 Oct '26:
+          // "+ Section" made one, and tapping it showed nothing to add with).
+          if (items.length === 0 && catCombos.length === 0 && !menuEditOn()) return '';
           const subcats = catObj ? state.subcategories.filter(s => s.categoryId === catObj.id) : [];
           const isManager = state.currentStaff && state.currentStaff.role === 'manager';
           // In edit mode every grid of dishes ends in an empty slot that adds
@@ -25119,14 +25201,14 @@ function renderMenuScrollBody() {
               <div class="grid">${catCombos.map(comboCard).join('')}${items.map(renderItemCard).join('')}${addDish()}</div>`;
           }
           const itemsWithoutSub = items.filter(i => !i.subcategoryId);
-          const subtreeHasItems = (sub) => { const ids = subcatSubtreeIds(sub.id); return items.some(i => ids.includes(i.subcategoryId)); };
+          const subtreeHasItems = (sub) => { if (menuEditOn()) return true; const ids = subcatSubtreeIds(sub.id); return items.some(i => ids.includes(i.subcategoryId)); };
           const renderSubGroup = (sub, depth, withHeader) => {
             const direct = items.filter(i => i.subcategoryId === sub.id);
             const kids = childSubcats(sub.id).filter(subtreeHasItems);
-            if (direct.length === 0 && kids.length === 0) return '';
+            if (direct.length === 0 && kids.length === 0 && !menuEditOn()) return '';
             let h = '';
             if (withHeader) h += `<div class="ts" style="font-weight:700;margin:12px 0 6px;padding-left:${depth * 12}px;">${depth ? '↳ ' : ''}${esc(sub.name)}</div>`;
-            if (direct.length) h += `<div class="grid">${direct.map(renderItemCard).join('')}${addDish(sub.id)}</div>`;
+            if (direct.length || menuEditOn()) h += `<div class="grid">${direct.map(renderItemCard).join('')}${addDish(sub.id)}</div>`;
             kids.forEach(k => { h += renderSubGroup(k, depth + 1, true); });
             return h;
           };
@@ -26792,10 +26874,12 @@ async function takePart(amount, method, giftCardCode, change) {
   }
   // The terminal charges once per attempt: a retry of a lost reply keeps the
   // attempt's name, so it does not put the card through again (Sep '26).
+  let chargedNow = 0;
   if (method === 'card' && terminalActive() && !state._terminalApproved && state._partAttempt.charged !== amount) {
     const ok = await runTerminalPurchase(amount);
     if (!ok) return;
     state._partAttempt.charged = amount;
+    chargedNow = amount;
   }
   const staffName = state.currentStaff ? state.currentStaff.name : 'Unknown';
   // Paying the share from the split screen marks THAT share paid, and the
@@ -26821,7 +26905,12 @@ async function takePart(amount, method, giftCardCode, change) {
     // re-read so this till sees what the other one took. Only a lost reply
     // (no status) keeps the name for its retry.
     if (e.status) { state._partAttempt = null; refreshOrders().then(() => renderWhenStill()).catch(() => {}); }
-    state.toast = toastFail(e.message || (method === 'giftcard' ? 'Could not take that gift card.' : 'Could not record that card.'));
+    // THE CARD WAS CHARGED AND THE TILL SAID NO (7 Oct '26): another till had
+    // taken most of the bill, the part was refused, and the guest's terminal
+    // charge was recorded nowhere. Say so, and what to do about it.
+    state.toast = toastFail(e.status && chargedNow
+      ? `Card charged ${money(chargedNow)} but not recorded — ${e.message || 'refused'}. Refund it on the terminal.`
+      : e.message || (method === 'giftcard' ? 'Could not take that gift card.' : 'Could not record that card.'));
     render();
     return false;
   }
@@ -27958,7 +28047,9 @@ async function rosterCopyLastWeek() {
   // '26). A shift already on this week is left alone.
   const plus7 = r => { const d = new Date(r.date + 'T00:00:00'); d.setDate(d.getDate() + 7); return rosterDateKey(d); };
   const there = new Set((state.roster || []).map(r => [r.staffId, r.date, r.start, r.end].join('|')));
-  const lastWeek = (state.roster || []).filter(r => prevKeys.includes(r.date));
+  // Only people still on the team (7 Oct '26): a removed waiter's shifts were copied on, week after week.
+  const onTeam = new Set((state.staffList || []).map(st => st.id));
+  const lastWeek = (state.roster || []).filter(r => prevKeys.includes(r.date) && (!onTeam.size || onTeam.has(r.staffId)));
   if (lastWeek.length === 0) { state.toast = toastFail('Last week has no shifts to copy.'); render(); return; }
   const src = lastWeek.filter(r => !there.has([r.staffId, plus7(r), r.start, r.end].join('|')));
   if (src.length === 0) { state.toast = 'Last week is already copied.'; render(); armToastTimer(TOAST_SHORT); return; }
@@ -28238,6 +28329,7 @@ async function redeemLoyaltyPoints() {
     // Points leave the customer when the bill is PAID, not now.
     const amount = points / loyaltyPointsPerDollar();
     state.discount = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
+    if (state.orderType === 'dine-in' && state.table) saveTableDiscount(state.table, state.discount); // kept with the table, like any money off
     resizeEvenSplit(); // an even split follows the bill it now is
     render();
   } catch (e) {
@@ -28519,8 +28611,8 @@ async function saveInventoryItem() {
     } else {
       await api(`/api/inventory-items/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     }
+    state.inventoryItemModal = null; // gone before the reload paints, or it stayed up looking unsaved (7 Oct '26)
     await loadInventoryData();
-    state.inventoryItemModal = null;
   } catch (e) {
     state.adminError = e.message || 'Could not save ingredient.';
     render();
@@ -28565,8 +28657,8 @@ async function confirmAdjustInventory() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ change, reason: m.reason, staffName: state.currentStaff ? state.currentStaff.name : 'System' })
     });
+    state.adjustInventoryModal = null; // gone before the reload paints, or it stayed up looking unsaved (7 Oct '26)
     await loadInventoryData();
-    state.adjustInventoryModal = null;
   } catch (e) {
     state.toast = toastFail(e.message || 'Could not adjust inventory.');
     render();
@@ -28626,8 +28718,8 @@ async function saveSupplier() {
     } else {
       await api(`/api/suppliers/${m.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     }
+    state.supplierModal = null; // gone before the reload paints, or it stayed up looking unsaved (7 Oct '26)
     await loadInventoryData();
-    state.supplierModal = null;
   } catch (e) {
     state.adminError = e.message || 'Could not save supplier.';
     render();
@@ -30823,6 +30915,10 @@ async function applyVoucherCode() {
     if (voucher.used) throw new Error('This voucher has already been used');
     // Spent when the bill is PAID, not now — Cancel keeps the voucher whole.
     state.discount = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount', voucherCode: voucher.code };
+    // KEPT WITH THE TABLE (7 Oct '26): it lived on this screen only, so a part
+    // paid, a walk to another table and back, and the voucher was gone — the
+    // rest of the bill was charged in full and the voucher stayed unspent.
+    if (state.orderType === 'dine-in' && state.table) saveTableDiscount(state.table, state.discount);
     resizeEvenSplit(); // an even split follows the bill it now is
     state.checkoutVoucherCode = '';
     state.toast = `Voucher ${voucher.code} applied`;
@@ -30847,7 +30943,10 @@ async function applyGiftCardCode() {
     // same write that records the part.
     // A bill with a part already taken is paid in parts to the end — the
     // card takes what it can of what is LEFT, never the whole bill again.
-    if (card.balance < amountOwing() - 0.01 || splitPaidList().length) {
+    // …and a bill split ÷N pays its SHARE: the card took the whole bill over
+    // the "Share 1 of 2" on screen (7 Oct '26).
+    const share = state.payShare && state.payShare.amount > 0 ? state.payShare.amount : null;
+    if (card.balance < amountOwing() - 0.01 || splitPaidList().length || share) {
       // AN EMPTY CARD IS NOT A PART. Spent down to nothing it still looked up
       // fine, so it went through as a $0 part: the server refused it and the
       // screen said "paid $0.00" over the top of the refusal (caught here,
@@ -30861,7 +30960,7 @@ async function applyGiftCardCode() {
       const tipsTaken = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
       const billLeft = Math.max(0, Math.round((cartTotal() - (splitPaidTotal() - tipsTaken)) * 100) / 100);
       if (billLeft <= 0.005) { state.toast = toastFail('A gift card pays the bill, not the tip.'); render(); return; }
-      const spend = Math.min(card.balance, owed, billLeft);
+      const spend = Math.min(card.balance, owed, billLeft, share || Infinity);
       const took = await takePart(spend, 'giftcard', card.code);
       if (!took) return; // takePart has already said why
       state.checkoutGiftCardCode = '';
@@ -35266,8 +35365,12 @@ function miPreviewRows() {
     if (!name || isNaN(price)) return { name: rawName || '—', status: 'skip' };
     // ledger noise, not menu: a sheet's TOTAL/SUBTOTAL rows never import
     if (/^(sub)?total\b|^sum\b/i.test(name)) return { name, status: 'skip' };
-    const ex = state.menu.find(m => m.name.toLowerCase() === name.toLowerCase() && m.category === cat);
-    if (ex) return ex.price === price ? { name, price, cat, status: 'same' } : { name, price, cat, status: 'update', id: ex.id };
+    // The dish's OWN name first (7 Oct '26): "House Red (150ml)" came back from
+    // the download stripped to "House Red", matched nothing, and was added as a
+    // second dish beside the one it was meant to re-price.
+    const sameName = n => m => m.name.toLowerCase() === n.toLowerCase() && m.category === cat;
+    const ex = state.menu.find(sameName(rawName.trim())) || state.menu.find(sameName(name));
+    if (ex) return ex.price === price ? { name: ex.name, price, cat, status: 'same' } : { name: ex.name, price, cat, status: 'update', id: ex.id };
     return { name, price, cat, status: 'add' };
   });
 }
@@ -35376,7 +35479,7 @@ async function miApply() {
   for (const r of rows) {
     try {
       if (!haveCats.has(r.cat)) {
-        const c = await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: r.cat }) });
+        const c = sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: r.cat }) }));
         if (c && c.name) { haveCats.add(c.name); state.categories.push(c); }
       }
       if (r.status === 'add') {
@@ -42721,7 +42824,7 @@ async function duplicateSelectedSections() {
     for (const id of ids) {
       const c = state.categories.find(x => x.id === id);
       if (!c) continue;
-      await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), color: c.color, icon: c.icon, iconEnabled: c.iconEnabled }) });
+      sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), color: c.color, icon: c.icon, iconEnabled: c.iconEnabled }) }));
     }
     state.categories = await api('/api/categories');
   } catch (e) { state.toast = toastFail('Could not duplicate some sections.'); }
@@ -43462,7 +43565,7 @@ async function saveCategoryModal() {
   if (!m.name.trim()) { state.adminError = 'Section name is required.'; render(); return; }
   const payload = { name: m.name, icon: m.icon, iconEnabled: m.iconEnabled };
   try {
-    await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }));
     state.categories = await api('/api/categories');
     state.menu = await api('/api/menu');
     state.categoryModal = null;
@@ -43662,7 +43765,7 @@ function uniqueDefaultName(base, existingNames) {
 async function quickAddCategory() {
   const name = uniqueDefaultName('New section', state.categories.map(c => c.name));
   try {
-    await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, icon: null, iconEnabled: true }) });
+    sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, icon: null, iconEnabled: true }) }));
     state.categories = await api('/api/categories');
     render();
   } catch (e) { state.toast = toastFail('Could not add section.'); render(); }
@@ -44730,6 +44833,13 @@ async function saveBulkEditModal() {
   const ids = state.selectedMenuItemIds;
   if (m.priceMode !== 'none' && (m.priceValue === '' || isNaN(parseFloat(m.priceValue)))) {
     state.adminError = 'Enter a valid price adjustment value.';
+    render();
+    return;
+  }
+  // COUNTING NEEDS A COUNT (7 Oct '26): left blank, every dish not already
+  // counted was set to 0 — and went Sold out on the till all at once.
+  if (m.trackStockMode === 'on' && String(m.stockCount).trim() === '' && ids.some(id => { const it = state.menu.find(x => x.id === id); return it && !it.trackStock; })) {
+    state.adminError = 'Type how many are in stock.';
     render();
     return;
   }

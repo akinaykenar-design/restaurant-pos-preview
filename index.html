@@ -10930,7 +10930,10 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
   const data = readData();
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
-  const { label, x, y, shape, width, height, seats, type, decorType, icon, rotation, color } = req.body;
+  const { x, y, shape, width, height, seats, type, decorType, icon, rotation, color } = req.body;
+  // A NUMBER IS TEXT (7 Oct '26): one label sent as a number (an import, another
+  // app) was accepted, and every add and rename after it failed on the server.
+  const label = req.body.label == null ? req.body.label : String(req.body.label);
   if (!label) return res.status(400).json({ error: 'A table label is required' });
   if (type !== 'decor') {
     const clash = tableLabelClash(data, label, null, floorPlan);
@@ -10968,7 +10971,8 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (!floorPlan) return res.status(404).json({ error: 'Layout not found' });
   const table = floorPlan.tables.find(t => t.id === req.params.id);
   if (!table) return res.status(404).json({ error: 'Table not found' });
-  const { label, x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, color, decorType, icon, prevX, prevY, discount, swap } = req.body;
+  const { x, y, shape, width, height, seats, rotation, covers, notes, mergedInto, color, decorType, icon, prevX, prevY, discount, swap } = req.body;
+  const label = req.body.label == null ? req.body.label : String(req.body.label); // a number is text
   let traded = null; // the OTHER table, when two of them trade numbers
   if (label !== undefined) {
     const was = String(table.label);
@@ -11169,6 +11173,10 @@ app.delete('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (table && table.type === 'table') {
     const stuck = (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table.label));
     if (stuck) return res.status(400).json({ error: `Table ${stuck.table} has an unpaid bill. Settle or move it first.` });
+    // …nor out from under a waiter who has it open (7 Oct '26): their round,
+    // rung but not yet sent, went to the kitchen for a table that was gone.
+    const held = tableLocks.get(String(table.id));
+    if (held && lockFresh(held)) return res.status(400).json({ error: `Table ${table.label} is open on ${held.staff}'s till. Try again when they leave it.` });
   }
   floorPlan.tables = floorPlan.tables.filter(t => t.id !== req.params.id);
   // A combination is its tables. Lose one and the combination is not a
@@ -13397,6 +13405,16 @@ app.post('/api/orders', (req, res) => {
       rawItems = unseenLines(landed, rawItems);
       if (!rawItems.length) return res.json(landed);
     }
+  }
+  // A TICKET NEEDS A TABLE THAT IS STILL ON THE FLOOR (7 Oct '26). A till
+  // that had not caught up with the layout sold on a table deleted on another
+  // till — the bill sat on no floor — and on a renamed table's old number,
+  // which opened a second bill beside the party's real one.
+  // Money taken at once is never refused for it — the bill closes as it opens.
+  if (open && (orderType || 'dine-in') === 'dine-in' && table != null && String(table) !== '') {
+    const here = new Set();
+    (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (t.type !== 'decor') { here.add(String(t.label)); here.add(String(t.id)); } }));
+    if (here.size && !here.has(String(table))) return res.status(409).json({ error: `Table ${table} is no longer on the floor — pick the table again.` });
   }
   const noteOnly = !rawItems || rawItems.length === 0;
   if (noteOnly && !(open && (String(req.body.quickNote || '').trim() || (orderType || 'dine-in') === 'dine-in' && table))) {
@@ -17564,7 +17582,9 @@ async function api(path, opts) {
     res = await fetch(path, opts);
   } catch (e) {
     state.online = false;
-    throw e;
+    // In the venue's words (7 Oct '26): a save with the wifi down said
+    // "Failed to fetch". No status, as before — callers read that as "no answer".
+    throw new Error('No connection — not saved.');
   }
   state.online = true;
   // Any admin delete that succeeds offers its undo (owner, Aug '26). One
@@ -19740,7 +19760,35 @@ async function refreshDeskColours() {
   state.settings.tableStatusColors = s.tableStatusColors || {};
   state.settings.deskOwned = s.deskOwned || [];
 }
+// THE LAYOUT FOLLOWS THE OTHER TILLS (7 Oct '26). The poll only copied the
+// party on each table — covers, notes, discount — so a table added, renamed,
+// moved or deleted on another till was not seen here until a log-off: a
+// waiter sold on a deleted table, and on a renamed table's old number, which
+// opened a second bill. The plans are read in whole when they differ, unless
+// this till's hand is in the middle of an edit; an editor that took another
+// till's change lets go of its undo, which would have put that change back.
+function floorLayoutKey(fps) {
+  return JSON.stringify((fps || []).map(fp => [fp.id, fp.name, (fp.tables || []).map(t => [t.id, String(t.label), t.x, t.y, t.width, t.height, t.rotation || 0, t.shape, t.type, t.decorType || '', t.seats || 0, t.color || '', t.mergedInto || '']),
+    (fp.joins || []).map(j => [j.id, j.tables.join('+'), j.min, j.max])]));
+}
+function followLayout(fps) {
+  if (floorLayoutKey(fps) === floorLayoutKey(state.floorPlans)) return false;
+  const editing = floorEditorActive();
+  if (editing && (floorDrag || state.tableNumPad || state.tableJoinPad || state.confirmDialog || state.floorPlacing || (typeof gestureLive === 'function' && gestureLive()))) return false;
+  // a table saved here a moment ago keeps this till's copy until the server's catches up
+  const mine = new Map();
+  (state.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => { if (t._savedAt && t._savedAt > Date.now() - 3000) mine.set(t.id, t); }));
+  fps.forEach(fp => { fp.tables = (fp.tables || []).map(t => mine.get(t.id) || t); });
+  state.floorPlans = fps;
+  if (editing) { floorHistory.undo = []; floorHistory.redo = []; }
+  if (state.selectedAdminTableId && !findTableById(state.selectedAdminTableId)) state.selectedAdminTableId = null;
+  state.selectedAdminTableIds = (state.selectedAdminTableIds || []).filter(id => findTableById(id));
+  return true;
+}
 async function refreshTableSittings() {
+  let fps0;
+  try { fps0 = await api('/api/floorplans'); } catch (e) { return; }
+  if (Array.isArray(fps0) && followLayout(fps0)) { renderWhenStill(); return; }
   if (floorEditorActive()) return;
   // A NEWER SAVE HERE WINS (2 Oct '26): an answer that left before this till
   // saved an allergy landed after it, put the old list back, and the next note
@@ -23144,7 +23192,7 @@ async function sendToKitchen() {
     state.sendFailed = { at: Date.now(), items: state.cart.length, net: !e.status }; // no answer at all: it may have landed, and it resends by itself
     state.toast = toastFail(!state.online
       ? 'Offline — it sends by itself when the server is back.'
-      : e.status === 403 && e.message ? e.message // a refusal says what it needs (a manager's PIN for a price under the menu's)
+      : (e.status === 403 || e.status === 409) && e.message ? e.message // a refusal says what it needs (a manager's PIN; a table no longer on the floor)
       : wasPay ? 'Not sent — nothing charged. Tap Send to try again.' : 'Not sent — tap Send to try again.');
     render();
     armToastTimer(TOAST_LONG);
@@ -39199,7 +39247,14 @@ async function placeFloorItemAt(fpId, val, xPct, yPct) {
     const obj = await api(`/api/floorplans/${fpId}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     fp.tables.push(obj);
     render(); // keep placing
-  } catch (e) { state.toast = toastFail('Could not place that.'); render(); }
+  } catch (e) {
+    // A REFUSAL SAYS WHY, AND LEAVES NO STEP (7 Oct '26): it said "Could not
+    // place that." over a number another floor had taken, and Undo then spent
+    // a press putting back nothing.
+    floorHistory.undo.pop();
+    state.toast = toastFail(e.message || 'Could not place that.');
+    render();
+  }
 }
 async function addObject(fpId) {
   const select = document.getElementById('add-object-template-select');
@@ -39433,8 +39488,13 @@ async function applyFloorSnapshot(fpId, target) {
   state.selectedAdminTableId = null;
   state.selectedAdminTableIds = [];
   render();
-  for (const id of toDelete) { try { await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'DELETE' }); } catch (e) {} }
-  for (const t of toPut) { try { await api(`/api/floorplans/${fpId}/tables/${t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ..._floorPutBody(t), swap: true }) }); } catch (e) {} }
+  // AN UNDO THAT PARTLY FAILED SAYS SO, AND SHOWS THE TRUTH (7 Oct '26): a
+  // refused step (a bill on the table, the wifi gone) left this screen showing
+  // a floor the server never had. Now the plans are read back and it says why.
+  let failed = null;
+  const miss = e => { if (!failed) failed = e; };
+  for (const id of toDelete) { try { await api(`/api/floorplans/${fpId}/tables/${id}`, { method: 'DELETE' }); } catch (e) { miss(e); } }
+  for (const t of toPut) { try { await api(`/api/floorplans/${fpId}/tables/${t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ..._floorPutBody(t), swap: true }) }); } catch (e) { miss(e); } }
   for (const t of toAdd) {
     try {
       const obj = await api(`/api/floorplans/${fpId}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(_floorCreateBody(t)) });
@@ -39445,7 +39505,7 @@ async function applyFloorSnapshot(fpId, target) {
         try { await api(`/api/floorplans/${fpId}/tables/${obj.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) }); Object.assign(obj, patch); } catch (e) {}
       }
       _remapFloorId(fp, t.id, obj.id, obj);
-    } catch (e) {}
+    } catch (e) { miss(e); }
   }
   // Combinations the snapshot had and the plan lost come back on their tables.
   if (target.joins) {
@@ -39466,6 +39526,13 @@ async function applyFloorSnapshot(fpId, target) {
       try { await api(`/api/floorplans/${fpId}/joins/${j.id}`, { method: 'DELETE' }); fp.joins = fp.joins.filter(x => x.id !== j.id); } catch (e) {}
     }
     fp.joins = (fp.joins || []).filter(j => j.tables.every(id => ids.has(id)));
+  }
+  if (failed) {
+    try {
+      const fps = await api('/api/floorplans');
+      if (Array.isArray(fps)) { state.floorPlans = fps; floorHistory.undo = []; floorHistory.redo = []; }
+    } catch (e) {}
+    state.toast = toastFail(failed.message ? `Not all of it went back — ${failed.message}` : 'Not all of it went back.');
   }
   render();
 }
@@ -39812,7 +39879,8 @@ async function deleteTableAction(id, fpId) {
     state.selectedAdminTableId = null;
     offerUndo('Deleted', () => floorUndo());
   } catch (e) {
-    state.toast = toastFail('Could not remove that table.');
+    floorHistory.undo.pop(); // nothing went, so there is nothing to undo
+    state.toast = toastFail(e.message || 'Could not remove that table.'); // the server says why: a bill, a waiter on it
     render();
   }
 }
@@ -39820,11 +39888,19 @@ async function deleteTableAction(id, fpId) {
 async function saveTablePosition(id, x, y) {
   const fp = state.floorPlans.find(f => f.id === state.adminFloorPlanId);
   const t = fp && fp.tables.find(t => t.id === id);
-  if (t) { t.x = x; t.y = y; }
+  const was = t ? { x: t.x, y: t.y } : null;
+  if (t) { t.x = x; t.y = y; t._savedAt = Date.now(); }
   if (!fp) return;
   try {
     await api(`/api/floorplans/${fp.id}/tables/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ x, y }) });
-  } catch (e) {}
+  } catch (e) {
+    // A MOVE THAT DID NOT SAVE GOES BACK (7 Oct '26): with the wifi down the
+    // table sat where it was dropped on this screen only, and came back at the
+    // next log-off — the venue thought the floor was laid out.
+    if (t && was && t.x === x && t.y === y) { t.x = was.x; t.y = was.y; t._savedAt = 0; }
+    state.toast = toastFail(e.message || 'Could not move that.');
+    render();
+  }
 }
 
 function openAddFloorPlan() { state.floorPlanModal = withDirtyCheck({ mode: 'add', id: null, name: '' }); state.adminError = ''; render(); }
@@ -40223,8 +40299,9 @@ async function duplicateSelectedTables(singleId) {
       const obj = await api(`/api/floorplans/${fp.id}/tables`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
       fp.tables.push(obj);
       newIds.push(obj.id);
-    } catch (e) {}
+    } catch (e) { state.toast = toastFail(e.message || 'Could not copy that.'); }
   }
+  if (!newIds.length) floorHistory.undo.pop();
   if (newIds.length) {
     state.selectedAdminTableIds = newIds.length > 1 ? newIds : [];
     state.selectedAdminTableId = newIds.length === 1 ? newIds[0] : null;
@@ -47925,7 +48002,11 @@ function handleActClick(el, e) {
         // "Delete table 14?" took 13 + 14 with it, unasked.
         const fpT = findFloorPlanForTable(id);
         const goes = fpT && t ? (fpT.joins || []).filter(c => c.tables.includes(id)).map(c => joinLabel(fpT, c)) : [];
-        openConfirm({ message: t && t.type !== 'decor' ? `Delete table ${t.label}${goes.length ? ` and ${goes.join(', ')}` : ''}?` : `Delete this ${floorThingWord(t)}?`, confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
+        // …AND SO DOES A BOOKING ON IT (7 Oct '26): the booking kept a table
+        // that was gone, and the desk found out when the guests walked in.
+        const booked = t && t.type !== 'decor' ? (state.reservations || []).filter(r => r.tableId === id && (!r.status || r.status === 'booked') && new Date(r.time).getTime() > Date.now() - 15 * 60000).length : 0;
+        const bookedWord = booked ? `\nIt has ${booked === 1 ? 'a booking' : `${booked} bookings`} to come.` : '';
+        openConfirm({ message: t && t.type !== 'decor' ? `Delete table ${t.label}${goes.length ? ` and ${goes.join(', ')}` : ''}?${bookedWord}` : `Delete this ${floorThingWord(t)}?`, confirmLabel: 'Delete', danger: true }, () => deleteTableAction(id, fp));
       }
       else if (act === 'delete-selected-tables') { deleteSelectedTables(); }
       else if (act === 'pick-table-shape') {

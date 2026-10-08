@@ -13562,6 +13562,7 @@ app.post('/api/orders', (req, res) => {
       customerId: customerId || null,
     };
     if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
+    noteRungKeys(order, items);
     callFirstFood(data, order, items, order.rounds[0].sentAt);
     order.notesSig = tableNotesSig(data, order);
     data.orders.push(order);
@@ -13731,6 +13732,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const round = { id: roundNumber, sendKey, sentAt: Date.now(), color: roundColorFor(data, roundNumber), items, quickNote, quickNoteStation, staffName: staffName || order.staffName || null };
   order.rounds = [...(order.rounds || []), round];
   order.items = order.items.concat(items);
+  noteRungKeys(order, items);
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
@@ -13768,10 +13770,17 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
 // keeps the lines whose key it has never seen and skips the rest, so the
 // same cart sent twice doubles nothing and a changed cart rings only what is
 // new. Lines from older tills carry no key and are never skipped.
+// …and a line that has LEFT the ticket — voided, or moved to another table —
+// is still a line the ticket has rung: a resend after a lost reply rang the
+// voided dish again (8 Oct '26). The ticket keeps every key it ever rang.
 function knownLineKeys(order) {
-  const keys = new Set();
+  const keys = new Set((order.rungKeys || []).map(String));
   (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (i.lineKey) keys.add(String(i.lineKey)); }));
   return keys;
+}
+function noteRungKeys(order, items) {
+  const ks = (items || []).map(i => i && i.lineKey).filter(Boolean).map(String);
+  if (ks.length) order.rungKeys = [...new Set([...(order.rungKeys || []), ...ks])];
 }
 function unseenLines(order, rawItems) {
   const known = knownLineKeys(order);
@@ -19959,6 +19968,16 @@ async function followMovedParty() {
   const here = findTableById(state.table);
   if (!here) return;
   const seatedOn = (b) => b.status === 'seated' && !b.tillEndedAt ? (b.tillTableId || b.tableId) : null;
+  // THE TICKET IN HAND FOLLOWS THE SERVER TOO: paid on another till while this
+  // one slept, it stayed the ticket every round rang onto — "Not sent" for
+  // good. Combined or moved, it is the ticket the party is on now; paid, the
+  // party has gone and the next round opens a new one.
+  const held = state.openOrderId && (state.orders || []).find(x => x.id === state.openOrderId);
+  if (held && held.status !== 'open' && !state.showCheckout) {
+    const now = ticketNow(held.id);
+    state.openOrderId = now ? now.id : null;
+    if (!now) { state.firedCourses = {}; state.attachedCustomerId = null; }
+  }
   const o = state.openOrderId && (state.orders || []).find(x => x.id === state.openOrderId && x.status === 'open');
   let to = null;
   if (o) { if (String(o.table) !== String(here.label)) to = allTables().find(t => String(t.label) === String(o.table)) || null; }
@@ -20822,8 +20841,10 @@ function doSameAgain(n) {
     const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: item.qty || 1,
       course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
       variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
+    // …and never into a line at another price: a lager comped to $0 took the
+    // whole round free (the menu add and Add another already check it).
     const twin = state.cart.find(c => c.sentQty == null && c.id === line.id && c.course === line.course
-      && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line));
+      && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line) && c.price === line.price);
     if (twin) twin.qty += line.qty; else state.cart.push(line);
   });
   state.toast = 'Same again — press Send';
@@ -28233,6 +28254,9 @@ function kdsItemRows() {
     const sentAtByItem = new Map();
     (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { const k = keyOf(it); if (k && !sentAtByItem.has(k)) sentAtByItem.set(k, rd.sentAt); }));
     const fired = o.firedCourses || {};
+    // A table that has had its food called is PACED: a course not called now
+    // waits — a taken-back call put every held course on the stove.
+    const paced = Object.keys(fired).some(k => fired[k] > 0) || (o.orderType === 'dine-in' && !!o.firstFoodCalled);
     (o.items || []).forEach((item, idx) => {
       if (!item.status || item.status === 'served' || !(item.qty > 0)) return;
       const course = item.course || 1;
@@ -28249,7 +28273,7 @@ function kdsItemRows() {
         // How long the cook has had it: from the CALL when the course waited
         // for one, from the send when it went straight away.
         since: fired[course] > 0 ? Math.max(sentAt, fired[course]) : sentAt,
-        held: Object.keys(fired).some(k => fired[k] > 0) && !(fired[course] > 0),
+        held: paced && !(fired[course] > 0),
         table: o.orderType === 'dine-in' ? String(o.table == null ? '' : o.table) : (o.customerName || o.orderType),
       });
     });
@@ -28300,8 +28324,11 @@ function kdsTickets(rows) {
     t.rows.push(r);
     if (r.item.status !== 'ready' && r.since < t.since) t.since = r.since;
   });
-  const tickets = [...tmap.values()].filter(t => t.since !== Infinity);
+  // A card whose every dish is crossed off STAYS for its Ready: it left on the
+  // last tap, its dishes never went, and the Pass kept the course away.
+  const tickets = [...tmap.values()].filter(t => t.rows.length);
   tickets.forEach(t => {
+    if (t.since === Infinity) t.since = Math.min(...t.rows.map(r => r.since));
     const cmap = new Map();
     t.rows.forEach(r => { if (!cmap.has(r.course)) cmap.set(r.course, []); cmap.get(r.course).push(r); });
     t.courses = [...cmap.entries()].sort((a, b) => a[0] - b[0]).map(([n, rs]) => ({ n, rows: rs }));
@@ -38661,6 +38688,9 @@ function offerCloseEmptyTable(next) {
         body: JSON.stringify({ reason: 'Nothing ordered', note: 'Closed with the table', staffName: (state.currentStaff || {}).name || '' }) });
       await saveTableCovers(t.id, 0);
       await saveTableNotes(t.id, []);
+      // …and the account's money off or surcharge: it stayed on the table and
+      // the next party sat there opened with it (a paid table goes clean).
+      await saveTableDiscount(t.id, null);
       releaseTableLock(t.id);
       if (_autoSeat && _autoSeat.table === t.id) {
         const id = _autoSeat.id; _autoSeat = null;
@@ -38669,7 +38699,7 @@ function offerCloseEmptyTable(next) {
         state.reservations = await api('/api/reservations');
       }
     } catch (e) {}
-    state.covers = 0; state.notes = [];
+    state.covers = 0; state.notes = []; state.discount = null;
     state.openOrderId = null;
     await refreshOrders();
     next();

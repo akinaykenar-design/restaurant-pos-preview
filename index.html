@@ -8688,7 +8688,9 @@ app.use((req, res, next) => {
 // at 11pm rolled gift cards, points, stock, paid-outs, the float and the
 // time clock back to a delete at 10am). Menu rows come back WITHOUT their
 // stock fields, and a snapshot older than ten minutes is gone.
-const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes'];
+// The roster and leave are the plan, not trading: removing a person takes
+// their shifts to come and their leave with them, so Undo puts those back too.
+const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes', 'roster', 'timeOff'];
 const UNDO_TTL = 10 * 60 * 1000;
 let _undoSnap = null, _undoSnapAt = 0, _undoKeys = new Set(), _undoByManager = false, _undoEdited = {};
 app.use((req, res, next) => {
@@ -27909,7 +27911,7 @@ function numSettingRow(label, key, val, unit, min, max) {
   return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
     <label class="field-label" style="margin:0;flex:1;">${esc(label)}</label>
     <input type="number" min="${min}" max="${max}" step="1" value="${val}" class="num-field"
-      onblur="saveTicketSetting({ ${key}: Math.max(${min}, Math.min(${max}, parseInt(this.value,10) || ${min})) })">
+      onblur="if (isNaN(parseInt(this.value,10))) { this.value = '${val}'; return; } saveTicketSetting({ ${key}: Math.max(${min}, Math.min(${max}, parseInt(this.value,10) || ${min})) })">
     <span class="ts" style="flex-shrink:0;">${esc(unit)}</span>
   </div>`;
 }
@@ -28626,13 +28628,19 @@ function renderInventoryItemsTab() {
   <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;">
     <input id="inventory-search" type="text" placeholder="Search items…" value="${state.inventorySearch || ''}" style="flex:1;max-width:300px;font-family:inherit;">
   </div>
-  ${listToolbar({ list: 'inventory-item', keys: (state.inventoryItems || []).map(i => i.id), sort: 'inventory',
+  ${listToolbar({ list: 'inventory-item', keys: inventoryShown().map(i => i.id), sort: 'inventory',
     del: 'delete-selected-inventory-items', clear: 'clear-inventory-item-selection',
     add: { act: 'open-add-inventory-item', label: '+ Ingredient' } })}
   <div id="inventory-list">${renderInventoryRows()}</div>
   `;
 }
 
+// The ingredients the search leaves on screen — what the rows draw AND what
+// Select all ticks, or a search for one ticked every ingredient (8 Oct '26).
+function inventoryShown() {
+  const q = (state.inventorySearch || '').toLowerCase();
+  return (state.inventoryItems || []).filter(i => !q || i.name.toLowerCase().includes(q));
+}
 // Inventory item cards, rendered into #inventory-list so the search box can
 // refresh just the list on keystroke without rebuilding the input.
 function renderInventoryRows() {
@@ -28642,7 +28650,7 @@ function renderInventoryRows() {
   // live behind the expand.
   const suppliers = state.suppliers || [];
   const sel = state.selectedInventoryItemIds || [];
-  const items = applyListSort('inventory', (state.inventoryItems || []).filter(i => !state.inventorySearch || i.name.toLowerCase().includes(state.inventorySearch.toLowerCase())));
+  const items = applyListSort('inventory', inventoryShown());
   return `
     ${items.map(i => `
       <div class="menu-item-expandable inventory-item-row${sel.includes(i.id) ? ' selected' : ''}${(state.expandedInventoryItemIds || []).includes(i.id) ? ' open' : ''}" data-id="${i.id}" style="border:1px solid var(--steel-200);border-radius:var(--r-control);background:var(--surface);overflow:hidden;margin-bottom:var(--list-gap);">
@@ -43413,6 +43421,7 @@ function reorderNotePresets(fromIdx, toIdx) {
     presets.splice(toIdx, 0, moved);
     return { ...c, presets };
   });
+  moveRowMarks(['selectedNotePresetIdxs', 'expandedNotePresetIdxs'], draggedTo(fromIdx, toIdx));
   saveNoteCategories(cats);
 }
 function saveNotePresetStation(catId, pIdx, val) {
@@ -43455,7 +43464,9 @@ function removeNoteSection(idx) {
 function addNotePreset(catId) {
   // Server drops empty presets, so seed a placeholder the user then edits
   // (same pattern as "New section" / "New category").
+  if (!state.noteCategories.some(c => c.id === catId)) return;
   const cats = state.noteCategories.map(c => c.id === catId ? { ...c, presets: [{ name: 'New note', color: null }, ...(c.presets || [])] } : c);
+  moveRowMarks(['selectedNotePresetIdxs', 'expandedNotePresetIdxs'], i => i + 1);
   saveNoteCategories(cats);
 }
 // A PRESET'S KINDS, ON EVERY TYPE. These were allergy-only ("Nuts" -> Severe);
@@ -43569,7 +43580,12 @@ async function saveVoidReasons(presets) {
     render();
   } catch (e) { listRefused(e, async () => { state.voidReasons = await api('/api/void-reasons'); }); }
 }
-function addVoidReason() { saveVoidReasons(['New reason', ...state.voidReasons]); }
+// A LIST KEPT BY POSITION KEEPS ITS TICKS ON THEIR ROWS (8 Oct '26). A row
+// added on top, or one dragged, moved every row under it — and the tick and
+// the open editor stayed on the old number, so Delete took the row above.
+function moveRowMarks(keys, at) { keys.forEach(k => { state[k] = (state[k] || []).map(at); }); }
+function draggedTo(from, to) { return i => i === from ? to : (from < to ? (i > from && i <= to ? i - 1 : i) : (i >= to && i < from ? i + 1 : i)); }
+function addVoidReason() { moveRowMarks(['selectedVoidReasonIdxs', 'expandedVoidIdxs'], i => i + 1); saveVoidReasons(['New reason', ...state.voidReasons]); }
 const DEFAULT_VOID_REASON_NAMES = ['Order mistake', 'Customer complaint', 'Kitchen error', 'Duplicate order', 'Comp / goodwill', 'Other'];
 function updateVoidReason(idx, value) {
   saveVoidReasons(state.voidReasons.map((p, i) => i === idx ? value : p));
@@ -43581,6 +43597,7 @@ function reorderVoidReasons(fromIdx, toIdx) {
   const reasons = state.voidReasons.slice();
   const [dragged] = reasons.splice(fromIdx, 1);
   reasons.splice(toIdx, 0, dragged);
+  moveRowMarks(['selectedVoidReasonIdxs', 'expandedVoidIdxs'], draggedTo(fromIdx, toIdx));
   saveVoidReasons(reasons);
 }
 
@@ -46197,6 +46214,7 @@ function bindEvents() {
   });
   if (inventorySearchInput) inventorySearchInput.addEventListener('input', (e) => {
     state.inventorySearch = e.target.value;
+    _listKeys['inventory-item'] = inventoryShown().map(i => i.id);
     const list = document.getElementById('inventory-list');
     if (list) list.innerHTML = renderInventoryRows(); else render();
   });
@@ -47038,6 +47056,15 @@ function bindEvents() {
   dateInto('timeoff-start', v => { if (state.timeOffModal) state.timeOffModal.start = v; });
   dateInto('timeoff-end', v => { if (state.timeOffModal) state.timeOffModal.end = v; });
   dateInto('shift-date', v => { if (state.shiftModal) state.shiftModal.date = v; });
+  // …and every other box on those forms, or opening the date pad (a redraw)
+  // put the staff member and the times back to the form's first ones.
+  [['shiftModal', { 'shift-staff': 'staffId', 'shift-start': 'start', 'shift-end': 'end' }],
+   ['timeOffModal', { 'timeoff-staff': 'staffId', 'timeoff-reason': 'reason' }],
+   ['rosterShiftModal', { 'roster-start': 'start', 'roster-end': 'end', 'roster-role': 'role', 'roster-note': 'note' }]]
+    .forEach(([m, map]) => Object.entries(map).forEach(([id, k]) => {
+      const el = document.getElementById(id);
+      if (el) ['input', 'change'].forEach(ev => el.addEventListener(ev, (e) => { if (state[m]) state[m][k] = e.target.value; }));
+    }));
   const expenseDateInput = document.getElementById('expense-date-input');
   if (expenseDateInput) expenseDateInput.addEventListener('input', (e) => { state.expenseForm.date = e.target.value; });
   const expenseCategoryInput = document.getElementById('expense-category-input');
@@ -48742,7 +48769,7 @@ function handleActClick(el, e) {
       else if (act === 'restore-note-types') { restoreNoteTypes(); }
       else if (act === 'add-note-section') { addNoteSection(); }
       else if (act === 'remove-note-section') { removeNoteSection(parseInt(el.dataset.idx)); }
-      else if (act === 'add-note-preset') { addNotePreset(el.dataset.id); }
+      else if (act === 'add-note-preset') { addNotePreset(el.dataset.id || state.notesOpenId); }
       else if (act === 'remove-note-preset') { removeNotePreset(el.dataset.id, parseInt(el.dataset.idx)); }
       else if (act === 'add-void-reason') { addVoidReason(); }
       else if (act === 'set-manager-approval-void') { setManagerApprovalForVoid(el.dataset.val === 'true'); }

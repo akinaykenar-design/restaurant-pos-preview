@@ -11679,9 +11679,10 @@ app.post('/api/doshii/sync-menu', async (req, res) => {
   }
   try {
     await doshii.syncMenu(config, data.menu, data.categories);
-    logAudit(data, staffFromReq(req), 'Synced the menu to Doshii');
-    writeData(data);
-    res.json({ ok: true, items: data.menu.filter(m => !m.disabled).length });
+    const fresh = readData(); // the wait was long enough for other saves — never write the copy from before it
+    logAudit(fresh, staffFromReq(req), 'Synced the menu to Doshii');
+    writeData(fresh);
+    res.json({ ok: true, items: fresh.menu.filter(m => !m.disabled).length });
   } catch (e) {
     res.status(502).json({ error: e.message });
   }
@@ -11696,20 +11697,22 @@ async function doshiiPollOnce() {
   if (doshiiPollBusy) return;
   doshiiPollBusy = true;
   try {
-    const data = readData();
-    const config = data.settings.doshii;
+    const config = readData().settings.doshii;
     if (!doshii.ready(config)) return;
     const pending = await doshii.getPendingOrders(config);
     for (const dOrder of pending) {
       const doshiiId = String(dOrder.id);
       if (doshiiSeen.has(doshiiId)) continue;
-      if (data.orders.some(o => o.doshiiId === doshiiId)) { doshiiSeen.add(doshiiId); continue; }
+      if (readData().orders.some(o => o.doshiiId === doshiiId)) { doshiiSeen.add(doshiiId); continue; }
       try {
         await doshii.updateOrderStatus(config, doshiiId, 'accepted');
       } catch (e) {
         console.error('Doshii: could not accept order', doshiiId, e.message);
         continue;
       }
+      // READ AFTER THE WAIT (8 Oct '26): a copy read before it was written
+      // back over every payment and round saved while Doshii answered.
+      const data = readData();
       const items = doshii.mapOrderItems(dOrder, data.menu);
       if (items.length === 0) { doshiiSeen.add(doshiiId); continue; }
       const meta = doshii.mapOrderMeta(dOrder);
@@ -11766,7 +11769,16 @@ let doshiiPayBusy = false;
 function payAtTableBill(data, o) {
   const sub = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
   const t = (data.floorPlans || []).flatMap(f => f.tables || []).find(x => String(x.label) === String(o.table));
-  const { discountRecord, discountAmount } = computeDiscount(sub, t && t.discount, o.items, data);
+  // …and with no money off or on of its own, the venue's AUTOMATIC rule that
+  // fits, as the Pay screen, the Bills card and the printed bill put on (8 Oct
+  // '26: a 10% automatic surcharge — $30.80 on the paper, $28 on the terminal).
+  // A public-holiday rule is the till's calendar, not the server's: left off.
+  const asked = { covers: o.covers, subtotal: sub, orderType: o.orderType, table: o.table };
+  const auto = !(t && t.discount) && (data.discountPresets || []).find(p => p.auto && p.enabled !== false && p.field !== 'holiday' && autoRuleFits(p, asked, new Date()));
+  // A voucher or points spent elsewhere since they were put on take nothing off.
+  const own = t && t.discount && !checkDiscountExtras(data, t.discount) ? t.discount : null;
+  const off = own || (auto ? { type: auto.type, value: auto.value, reason: auto.name, kind: auto.kind, auto: true, ruleId: auto.id } : null);
+  const { discountRecord, discountAmount } = computeDiscount(sub, off, o.items, data);
   const tx = computeTax(data, sub - discountAmount - voucherSaleTotal(o.items || []));
   const bill = Math.round((sub - discountAmount + tx.add) * 100) / 100;
   return { sub, bill, discountRecord, tax: tx.tax, due: Math.max(0, Math.round((bill - splitPaidNet(o)) * 100) / 100) };
@@ -11775,30 +11787,38 @@ async function doshiiPayAtTableOnce() {
   if (doshiiPayBusy) return;
   doshiiPayBusy = true;
   try {
-    const data = readData();
-    const config = data.settings.doshii;
+    const config = readData().settings.doshii;
     if (!doshii.ready(config) || config.payAtTable === false) return;
-    let changed = false;
-
-    for (const order of data.orders) {
-      // Skip orders that came FROM an app (they're already at Doshii).
-      if (order.source === 'doshii') continue;
+    // ONE TABLE AT A TIME, READ AFRESH AFTER EVERY WAIT (8 Oct '26). The loop
+    // held one copy of the store through a whole round of questions to Doshii
+    // — seconds per table — and wrote it back at the end: after any refusal
+    // meanwhile (another till told "In use"), every save since started from
+    // disk, and that old copy was written over them. A cash bill paid while
+    // it asked went open again.
+    const ids = readData().orders
+      // Not an order that came FROM an app (it is already at Doshii), and never
+      // a trainee's practice bill: a real card must never pay one (8 Oct '26).
+      .filter(o => o.source !== 'doshii' && !o.practice && (o.status === 'open' || o.doshiiSyncId)).map(o => o.id);
+    for (const id of ids) {
+      let data = readData();
+      let order = data.orders.find(o => o.id === id);
+      if (!order) continue;
 
       // 1) Keep Doshii's copy of every open order fresh (and tell it when a
       //    locally-closed order is done, so the terminal drops the table).
-      const pb = order.status === 'open' ? payAtTableBill(data, order) : null;
-      const syncHash = JSON.stringify([order.status, order.table, pb ? pb.due : order.grandTotal, (order.items || []).length]);
-      if (order.status === 'open' || (order.doshiiSyncId && order.doshiiSyncHash !== syncHash)) {
-        if (order.doshiiSyncHash !== syncHash) {
-          try {
-            const id = await doshii.pushOrder(config, pb ? { ...order, grandTotal: pb.due } : order, order.doshiiSyncId || null);
-            if (id) order.doshiiSyncId = id;
-            order.doshiiSyncHash = syncHash;
-            changed = true;
-          } catch (e) {
-            console.error(`Doshii: could not publish Order #${order.id}:`, e.message);
-            continue;
-          }
+      const pb0 = order.status === 'open' ? payAtTableBill(data, order) : null;
+      const syncHash = JSON.stringify([order.status, order.table, pb0 ? pb0.due : order.grandTotal, (order.items || []).length]);
+      if ((order.status === 'open' || order.doshiiSyncId) && order.doshiiSyncHash !== syncHash) {
+        try {
+          const sid = await doshii.pushOrder(config, pb0 ? { ...order, grandTotal: pb0.due } : order, order.doshiiSyncId || null);
+          data = readData(); order = data.orders.find(o => o.id === id);
+          if (!order) continue;
+          if (sid) order.doshiiSyncId = sid;
+          order.doshiiSyncHash = syncHash;
+          writeData(data);
+        } catch (e) {
+          console.error(`Doshii: could not publish Order #${id}:`, e.message);
+          continue;
         }
       }
 
@@ -11806,7 +11826,10 @@ async function doshiiPayAtTableOnce() {
       if (order.status === 'open' && order.doshiiSyncId) {
         try {
           const paid = await doshii.getPaidTotal(config, order.doshiiSyncId);
-          const due = pb ? pb.due : 0;
+          data = readData(); order = data.orders.find(o => o.id === id);
+          if (!order || order.status !== 'open') continue;
+          const pb = payAtTableBill(data, order);
+          const due = pb.due;
           if (due > 0 && paid >= due - 0.005) {
             const now = Date.now();
             // Money past what was owed is the guest's tip on the terminal.
@@ -11832,12 +11855,15 @@ async function doshiiPayAtTableOnce() {
             // carried no GST, no vouchers sold on it and no points.
             order.closedAt = order.paidAt;
             discountSpent(data, order);
+            // …and what that money off SPENT is spent, as the till's close does:
+            // the voucher came off the bill and stayed live (8 Oct '26).
+            spendDiscountExtras(data, order, pb.discountRecord, 'EFTPOS terminal');
             issueSoldVouchers(data, order, 'EFTPOS terminal');
             if (!order.practice) { order.loyaltyCredited = Math.max(0, (order.total || 0) - voucherSaleTotal(order.items || [])); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
             order.doshiiSyncHash = null; // force a final status push next cycle
             tillEndsSitting(data, order);
             logAudit(data, 'EFTPOS terminal', `Order #${order.id} paid at the terminal (${paid.toFixed(2)}) — table closed automatically`);
-            changed = true;
+            writeData(data);
             if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
             console.log(`Doshii: Order #${order.id} paid at the terminal — closed`);
           }
@@ -11846,7 +11872,6 @@ async function doshiiPayAtTableOnce() {
         }
       }
     }
-    if (changed) writeData(data);
   } catch (e) {
     // Never let the pay-at-table loop take down the server.
   } finally {
@@ -11884,9 +11909,10 @@ app.post('/api/terminal/pair', async (req, res) => {
   if (!username || !password || !pairCode) return res.status(400).json({ error: 'Username, password and the pairing code from the terminal are all required' });
   try {
     const secret = await terminal.linklyPair({ username, password }, String(pairCode).trim());
-    data.settings.terminal = { provider: 'linkly', linkly: { username, secret } };
-    logAudit(data, staffFromReq(req), 'Paired a Linkly card terminal');
-    writeData(data);
+    const fresh = readData(); // read after the wait, as the roster link does
+    fresh.settings.terminal = { provider: 'linkly', linkly: { username, secret } };
+    logAudit(fresh, staffFromReq(req), 'Paired a Linkly card terminal');
+    writeData(fresh);
     res.json({ ok: true });
   } catch (e) {
     res.status(502).json({ error: e.message });
@@ -11946,10 +11972,13 @@ function missedWhereNow(data, list) {
 }
 app.get('/api/missed-prints', (req, res) => { res.json(missedWhereNow(readData(), printing.getMissed())); });
 app.post('/api/missed-prints/:id', async (req, res) => {
-  const data = readData();
   const how = (req.body || {}).how === 'reprint' ? 'reprint' : 'walked';
-  const m = await printing.settleMissed(parseInt(req.params.id, 10), how, data.printerStations || []);
+  const m = await printing.settleMissed(parseInt(req.params.id, 10), how, readData().printerStations || []);
   if (!m) return res.status(404).json({ error: 'Already sorted' });
+  // READ AFTER THE WAIT, never before it (8 Oct '26): a printer that is off
+  // holds this for seconds, and the copy read before it was written back over
+  // everything saved meanwhile — a cash bill paid in that time went open again.
+  const data = readData();
   logAudit(data, staffFromReq(req), `${m.label} for ${m.stationName}: ${how === 'reprint' ? 'printed again' : 'walked over by hand'}`);
   writeData(data);
   res.json(missedWhereNow(data, printing.getMissed()));
@@ -22029,6 +22058,20 @@ async function saveDiscountModal() {
   render();
 }
 function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); resizeEvenSplit(); render(); }
+// What the parts have paid of the BILL — their tips are the guests' own, not
+// bill money (the server's close judges it the same way).
+function paidOfBill() { return splitPaidList().reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0); }
+// Would this money off take the bill under what has been paid of it? The
+// close then refuses ("refund it first") and an open bill cannot be refunded:
+// a voucher or points put on after a part stranded the table (8 Oct '26).
+function offUnderTaken(d) {
+  if (!splitPaidList().length || !d || d.kind === 'surcharge') return false;
+  const had = state.discount;
+  state.discount = d;
+  const under = cartTotal() < paidOfBill() - 0.005;
+  state.discount = had;
+  return under;
+}
 // The okay for one or more things, from a manager's till or the PIN typed.
 function offScope(d) { return `off|${d.type === 'percent' ? 'percent' : 'fixed'}|${Number(parseFloat(d.value) || 0)}|${d.kind === 'surcharge' ? 'surcharge' : 'discount'}`; }
 function lineScope(i) { return `line|${i.menuItemId || ''}|${(parseFloat(i.price) || 0).toFixed(2)}`; }
@@ -28440,7 +28483,9 @@ async function redeemLoyaltyPoints() {
   try {
     // Points leave the customer when the bill is PAID, not now.
     const amount = points / loyaltyPointsPerDollar();
-    state.discount = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
+    const next = { type: 'fixed', value: amount, reason: `${points} loyalty points`, kind: 'discount', loyaltyPoints: points, customerId: customer.id };
+    if (offUnderTaken(next)) throw new Error(`${money(paidOfBill())} has been paid — those points would take the bill under it.`);
+    state.discount = next;
     if (state.orderType === 'dine-in' && state.table) saveTableDiscount(state.table, state.discount); // kept with the table, like any money off
     resizeEvenSplit(); // an even split follows the bill it now is
     render();
@@ -31026,7 +31071,9 @@ async function applyVoucherCode() {
     const voucher = await api(`/api/vouchers/lookup/${encodeURIComponent(code)}`);
     if (voucher.used) throw new Error('This voucher has already been used');
     // Spent when the bill is PAID, not now — Cancel keeps the voucher whole.
-    state.discount = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount', voucherCode: voucher.code };
+    const next = { type: voucher.type, value: voucher.value, reason: 'Voucher ' + voucher.code, kind: 'discount', voucherCode: voucher.code };
+    if (offUnderTaken(next)) throw new Error(`${money(paidOfBill())} has been paid — that voucher would take the bill under it.`);
+    state.discount = next;
     // KEPT WITH THE TABLE (7 Oct '26): it lived on this screen only, so a part
     // paid, a walk to another table and back, and the voucher was gone — the
     // rest of the bill was charged in full and the voucher stayed unspent.

@@ -12068,6 +12068,21 @@ app.post('/api/orders/:id/print-bill', (req, res) => {
   res.json({ ok: true });
 });
 
+// A PAID BILL'S RECEIPT, AGAIN (8 Oct '26): the print key on a closed bill and
+// Table history's Print receipt used the browser's own print, which a thermal
+// till never opens — they printed nothing and said nothing. A reprint is
+// paper, not a sale: it never kicks the drawer.
+app.post('/api/orders/:id/print-receipt', (req, res) => {
+  const data = readData();
+  const order = (data.orders || []).find(o => String(o.id) === String(req.params.id));
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (order.status !== 'paid') return res.status(400).json({ error: order.status === 'void' ? 'A voided bill has no receipt' : 'Not paid yet — print the bill instead' });
+  if (order.practice || data.settings.practiceMode) return res.status(400).json({ error: 'A practice bill never prints' });
+  if (!(data.printerStations || []).some(s => s.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
+  printing.printReceiptForOrder(data, { ...order, drawerDone: true });
+  res.json({ ok: true });
+});
+
 // Send a test page straight to an IP so setup can be verified in seconds.
 app.post('/api/printers/test', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
@@ -16822,6 +16837,16 @@ function buildReceiptDoc(order, edit) {
 
 function printReceipt(order) {
   openPrintArea(buildReceiptDoc(order));
+}
+// A closed bill's receipt, again. A thermal till sends it to the receipt
+// printer through the server — the browser's print, which it never opens,
+// made both reprint keys dead (8 Oct '26); plain paper prints as before. Only
+// a failure says anything: the paper is the news.
+async function reprintReceipt(o) {
+  if ((state.settings.printColorMode || 'thermal') === 'color') { printReceipt(o); return; }
+  try {
+    await api(`/api/orders/${o.id}/print-receipt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  } catch (e) { state.toast = toastFail(e.message || 'Could not print the receipt.'); render(); armToastTimer(TOAST_LONG); }
 }
 // A BILL READS IN THE MENU'S ORDER (owner, 6 Oct '26: "if drinks are top then
 // thats how it should be viewed and printed"): sections as they stand in
@@ -24166,7 +24191,11 @@ function snapshotMotion() {
 function _middleKeys() {
   const keys = new Map();
   document.querySelectorAll('.main > .middle-view, .main > .menu-panel').forEach(el => {
-    const k = el.className.replace(/\b(tp-off|tp-entering|tp-leaving)\b/g, '').trim() + '|' + (el.firstElementChild ? el.firstElementChild.className : 'x');
+    // The floor is ONE floor whether it shows the map or edit mode: the pencil
+    // swapped its face, read as a new arrival, and over an order screen the
+    // floor slid in again — the editor measured mid-slide and opened a
+    // screen's width off the tables (owner, 8 Oct '26).
+    const k = el.classList.contains('tp-view') ? 'tp-view' : el.className.replace(/\b(tp-off|tp-entering|tp-leaving)\b/g, '').trim() + '|' + (el.firstElementChild ? el.firstElementChild.className : 'x');
     keys.set(k, el);
   });
   return keys;
@@ -47257,7 +47286,7 @@ function handleActClick(el, e) {
         // its receipt, as Table history does.
         const o = (state.orders || []).find(x => String(x.id) === String(el.dataset.id));
         if (!o) return;
-        if (o.status === 'paid') { printReceipt(o); return; }
+        if (o.status === 'paid') { reprintReceipt(o); return; }
         if (!!o.practice !== isTrainee()) { state.toast = toastFail(o.practice ? 'That is a practice table' : `${o.orderType === 'dine-in' ? 'Table ' + o.table : 'That order'} is in real service`); render(); armToastTimer(TOAST_SHORT); return; }
         if (!state.online) { state.toast = toastFail('No connection — the bill cannot print right now'); render(); armToastTimer(TOAST_SHORT); return; }
         markBillPrinted(o.id);
@@ -49018,7 +49047,7 @@ function handleActClick(el, e) {
       else if (act === 'print-sample-callaway') { printSample('callaway'); }
       else if (act === 'print-sample-receipt') { printSample(el.dataset.kind === 'bill' ? 'bill' : 'receipt'); }
       else if (act === 'print-docket') { printKitchenDocket(parseInt(el.dataset.val)); }
-      else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) printReceipt(o); }
+      else if (act === 'print-receipt') { const o = state.orders.find(x => x.id === parseInt(el.dataset.id)); if (o) reprintReceipt(o); }
       else if (act === 'export-csv') {
         const from = document.getElementById('export-from-input').value;
         const to = document.getElementById('export-to-input').value;

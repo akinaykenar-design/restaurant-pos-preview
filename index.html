@@ -22238,7 +22238,7 @@ function middlePaneDirty() {
 // dropdown, and the table picker's approved doors.
 function escapeMiddlePane() {
   const close =
-    (state.tablePeek || state.orderHistoryPop || state.noteSeatPop
+    (state.orderHistoryPop || state.noteSeatPop
       || state.coversPad || state.showCheckout || state.billSplit || state.callAway
       || state.quickNotePad || state.notesPanel || state.itemOptions || state.priceEntry
       || state.editLine || state.editSent || state.customerPane || state.moveItems) ? null
@@ -23341,93 +23341,6 @@ function renderOrderHistoryPop() {
       </div>`;
 }
 
-function renderTablePeekPop() {
-  const t = findTableById(state.tablePeek);
-  const o = t && tableOpenOrder(t.label);
-  // Self-heal: if the peeked order vanished mid-peek (paid on another device,
-  // a background refresh), a set tablePeek with no pop would silently eat
-  // holds forever. Clear it instead of rendering nothing.
-  if (!t || !o) { state.tablePeek = null; return ''; }
-  const prefix = (state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim();
-  // Merge every sent round into per-course lines, same grammar as the ticket.
-  const byCourse = {};
-  (o.rounds || []).forEach(r => courseLines(r.items).forEach(it => {
-    const c = it.course || 1;
-    const key = `${it.name}|${it.seat || ''}|${it.note || ''}|${it.price}|${removedSig(it)}`;
-    const bucket = (byCourse[c] = byCourse[c] || {});
-    if (bucket[key]) bucket[key].qty += it.qty;
-    else bucket[key] = { ...it };
-  }));
-  const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
-  const mins = Math.max(0, Math.round((Date.now() - (o.createdAt || Date.now())) / 60000));
-  // The NEXT course to call away: lowest-numbered course that has items and
-  // hasn't been fired yet (order.firedCourses is stamped server-side each time
-  // a course is called away, so this advances table by table, till to till).
-  const firedC = o.firedCourses || {};
-  const nextCallAway = Object.keys(byCourse).map(Number).sort((a, b) => a - b).find(n => !firedC[n]);
-  const line = (it) => {
-    const removed = lineBuild(it).removed.map(c => 'no ' + c.label);
-    return `
-      <div class="peek-line">
-        <span class="peek-qty">${it.qty} ×</span>
-        <span class="peek-name">${esc(it.name)}${it.seat && it.seat !== 'all' ? ` <span class="peek-seat">(${esc(prefix)}&nbsp;${it.seat})</span>` : ''}
-          ${removed.length ? `<span class="peek-note">${esc(removed.join(', '))}</span>` : ''}
-          ${it.note ? `<span class="peek-note">${esc(it.note)}</span>` : ''}
-        </span>
-        <span class="peek-price">${it.price > 0 ? money(it.price * it.qty) : ''}</span>
-      </div>`;
-  };
-  return `
-      <div class="pop-scrim"></div>
-      <div class="qty-pop covers-pop peek-pop">
-        <div class="sp-item">${tableDisplayLabel(t.id)}</div>
-        <div class="peek-meta">${o.covers ? `${o.covers} cover${o.covers === 1 ? '' : 's'} · ` : ''}${esc(o.staffName || '')} · ${pillDur(mins)}</div>
-        ${(() => {
-          // The docket panel's course header, on the peek (owner pick, Aug
-          // '26): one tab per sent course — called-away ones wear the blue
-          // and nothing else (owner, 6 Oct '26: "no mark"), tapping a plain
-          // one calls THAT course away. The pop stays
-          // up so mains can follow entrées without re-holding the table.
-          const ns = Object.keys(byCourse).map(Number).sort((a, b) => a - b);
-          if (!ns.length) return '';
-          return `<div class="course-tabs peek-ct">
-            ${ns.map(n => `
-            <button class="course-tab${firedC[n] ? ' active' : ''}"${firedC[n] ? '' : ` data-act="peek-callaway-course" data-course="${n}"`}>
-              ${esc(courseInfo(n).name)}
-            </button>`).join('')}
-          </div>`;
-        })()}
-        ${(() => { const al = notesOfType('allergy', t.notes); return al.length ? `<div class="peek-chips">${al.map(a => `<span class="algn-chip contains">${esc(a.text)}${a.seat ? ` · ${esc(prefix).toLowerCase()} ${a.seat}` : ''}</span>`).join('')}</div>` : ''; })()}
-        <div class="peek-list">
-          ${(() => {
-            // The docket's own course grammar, verbatim (owner, Sep '26): the
-            // group head row with the ⏱ elapsed chip on a fired course, and
-            // the same skip — a lone course needs no signpost (the tab row
-            // already names it) UNLESS it is fired, where the chip carries
-            // what the tab's tick can't: how long the kitchen's had it.
-            const ns = Object.keys(byCourse).map(Number).sort((a, b) => a - b);
-            const solo = ns.length === 1;
-            return ns.map(n => {
-              const fired = firedC[n];
-              const head = (solo && !fired) ? '' : `
-              <div class="course-group-head">
-                <span>${solo ? '' : esc(courseInfo(n).name)}</span>
-                ${courseClockHtml(o, n, fired)}
-              </div>`;
-              return head + Object.values(byCourse[n]).map(line).join('');
-            }).join('');
-          })()}
-        </div>
-        <div class="peek-total"><span>Total</span><span>${money(total)}</span></div>
-        <div class="qp-row qp-actions">
-          ${/* No Close table here (owner, Sep '26): the peek is a read.
-                Paying starts where it always does — tap the table, the
-                docket's own money row. */ ''}
-          <button class="icon-action neutral" data-act="peek-close">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
-        </div>
-      </div>`;
-}
-
 // Send has something to do when there are items — or, with an empty cart, a
 // note the kitchen hasn't seen: the one-shot quick note, or a dine-in table
 // whose standing notes/allergies can go out as a notes-only docket.
@@ -24288,7 +24201,6 @@ function render() {
     ${state.seatRowPop && seatRowOn() ? renderSeatRowPop() : ''}
     ${state.itemOptions && !state.itemOptions.seatOnly && !state.allergenWarnModal ? renderItemOptionsPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
-    ${state.tablePeek ? renderTablePeekPop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.splitAmtPad ? renderSplitAmtPop() : ''}
@@ -41733,39 +41645,19 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointercancel', end);
 }, { passive: true });
 document.addEventListener('scroll', closeQtyPop, true);
-// Table peek: press-and-hold an occupied table on the picker to read its
-// order (same hold grammar as the qty pop). The fired flag swallows the
-// release's click so holding never also selects the table.
-let _peekHoldFired = false, _peekHoldAt = 0;
-// The finger that OPENED the peek cannot close it: the pop draws under the
-// still-down finger, so the lift lands on its own Close button. Close counts
-// only after a new finger has landed (a timer guessed wrong — a lift 460ms
-// after the hold fired walked straight through a 400ms window).
-let _peekArmed = false;
-document.addEventListener('pointerdown', () => { _peekArmed = true; }, { passive: true, capture: true });
+// A STILL HOLD ON A TABLE DOES NOTHING (owner, 9 Oct '26: "we still hold a
+// table to view the bill, which we should get rid of because we have this
+// now"). The order used to pop up; Bills shows every open bill with its Pay
+// and print, so the pop is gone. The hold is still the grip for dragging the
+// sitting to another table (below), and its release never opens the table.
+let _tableHoldFired = false, _tableHoldAt = 0;
 document.addEventListener('pointerdown', (e) => {
-  if (e.isPrimary === false) return; // second finger never arms a hold
+  if (e.isPrimary === false) return;
   const tile = e.target.closest && e.target.closest('[data-act="pick-table"]');
-  if (!tile || state.tablePeek) return;
-  if (e.target.closest('.pass-go')) return; // the pass's (and the timeline's) Call away is its own key, not a hold on the row
-  if (tile.closest('.bills')) return; // a bill IS the order already — a hold on it does nothing (6 Oct '26)
-  const t = findTableById(tile.dataset.id);
-  if (!t || !tableOpenOrder(t.label)) return;
+  if (!tile || tile.closest('.bills') || e.target.closest('.pass-go')) return;
   const x0 = e.clientX, y0 = e.clientY;
-  _peekHoldFired = false;
-  const myTimer = setTimeout(() => {
-    _peekHoldFired = true; _peekHoldAt = Date.now(); _peekArmed = false; state.tablePeek = t.id;
-    // The pop is INSERTED, never render()ed in: a full render mid-hold
-    // rebuilds the floor and destroys the marker under the still-down
-    // finger, and a real touch screen answers that with pointercancel —
-    // so the drag that should follow the hold was stillborn on exactly
-    // the tables that have an order (covers-only tables open no peek,
-    // which is why those dragged fine; owner, Sep '26). The pop rides on
-    // top of the untouched floor; the next full render owns it from
-    // state.tablePeek as always.
-    const app = document.getElementById('app');
-    if (app && !document.querySelector('.peek-pop')) app.insertAdjacentHTML('beforeend', renderTablePeekPop());
-  }, 450);
+  _tableHoldFired = false;
+  const myTimer = setTimeout(() => { _tableHoldFired = true; _tableHoldAt = Date.now(); }, 450);
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
@@ -41892,14 +41784,10 @@ document.addEventListener('pointerdown', (e) => {
     // the table moving. (A mouse is lifted from the start and keeps the
     // same deliberate threshold.)
     if (!g.dragging && dist > 24) {
-      // The grip becomes a drag: fold the peek, freeze renders, lift a copy.
-      // The peek's pop is plucked out by hand, NOT via render() — a render
-      // mid-gesture rebuilds the floor under the live touch and Chromium
-      // answers with pointercancel, killing the drag on its first frame.
+      // The grip becomes a drag: freeze renders, lift a copy — never via
+      // render(), which mid-gesture rebuilds the floor under the live touch
+      // and Chromium answers with pointercancel.
       g.dragging = true;
-      state.tablePeek = null;
-      const pk = document.querySelector('.peek-pop');
-      if (pk) { const sc = pk.previousElementSibling; if (sc && sc.classList.contains('pop-scrim')) sc.remove(); pk.remove(); }
       state._sortDragging = true;
       const src = document.querySelector(`[data-act="pick-table"][data-id="${g.id}"]`);
       if (!src) { _tblGrabCancel(); return; }
@@ -48886,17 +48774,7 @@ function handleActClick(el, e) {
         if (el.dataset.val === 'booked') api('/api/reservations').then(r => { state.reservations = r; render(); }).catch(() => {});
         render();
       }
-      else if (act === 'peek-close') { if (!_peekArmed) return; state.tablePeek = null; render(); }
       else if (act === 'close-order-history') { state.orderHistoryPop = null; render(); }
-      else if (act === 'peek-callaway-course') {
-        // Course tab on the peek header: fire exactly that course. The peek
-        // STAYS open — the tab flips to blue + tick so the next course can
-        // follow without re-holding the table.
-        const t = findTableById(state.tablePeek);
-        const o = t && tableOpenOrder(t.label);
-        const course = parseInt(el.dataset.course);
-        if (o && course) callAwayFromFloor(o, t, course);
-      }
       else if (act === 'pass-callaway') {
         // a paid table still eating keeps its key (tablePassOrder, 9 Oct '26)
         const o = (state.orders || []).find(x => String(x.id) === String(el.dataset.order) && (x.status === 'open' || x.status === 'paid'));
@@ -48971,26 +48849,13 @@ function handleActClick(el, e) {
         // mid-room like every other road onto the floor.
         tpCentreOnOpen();
       }
-      else if (act === 'peek-callaway-next') {
-        // Hold a table → its order pop → one tap calls away the NEXT course that
-        // has items (no table entry, no pane). The button already names that
-        // course; the server prints its docket and stamps it fired so the next
-        // tap advances to the following course.
-        const t = findTableById(state.tablePeek);
-        const o = t && tableOpenOrder(t.label);
-        const course = parseInt(el.dataset.course);
-        state.tablePeek = null; render();
-        if (o && course) callAwayFromFloor(o, t, course);
-      }
       else if (act === 'pick-table') {
         // A key INSIDE the table (the pass's Call away) is its own tap: the
         // click bubbles here too, and must not also open the table.
         if (e && e.target.closest && e.target.closest('[data-act]') !== el) return;
         // Swallow only the release-click of the hold ITSELF (a sub-second
-        // window). The flag used to linger after the peek closed and silently
-        // eat the NEXT tap on any table — "I tapped and nothing happened"
-        // (found by the Aug '26 monkey test).
-        if (_peekHoldFired) { _peekHoldFired = false; if (Date.now() - _peekHoldAt < 700) return; }
+        // window): a lingering flag once ate the NEXT tap on any table (Aug '26).
+        if (_tableHoldFired) { _tableHoldFired = false; if (Date.now() - _tableHoldAt < 700) return; }
         // The release of a drag-drop must not also open the table it landed on.
         if (Date.now() - _tblDropAt < 700) return;
         if (state.moveItemsPicking) doMoveItems(el.dataset.id);

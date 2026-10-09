@@ -5818,6 +5818,13 @@ input.cash-read::-webkit-outer-spin-button, input.cash-read::-webkit-inner-spin-
 .bill-line .bl-n{flex:1;min-width:0;color:var(--text-primary);}
 .bill-line .bl-s{display:block;font-size:var(--fs-md);color:var(--text-secondary);}
 .bill-line .bl-p{font-family:var(--font-mono);color:var(--text-primary);white-space:nowrap;}
+/* A bill's sales group (Food, Beverage, Wine): the field-label voice, no
+   colour, no border, never a tap — it only says where the lines below sit. */
+.bill-grp, .bl-grp{font-size:var(--fs-chip);font-weight:600;color:var(--text-secondary);text-transform:uppercase;letter-spacing:.5px;}
+.bill-grp{padding:12px 0 4px;}
+.bill-grp:first-child{padding-top:0;}
+.bl-grp{padding-top:4px;}
+.bl-grp:first-child{padding-top:0;}
 .bill-empty{color:var(--text-secondary);font-size:var(--fs-md);padding:8px 0;}
 .bill-money{padding:8px 12px;border-top:1px solid var(--steel-200);}
 .bill-money .bill-note span{color:var(--text-secondary);font-size:var(--fs-md);}
@@ -16968,20 +16975,7 @@ function buildReceiptDoc(order, edit) {
   // ' x ' as the paper types it; no note/seat fragments — the paper never
   // prints them on a customer slip (Aug '26).
   const itemLine = (i) => `<div class="print-line"><span>${i.qty} x ${esc(i.name)}</span><span>${money(i.price * i.qty)}</span></div>`;
-  order = { ...order, items: menuSortItems(order.items || []) };
-  const itemsHtml = layout === 'grouped'
-    ? (() => {
-        const byCat = new Map((state.salesCategories || []).map(c => [c.id, []]));
-        const other = [];
-        order.items.forEach(i => {
-          const mi = state.menu.find(x => x.id === i.menuItemId);
-          (mi && mi.salesCategoryId != null && byCat.has(mi.salesCategoryId) ? byCat.get(mi.salesCategoryId) : other).push(i);
-        });
-        const groups = (state.salesCategories || []).filter(c => (byCat.get(c.id) || []).length).map(c => ({ name: c.name, items: byCat.get(c.id) }));
-        if (other.length) groups.push({ name: 'Other', items: other });
-        return groups.map(g => `<div class="print-line" style="font-weight:800;"><span>${esc(g.name.toUpperCase())}</span><span></span></div>${g.items.map(itemLine).join('')}`).join('');
-      })()
-    : order.items.map(itemLine).join('');
+  const itemsHtml = billGroups(order.items || []).map(g => (g.name ? `<div class="print-line" style="font-weight:800;"><span>${esc(g.name.toUpperCase())}</span><span></span></div>` : '') + g.lines.map(itemLine).join('')).join('');
   // Parts shared by every layout's top block.
   const cHeader = edit || s.ticketHeader ? partR('header', `<h3${rstl('header')}>${headerInner}</h3>`, true) : '';
   const cAbn = partR('abn', `<div class="print-sub"${rstl('abn')}>${abnInner}</div>`, true);
@@ -17091,22 +17085,33 @@ async function reprintReceipt(o) {
     await api(`/api/orders/${o.id}/print-receipt`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   } catch (e) { state.toast = toastFail(e.message || 'Could not print the receipt.'); render(); armToastTimer(TOAST_LONG); }
 }
-// A BILL READS IN THE MENU'S ORDER (owner, 6 Oct '26: "if drinks are top then
-// thats how it should be viewed and printed"): sections as they stand in
-// admin, then subsections, then each dish's place. The same sort as the
-// printed paper's (printing.js menuSortItems) — change both or neither.
-function menuSortItems(items) {
-  const cats = state.categories || [], subs = state.subcategories || [], menu = state.menu || [];
-  const key = it => {
+// A BILL READS BY SALES GROUP (owner, 8 Oct '26): the group's place on
+// Admin › Sales groups first, then the menu's own order inside it — section,
+// subsection, the dish's place. A line with no group goes last, as 'Other'.
+// The same dish at the same price is ONE line, whatever round it went out in
+// (opts.fold false: the caller already folded, e.g. the pay screen by seat).
+// One group on the bill = a plain list, no lone heading. The twin of
+// printing.js billGroups — change both or neither.
+function billGroups(items, opts) {
+  const fold = !(opts && opts.fold === false);
+  const sc = state.salesCategories || [], cats = state.categories || [], subs = state.subcategories || [], menu = state.menu || [];
+  const N = 9999, ix = i => i < 0 ? N : i;
+  const keyed = items.map((it, n) => {
     const m = menu.find(x => x.id === it.menuItemId);
-    if (!m) return [9999, 9999, 9999];
-    const ci = cats.findIndex(c => c.name === m.category);
-    const si = subs.findIndex(x => x.id === m.subcategoryId);
-    return [ci < 0 ? 9999 : ci, si < 0 ? 9999 : si, m.sequence != null ? m.sequence : 9999];
-  };
-  return items.map(it => ({ it, k: key(it) }))
-    .sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2])
-    .map(x => x.it);
+    return { it, n, g: m ? ix(sc.findIndex(c => c.id === m.salesCategoryId)) : N,
+      k: m ? [ix(cats.findIndex(c => c.name === m.category)), ix(subs.findIndex(x => x.id === m.subcategoryId)), m.sequence != null ? m.sequence : N] : [N, N, N] };
+  });
+  keyed.sort((a, b) => a.g - b.g || a.k[0] - b.k[0] || a.k[1] - b.k[1] || a.k[2] - b.k[2] || a.n - b.n);
+  const groups = [];
+  for (const x of keyed) {
+    const name = x.g === N ? 'Other' : sc[x.g].name;
+    let g = groups[groups.length - 1];
+    if (!g || g.name !== name) groups.push(g = { name, lines: [] });
+    const same = fold && g.lines.find(l => l.menuItemId === x.it.menuItemId && l.name === x.it.name && l.price === x.it.price);
+    if (same) same.qty += x.it.qty; else g.lines.push(fold ? { ...x.it } : x.it);
+  }
+  if (groups.length < 2) groups.forEach(g => { g.name = ''; });
+  return groups;
 }
 
 function stationForCategory(categoryName) {
@@ -26625,7 +26630,7 @@ function billLines() {
   const add = (it, cartIdx) => {
     const key = `${it.name}|${it.seat || ''}|${it.price}`;
     let l = lines.find(x => x.key === key);
-    if (!l) { l = { key, name: it.name, seat: it.seat, price: it.price, qty: 0, sent: [], cart: [] }; lines.push(l); }
+    if (!l) { l = { key, menuItemId: it.menuItemId, name: it.name, seat: it.seat, price: it.price, qty: 0, sent: [], cart: [] }; lines.push(l); }
     l.qty += it.qty;
     if (cartIdx === undefined) {
       const m = { name: it.name, seat: it.seat == null ? null : it.seat, note: it.note || '', price: it.price, course: it.course || 1 };
@@ -26651,12 +26656,12 @@ function billBodyHtml(opts) {
   const seatWord = (n) => seatText(n);
   return `
     <div class="bill-lines">
-      ${lines.length ? lines.map(l => `
+      ${lines.length ? billGroups(lines, { fold: false }).map(g => (g.name ? `<div class="bill-grp">${esc(g.name)}</div>` : '') + g.lines.map(l => `
         <div class="bill-line${pick && picked.includes(l.key) ? ' picked' : ''}"${pick ? ` data-act="pick-bill-line" data-key="${esc(l.key)}"` : ''}>
           <span class="bl-q">${l.qty}</span>
           <span class="bl-n">${esc(l.name)}${typeof l.seat === 'number' ? `<span class="bl-s">${esc(seatWord(l.seat))}</span>` : ''}</span>
           <span class="bl-p">${money(l.price * l.qty)}</span>
-        </div>`).join('') : '<div class="bill-empty">Nothing on this bill yet.</div>'}
+        </div>`).join('')).join('') : '<div class="bill-empty">Nothing on this bill yet.</div>'}
     </div>
     <div class="bill-money">
       ${plain ? '' : `<div class="tot-row"><span>Subtotal</span><span>${money(sub)}</span></div>`}
@@ -37896,14 +37901,10 @@ function billDocket(o) {
   const mins = Math.max(0, Math.round((Date.now() - (o.createdAt || Date.now())) / 60000));
   const meta = [o.covers ? `${o.covers} cover${o.covers === 1 ? '' : 's'}` : '', pillDur(mins), o.staffName || ''].filter(Boolean).join(' · ');
   const st = billStatus(o);
-  // The lines folded like the printed bill: like with like, whatever course
-  // it went out in — no course headings — in the menu's order (owner, 6 Oct '26).
-  const by = new Map();
-  menuSortItems((o.items || []).filter(i => i.qty > 0)).forEach(i => {
-    const key = i.name + '|' + i.price; const was = by.get(key);
-    by.set(key, { name: i.name, qty: (was ? was.qty : 0) + i.qty, price: i.price });
-  });
-  const lines = [...by.values()].map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${priceNum(l.price * l.qty)}</span></div>`).join('');
+  // The lines as the printed bill reads them: by sales group, menu order
+  // inside, like with like folded (owner, 8 Oct '26).
+  const lines = billGroups((o.items || []).filter(i => i.qty > 0)).map(g => (g.name ? `<div class="bl-grp">${esc(g.name)}</div>` : '')
+    + g.lines.map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${priceNum(l.price * l.qty)}</span></div>`).join('')).join('');
   const paid = (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
   // ONE DOOR, AND YOU CAN SEE IT (owner, 6 Oct '26: "there needs to be clear
   // defined areas"): the table's number, drawn as a key, as the Pass's is.

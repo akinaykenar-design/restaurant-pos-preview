@@ -777,8 +777,11 @@ body[data-osk="1"] .tabs .bar-search input{ display:none; }
 @media (max-width:768px){
   body .topbar{ padding:var(--deck-pad) var(--deck-edge); }
   body .topbar .tab-btn{ min-width:72px; } /* the chip's padding never changes — Deck law */
-  /* Searching: the hub tile steps aside so the field gets typing room. */
-  .topbar:has(.bar-search input.open) .staff-badge [data-act="toggle-account-menu"]{ display:none; }
+  /* Searching: the hub tile steps aside so the field gets typing room — only
+     where the bar's own field is drawn. A touch screen types on the app's
+     keyboard (data-osk 1 hides that field), and there Tools left the bar for
+     nothing and Floor · Table slid under the next finger (9 Oct '26). */
+  body[data-osk="0"] .topbar:has(.bar-search input.open) .staff-badge [data-act="toggle-account-menu"]{ display:none; }
 }
 /* Phone search rides the KEYBOARD (owner pick, Aug '26 sheet C): the field
    sits on the keyboard's top edge, best matches stack above it — everything
@@ -6576,6 +6579,14 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .menu-editing.me-in .item-card:nth-child(3n){ --jig-d:80ms; }
 }
 body.sorting .catrail, body.sorting .subcat-seg{ scroll-snap-type:none !important; }
+
+/* Two small keys catch a finger without growing (9 Oct '26): a new line's
+   price is as wide as its figures (a wide key ate the dish's name on the
+   iPad), and the cash-up's Float pencil is 28 tall. Each gets a halo. */
+.tl-price-btn{ position:relative; }
+.tl-price-btn::before{ content:''; position:absolute; inset:0 -4px; }
+.dk-float-edit{ position:relative; }
+.dk-float-edit::before{ content:''; position:absolute; inset:-8px 0; }
 </style>
 <div id="app">Loading…</div>
 <div class="turn-card" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="M12 2v3M10 3.5l2 1.5 2-1.5"/></svg><b>Turn it sideways</b><span>The till works lying down</span></div>
@@ -6601,6 +6612,7 @@ body.sorting .catrail, body.sorting .subcat-seg{ scroll-snap-type:none !importan
       var d = JSON.parse(liveStore());
       d.orders = (d.orders || []).filter(function (o) { return !o.demo; });
       d.reservations = (d.reservations || []).filter(function (r) { return !r.demo; });
+      d.printerStations = (d.printerStations || []).filter(function (s) { return !s.demo; });
       return JSON.stringify(d);
     } catch (e) { return liveStore(); }
   }
@@ -6632,6 +6644,13 @@ body.sorting .catrail, body.sorting .subcat-seg{ scroll-snap-type:none !importan
     var now = Date.now();
     d.orders = (d.orders || []).filter(function (o) { return !o.demo; });
     d.reservations = (d.reservations || []).filter(function (r) { return !r.demo; });
+    // A PRETEND PRINTER (9 Oct '26): the shipped data has no stations, so on
+    // the preview every Bill, Print and No sale answered in red ("No station
+    // is marked for receipts") and Bill never marked a table — the preview's
+    // printing is make-believe anyway. Only when the data has none; it never
+    // leaves the preview (outStore drops it).
+    d.printerStations = (d.printerStations || []).filter(function (s) { return !s.demo; });
+    if (!d.printerStations.some(function (s) { return s.receipts; })) d.printerStations.push({ id: 'ps-demo', name: 'Demo printer', ips: ['192.168.1.87'], ip: '192.168.1.87', receipts: true, categories: [], subcategoryIds: [], kind: 'thermal', paperWidth: '80', paused: false, demo: true });
     var tables = {};
     (d.floorPlans || []).forEach(function (f) { (f.tables || []).forEach(function (t) { if (t.type !== 'decor' && !tables[String(t.label)]) tables[String(t.label)] = t; }); });
     var menu = (d.menu || []).filter(function (m) { return m.price > 0 && m.enabled !== false; });
@@ -7119,7 +7138,7 @@ body.sorting .catrail, body.sorting .subcat-seg{ scroll-snap-type:none !importan
     getMissed: function () { return []; },
     settleMissed: function () { return Promise.resolve(null); },
     courseNameOf: function (settings, n) { return (((settings || {}).courses || [])[n - 1] || {}).name || ('Course ' + n); },
-    openCashDrawer: function () { return false; },
+    openCashDrawer: function (d) { return ((d || {}).printerStations || []).some(function (s) { return s.receipts && !s.paused; }); },
     probe: function () { return Promise.resolve(true); },
     probePrinter: function () { return Promise.resolve({ model: 'TM-T82III' }); },
     classifyPrinter: function () { return { kind: 'thermal', paperWidth: '80' }; },
@@ -21780,7 +21799,11 @@ function undoRemoveLine() {
 function clearCart() {
   state.cart = []; clearSendState();
   state.activeSeat = null;
-  state.covers = (findTableById(state.table) || {}).covers || 0;
+  // The covers stay with the bill: Discard took them back to the table's own
+  // record, which a table with a bill may not carry, so Tools read "Covers —"
+  // and the next dish asked no seat (9 Oct '26). The same order opening a
+  // table reads them in: the table, then its open bill.
+  state.covers = (findTableById(state.table) || {}).covers || (activeOpenOrder() || {}).covers || 0;
   state.notes = (findTableById(state.table) || {}).notes || [];
   // Discard drops the UNSENT round, not the account: the table's discount and
   // the courses already called stay (4 Oct '26 — a surcharge vanished from
@@ -27926,7 +27949,7 @@ function renderRegisterAdmin() {
   ${isManager ? `
   <div class="settings-card">
     <div class="th">Drawer count</div>
-    <div class="detail-line"><span>Float${state.registerFloatEdit ? '' : ` <button class="dk-tb-btn" style="min-height:28px;min-width:28px;" data-act="edit-float">${ACT_PENCIL_SVG}</button>`}</span>
+    <div class="detail-line"><span>Float${state.registerFloatEdit ? '' : ` <button class="dk-tb-btn dk-float-edit" style="min-height:28px;min-width:28px;" data-act="edit-float">${ACT_PENCIL_SVG}</button>`}</span>
       <span>${state.registerFloatEdit ? `<input id="register-float-input" type="number" min="0" step="0.01" value="${cur.float || 0}" style="width:90px;">` : money(cur.float || 0)}</span></div>
     <div class="detail-line"><span>Cash sales</span><span>${money(cur.cashNet)}</span></div>
     ${cur.paidOutTotal ? `<div class="detail-line"><span>Paid-outs</span><span>-${money(cur.paidOutTotal)}</span></div>` : ''}
@@ -40659,6 +40682,15 @@ let floorDrag = null; // { tableId, canvasEl, markerEl, moved }
 let _billsDown = null; // { x, y, at } — where a finger last REALLY landed on the Bills page
 let _floorTouchAt = 0; // suppresses the compat mouse events a touch tap emits
 const FLOOR_DRAG_SLOP = 8; // px a finger must travel before a drag/scroll is judged
+// A FINGER'S WOBBLE IS MEASURED ON THE GLASS (9 Oct '26). Every tap and hold
+// here judges "did the finger move?" in the app's own pixels — which is the
+// glass on a till or a phone. Inside the preview's Tablet view the iPad is
+// drawn at a third of its size, so 12 of its pixels were 4 on the glass and
+// an ordinary tap's wobble threw away the tap (no dish, no Send, a power hold
+// that logged off). Scaled back to the glass, they judge as an iPad does.
+function fingerPx(n) {
+  try { const f = window.frameElement, w = f && f.getBoundingClientRect().width; return w > 0 ? n * innerWidth / w : n; } catch (e) { return n; }
+}
 
 // ── Guides: a dragged table clicks to its neighbours (DESIGN.md § Guide law) ──
 // Canva's lines. While a table is under a finger, its edges and centre are
@@ -41071,7 +41103,7 @@ function moveFloorDrag(clientX, clientY) {
   // Touch gate: judge drag-vs-scroll on the first real movement.
   if (floorDrag.pending) {
     const dx = clientX - floorDrag.startClientX, dy = clientY - floorDrag.startClientY;
-    if (Math.abs(dx) < FLOOR_DRAG_SLOP && Math.abs(dy) < FLOOR_DRAG_SLOP) return; // too small to tell yet
+    if (Math.abs(dx) < fingerPx(FLOOR_DRAG_SLOP) && Math.abs(dy) < fingerPx(FLOOR_DRAG_SLOP)) return; // too small to tell yet
     // ONLY THE PICKED TABLE MOVES. Everything else is a scroll (owner, Aug
     // '26: "scrolling on the map itself drags tables. very buggy").
     //
@@ -41094,6 +41126,11 @@ function moveFloorDrag(clientX, clientY) {
     }
     floorDrag.pending = false;
   }
+  // A TAP'S WOBBLE IS NOT A MOVE (9 Oct '26): on an iPad a touch is never
+  // 'pending', so the first pixel of wobble set the table moving and saved it
+  // — a tap on a table nudged it instead of picking it. Nothing moves until
+  // the hand has really travelled.
+  if (!floorDrag.moved && Math.hypot(clientX - floorDrag.startClientX, clientY - floorDrag.startClientY) < fingerPx(FLOOR_DRAG_SLOP)) return;
   const rect = floorDrag.rect;
   let x = ((clientX - rect.left) / rect.width) * 100;
   let y = ((clientY - rect.top) / rect.height) * 100;
@@ -41300,7 +41337,9 @@ document.addEventListener('touchend', () => {
     if (stale.length) stale.forEach(el => el.classList.remove('pressed', 'qp-held'));
   }, 350);   // after the tap's own delayed cleanup has had its go
 }, { passive: true });
+let _qtyPopResize = null; // the pad's own recentring on a turn
 function closeQtyPop() {
+  if (_qtyPopResize) { window.removeEventListener('resize', _qtyPopResize); _qtyPopResize = null; }
   if (_qtyPopCard) { _qtyPopCard.classList.remove('qp-held'); _qtyPopCard = null; }
   if (_qtyPopEl) { _qtyPopEl.remove(); _qtyPopEl = null; _qtyPopApplyCount = null; }
   if (_qtyPopScrim) { _qtyPopScrim.remove(); _qtyPopScrim = null; }
@@ -41367,9 +41406,15 @@ function openQtyPop(card) {
   _qtyPopScrim.className = 'pop-scrim';
   document.body.appendChild(_qtyPopScrim);
   document.body.appendChild(el);
-  // Number pads always pop dead centre of the screen — no anchoring.
-  el.style.left = Math.round((innerWidth - el.offsetWidth) / 2) + 'px';
-  el.style.top = Math.round((innerHeight - el.offsetHeight) / 2) + 'px';
+  // Number pads always pop dead centre of the screen — no anchoring — and
+  // stay there when the phone turns (9 Oct '26: opened sideways and turned
+  // upright, its ✕ and ✓ sat off the edge of the screen).
+  const recentre = () => { if (!el.isConnected) return;
+    el.style.left = Math.round((innerWidth - el.offsetWidth) / 2) + 'px';
+    el.style.top = Math.round((innerHeight - el.offsetHeight) / 2) + 'px'; };
+  recentre();
+  if (_qtyPopResize) window.removeEventListener('resize', _qtyPopResize);
+  _qtyPopResize = recentre; window.addEventListener('resize', recentre);
   // The pad pops UNDER a finger that's still holding the tile — lifting off
   // would "tap" whatever key sits beneath the fingertip (read as a phantom
   // double-tap). Swallow clicks landing on the pad until that first finger
@@ -41495,7 +41540,7 @@ document.addEventListener('pointerdown', (e) => {
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   // Cancel the hold only on a real drag, not the natural finger drift you get
   // pressing a tile's edge — a tight 8px made the hold feel centre-only.
-  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > 16 || Math.abs(ev.clientY - y0) > 16) { end(); closeQtyPop(); } };
+  const mv = (ev) => { if (Math.abs(ev.clientX - x0) > fingerPx(16) || Math.abs(ev.clientY - y0) > fingerPx(16)) { end(); closeQtyPop(); } };
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -41535,7 +41580,7 @@ document.addEventListener('pointerdown', (e) => {
     if (app && !document.querySelector('.peek-pop')) app.insertAdjacentHTML('beforeend', renderTablePeekPop());
   }, 450);
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
-  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? 18 : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
+  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -41646,7 +41691,7 @@ document.addEventListener('pointerdown', (e) => {
     if (!g.lifted) {
       // Moving before the hold is a pan, exactly as it always was — just
       // driven from here now.
-      const slop = ev.pointerType === 'touch' ? 18 : 8;
+      const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8;
       if (dist > slop) {
         if (ev.pointerType === 'touch') {
           clearTimeout(g.timer);
@@ -41838,7 +41883,7 @@ document.addEventListener('pointerdown', (e) => {
     render();
   }, 450);
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
-  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? 18 : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
+  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -41873,14 +41918,14 @@ document.addEventListener('pointerdown', (e) => {
   // A quick release (a real tap, not a partial hold) flashes the ring; a held-
   // then-released press never glows.
   const up = (ev) => { if (send && !_sendHoldFired && (ev.timeStamp - t0) < 250) { send.classList.add('pop'); setTimeout(() => send.classList.remove('pop'), 420); } end(); };
-  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? 18 : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
+  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   // Android fires pointercancel the moment IT claims the gesture (scroll
   // guess, long-press UI) even when the finger hasn't really moved — which
   // silently killed holds on the venue phone. For touch we ignore it and keep
   // judging by the REAL touches: still finger = hold fires; real drag (>18px,
   // via touchmove which keeps streaming) = cancelled.
   const pc = (ev) => { if (ev.pointerType !== 'touch') end(); };
-  const tm = (ev) => { const t = ev.touches && ev.touches[0]; if (!t) return; if (Math.abs(t.clientX - x0) > 18 || Math.abs(t.clientY - y0) > 18) end(); };
+  const tm = (ev) => { const t = ev.touches && ev.touches[0]; if (!t) return; if (Math.abs(t.clientX - x0) > fingerPx(18) || Math.abs(t.clientY - y0) > fingerPx(18)) end(); };
   document.addEventListener('touchcancel', up, { once: true }); // system truly took the gesture — abort
   myTimer = setTimeout(() => {
     if (tab) {
@@ -42343,7 +42388,7 @@ const TAP_SLIP = 12;      // past this much sideways travel it was a slide, not 
       // Only here, where nothing else will act on it: a real swipe further
       // down still needs its click, and eating those broke the admin and pay
       // rails (caught by the panel gate).
-      if (Math.abs(dx) > TAP_SLIP && Math.abs(dx) > Math.abs(dy)) eatClick();
+      if (Math.abs(dx) > fingerPx(TAP_SLIP) && Math.abs(dx) > Math.abs(dy)) eatClick();
       return;
     }
     if (state.view === 'admin') { adminSwipeTile(dx < 0 ? 1 : -1); return; }
@@ -42676,7 +42721,7 @@ document.addEventListener('pointerdown', (e) => {
     document.removeEventListener('touchmove', tm);
     document.removeEventListener('touchend', up);
   };
-  const mv = (ev) => { if (_adminPinFired) return; const slop = ev.pointerType === 'touch' ? 18 : 10; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) stop(); };
+  const mv = (ev) => { if (_adminPinFired) return; const slop = ev.pointerType === 'touch' ? fingerPx(18) : 10; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) stop(); };
   // The release click consumes the flag — but the pin render replaces the
   // tile node, so that click may never arrive. Expire the flag shortly after
   // release or it eats the NEXT tap instead.
@@ -42684,7 +42729,7 @@ document.addEventListener('pointerdown', (e) => {
   // Touch ignores pointercancel (Android fires it on a mere scroll GUESS) —
   // the real touches decide: still = pin fires, >18px drag = cancelled.
   const pc = (ev) => { if (ev.pointerType !== 'touch') stop(); };
-  const tm = (ev) => { const t = ev.touches && ev.touches[0]; if (!t || _adminPinFired) return; if (Math.abs(t.clientX - x0) > 18 || Math.abs(t.clientY - y0) > 18) stop(); };
+  const tm = (ev) => { const t = ev.touches && ev.touches[0]; if (!t || _adminPinFired) return; if (Math.abs(t.clientX - x0) > fingerPx(18) || Math.abs(t.clientY - y0) > fingerPx(18)) stop(); };
   document.addEventListener('touchcancel', up, { once: true }); // system truly took the gesture — abort
   _adminPinTimer = setTimeout(() => { _adminPinFired = true; toggleAdminPin(key); }, 550);
   document.addEventListener('pointermove', mv, { passive: true });
@@ -45919,7 +45964,7 @@ document.addEventListener('pointerdown', (e) => {
   const x0 = e.clientX, y0 = e.clientY;
   const t = setTimeout(() => { _mkHoldFired = true; openMkEditPop(el); }, wasOpen ? 250 : 450);
   const end = () => { clearTimeout(t); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
-  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? 18 : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
+  const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv);
   document.addEventListener('pointerup', end);
   document.addEventListener('pointercancel', end);
@@ -49867,7 +49912,7 @@ document.addEventListener('touchstart', (e) => {
 }, { passive: true, capture: true });
 document.addEventListener('touchmove', (e) => {
   const t = e.touches[0]; if (!t || !_tapFrom) return;
-  if (Math.hypot(t.clientX - _tapFrom.x, t.clientY - _tapFrom.y) > TAP_SLOP) _tapOff();
+  if (Math.hypot(t.clientX - _tapFrom.x, t.clientY - _tapFrom.y) > fingerPx(TAP_SLOP)) _tapOff();
 }, { passive: true, capture: true });
 document.addEventListener('touchend', () => {
   // Lifted before the wait was up and never slid: show the press on the way
@@ -49939,7 +49984,10 @@ function setupResponsive() {
     if (!mq.matches && state.mobileCartOpen) { state.mobileCartOpen = false; if (state.currentStaff) render(); }
   };
   apply();
-  mq.addEventListener('change', apply);
+  // The bar is drawn for the size it was drawn at (Docket or not, "12" or
+  // "Table 12"): turning the phone across the breakpoint kept the other
+  // device's keys until something redrew (9 Oct '26). Redraw once on the flip.
+  mq.addEventListener('change', () => { apply(); if (state.currentStaff) render(); });
   window.addEventListener('resize', apply);
 }
 setupResponsive();

@@ -6586,6 +6586,20 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
   .menu-editing.me-in .item-card:nth-child(3n){ --jig-d:80ms; }
 }
 body.sorting .catrail, body.sorting .subcat-seg{ scroll-snap-type:none !important; }
+/* A DISH IN THE AIR (menu edit mode, app.js § Menu edit: carry a dish to
+   another section): the hub and its rail step back on the one dim, like the
+   floor under a carried table, and the one place it would land comes back
+   wearing the picked band — a chip turns soft blue with the band where its
+   dash was, a subsection's grid is ringed and its heading comes back with it.
+   The dish itself is the floor's carried copy (.mk-drag-ghost), the spot it
+   left .mk-drag-src; the docket stays as it is, as it does under a table. */
+body.mk-dragging .menu-editing .item-card, body.mk-dragging .menu-editing .ts,
+body.mk-dragging .menu-editing .subcat-seg button, body.mk-dragging:has(.menu-editing) .catrail .cat-btn{ opacity:var(--dim); transition:opacity var(--t-state) ease; }
+body.mk-dragging .catrail .cat-btn.mk-drop, body.mk-dragging .menu-editing .subcat-seg button.mk-drop, body.mk-dragging .menu-editing .item-card.mk-drop,
+body.mk-dragging .menu-editing .grid.mk-drop .item-card, body.mk-dragging .menu-editing .ts:has(+ .grid.mk-drop){ opacity:1; }
+.catrail .cat-btn.mk-drop, .menu-editing .seg.subcat-seg button.mk-drop, .menu-editing .item-card.subcat-tile.mk-drop{ background:var(--orange-dim); color:var(--orange);
+  outline:calc(1px + var(--ring)) solid var(--orange); outline-offset:calc(-1px - var(--ring)); }
+.menu-editing .grid.mk-drop{ outline:calc(1px + var(--ring)) solid var(--orange); outline-offset:4px; border-radius:var(--radius); }
 
 /* Two small keys catch a finger without growing (9 Oct '26): a new line's
    price is as wide as its figures (a wide key ate the dish's name on the
@@ -10853,6 +10867,18 @@ app.put('/api/menu/:id', (req, res) => {
   const item = data.menu.find(m => m.id === req.params.id);
   if (!item) return res.status(404).json({ error: 'Item not found' });
   const { name, category, price, variants, subcategoryId, modifierGroupIds, image, defaultCourse, trackStock, stockCount, lowStockThreshold, color, sequence, out, salesCategoryId, icon, iconEnabled, recipes, disabled } = req.body;
+  // A DISH ONLY MOVES TO A PLACE THAT IS THERE (9 Oct '26): a till still
+  // showing a section another till renamed, or a subsection it deleted, sent
+  // the old one, and the dish vanished from every till. Judged only when the
+  // place CHANGES, so a dish already somewhere odd still saves its price.
+  const catMoved = !!category && category !== item.category;
+  const toCat = (data.categories || []).find(c => c.name === (category || item.category));
+  if (catMoved && !toCat) return res.status(400).json({ error: 'that section is not there any more' });
+  if (subcategoryId && (subcategoryId !== item.subcategoryId || catMoved)) {
+    let sub = (data.subcategories || []).find(x => x.id === subcategoryId), root = sub;
+    while (root && !root.categoryId && root.parentSubcategoryId) root = (data.subcategories || []).find(x => x.id === root.parentSubcategoryId);
+    if (!sub || !root || !toCat || root.categoryId !== toCat.id) return res.status(400).json({ error: 'that subsection is not there any more' });
+  }
   if (disabled !== undefined) item.disabled = !!disabled;
   const oldPrice = item.price;
   if (name !== undefined && !String(name).trim()) return res.status(400).json({ error: 'An item needs a name' });
@@ -24512,8 +24538,10 @@ function _middleKeys() {
     // The floor is ONE floor whether it shows the map or edit mode: the pencil
     // swapped its face, read as a new arrival, and over an order screen the
     // floor slid in again — the editor measured mid-slide and opened a
-    // screen's width off the tables (owner, 8 Oct '26).
-    const k = el.classList.contains('tp-view') ? 'tp-view' : el.className.replace(/\b(tp-off|tp-entering|tp-leaving)\b/g, '').trim() + '|' + (el.firstElementChild ? el.firstElementChild.className : 'x');
+    // screen's width off the tables (owner, 8 Oct '26). The menu's edit marks
+    // come off the same way: the jiggle's mark leaving on the render after the
+    // pencil read as a new hub, and the whole hub settled in a second time.
+    const k = el.classList.contains('tp-view') ? 'tp-view' : el.className.replace(/\b(tp-off|tp-entering|tp-leaving|menu-editing|me-in)\b/g, '').replace(/\s+/g, ' ').trim() + '|' + (el.firstElementChild ? el.firstElementChild.className : 'x');
     keys.set(k, el);
   });
   return keys;
@@ -25646,15 +25674,19 @@ function renderMenuScrollBody() {
             const kids = childSubcats(sub.id).filter(subtreeHasItems);
             if (direct.length === 0 && kids.length === 0 && !menuEditOn()) return '';
             let h = '';
-            if (withHeader) h += `<div class="ts" style="font-weight:700;margin:12px 0 6px;padding-left:${depth * 12}px;">${depth ? '↳ ' : ''}${esc(sub.name)}</div>`;
-            if (direct.length || menuEditOn()) h += `<div class="grid">${direct.map(renderItemCard).join('')}${addDish(sub.id)}</div>`;
+            // In edit mode a subsection's heading and grid are where a carried
+            // dish can land (§ Menu edit: carry a dish to another section).
+            const drop = menuEditOn() ? ` data-drop-sub="${sub.id}"` : '';
+            if (withHeader) h += `<div class="ts"${drop} style="font-weight:700;margin:12px 0 6px;padding-left:${depth * 12}px;">${depth ? '↳ ' : ''}${esc(sub.name)}</div>`;
+            if (direct.length || menuEditOn()) h += `<div class="grid"${drop}>${direct.map(renderItemCard).join('')}${addDish(sub.id)}</div>`;
             kids.forEach(k => { h += renderSubGroup(k, depth + 1, true); });
             return h;
           };
           const topSubs = subcats.filter(s => !s.parentSubcategoryId && subtreeHasItems(s));
+          const dropNone = menuEditOn() ? ' data-drop-sub="__none__"' : '';
           const groupedAll = `
             ${topSubs.map(s => renderSubGroup(s, 0, true)).join('')}
-            ${itemsWithoutSub.length > 0 ? `<div class="ts" style="font-weight:700;margin:12px 0 6px;">Other</div><div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}${addDish()}</div>` : ''}`;
+            ${itemsWithoutSub.length > 0 ? `<div class="ts"${dropNone} style="font-weight:700;margin:12px 0 6px;">Other</div><div class="grid"${dropNone}>${itemsWithoutSub.map(renderItemCard).join('')}${addDish()}</div>` : ''}`;
           // No populated subsection → nothing to filter or drill into, so show
           // a plain grid with no subsection bar (or tiles) at all.
           if (topSubs.length === 0) {
@@ -25713,7 +25745,7 @@ function renderMenuScrollBody() {
             </div>
             ${catCombos.length && activeSub === '__all__' ? `<div class="grid" style="margin-bottom:10px;">${catCombos.map(comboCard).join('')}</div>` : ''}
             ${activeSub === '__all__' ? groupedAll
-            : activeSub === '__none__' ? `<div class="grid">${itemsWithoutSub.map(renderItemCard).join('')}${addDish()}</div>`
+            : activeSub === '__none__' ? `<div class="grid"${dropNone}>${itemsWithoutSub.map(renderItemCard).join('')}${addDish()}</div>`
             : activeKid ? renderSubGroup(activeKid, 0, false)
             : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
             : `<div class="grid">${items.filter(i => i.subcategoryId === activeSub).map(renderItemCard).join('')}</div>`}
@@ -41854,6 +41886,259 @@ document.addEventListener('pointerdown', (e) => {
   document.addEventListener('pointerup', g.up);
   document.addEventListener('pointercancel', g.pc);
 }, { passive: true });
+// §§ Menu edit: carry a dish to another section
+// THE DISH GOES WHERE YOU PUT IT (owner, 9 Oct '26: "I want to be able to drag
+// and drop an item to another section subsection"). In the menu's edit mode a
+// HOLD on a dish lifts it — the tile's own hold, 450ms of a still finger; a
+// mouse just pulls — and it rides the hand the way a table does on the floor:
+// the same tile at the same size on the drawer's lift, the room stepped back
+// (paintDropRoom). It lands on what is under the FINGER: a section on the rail
+// (it leaves its subsection), a subsection key, a subsection's own grid or
+// heading. The one it would land on comes back from the dim wearing the picked
+// band. It lands LAST there, beside + Item (owner's pick): one past the last
+// dish in that group. A dish + Item made carries no number and is drawn after
+// every numbered one, so those are numbered first, in the order they are drawn
+// (nothing on the screen moves), and the carried dish goes one past them.
+// THE DISH NEVER COVERS WHAT IT IS AIMED AT: it stays on the grid, stops at the
+// key row, and the finger reaches on into the rail or the row. A strip with
+// more past its end slides while the finger rests at that end — or past it, on
+// the glass beyond the strip's inset — and so does the grid, above its top as
+// below its bottom. Home, or nothing, floats it back to where its tile is NOW —
+// or fades it where it was let go when that tile has scrolled away — and
+// changes nothing. The list holds still: the group it lands in stays where the
+// finger let go, though the dish took a row out of a group above it.
+// It saves through the dish's own save (PUT /api/menu/:id, the editor's door),
+// one save at a time, and only a dish's LATEST move paints or puts back: a
+// failed save puts it back and says why, in red, and no "moved" covers that
+// red. Every slop is measured on the glass (fingerPx). Renders wait while it
+// is in the air, and the one after a drop waits for the touchend: rebuilt
+// before it, the tile under the finger was gone, the till never heard the
+// finger lift, and every background render after that waited for a hand that
+// was not there. So everything that lands LATER — a save coming back, the
+// float home ending — paints through renderWhenStill, never under a finger.
+let _dishGrab = null, _dishSaves = Promise.resolve();
+const _dishLast = {}; // dish id → its latest move
+const DISH_HOLD = 450, DISH_SLOP = 16, DISH_PULL = 8, DISH_EDGE = 44, DISH_SPEED = 14;
+function dishDropAt(x, y, dish) {
+  const el = dish && document.elementFromPoint(Math.max(0, Math.min(innerWidth - 1, x)), Math.max(0, Math.min(innerHeight - 1, y)));
+  if (!el || !el.closest) return null;
+  const chip = el.closest('.catrail .cat-btn[data-act="cat"]');
+  if (chip) {
+    const name = chip.dataset.val;
+    return name !== dish.category && state.categories.some(c => c.name === name && !c.disabled) ? { el: chip, category: name, sub: null, say: name } : null;
+  }
+  const key = el.closest('.menu-panel [data-act="subcat"]:not(.subcat-back)');
+  const block = key ? null : el.closest('.menu-scroll [data-drop-sub]');
+  const v = key ? key.dataset.val : block ? block.dataset.dropSub : null;
+  if (!v || v === '__all__') return null;
+  const sub = v === '__none__' ? null : state.subcategories.find(s => s.id === v);
+  const cat = sub ? state.categories.find(c => c.id === sub.categoryId) : v === '__none__' ? state.categories.find(c => c.name === state.activeCat) : null;
+  if (!cat || (cat.name === dish.category && (sub ? sub.id : null) === (dish.subcategoryId || null))) return null; // home
+  return { el: key || document.querySelector(`.menu-scroll .grid[data-drop-sub="${v}"]`) || block, category: cat.name, sub: sub ? sub.id : null, say: sub ? sub.name : 'Other' };
+}
+function _dishTouch(e) { if (_dishGrab && _dishGrab.lifted && e.cancelable) e.preventDefault(); }
+function _dishEdgeScroll(g) {
+  const ramp = (d) => d < DISH_EDGE ? Math.ceil(DISH_SPEED * (1 - Math.max(0, d) / DISH_EDGE)) : 0;
+  for (const el of document.querySelectorAll('.catrail, .menu-panel .subcat-seg')) {
+    const r = el.getBoundingClientRect();
+    const across = el.scrollWidth > el.clientWidth + 1, down = !across && el.scrollHeight > el.clientHeight + 1;
+    // A strip's ends run on past its inset, the way it scrolls: a finger
+    // pushed to the glass's edge beside a row is still at that row's end.
+    const rx = across ? DISH_EDGE : 0, ry = down ? DISH_EDGE : 0;
+    if (g.x < r.left - rx || g.x > r.right + rx || g.y < r.top - ry || g.y > r.bottom + ry) continue;
+    if (across) el.scrollLeft += ramp(r.right - g.x) - ramp(g.x - r.left);
+    else if (down) el.scrollTop += ramp(r.bottom - g.y) - ramp(g.y - r.top);
+    return;
+  }
+  // The grid: above its top slides it up, as below its bottom slides it down.
+  const ms = document.querySelector('.menu-panel .menu-scroll');
+  const r = ms && ms.getBoundingClientRect();
+  if (r && g.x >= r.left && g.x <= r.right) ms.scrollTop += ramp(r.bottom - g.y) - ramp(g.y - r.top);
+}
+function _dishFrame(g) {
+  g.raf = requestAnimationFrame(() => {
+    if (_dishGrab !== g) return;
+    _dishEdgeScroll(g);
+    // With the hand, inside the grid: below the key row, beside the rail.
+    const ms = document.querySelector('.menu-panel .menu-scroll');
+    const m = ms ? ms.getBoundingClientRect() : { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+    const row = ms && ms.querySelector('.subcat-seg');
+    const rr = row && row.getBoundingClientRect();
+    const top = rr && rr.bottom > m.top && rr.top < m.bottom ? Math.max(m.top, rr.bottom + 8) : m.top;
+    const a = g.rect, w = a.width, h = a.height;
+    const L = Math.max(Math.min(m.left, a.left), Math.min(Math.max(m.right, a.right) - w, a.left + g.x - g.gx));
+    const T = Math.max(Math.min(top, a.top), Math.min(Math.max(m.bottom, a.bottom) - h, a.top + g.y - g.gy));
+    g.ghost.style.translate = (L - a.left) + 'px ' + (T - a.top) + 'px';
+    const t = dishDropAt(g.x, g.y, state.menu.find(d => d.id === g.id));
+    const el = t ? t.el : null;
+    if (g.over && g.over.el !== el) g.over.el.classList.remove('mk-drop');
+    if (el) el.classList.add('mk-drop');
+    g.over = t;
+    _dishFrame(g);
+  });
+}
+function _dishLift(g) {
+  if (_dishGrab !== g || g.lifted) return;
+  const src = menuEditOn() && !state._sortDragging && document.querySelector(`.menu-scroll .item-card[data-act="menu-edit-item"][data-id="${g.id}"]`);
+  if (!src) { _dishGrabEnd(g); return; }
+  g.lifted = true;
+  state._sortDragging = true; // render() holds while it is in the air
+  // The lift is the gesture's news now: the press's sink ends here, or the
+  // render after the drop paints it on the tile in its new place.
+  if (_pressState && _pressState.el) _pressState.el.classList.remove('pressed');
+  _pressState = null;
+  g.rect = src.getBoundingClientRect(); g.gx = g.x; g.gy = g.y;
+  const gh = src.cloneNode(true);
+  gh.classList.remove('pressed', 'qp-held', 'mk-hit');
+  gh.classList.add('mk-drag-ghost');
+  gh.removeAttribute('data-act'); gh.removeAttribute('data-id');
+  // A tile's insides are sized off its grid (pinned rows carry their own), and
+  // the copy rides on <body>: the sizes ride with it, so it IS the tile.
+  const cs = getComputedStyle(src);
+  ['--tile-h-real', '--item-pad', '--item-name-size', '--item-icon-size', '--item-img-h'].forEach(k => { const v = cs.getPropertyValue(k).trim(); if (v) gh.style.setProperty(k, v); });
+  Object.assign(gh.style, { left: g.rect.left + 'px', top: g.rect.top + 'px', width: g.rect.width + 'px', height: g.rect.height + 'px' });
+  document.body.appendChild(gh);
+  g.ghost = gh;
+  src.classList.add('mk-drag-src');
+  paintDropRoom();
+  document.body.classList.add('sorting');
+  try { navigator.vibrate && navigator.vibrate(10); } catch (err) {}
+  _dishFrame(g);
+}
+function _dishGrabEnd(g, drop) {
+  if (_dishGrab !== g) return;
+  _dishGrab = null;
+  clearTimeout(g.timer); cancelAnimationFrame(g.raf);
+  document.removeEventListener('pointermove', g.mv);
+  document.removeEventListener('pointerup', g.up);
+  document.removeEventListener('pointercancel', g.pc);
+  if (!g.lifted) return;
+  // The release is not a tap on what it ends over: its ONE click is swallowed,
+  // and the next press lets clicks through again (a flat 350ms ate a real tap
+  // made straight after a drop).
+  let late = 0;
+  const off = () => { clearTimeout(late); document.removeEventListener('click', kill, true); document.removeEventListener('pointerdown', off, true); };
+  const kill = (ce) => { ce.stopPropagation(); ce.preventDefault(); off(); };
+  document.addEventListener('click', kill, true);
+  document.addEventListener('pointerdown', off, true);
+  late = setTimeout(off, 350);
+  if (g.over) g.over.el.classList.remove('mk-drop');
+  clearDropRoom();
+  document.body.classList.remove('sorting');
+  state._renderQueuedDuringDrag = false; // both ends below render
+  const dish = state.menu.find(d => d.id === g.id), t = drop && dish ? g.over : null;
+  if (!t) {
+    // Home is where the tile IS now — the grid may have slid under the carry —
+    // and a home scrolled out of sight is not flown to: it fades where it is.
+    const src = document.querySelector('.mk-drag-src'), r = src && src.getBoundingClientRect();
+    const ms = document.querySelector('.menu-panel .menu-scroll'), m = ms && ms.getBoundingClientRect();
+    const seen = r && m && r.bottom > m.top && r.top < m.bottom;
+    g.ghost.style.setProperty('transition', 'translate var(--t-move) ease, opacity var(--t-move) ease', 'important');
+    if (seen) g.ghost.style.translate = (r.left - g.rect.left) + 'px ' + (r.top - g.rect.top) + 'px';
+    else g.ghost.style.setProperty('opacity', '0', 'important');
+    // The tile is whole again when the copy reaches it; the redraw waits for
+    // the hand (a second finger that ended the carry may still be down).
+    setTimeout(() => { g.ghost.remove(); document.querySelectorAll('.mk-drag-src').forEach(el => el.classList.remove('mk-drag-src')); state._sortDragging = false; renderWhenStill(); }, cssMs('--t-move'));
+    return;
+  }
+  state._sortDragging = false;
+  setTimeout(() => { g.ghost.remove(); moveDishTo(dish, t); }, 0); // after the touchend reaches the document
+}
+// THE LIST HOLDS STILL. A dish leaving a group above the view takes a row with
+// it, and render() puts the raw scroll back, so the group under the hand
+// jumped a row. Where it lands — or, putting one back, the heading nearest the
+// middle — is read in the list's own layout (a settle or a jiggle is a
+// transform, and a rect read mid-animation is not where the row is), and after
+// the redraw the list moves by what that moved.
+function _dishHold(target) {
+  const ms = document.querySelector('.menu-panel .menu-scroll'); if (!ms) return () => {};
+  const y = (el) => { let v = 0; for (let n = el; n; n = n.offsetParent) v += n.offsetTop; return v; };
+  const at = (el, box) => y(el) - y(box) - box.scrollTop;
+  const selOf = (el) => el.matches('.ts[data-drop-sub], .grid[data-drop-sub]') ? `${el.matches('.grid') ? '.grid' : '.ts'}[data-drop-sub="${el.dataset.dropSub}"]` : null;
+  let el = target && target.isConnected && ms.contains(target) && selOf(target) ? target : null;
+  if (!el) {
+    const mid = ms.clientHeight / 2; let best = Infinity;
+    ms.querySelectorAll('.ts[data-drop-sub]').forEach(h => { const d = Math.abs(at(h, ms) - mid); if (h.offsetHeight && d < best) { best = d; el = h; } });
+  }
+  if (!el) return () => {};
+  const sel = selOf(el), top = at(el, ms);
+  return () => { const m2 = document.querySelector('.menu-panel .menu-scroll'), e2 = m2 && m2.querySelector(sel); if (e2) m2.scrollTop += at(e2, m2) - top; };
+}
+let _dishRed = null; // the red a refused move raised: { id, toast }
+async function moveDishTo(dish, t) {
+  const id = dish.id, mine = _dishLast[id] = {}; // this move is the dish's latest now
+  const was = { category: dish.category, subcategoryId: dish.subcategoryId || null, sequence: dish.sequence };
+  // LAST in its new group, beside + Item. A dish + Item made has no number and
+  // is drawn after every numbered one, so those are numbered first, in the
+  // order they are drawn (nothing on the screen moves), and the dish goes one
+  // past them.
+  const has = (m) => m.sequence !== null && m.sequence !== undefined && m.sequence !== '' && Number.isFinite(Number(m.sequence));
+  const group = sortMenuItems(state.menu.filter(m => m.id !== id && m.category === t.category && (m.subcategoryId || null) === t.sub));
+  let n = group.filter(has).reduce((a, m) => Math.max(a, Number(m.sequence)), 0);
+  const number = group.filter(m => !has(m)).map(m => ({ id: m.id, sequence: ++n }));
+  const patch = { category: t.category, subcategoryId: t.sub };
+  if (group.length) patch.sequence = n + 1;
+  const keep = _dishHold(t.el);
+  number.forEach(u => { const m = state.menu.find(x => x.id === u.id); if (m) m.sequence = u.sequence; });
+  Object.assign(dish, patch);
+  render(); keep();
+  // One after another: the server hears the moves in the order the hand made
+  // them, and the numbers before the dish they make room for.
+  let numbered = !number.length;
+  const job = _dishSaves.then(async () => {
+    if (!numbered) { await api('/api/menu/reorder', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updates: number }) }); numbered = true; }
+    return api('/api/menu/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
+  });
+  _dishSaves = job.catch(() => {});
+  try {
+    const saved = await job;
+    if (_dishLast[id] !== mine) return; // a later move owns the dish now
+    const i = state.menu.findIndex(d => d.id === id);
+    if (i !== -1 && saved && saved.id) state.menu[i] = saved;
+    // A "moved" never covers a red that is still up — the one alarm on the
+    // screen — unless that red was this dish's own, which this move answers.
+    const red = state.toast && state.toastFailed === state.toast && !(_dishRed && _dishRed.id === id && _dishRed.toast === state.toast);
+    if (!red) { state.toast = `${dish.name} moved to ${t.say}`; armToastTimer(TOAST_SHORT); }
+    renderWhenStill();
+  } catch (e) {
+    if (!numbered) number.forEach(u => { const m = state.menu.find(x => x.id === u.id); if (m && m.sequence === u.sequence) m.sequence = null; });
+    if (_dishLast[id] !== mine) return;
+    const d = state.menu.find(x => x.id === id);
+    if (d) Object.assign(d, was);
+    state.toast = toastFail(`Could not move ${dish.name} — ${e.message || 'not saved'}`);
+    _dishRed = { id, toast: state.toast };
+    armToastTimer(TOAST_LONG);
+    if (gestureLive() || state._sortDragging) {
+      // Held behind a hand, its clock starts when it is painted (render gives
+      // a toast its four seconds at its first paint): a long carry ran the red
+      // out before anyone saw it.
+      clearTimeout(state._toastTimer); state._toastTimer = null;
+      renderWhenStill();
+    } else { const back = _dishHold(null); render(); back(); }
+  }
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.isPrimary === false) { if (_dishGrab) _dishGrabEnd(_dishGrab); return; } // a second finger never carries
+  if (e.button || _dishGrab || state._sortDragging || !menuEditOn()) return;
+  const tile = e.target.closest && e.target.closest('.menu-scroll .item-card[data-act="menu-edit-item"]');
+  if (!tile) return;
+  const touch = e.pointerType !== 'mouse';
+  const g = _dishGrab = { id: tile.dataset.id, pid: e.pointerId, x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, lifted: false };
+  if (touch) g.timer = setTimeout(() => _dishLift(g), DISH_HOLD);
+  g.mv = (ev) => {
+    if (ev.pointerId !== g.pid) return;
+    g.x = ev.clientX; g.y = ev.clientY;
+    if (g.lifted) return; // the frame reads the hand
+    // A finger that moves first is scrolling; a mouse that pulls is carrying.
+    if (Math.hypot(g.x - g.x0, g.y - g.y0) > fingerPx(touch ? DISH_SLOP : DISH_PULL)) { if (touch) _dishGrabEnd(g); else _dishLift(g); }
+  };
+  g.up = (ev) => { if (ev.pointerId === g.pid) _dishGrabEnd(g, true); };
+  g.pc = (ev) => { if (ev.pointerId === g.pid) _dishGrabEnd(g); };
+  document.addEventListener('pointermove', g.mv, { passive: true });
+  document.addEventListener('pointerup', g.up);
+  document.addEventListener('pointercancel', g.pc);
+}, { passive: true });
+window.addEventListener('blur', () => { if (_dishGrab) _dishGrabEnd(_dishGrab); }); // the till lost the hand: it floats home
 // Hold a cover in the item's seat pop to start multi-select — arm several
 // covers, then ✓ adds the dish to each. Only in the seat-only pop; 'All' is
 // already everyone so it's skipped.
@@ -47258,6 +47543,10 @@ function bindEvents() {
   // chips and the subsection chips, through the SAME drag and the SAME
   // reorder as the two lists above (one door, two places to stand).
   if (menuEditOn()) {
+    // A carried dish keeps the finger: the touch is claimed on the tile's own
+    // box, never the document, and only once it has lifted — a swipe that
+    // starts on a tile still scrolls the menu.
+    document.querySelectorAll('.menu-scroll .item-card[data-act="menu-edit-item"]').forEach(el => el.addEventListener('touchmove', _dishTouch, { passive: false }));
     makeSortable('cat-move', (from, to, els) => reorderCategories(els[from].dataset.id, els[to].dataset.id), { canStart: () => !isListSorted('categories'), strip: true, holdMs: 450 });
     makeSortable('sub-move', (from, to, els) => reorderSubcategories(els[from].dataset.id, els[to].dataset.id), { canStart: () => !isListSorted('categories'), strip: true, holdMs: 450 }); // the app's hold: a slow tap to switch never lifts
   }

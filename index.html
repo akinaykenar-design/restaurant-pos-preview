@@ -21541,6 +21541,10 @@ function openMobileCart() {
     state.showTablePicker = false; state.transferFrom = null;
     state.moveItemsPicking = false; state.pickFlashId = null;
   }
+  // …and the tools stand down, as they do for the floor: a swipe opened the
+  // docket UNDER open tools, so the tools stayed on screen with Docket lit
+  // and the Tools key did nothing (Oct '26).
+  state.accountMenuOpen = false;
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   if (window.innerWidth <= 768 && !reduce) {
     state.mobileCartOpen = true; state._sheetEntering = true; render();
@@ -25189,15 +25193,62 @@ function barPagerOn() {
 // OUT OF ADMIN BY THE BAR'S OWN KEYS (one bar, 6 Oct '26): Floor lands on
 // the floor, the table's key on the order you left, Tools on that order's
 // tools. Admin remembers its page and scroll spot for the trip back in.
+// ☰ pressed again takes the same road (adminBack), so it can also land on
+// the phone's docket or a takeaway — wherever Admin was opened from.
 function leaveAdminTo(k) {
   const sc = document.querySelector('.admin-content');
   state._adminReturn = { tab: state.adminTab, groups: (state.adminOpenGroups || []).slice(), scroll: sc ? sc.scrollTop : 0 };
+  const r = state._tillReturn || {};
+  if (k === 'takeaway' || k === 'delivery') { state.view = 'order'; setOrderType(k); state.showTablePicker = false; render(); return; }
   const back = tillReturnTable();
   state.view = 'order'; setOrderType('dine-in');
-  if (k !== 'floor' && back) { state.showTablePicker = false; state.accountMenuOpen = k === 'tools'; render(); return; }
+  if (k !== 'floor' && back) {
+    state.showTablePicker = false; state.accountMenuOpen = k === 'tools';
+    state.mobileCartOpen = k === 'docket'; // the phone's docket is up only when that is where you are going
+    render();
+    // The menu comes back where it was scrolled to, as Admin does.
+    if (r.menuTop) requestAnimationFrame(() => { const ms = document.querySelector('.menu-scroll'); if (ms) ms.scrollTop = r.menuTop; });
+    // The hold on the table is asked for again, as the heartbeat asks: a
+    // table another till took while Admin was up says so and the floor comes up.
+    if (state._lockReleased !== String(back.id)) claimTableLock(back.id).then(c => { if (c === 'busy') { if (state.showCheckout) closeCheckout(); lostTable(state._lockBusyStaff); } });
+    return;
+  }
   // The floor comes in the way it always does — through openTablePicker,
-  // which marks it entering so the phone's drawer slides.
-  state.showTablePicker = false; openTablePicker();
+  // which marks it entering so the phone's drawer slides — on the room it
+  // was showing when Admin opened over it.
+  state.showTablePicker = false; openTablePicker(r.page === 'floor' ? r.room : null, true);
+  const w = r.page === 'floor' && r.pan && document.querySelector('.middle-view .tp-canvas-wrap');
+  if (w) { w.scrollLeft = r.pan[0]; w.scrollTop = r.pan[1]; }
+}
+// WHERE THE TILL WAS when Admin opened over it. Every door into Admin writes
+// it — ☰, a pinned page, a set menu from the menu's pencil — so the way back
+// never points at an older trip. A door pressed inside Admin leaves it alone:
+// you still came from the same place.
+function noteTillReturn(toolsOpen) {
+  if (state.view === 'admin') return;
+  const ms = document.querySelector('.menu-scroll');
+  const page = state.view !== 'order' ? null
+    : state.orderType !== 'dine-in' ? state.orderType
+    : state.showTablePicker ? 'floor' : state.mobileCartOpen ? 'docket' : toolsOpen ? 'tools' : 'menu';
+  const fw = document.querySelector('.middle-view .tp-canvas-wrap');
+  state._tillReturn = { onOrder: state.view === 'order' && !state.showTablePicker && !!state.table, table: state.table, page, room: state.pickerFloorPlanId, menuTop: ms ? ms.scrollTop : 0, pan: fw ? [fw.scrollLeft, fw.scrollTop] : null };
+}
+// ☰ AGAIN CLOSES ADMIN (owner, 9 Oct '26: "Pressing the admin button and
+// repressing should take you back the where you came from"). Admin is a page
+// laid over the till: the key that opened it lifts it off, onto the screen it
+// covered — the floor on its Pass, Timeline or Bills, the table's menu on its
+// section, the phone's docket, Tools, a takeaway. Same road out as the bar's
+// Floor and table keys. Nothing to go back to is the floor; a table another
+// till has taken since says so, as a tap on it would.
+function adminBack() {
+  const r = state._tillReturn || {};
+  const k = r.page || 'floor';
+  if (k !== 'floor' && k !== 'takeaway' && k !== 'delivery' && !tillReturnTable()) {
+    const l = r.table != null && tableLockedBy(r.table);
+    if (l && state._lostTable !== String(r.table)) { const lt = findTableById(r.table); state._lostTable = String(r.table); state.toast = toastFail(`Table ${lt ? lt.label : ''} is open on ${l.staff || 'another'}'s till`); armToastTimer(TOAST_LONG); }
+    leaveAdminTo('floor'); return;
+  }
+  leaveAdminTo(k);
 }
 // The table Admin's key returns to: the one the till was ordering on when it
 // left, if it is still this till's. Null means "back to the floor".
@@ -25335,15 +25386,13 @@ function renderTopbar() {
       })()}
       ${isChef ? `<button class="tab-btn ${state.view === 'kitchen' ? 'active' : ''}" data-act="view-kitchen">Kitchen</button>` : ''}
       ${(() => {
-        // ONE alternating door on the phone (owner, Sep '26): while ordering
-        // the slot shows the lines and opens Admin; inside Admin the same
-        // slot shows the floor map and walks back to the till. One button,
-        // two directions, always the icon of where it takes you.
         if (!isManager) return '';
         // ☰ IS ☰ IN ADMIN TOO, lit while you are in it (one bar, 6 Oct '26).
         // It turned into a way back in there — a table's number, then the
         // map — while the bar's Floor · Table · Tools went missing; now they
-        // stay, and they are the way back.
+        // stay, and they are ways out. Pressed again it lifts Admin off and
+        // lands where it was opened from (owner, 9 Oct '26) — one key, in
+        // and out, like the search key beside it.
         return `<span class="staff-badge"><button class="${state.view === 'admin' ? 'active' : ''}" data-act="view-admin" aria-label="Admin">${SYS_ADMIN_SVG}</button></span>`;
       })()}
       ${(() => {
@@ -38562,7 +38611,7 @@ function closeTablePicker(then) {
   requestAnimationFrame(() => { if (state._tpLeaving) live.classList.add('tp-off'); });
 }
 // §§ The floor: opening, closing, transferring
-function openTablePicker() {
+function openTablePicker(room, still) {
   const current = findTableById(state.table);
   const owningFp = current && state.floorPlans.find(f => f.tables.some(t => t.id === current.id));
   dropMobileDrawer();
@@ -38582,10 +38631,10 @@ function openTablePicker() {
     // (filmed, Sep '26). renderWhenStill holds it until the hand is off.
     setTimeout(() => { if (state.showTablePicker && !state._tpLeaving) renderWhenStill(); }, wait);
   });
-  state.pickerFloorPlanId = owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
+  state.pickerFloorPlanId = room && state.floorPlans.some(f => f.id === room) ? room : owningFp ? owningFp.id : (state.floorPlans[0] ? state.floorPlans[0].id : null);
   state.showTablePicker = true;
   // Opened OVER something: there is a screen behind it to slide back to.
-  state._tpFromOrder = !!state.table;
+  state._tpFromOrder = !!state.table && !still;
   // THE FLOOR TAKES THE MIDDLE, SO THE ACCOUNT HUB STANDS DOWN. The hub is
   // checked before the floor when the pane is chosen, so anything opening the
   // floor from inside the hub drew the hub again — Move items ticked its lines
@@ -38598,6 +38647,10 @@ function openTablePicker() {
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   state.notesPanel = null;
   state.customNoteDraft = null;
+  // BACK FROM ADMIN THE FLOOR IS THE SCREEN (slide law 12): Admin covered
+  // everything, so there is nothing for it to come over — it is simply there.
+  // The way out still slides (rule 13).
+  if (still) { clearTimeout(state._tpEnterTimer); document.body.removeAttribute('data-tp-entering'); render(); tpCentreOnOpen(); return; }
   // The till's floor slides too (pane-in-left), so the lock refresh above
   // waits on BOTH devices — on the till it re-rendered at once and the replay
   // guard held the floor still (filmed, Sep '26: "hub → floor: nothing").
@@ -42230,6 +42283,7 @@ const TAP_SLIP = 12;      // past this much sideways travel it was a slide, not 
         el.style.transform = ''; el.style.transitionDuration = '';
         if (!take) { if (was === 'docket') el.classList.toggle('open', !!state.mobileCartOpen); return; }
         state.mobileCartOpen = (to === 0);    // the docket's far end IS open
+        if (state.mobileCartOpen) state.accountMenuOpen = false; // the tools stand down, as for the Docket key
         render();
       };
       // The docket holds its own end state while the slide runs: the class is
@@ -47434,6 +47488,7 @@ function handleActClick(el, e) {
       // quick note) is floating over it, leave it open so closing the popup
       // returns to the grid. Bare floor inside the pane does nothing.
       const _acctPopupOpen = state.coversPad || state.notesPanel || state.quickNotePad || state.callAway || state.customerPane || state.moveItems || state.orderHistoryPop;
+      const _toolsWereOpen = state.accountMenuOpen; // a door into Admin remembers them — ☰ walks back to them
       if (state.accountMenuOpen && act !== 'toggle-account-menu' && act !== 'acct-go' && !_acctPopupOpen) state.accountMenuOpen = false;
       if (ROW_EDIT_ACTIONS[act]) { ROW_EDIT_ACTIONS[act](el.dataset.id); }
       else if (MODAL_DELETE_ACTIONS[act]) {
@@ -47890,11 +47945,8 @@ function handleActClick(el, e) {
       else if (act === 'clock-in') { clockIn(); }
       else if (act === 'clock-out') { clockOut(); }
       else if (act === 'view-admin') {
-        if (state.view === 'admin') return; // the lit ☰: you are here
-        // Remember where the till WAS, so Admin's key walks back to it: the
-        // order screen on your table (owner, Sep '26: "from admin it should
-        // take you back to order"), or the floor when there was no table.
-        state._tillReturn = { onOrder: state.view === 'order' && !state.showTablePicker && !!state.table, table: state.table };
+        if (state.view === 'admin') { adminBack(); return; } // the lit ☰ again lifts Admin off
+        noteTillReturn(_toolsWereOpen);
         state.view = 'admin';
         // Come back to where you WERE — page and exact scroll spot (owner,
         // Aug '26). The first visit opens on the page this device used LAST
@@ -47926,6 +47978,7 @@ function handleActClick(el, e) {
         // ALSO navigate.
         if (_pinHoldFired) { _pinHoldFired = false; return; }
         const key = el.dataset.val;
+        noteTillReturn(_toolsWereOpen);
         state.view = 'admin';
         state.adminTab = key;
         openAdminGroupFor(key);
@@ -48248,6 +48301,11 @@ function handleActClick(el, e) {
         // then sprang the tools open the moment the bill was paid (6 Oct '26).
         if (state.showCheckout) return;
         if (state.view === 'admin') { leaveAdminTo('tools'); return; }
+        // The lit Tools key: you are here, so it does nothing — like Floor on
+        // the floor and ☰ in Admin (owner, Oct '26: "doing nothing when you're
+        // already in tools"). It shut the tools and dropped you on the table.
+        // The pane's own Close shares this act and is still the way out.
+        if (state.accountMenuOpen && el.closest('.bar-pager')) return;
         // From the floor or the phone's docket, Tools goes to the table AND
         // opens its tools — the same doors the bar's other keys use.
         if (!state.accountMenuOpen && state.showTablePicker) { if (state.moveItemsPicking || !state.table) return; state.accountMenuOpen = true; closeTablePicker(() => { state.pickFlashId = null; }); return; }
@@ -48376,7 +48434,7 @@ function handleActClick(el, e) {
       // A set menu's editor is the Set menus page's own, inline: edit mode
       // takes you to it with that set menu open — the one door, not a copy —
       // and the bar's Table key brings you back to the table, as ☰ does.
-      else if (act === 'menu-edit-combo') { state._tillReturn = { onOrder: !!state.table, table: state.table }; state.menuEdit = false; state.view = 'admin'; state.adminTab = 'combos'; openAdminGroupFor('combos'); openEditCombo(el.dataset.id); }
+      else if (act === 'menu-edit-combo') { noteTillReturn(); state.menuEdit = false; state.view = 'admin'; state.adminTab = 'combos'; openAdminGroupFor('combos'); openEditCombo(el.dataset.id); }
       else if (act === 'fp-tray-group') {
         // Another kind of piece is another row: it starts at its start (the
         // row's slide is kept across a redraw, never across a switch).

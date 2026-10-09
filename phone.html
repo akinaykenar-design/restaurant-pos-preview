@@ -12,7 +12,11 @@
      full-size one. Scaling alone left the big box in the layout, so on a phone
      the page grew wider than the screen, the browser zoomed out to fit, and the
      frame shrank again on the next measure. */
-  .stage { flex:none; overflow:hidden; max-width:100vw; } /* never wider than the screen: Tablet on an upright phone widened the page for one layout and the fit locked onto it, cut off both sides with the tray below the edge (9 Oct '26) */
+  /* CLIP, NOT HIDDEN: a hidden box still scrolls when code asks it to, and the
+     app's own scrollIntoView reached up through the frame and slid the zoomed
+     iPad out of reach for good (Oct '26). Clip has nothing to scroll; where it
+     is not known, the script below puts any scroll straight back. */
+  .stage { flex:none; overflow:hidden; overflow:clip; max-width:100vw; } /* never wider than the screen: Tablet on an upright phone widened the page for one layout and the fit locked onto it, cut off both sides with the tray below the edge (9 Oct '26) */
   .phone { --w:390px; --h:844px; --s:1; width:calc(var(--w) + 24px); height:calc(var(--h) + 24px);
     transform:translate(var(--tx, 0px), var(--ty, 0px)) scale(var(--s)); transform-origin:top left; background:#0a0a0a; border-radius:52px;
     padding:12px; box-sizing:border-box; box-shadow:0 30px 60px rgba(0,0,0,.6), inset 0 0 0 2px #333; flex:none; }
@@ -142,7 +146,9 @@
   // always kept 200px clear for the hand column beside it). Narrow, the
   // controls drop UNDERNEATH, so the frame gets the whole width and the Tablet
   // button does what he wants it for: the tablet look, on a phone.
-  const narrow = () => innerWidth <= 900;
+  // A big phone on its side is 915-932 wide, which read as a laptop: no tray,
+  // no zoom. A touch screen whose short side is a phone's is a phone.
+  const narrow = () => innerWidth <= 900 || (matchMedia('(pointer:coarse)').matches && Math.min(innerWidth, innerHeight) <= 500);
   // TURN THE PHONE AND YOU GET THE TABLET, IN AN IPAD'S OWN SHAPE (owner,
   // Sep '26: "make the tablet version landscape if I turn my phone", then
   // "just make it proportional"). Letting the rotated screen through at 1:1
@@ -175,7 +181,7 @@
     const zoomable = narrow() && p.classList.contains('tablet');   // the Tablet view on a phone; the Phone view is the phone's own screen
     document.body.classList.toggle('zoomable', zoomable);
     const st = p.parentElement;
-    if (!zoomable) Z.key = '';   // the next Tablet view starts from the whole picture
+    if (!zoomable) { Z.key = ''; pad.open = false; pad.home = null; }   // the next Tablet view starts from the whole picture, with no glide back to a spot from before
     if (bare) { for (const v of ['--s', '--tx', '--ty']) p.style.removeProperty(v); st.style.width = ''; st.style.height = ''; return; }
     if (zoomable) {
       // The iPad gets the whole screen above the strip, and the zoom places it.
@@ -184,6 +190,7 @@
       const key = p.className + (innerWidth > innerHeight ? ' side' : ' up');
       // A turn or a new device starts from the whole picture; the browser's
       // bars coming and going keep the zoom.
+      if (key !== Z.key) { pad.open = false; pad.home = null; }
       if (key !== Z.key || Z.s <= Z.fit + .001) Z.s = fitS;
       Object.assign(Z, { key, fit: fitS, vw, vh, W: w + 24, H: h + 24 });
       Z.s = Math.max(Z.fit, Math.min(1, Z.s));
@@ -239,7 +246,7 @@
     return { x: (v[0].x + v[1].x) / 2, y: (v[0].y + v[1].y) / 2, d: Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y) }; };
   const anchor = () => { if (!G.pts.size) return; const m = mid(), r = document.querySelector('.stage').getBoundingClientRect();
     Object.assign(G.on, { m0: m, s0: Z.s, cx: (m.x - r.left - Z.tx) / Z.s, cy: (m.y - r.top - Z.ty) / Z.s, sl: r.left, st: r.top }); };
-  const paint = () => { G.raf = 0; const g = G.on; if (!g || !G.pts.size) return; const m = mid();
+  const paint = () => { G.raf = 0; const g = G.on; if (!g || !G.pts.size) return; const m = mid(); g.last = m;
     if (m.d && g.m0.d) Z.s = Math.max(Z.fit, Math.min(1, g.s0 * m.d / g.m0.d));
     Z.tx = m.x - g.sl - g.cx * Z.s; Z.ty = m.y - g.st - g.cy * Z.s; place(); };
   const grab = () => { G.on = {}; anchor(); pad.home = null;   // moved by hand: no glide back
@@ -248,8 +255,15 @@
   const lifted = () => {
     if (!G.on) return;
     if (G.pts.size) { anchor(); return; }   // one finger still down carries on sliding it
-    if (Z.s < Z.fit * 1.1) Z.s = Z.fit; else if (Z.s > .95) Z.s = 1;   // near either end, land on it: the whole picture, or exactly life size
-    place(); G.on = null; G.quietUntil = Date.now() + 400;
+    // Near either end, land on it: the whole picture, or exactly life size —
+    // and life size grows about the fingers, so what was under them stays.
+    const g = G.on, m = g.last;
+    if (Z.s < Z.fit * 1.1) Z.s = Z.fit;
+    else if (Z.s > .95 && Z.s < 1) {
+      if (m) { const cx = (m.x - g.sl - Z.tx) / Z.s, cy = (m.y - g.st - Z.ty) / Z.s; Z.tx = m.x - g.sl - cx; Z.ty = m.y - g.st - cy; }
+      Z.s = 1;
+    }
+    place(); G.on = null; G.quietUntil = Date.now() + 400; G.endedAt = performance.now();
     document.querySelector('.phone').style.willChange = '';   // drawn sharp again at the size it stopped at
   };
   // Two fingers on the black round the iPad, or on its edge, zoom it too.
@@ -280,6 +294,14 @@
     const callOff = (e) => {
       if (!first) return;
       const t = [...e.touches].find(t => t.target === first.target) || e.touches[0];
+      // A table being carried in the floor editor: hand the app the second
+      // finger a real iPad would, so its own rule sends the table back where
+      // it began and saves nothing. A bare cancel reads as a finished drag.
+      if (win.floorDragLive && win.floorDragLive() && e.touches.length >= 2) { try {
+        const tt = [...e.touches].slice(0, 2).map(x => new win.Touch({ identifier: x.identifier, target: first.target, clientX: x.clientX, clientY: x.clientY, pageX: x.pageX, pageY: x.pageY, screenX: x.screenX, screenY: x.screenY }));
+        first.target.dispatchEvent(new win.TouchEvent('touchstart', { bubbles: true, cancelable: true, touches: tt, targetTouches: tt, changedTouches: [tt[1]] }));
+        first.target.dispatchEvent(new win.TouchEvent('touchend', { bubbles: true, cancelable: true, touches: [], targetTouches: [], changedTouches: tt }));
+      } catch (x) {} }
       try { first.target.dispatchEvent(new win.PointerEvent('pointercancel', { bubbles: true, pointerId: first.id, pointerType: 'touch', isPrimary: true })); } catch (x) {}
       let ev; try { ev = new win.TouchEvent('touchcancel', { bubbles: true, cancelable: false, touches: [], targetTouches: [], changedTouches: [t] }); } catch (x) { ev = new win.Event('touchcancel', { bubbles: true }); }
       first.target.dispatchEvent(ev);
@@ -302,15 +324,22 @@
     // A finger's moves and lift go to the thing it landed on even after the
     // app redraws and throws that thing away — and then they never pass
     // through this window. A poll that redrew mid-pinch left the gesture
-    // stuck on, and the next pinch went to the iPad in Pinch inside. So while
-    // the iPad has the fingers, each one is also heard where it landed; an
-    // event heard twice is handled once.
+    // stuck on, and the next pinch went to the iPad in Pinch inside; a lock
+    // screen that replaced the power key under a held finger kept that finger
+    // down for good, so no pad ever glided in again. So every finger is also
+    // heard where it landed; an event heard twice is handled once.
     const handled = new WeakSet();
     const once = (e) => { if (!e.isTrusted || handled.has(e)) return false; handled.add(e); return true; };
-    const move = (e) => { if (!once(e)) return; sync(e); if (G.on) { stop(e); moved(); } };
+    // A finger that lands on the black beside the iPad sends nothing in here
+    // when it lands — it first shows up in the other finger's moves. So two
+    // fingers are settled on the first move that carries both, too.
+    const move = (e) => { if (!once(e)) return; sync(e);
+      if (!G.on && G.pts.size >= 2 && zooming()) { grab(); callOff(e); hear(e); if (e.touches.length) hold(e.touches[0].target); }
+      if (G.on) { stop(e); moved(); } };
     const end = (e) => {
       if (!once(e)) return;
       sync(e);
+      if (![...e.touches].some(t => t.target && t.target.ownerDocument === doc)) G.pts.forEach((v, key) => { if (key[0] === 'f') G.pts.delete(key); });   // a finger that landed beside the frame never reports its lift in here
       if (!G.pts.size) requestAnimationFrame(() => pad.follow());   // the hand is off: a pad that opened under it comes into view now
       if (!G.on) return;
       stop(e); lifted();
@@ -321,14 +350,17 @@
     win.addEventListener('touchstart', (e) => {
       if (!once(e)) return;
       if (e.touches.length === e.changedTouches.length) fresh();
-      sync(e);
-      if (G.on) { stop(e); anchor(); hear(e); return; }
+      sync(e); hear(e);
+      if (G.on) { stop(e); anchor(); return; }
       if (G.pts.size < 2 || !zooming()) return;
-      grab(); stop(e); callOff(e); hear(e); if (e.touches.length) hold(e.touches[0].target);
+      grab(); stop(e); callOff(e); if (e.touches.length) hold(e.touches[0].target);
     }, { capture: true, passive: true });
     win.addEventListener('touchmove', move, { capture: true, passive: true });
     for (const type of ['touchend', 'touchcancel']) win.addEventListener(type, end, { capture: true, passive: true });
-    win.addEventListener('click', (e) => { if (G.on || Date.now() < G.quietUntil) { e.preventDefault(); stop(e); } }, true);
+    // The click a gesture's own fingers leave behind is eaten; a NEW tap made
+    // straight after the lift is not (a quick slide-then-Send did nothing).
+    let downAt = 0; win.addEventListener('pointerdown', (e) => { if (e.isTrusted) downAt = performance.now(); }, true);
+    win.addEventListener('click', (e) => { if (G.on || (Date.now() < G.quietUntil && downAt < (G.endedAt || 0))) { e.preventDefault(); stop(e); } }, true);
     // A PAD COMES TO YOU (borrowed from the phone's keyboard, which scrolls the
     // field you tapped into view, and back when it shuts). Zoomed in, a pad
     // the app opens in the middle of the iPad can land off the screen, leaving
@@ -377,6 +409,8 @@
   document.querySelector('.grip').addEventListener('click', () => {
     document.body.classList.toggle('tray-shut'); });
   settle();
+  // The stage never scrolls (see .stage): a browser without clip gets it back here.
+  { const st = document.querySelector('.stage'); st.addEventListener('scroll', () => { st.scrollLeft = 0; st.scrollTop = 0; }); }
 
   // THE MOUSE IS A HAND (owner, Sep '26). The app's swipes, holds and
   // presses listen for touch, and its pointer handlers read pointerType; a

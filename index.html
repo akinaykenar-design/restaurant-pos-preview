@@ -6659,6 +6659,8 @@ body.mk-dragging .menu-editing .grid.mk-drop .item-card, body.mk-dragging .menu-
 :root{ --spend-1:color-mix(in srgb, var(--green) 10%, var(--surface)); --spend-2:color-mix(in srgb, var(--green) 24%, var(--surface)); --spend-3:color-mix(in srgb, var(--green) 42%, var(--surface)); }
 body[data-theme="dark"]{ --spend-1:color-mix(in srgb, var(--green) 14%, var(--surface)); --spend-2:color-mix(in srgb, var(--green) 28%, var(--surface)); --spend-3:color-mix(in srgb, var(--green) 44%, var(--surface)); }
 .bl-card.spend-1{ background:var(--spend-1); } .bl-card.spend-2{ background:var(--spend-2); } .bl-card.spend-3{ background:var(--spend-3); }
+/* On a green card the group heading takes the card's ink — the grey read 2.3:1 there (10 Oct '26). */
+.bl-card[class*="spend-"] .bl-grp{ color:inherit; }
 .spend-swatch{ flex:none; width:24px; height:24px; border-radius:var(--btn-radius); box-shadow:inset 0 0 0 var(--ring) var(--tbl-edge); }
 .spend-swatch.spend-1{ background:var(--spend-1); } .spend-swatch.spend-2{ background:var(--spend-2); } .spend-swatch.spend-3{ background:var(--spend-3); }
 </style>
@@ -8961,13 +8963,18 @@ app.use((req, res, next) => {
 // is now, like a dish's stock.
 const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes', 'roster', 'timeOff', 'inventoryItems'];
 const UNDO_TTL = 10 * 60 * 1000;
-let _undoSnap = null, _undoSnapAt = 0, _undoKeys = new Set(), _undoByManager = false, _undoEdited = {};
+let _undoSnap = null, _undoSnapAt = 0, _undoBatch = '', _undoKeys = new Set(), _undoByManager = false, _undoEdited = {};
 app.use((req, res, next) => {
   if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
     // A bulk delete is many DELETEs in a burst. Snapshot before the FIRST of
     // them and keep it for the rest, or Undo would put back only the last row.
-    const burst = _undoSnap && (Date.now() - _undoSnapAt) < 4000;
+    // The burst is the TAP that made it (X-Undo-Batch), not the clock alone: two
+    // separate deletes a moment apart were one Undo, from any till (10 Oct '26).
+    // A burst is one tap's deletes, each within 4s of the last.
+    const batch = String(req.get('X-Undo-Batch') || '').slice(0, 64);
+    const burst = _undoSnap && batch && batch === _undoBatch && (Date.now() - _undoSnapAt) < 4000;
     if (!burst) {
+      _undoBatch = batch;
       try {
         const d = readData();
         const snap = {};
@@ -10059,6 +10066,11 @@ app.put('/api/settings', (req, res) => {
   }
   if (req.body.spendBand2 !== undefined) data.settings.spendBand2 = Math.max(1, Math.min(9999, parseInt(req.body.spendBand2) || 25));
   if (req.body.spendBand3 !== undefined) data.settings.spendBand3 = Math.max(1, Math.min(9999, parseInt(req.body.spendBand3) || 45));
+  // Medium sits under High, or Medium never shows anywhere (High is read first).
+  if ((req.body.spendBand2 !== undefined || req.body.spendBand3 !== undefined)
+      && (data.settings.spendBand2 || 25) >= (data.settings.spendBand3 || 45)) {
+    return res.status(400).json({ error: 'Medium must be under High' });
+  }
   if (req.body.seatingMinutes !== undefined) data.settings.seatingMinutes = req.body.seatingMinutes ? Math.max(0, parseInt(req.body.seatingMinutes) || 0) || null : null;
   if (req.body.ticketPos && typeof req.body.ticketPos === 'object') {
     const next = Object.assign({}, data.settings.ticketPos);
@@ -11755,21 +11767,6 @@ app.delete('/api/customers/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/customers/:id/redeem-points', (req, res) => {
-  const data = readData();
-  const customer = (data.customers || []).find(c => c.id === req.params.id);
-  if (!customer) return res.status(404).json({ error: 'Customer not found' });
-  const points = parseInt(req.body.points);
-  if (isNaN(points) || points <= 0) return res.status(400).json({ error: 'Enter a valid number of points' });
-  if ((customer.points || 0) < points) return res.status(400).json({ error: 'Not enough points' });
-  const perDollar = parseInt(data.settings && data.settings.loyaltyPointsPerDollar, 10) || LOYALTY_POINTS_PER_DOLLAR;
-  const amount = points / perDollar;
-  customer.points -= points;
-  logAudit(data, staffFromReq(req), `Redeemed ${points} loyalty points ($${amount.toFixed(2)}) for ${customer.name}`);
-  writeData(data);
-  res.json({ customer, amount });
-});
-
 // ---------- Gift cards ----------
 // THE LIST IS A MANAGER'S (5 Oct '26): every code and balance answered any
 // device on the wifi, which could then spend a guest's card. The till looks a
@@ -13006,6 +13003,18 @@ app.put('/api/inventory-items/:id', (req, res) => {
   if (name !== undefined) item.name = name;
   if (category !== undefined) item.category = category;
   if (sku !== undefined) item.sku = sku;
+  // A NEW UNIT CARRIES THE RECIPES WITH IT (10 Oct '26): kg → g left every
+  // recipe line at 0.15 "kg" read as 0.15 g, so a burger took a sliver off
+  // the shelf and cost nothing. A known pair (g/kg, ml/l) rescales each line;
+  // any other change is refused while a recipe still weighs in the old unit.
+  if (unit !== undefined && String(unit).trim().toLowerCase() !== String(item.unit || '').trim().toLowerCase()) {
+    const from = String(item.unit || '').trim().toLowerCase(), to = String(unit).trim().toLowerCase();
+    const lines = [];
+    (data.menu || []).forEach(m => (m.recipes || []).forEach(r => { if (r.inventoryItemId === item.id) lines.push(r); }));
+    const scale = UNIT_SCALE[from] && UNIT_SCALE[from][0] === to ? UNIT_SCALE[from][1] : null;
+    if (lines.length && !scale) return res.status(400).json({ error: `Recipes weigh this in ${item.unit} — change them first` });
+    lines.forEach(r => { r.quantity = Math.round((parseFloat(r.quantity) || 0) * scale * 1000) / 1000; r.unit = unit; });
+  }
   if (unit !== undefined) item.unit = unit;
   if (currentStock !== undefined) item.currentStock = Math.max(0, round3(currentStock));
   if (minStock !== undefined && !isNaN(parseFloat(minStock))) item.minStock = Math.max(0, round3(minStock));
@@ -13115,6 +13124,8 @@ app.post('/api/happy-hours', (req, res) => {
   if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change that' });
   const { name, days, startTime, endTime, discountPercent } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+  const bad = happyHourBad({ discountPercent: discountPercent ?? 0, startTime, endTime });
+  if (bad) return res.status(400).json({ error: bad });
   const happyHour = {
     id: 'hh' + Date.now(),
     name: name.trim(),
@@ -13130,11 +13141,27 @@ app.post('/api/happy-hours', (req, res) => {
   res.json(happyHour);
 });
 
+// A promotion's % and times are checked, never squeezed: 150 saved as 100%
+// (everything free) and a cleared start ran it from midnight.
+function happyHourBad(b) {
+  if (b.discountPercent !== undefined) {
+    const p = parseFloat(b.discountPercent);
+    if (!(p > 0)) return 'A percentage must be over 0';
+    if (p > 100) return 'A percentage cannot be over 100';
+  }
+  for (const k of ['startTime', 'endTime']) {
+    if (b[k] !== undefined && !/^([01]\d|2[0-3]):[0-5]\d$/.test(String(b[k]))) return 'Times are like 16:00';
+  }
+  return null;
+}
+
 app.put('/api/happy-hours/:id', (req, res) => {
   const data = readData();
   if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can change that' });
   const hh = (data.happyHours || []).find(h => h.id === req.params.id);
   if (!hh) return res.status(404).json({ error: 'Not found' });
+  const bad = happyHourBad(req.body);
+  if (bad) return res.status(400).json({ error: bad });
   const { name, days, startTime, endTime, discountPercent, enabled } = req.body;
   if (name !== undefined && name.trim()) hh.name = name.trim();
   if (Array.isArray(days)) hh.days = days.map(d => parseInt(d)).filter(d => d >= 0 && d <= 6);
@@ -13606,7 +13633,7 @@ function parsePayments(payments, grandTotal) {
 // A voucher or loyalty points ride on the discount and are spent HERE, when
 // the money is taken — not when Apply was tapped (Sep '26: Cancel after Apply
 // left the voucher "already used" and the points gone, with nothing paid).
-function checkDiscountExtras(data, discount) {
+function checkDiscountExtras(data, discount, billCustomerId) {
   if (!discount) return null;
   if (discount.voucherCode) {
     const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
@@ -13621,6 +13648,8 @@ function checkDiscountExtras(data, discount) {
     if (!Number.isInteger(pts) || pts <= 0 || discount.kind === 'surcharge') return 'Loyalty points come off as a whole number of points';
     const c = (data.customers || []).find(x => x.id === discount.customerId);
     if (!c) return 'That customer no longer exists';
+    // …and they are the points of the guest ON THIS BILL (10 Oct '26).
+    if (billCustomerId !== undefined && String(billCustomerId || '') !== String(discount.customerId)) return 'Those points belong to another guest';
     if ((c.points || 0) < pts) return 'Not enough loyalty points';
   }
   return null;
@@ -13901,7 +13930,7 @@ app.post('/api/orders', (req, res) => {
   // PAY-ONCE for a pay-without-send: the same pay key twice is one payment.
   const payKey = String(req.body.payKey || '').slice(0, 64) || null;
   if (payKey) { const dup = (data.orders || []).find(o => o.payKey === payKey); if (dup) return res.json(dup); }
-  const extrasError = checkDiscountExtras(data, discount);
+  const extrasError = checkDiscountExtras(data, discount, customerId || null);
   if (extrasError) return res.status(400).json({ error: extrasError });
   const offRefused = moneyOffRefused(req, data, discount, { covers, subtotal, orderType, table });
   if (offRefused) return res.status(403).json({ error: offRefused });
@@ -14393,7 +14422,7 @@ app.post('/api/orders/:id/close', (req, res) => {
     if (result.error) return res.status(400).json({ error: result.error });
     splitPayments = result.payments;
   }
-  const extrasError = checkDiscountExtras(data, discount);
+  const extrasError = checkDiscountExtras(data, discount, customerId !== undefined ? customerId : order.customerId);
   if (extrasError) return res.status(400).json({ error: extrasError });
   const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table });
   if (offRefused) return res.status(403).json({ error: offRefused });
@@ -14409,6 +14438,12 @@ app.post('/api/orders/:id/close', (req, res) => {
     const owed = Math.round(grandTotal * 100);
     if (already < owed - 1) {
       return res.status(400).json({ error: `$${((owed - already) / 100).toFixed(2)} of this bill is still unpaid — settle every part first.` });
+    }
+    // …judged on the BILL as well: a part's tip is the guest's, not bill
+    // money, so $42 with $10 tip + $22 closed a $64 bill $10 short (10 Oct '26).
+    const net = Math.round(splitPaidNet(order) * 100), billCents = Math.round(total * 100);
+    if (net < billCents - 1) {
+      return res.status(400).json({ error: `$${((billCents - net) / 100).toFixed(2)} of this bill is still unpaid — settle every part first.` });
     }
     // …and never for LESS than the parts took off the bill: a surcharge taken
     // in the parts and then dropped closed $100 against $110 paid (Sep '26).
@@ -14547,7 +14582,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // the close refuses them — not after the guests have paid (8 Oct '26: a
   // used voucher sized both shares, both cards were charged, and the close
   // then said no).
-  const partExtras = checkDiscountExtras(data, (req.body || {}).discount);
+  const partExtras = checkDiscountExtras(data, (req.body || {}).discount, order.customerId);
   if (partExtras) return res.status(400).json({ error: partExtras });
   const { discountAmount } = computeDiscount(itemsTotal, (req.body || {}).discount, order.items, data);
   const billNow = Math.round((itemsTotal - discountAmount
@@ -18036,8 +18071,18 @@ async function printSample(kind) {
   render(); armToastTimer(TOAST_LONG);
 }
 
+// ONE TAP, ONE UNDO (10 Oct '26): the server folded every delete within 4s
+// of the last into one snapshot, so deleting dish A on purpose and dish B by
+// mistake a moment later made B's Undo bring back both — from any till. Every
+// delete now says which tap made it, and only deletes from the SAME tap (a
+// bulk delete's loop) share an Undo.
+let _tapSeq = 0;
+const _undoDev = Math.random().toString(36).slice(2, 10);
+document.addEventListener('pointerdown', () => { _tapSeq++; }, { capture: true, passive: true });
+document.addEventListener('keydown', () => { _tapSeq++; }, { capture: true, passive: true });
 async function api(path, opts) {
   opts = opts || {};
+  if (opts.method === 'DELETE') opts.headers = Object.assign({}, opts.headers, { 'X-Undo-Batch': _undoDev + ':' + _tapSeq });
   if (state.currentStaff && opts.method && opts.method !== 'GET') {
     opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Name': state.currentStaff.name });
   }
@@ -20545,6 +20590,8 @@ function cardTypeLabel(k) {
 function amountOwing() {
   return Math.max(0, Math.round((cartGrandTotal() - splitPaidTotal()) * 100) / 100);
 }
+// What is still owed of the BILL — the tip waiting to go on a card left out.
+function billOwing() { return Math.max(0, Math.round((amountOwing() - cardTipPending()) * 100) / 100); }
 function cardTakenAmount() {
   const v = String(state.cardAmount || '');
   if (v === '') return amountOwing();
@@ -20821,7 +20868,7 @@ function renderSplitPanel() {
       // it — and the box was never wired to anything, so every figure typed
       // into it was thrown away and every part stayed at zero.
       const typed = (sp.amounts || []);
-      const rest = Math.max(0, Math.round((amountOwing() - typed.reduce((t, v) => t + (parseFloat(v) || 0), 0)) * 100) / 100);
+      const rest = Math.max(0, Math.round((billOwing() - typed.reduce((t, v) => t + (parseFloat(v) || 0), 0)) * 100) / 100);
       return `
       <div class="split-amounts">
         ${typed.map((a, i) => `
@@ -20940,7 +20987,10 @@ function billSplitParts() {
     // pay screen, a later round — sits alongside them as its own row.
     Object.keys(paidMap).filter(k => !parts.some(p => p.key === k)).sort()
       .forEach(k => parts.push({ key: k, label: paidMap[k].label, amount: paidMap[k].amount }));
-    const extra = Math.round((cartGrandTotal() - parts.reduce((a, p) => a + p.amount, 0)) * 100) / 100;
+    // Judged on the BILL: the frozen parts carry no tip, so bill + tip made a
+    // tipped share look like money "Added since" (10 Oct '26).
+    const tipsIn = Object.keys(paidMap).filter(k => !frozen.some(p => p.key === k)).reduce((a, k) => a + (paidMap[k].tip || 0), 0);
+    const extra = Math.round((cartTotal() - (parts.reduce((a, p) => a + p.amount, 0) - tipsIn)) * 100) / 100;
     if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
     return parts;
   }
@@ -25570,7 +25620,7 @@ function floorFindHitsHtml() {
   if (!hits.length) return `<div class="ff-none">No table or guest matches</div>`;
   return hits.map(({ t, o, guest }) => `
     <div class="ff-row">
-      <span class="ff-main">${guest ? esc(guest.name) : 'Table ' + esc(String(t.label))}<span class="ff-sub">${guest ? `Table ${esc(String(t.label))} · seated` : o ? `${o.covers ? o.covers + (o.covers === 1 ? ' cover · ' : ' covers · ') : ''}${esc(o.staffName || '')} · ${money(billTotal(o))}` : (t.covers || 0) > 0 ? `seated · ${t.covers} ${t.covers === 1 ? 'cover' : 'covers'}` : 'free'}</span></span>
+      <span class="ff-main">${guest ? esc(guest.name) : 'Table ' + esc(String(t.label))}<span class="ff-sub">${guest ? `Table ${esc(String(t.label))} · seated` : o ? `${o.covers ? o.covers + (o.covers === 1 ? ' cover · ' : ' covers · ') : ''}${esc(o.staffName || '')} · ${money(Math.max(0, billTotal(o) - billPaidOf(o)))}${billPaidOf(o) > 0.005 ? ' left' : ''}` : (t.covers || 0) > 0 ? `seated · ${t.covers} ${t.covers === 1 ? 'cover' : 'covers'}` : 'free'}</span></span>
       <button type="button" class="ff-key" data-act="ff-open" data-id="${t.id}">Open</button>
       ${o ? `<button type="button" class="ff-key ff-pay" data-act="bill-pay" data-id="${o.id}">Pay</button>` : ''}
     </div>`).join('');
@@ -26119,7 +26169,7 @@ function openSplitAmtPad(idx) {
 function splitAmtRest(exceptIdx) {
   const typed = (state.billSplit && state.billSplit.amounts) || [];
   const used = typed.reduce((t, v, i) => t + (i === exceptIdx ? 0 : (parseFloat(v) || 0)), 0);
-  return Math.max(0, Math.round((amountOwing() - used) * 100) / 100);
+  return Math.max(0, Math.round((billOwing() - used) * 100) / 100);
 }
 function splitAmtKey(k) {
   const sa = state.splitAmtPad; if (!sa) return;
@@ -27445,7 +27495,11 @@ async function takePart(amount, method, giftCardCode, change) {
   // The next guest's part of a tip spread over the shares (the last one takes the odd cent).
   if (next && share.tipEach && amountOwing() > 0.005) {
     const done = (share.parts || []).filter(p => paidNow[p.key]).length;
-    const each = done >= (share.parts || []).length - 1 ? share.tipAll - share.tipEach * done : share.tipEach;
+    // The last share takes what is LEFT of the tip, by what the paid parts
+    // really carried — a gift card share carries none, and its part of the tip
+    // went missing (10 Oct '26).
+    const tipsPaid = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
+    const each = done >= (share.parts || []).length - 1 ? share.tipAll - tipsPaid : share.tipEach;
     state.cardTip = Math.round((splitPaidList().reduce((a, p) => a + (p.tip || 0), 0) + Math.max(0, each)) * 100) / 100;
   }
   state.payShare = next && next.amount < amountOwing() - 0.005
@@ -27517,7 +27571,7 @@ function renderCheckoutMiddle() {
       ${`<div class="sub">${money(state.payShare ? state.payShare.amount + cardTipPending() : amountOwing())} due${state.discount ? ' (after ' + money(Math.abs(cartDiscountAmount())) + ' ' + (state.discount.kind === 'surcharge' ? 'surcharge' : 'discount') + ')' : ''}</div>`}
       ${paySplitRowHtml()}
       ${state.discount ? `
-        <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)})${discountScopeText(state.discount) ? ' on ' + esc(discountScopeText(state.discount)) : ''} ${isManager || state.discount.voucherCode ? `<button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button>` : ''}</div>
+        <div class="seat-chip" style="margin-bottom:16px;">${SYS_TAG_SVG} ${state.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}${state.discount.reason ? ' — ' + esc(state.discount.reason) : ''} (${state.discount.type === 'percent' ? state.discount.value + '%' : money(state.discount.value)})${discountScopeText(state.discount) ? ' on ' + esc(discountScopeText(state.discount)) : ''} ${isManager || state.discount.voucherCode || state.discount.loyaltyPoints ? `<button data-act="remove-discount" style="background:none;border:none;cursor:pointer;color:inherit;font-weight:700;padding:0 0 0 3px;">✕</button>` : ''}</div>
       ` : ''}
       ${!(state.customers || []).length && !attachedCustomer ? '' : `
       <label>Customer (optional)</label>
@@ -28810,8 +28864,15 @@ async function loadCustomers() {
 // and adding a new one both come here, so they can never drift. The toast
 // escapes the name for you (escaping law) — escaping it again turns
 // O'Donnell into O&#39;Donnell on the floor.
+// A GUEST'S POINTS LEAVE WITH THE GUEST (10 Oct '26): attach the wrong guest,
+// redeem, swap to the right one — and the first guest's points still came off.
+function dropOtherGuestsPoints() {
+  const d = state.discount;
+  if (d && d.loyaltyPoints && d.customerId !== state.attachedCustomerId) { state.discount = null; saveTableDiscount(state.table, null); resizeEvenSplit(); }
+}
 function attachCustomer(id) {
   state.attachedCustomerId = id;
+  dropOtherGuestsPoints();
   const c = (state.customers || []).find(x => x.id === id);
   state.customerPane = null;
   state.toast = c ? `${c.name} on the order.` : 'Customer attached.';
@@ -28823,7 +28884,7 @@ async function updateHappyHourField(id, patch) {
   try {
     await api(`/api/happy-hours/${id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch) });
     state.happyHours = await api('/api/happy-hours');
-  } catch (e) { state.toast = toastFail('Could not save that change.'); armToastTimer(TOAST_SHORT); }
+  } catch (e) { state.toast = toastFail(e.message || 'Could not save that change.'); armToastTimer(TOAST_SHORT); }
   render();
 }
 async function duplicateSelectedHappyHours() {
@@ -31262,15 +31323,15 @@ function renderHappyHourSettingsAdmin() {
           <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:10px;">
             <div style="display:flex;flex-direction:column;">
               <label class="field-label">Start</label>
-              <input type="time" value="${h.startTime}" onchange="updateHappyHourField('${h.id}', { startTime: this.value })">
+              <input type="time" value="${h.startTime}" onchange="if (this.value) updateHappyHourField('${h.id}', { startTime: this.value }); else this.value = '${h.startTime}'">
             </div>
             <div style="display:flex;flex-direction:column;">
               <label class="field-label">End</label>
-              <input type="time" value="${h.endTime}" onchange="updateHappyHourField('${h.id}', { endTime: this.value })">
+              <input type="time" value="${h.endTime}" onchange="if (this.value) updateHappyHourField('${h.id}', { endTime: this.value }); else this.value = '${h.endTime}'">
             </div>
             <div style="display:flex;flex-direction:column;">
               <label class="field-label">Discount %</label>
-              <input type="number" min="0" max="100" value="${h.discountPercent}" onblur="updateHappyHourField('${h.id}', { discountPercent: parseFloat(this.value) || 0 })" style="width:90px;font-family:var(--font-mono);">
+              <input type="number" min="0" max="100" value="${h.discountPercent}" onblur="if (this.value !== '' && +this.value !== ${h.discountPercent}) updateHappyHourField('${h.id}', { discountPercent: parseFloat(this.value) }); else this.value = '${h.discountPercent}'" style="width:90px;font-family:var(--font-mono);">
             </div>
           </div>
         </div>` : ''}
@@ -34005,7 +34066,7 @@ function menuItemRowHtml(m) {
                 ${tags.map(t => `
                 <div class="algn-note-row">
                   <span class="algn-chip ${t.level}">${esc(t.name)}</span>
-                  <input type="text" class="algn-note-input" value="${esc(t.note || '')}" placeholder="Ingredient" maxlength="60" onblur="saveItemAllergenNote('${m.id}', '${esc(t.name)}', this.value)">
+                  <input type="text" class="algn-note-input" value="${esc(t.note || '')}" placeholder="Ingredient" maxlength="60" data-name="${esc(t.name)}" onblur="saveItemAllergenNote('${m.id}', this.dataset.name, this.value)">
                 </div>`).join('')}
               </div>` : ''}`) : ''}
             ${pillsOpen[m.id + ':sizes'] ? pop(m.id + ':sizes', 'Sizes', (() => {
@@ -37051,8 +37112,11 @@ const SPEND_LEVELS = [
 function spendLevelOff() { return state.settings.spendLevelOff || ['spendLow']; } // only the big ones by default (9 Oct '26)
 // THE BILL'S SPEND, the same weighing the floor's pill used: 0 none, 1 $$, 2 $$$ — or 0 if that level is off.
 function billSpendLevel(o) {
-  const total = (o.items || []).reduce((s, i) => s + i.price * i.qty, 0);
-  if (!(total > 0)) return 0;
+  // What the table will PAY, as the card says it — money off taken off, a
+  // gift voucher bought at the table left out: a $0.00 bill wore the deepest
+  // green and a $200 voucher made a big spender (10 Oct '26).
+  const total = billTotal(o) - (o.items || []).reduce((s, i) => s + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
+  if (!(total > 0.005)) return 0;
   const per = total / Math.max(1, parseInt(o.covers, 10) || 1), k = spendLevelKey(spendValue(total, per));
   if (spendLevelOff().includes(k)) return 0;
   return { spendLow: 1, spendBusy: 2, spendBig: 3 }[k];
@@ -37955,7 +38019,7 @@ function billDiscount(o, t, sub) {
   const r = matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: s, orderType: o.orderType, table: t ? t.id : '' });
   // …and the rule Pay leaves off, they leave off: one that would take the bill
   // under what its parts paid (9 Oct '26 — the card said $0 left, Pay asked $18).
-  const paid = (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
+  const paid = billPaidOf(o);
   return r && paid > 0 && r.kind !== 'surcharge' && openBillTotal(o, t, r) < paid - 0.005 ? null : r;
 }
 const billTableOf = o => o.orderType === 'dine-in' ? allTables().find(x => String(x.label) === String(o.table)) : null;
@@ -37981,6 +38045,10 @@ function openBillTotal(o, t, asIf) {
 }
 const billName = o => o.orderType === 'dine-in' ? String(o.table == null ? '' : o.table) : (o.customerName || 'Takeaway');
 const billTotal = o => o.status === 'paid' ? ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) : openBillTotal(o, billTableOf(o));
+// What is still to pay on a bill — its parts' tips are the guests' own. One sum
+// for the Bills card, the sort and the floor search, which showed the whole
+// bill beside a Pay key on a part-paid table (10 Oct '26).
+const billPaidOf = o => (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
 function billDocket(o) {
   const t = billTableOf(o);
   const name = billName(o);
@@ -37991,7 +38059,7 @@ function billDocket(o) {
   // inside, like with like folded (owner, 8 Oct '26).
   const lines = billGroups((o.items || []).filter(i => i.qty > 0)).map(g => (g.name ? `<div class="bl-grp">${esc(g.name)}</div>` : '')
     + g.lines.map(l => `<div class="bl-ln"><span class="bl-q">${l.qty}</span><span class="bl-n">${esc(l.name)}</span><span class="bl-p">${priceNum(l.price * l.qty)}</span></div>`).join('')).join('');
-  const paid = (o.splitPaid || []).reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0);
+  const paid = billPaidOf(o);
   // ONE DOOR, AND YOU CAN SEE IT (owner, 6 Oct '26: "there needs to be clear
   // defined areas"): the table's number, drawn as a key, as the Pass's is.
   const door = t ? `data-act="pick-table" data-id="${t.id}"`
@@ -41659,7 +41727,10 @@ document.addEventListener('pointerdown', (e) => {
   if (!tile || tile.closest('.bills') || e.target.closest('.pass-go')) return;
   const x0 = e.clientX, y0 = e.clientY;
   _tableHoldFired = false;
-  const myTimer = setTimeout(() => { _tableHoldFired = true; _tableHoldAt = Date.now(); }, 450);
+  // Only where the hold IS a grip — a table with a sitting, on the floor. A
+  // free table, a Pass or Timeline row and a Move pick have nothing to lift,
+  // so a slow tap there is a tap: it did nothing at all (10 Oct '26).
+  const myTimer = setTimeout(() => { if (_tblGrab && String(_tblGrab.id) === String(tile.dataset.id) && _tblGrab.liftable) { _tableHoldFired = true; _tableHoldAt = Date.now(); } }, 450);
   const end = () => { clearTimeout(myTimer); document.removeEventListener('pointermove', mv); document.removeEventListener('pointerup', end); document.removeEventListener('pointercancel', end); };
   const mv = (ev) => { const slop = ev.pointerType === 'touch' ? fingerPx(18) : 8; if (Math.abs(ev.clientX - x0) > slop || Math.abs(ev.clientY - y0) > slop) end(); };
   document.addEventListener('pointermove', mv, { passive: true });
@@ -41728,7 +41799,7 @@ document.addEventListener('pointerdown', (e) => {
   // A mouse can't pan the floor, so it needs no hold at all: grab and pull
   // (the owner's first try was exactly that, and nothing happened).
   const g = _tblGrab = {
-    id: t.id, x0: e.clientX, y0: e.clientY, lifted: liftable && e.pointerType !== 'touch', dragging: false,
+    id: t.id, x0: e.clientX, y0: e.clientY, liftable, lifted: liftable && e.pointerType !== 'touch', dragging: false,
     panning: false, lx: 0, ly: 0,
     ghost: null, rect: null, overEl: null, overId: null, blockTouch: null,
     // ONE moment (owner: "drag and hold-to-show-bill clash"): everything
@@ -48294,7 +48365,10 @@ function handleActClick(el, e) {
         // A % OF WHAT THIS CARD PAYS (Oct '26 hunt): with $50 typed for one
         // guest of a $127 table, 15% put the whole table's $19.05 tip on that
         // card. A typed part (no ÷ share) is the base, as a share is.
-        const typed = state.paymentMethod === 'card' && !state.payShare && String(state.cardAmount || '') !== '' ? Math.max(0, (parseFloat(state.cardAmount) || 0) - before) : null;
+        // And on CASH (10 Oct '26): $40 handed over for a $128 table put the
+        // whole table's $19.20 on that $40, and only $20.80 reached the bill.
+        const typedRaw = state.payShare ? '' : state.paymentMethod === 'card' ? String(state.cardAmount || '') : state.paymentMethod === 'cash' ? String(state.cashGiven || '') : '';
+        const typed = typedRaw !== '' ? Math.max(0, (parseFloat(typedRaw) || 0) - before) : null;
         const part = state.payShare ? state.payShare.amount : typed != null && typed > 0.005 && typed < amountOwing() - 0.005 ? typed : null;
         state.cardTip = Math.round(Math.max(already, p ? (part != null ? already + part * p / 100 : cartTotal() * p / 100) : 0) * 100) / 100;
         shareCardFollowsTip(before); render();
@@ -48755,6 +48829,7 @@ function handleActClick(el, e) {
       else if (act === 'attach-customer') { attachCustomer(el.dataset.id); }
       else if (act === 'detach-customer') {
         state.attachedCustomerId = null;
+        dropOtherGuestsPoints();
         if (state.openOrderId) api(`/api/orders/${state.openOrderId}/customer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ customerId: null }) }).catch(() => {});
         render();
       }
@@ -50288,13 +50363,17 @@ setInterval(() => {
       // AND THE SET MENUS AND ADD-ONS, which carry prices too (9 Oct '26): the
       // iPad put the Banquet up to $75 and this till sold it at $65 until a
       // log-off — refused at Send for a waiter — and Bacon at last week's +$3.
+      // AND THE PROMOTIONS (10 Oct '26): one switched off on the iPad was
+      // still offered here, and Pay then refused the half price the guest
+      // had been promised.
       const storeMoved = !(v && _dataVersion && v.store === _dataVersion.store);
       if (v) _dataVersion = v;
       if (same) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
       return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings(), refreshDeskColours()]).then(followMovedParty).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary();
         return Promise.all([api('/api/menu'), storeMoved ? api('/api/categories').catch(() => null) : null, storeMoved ? api('/api/subcategories').catch(() => null) : null,
-          storeMoved ? api('/api/combos').catch(() => null) : null, storeMoved ? api('/api/modifier-groups').catch(() => null) : null]); })
-        .then(([menu, cats, subs, combos, mods]) => { state.menu = menu; if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
+          storeMoved ? api('/api/combos').catch(() => null) : null, storeMoved ? api('/api/modifier-groups').catch(() => null) : null,
+          storeMoved ? api('/api/happy-hours').catch(() => null) : null]); })
+        .then(([menu, cats, subs, combos, mods, hhs]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs; if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (!typingInField()) renderWhenStill(); });
     });
   }

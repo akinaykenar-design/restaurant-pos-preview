@@ -3745,7 +3745,7 @@ body.mk-dragging .fp-float,
   /* No floating Close on a phone — the swipe off the map's end goes back.
      It survives only mid-move, where that swipe is ignored on purpose. */
   .tp-actions:not(.tp-keep){ display:none; }
-  .tp-actions.tp-keep{ position:fixed; right:12px; bottom:calc(var(--appbar-off, 0px) + 12px); z-index:calc(var(--z-popup) - 2); padding:0 !important; margin:0; }
+  .tp-actions.tp-keep{ position:fixed; left:12px; right:auto; bottom:calc(var(--appbar-off, 0px) + 12px); z-index:calc(var(--z-popup) - 2); padding:0 !important; margin:0; } /* left on a phone: the dock's room keys sit on the right, and Close mid-move lay over Outside (11 Oct '26) */
   /* Breathing room under the map so the floating Close never covers the
      bottom tables — the room scrolls up clear of it. */
   /* Phone: the map is sized off the HEIGHT, and the same transform zoom rides
@@ -5675,6 +5675,8 @@ body .deck-modes.track > .tab-btn.active{ background:var(--surface); border-colo
      its whole name again. */
   .paged .bar-pager.track.bar-two{ left:50%; }
   .paged .bar-pager.bar-two button[data-val="menu"]{ width:104px; }
+  /* Offline on a phone is its red dot: the word ran under Floor | Table (11 Oct '26). */
+  .bar-offline{ font-size:0; gap:0; padding:0; width:var(--sq-ctl); justify-content:center; }
 }
 
 /* THE ROW ARRIVES ONCE, WHEN IT OPENS (owner, Sep '26, picked from three
@@ -9047,14 +9049,30 @@ app.post('/api/undo', (req, res) => {
   // not the setup's: it stays as it is now.
   const liveTables = new Map();
   (d.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => liveTables.set(t.id, t)));
-  const SERVICE = ['covers', 'notes', 'discount'];
   for (const k of Object.keys(_undoSnap)) {
     if (!_undoKeys.has(k)) continue;
+    // THE MENU AND THE FLOOR TAKE BACK ONLY WHAT WENT TOO (11 Oct '26): they
+    // came back whole, so a dish another till added in those seconds vanished,
+    // a new price went back to the old one, and a table added since was gone.
     if (k === 'floorPlans') {
-      d.floorPlans = _undoSnap.floorPlans.map(fp => ({ ...fp, tables: (fp.tables || []).map(t => { const cur = liveTables.get(t.id); if (!cur) return t; const out = { ...t }; SERVICE.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; else delete out[f]; }); return out; }) }));
+      const curPlans = new Map((d.floorPlans || []).map(fp => [fp.id, fp]));
+      const editedPlans = _undoEdited.floorPlans || new Set();
+      const wasPlans = new Set(_undoSnap.floorPlans.map(fp => fp.id));
+      d.floorPlans = [..._undoSnap.floorPlans.map(fp => {
+        const now = curPlans.get(fp.id);
+        if (!now) return fp;
+        const base = editedPlans.has(fp.id) ? fp : now;
+        const wasT = new Set((fp.tables || []).map(t => t.id));
+        const tables = [...(fp.tables || []).map(t => { const cur = liveTables.get(t.id); if (!cur) return t; return cur; }),
+          ...(now.tables || []).filter(t => !wasT.has(t.id))];
+        return { ...base, tables };
+      }), ...(d.floorPlans || []).filter(fp => !wasPlans.has(fp.id))];
     } else if (k === 'menu') {
       // A dish comes back as it was set up; what has been SOLD since stays sold.
-      d.menu = _undoSnap.menu.map(m => { const cur = live.get(m.id); if (!cur) return m; const out = { ...m }; STOCK_FIELDS.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; }); return out; });
+      const editedDish = _undoEdited.menu || new Set();
+      const wasDish = new Set(_undoSnap.menu.map(m => m.id));
+      d.menu = [..._undoSnap.menu.map(m => { const cur = live.get(m.id); if (!cur) return m; if (!editedDish.has(m.id)) return cur; const out = { ...m }; STOCK_FIELDS.forEach(f => { if (cur[f] !== undefined) out[f] = cur[f]; }); return out; }),
+        ...(d.menu || []).filter(m => !wasDish.has(m.id))];
     } else if (Array.isArray(_undoSnap[k]) && Array.isArray(d[k]) && _undoSnap[k].every(r => r && r.id != null)) {
       // A LIST TAKES BACK ONLY WHAT WENT (5 Oct '26): the whole list came back,
       // so a voucher spent in those seconds read unused again and a booking
@@ -11676,6 +11694,9 @@ app.put('/api/staff/:id', (req, res) => {
   const staff = data.staff.find(s => s.id === req.params.id);
   if (!staff) return res.status(404).json({ error: 'Staff member not found' });
   const { name, pin, role } = req.body;
+  // A job title that does not exist is refused, never quietly made "staff"
+  // while the till said "Job title updated" (11 Oct '26).
+  if (role && role !== staff.role && !roleOk(data, role)) return res.status(400).json({ error: 'That job title does not exist' });
   const changes = [];
   if (pin) {
     if (!/^\d{4,8}$/.test(pin)) {
@@ -18088,6 +18109,7 @@ async function printSample(kind) {
   render(); armToastTimer(TOAST_LONG);
 }
 
+let _srvSettings = null; // the settings as the server last said them — the poll brings in what changed since
 // ONE TAP, ONE UNDO (10 Oct '26): the server folded every delete within 4s
 // of the last into one snapshot, so deleting dish A on purpose and dish B by
 // mistake a moment later made B's Undo bring back both — from any till. Every
@@ -19740,6 +19762,7 @@ async function loadInitial() {
       : await Promise.all([api('/api/theme'), api('/api/settings'), api('/api/floorplans')]);
     state.theme = theme; applyTheme();
     state.settings = settings; applyPanelLayout();
+    _srvSettings = JSON.parse(JSON.stringify(settings || {}));
     state.floorPlans = floorPlans;
     resnapFloorPlans(); // heal old 5%-Y layouts onto the square grid so spacing is even
     state.adminFloorPlanId = state.floorPlans[0] ? state.floorPlans[0].id : null;
@@ -21002,11 +21025,14 @@ function billSplitParts() {
     const paidMap = splitPaidMap();
     // Anything paid that is not one of the frozen parts — a card taken on the
     // pay screen, a later round — sits alongside them as its own row.
-    Object.keys(paidMap).filter(k => !parts.some(p => p.key === k)).sort()
+    // A share paid in two goes (a $50 gift card, then the card for the rest)
+    // is ONE share: its first go is named after it (share~…) and lives inside it.
+    const inShare = k => frozen.some(p => k.indexOf(p.key + '~') === 0);
+    Object.keys(paidMap).filter(k => !parts.some(p => p.key === k) && !inShare(k)).sort()
       .forEach(k => parts.push({ key: k, label: paidMap[k].label, amount: paidMap[k].amount }));
     // Judged on the BILL: the frozen parts carry no tip, so bill + tip made a
     // tipped share look like money "Added since" (10 Oct '26).
-    const tipsIn = Object.keys(paidMap).filter(k => !frozen.some(p => p.key === k)).reduce((a, k) => a + (paidMap[k].tip || 0), 0);
+    const tipsIn = Object.keys(paidMap).filter(k => !frozen.some(p => p.key === k) && !inShare(k)).reduce((a, k) => a + (paidMap[k].tip || 0), 0);
     const extra = Math.round((cartTotal() - (parts.reduce((a, p) => a + p.amount, 0) - tipsIn)) * 100) / 100;
     if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
     return parts;
@@ -27473,10 +27499,17 @@ async function takePart(amount, method, giftCardCode, change) {
   const onTop = method === 'giftcard' ? 0 : cardTipPending(); // the share's own tip rides on its card or its cash
   const share = state.payShare && Math.abs(amount - onTop - state.payShare.amount) < 0.005
     && !(order.splitPaid || []).some(p => p.key === state.payShare.key) ? state.payShare : null;
+  // LESS THAN THE SHARE IS PART OF THE SHARE (11 Oct '26): a $50 gift card on
+  // a $90 share threw the split away and asked $130 in one go. The shares
+  // freeze, the go is named inside the share, and the same share stays up
+  // for what is left of it.
+  const partial = !share && state.payShare && !(order.splitPaid || []).some(p => p.key === state.payShare.key)
+    && amount - onTop > 0.005 && amount - onTop < state.payShare.amount - 0.005 ? state.payShare : null;
   try {
     const updated = await api(`/api/orders/${order.id}/split-part`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: share ? share.key : state._partAttempt.key, parts: share ? share.parts : undefined,
+      body: JSON.stringify({ key: share ? share.key : partial ? (partial.key + '~' + state._partAttempt.key.slice(-10)).slice(0, 40) : state._partAttempt.key,
+        parts: share ? share.parts : partial ? partial.parts : undefined,
         label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
         amount, method, giftCardCode: giftCardCode || null, discount: state.discount,
         cardType: method === 'card' ? state.cardType : null,
@@ -27504,6 +27537,14 @@ async function takePart(amount, method, giftCardCode, change) {
   // The next share nobody has paid comes up on its own, so a three-way split
   // is Take, Take, Take — not a trip back to the split screen for each guest.
   // The last share needs nothing: what is owing IS that share.
+  if (partial) {
+    state.payShare = Object.assign({}, partial, { amount: Math.round((partial.amount - (amount - onTop)) * 100) / 100 });
+    state.cardTip = Math.round(splitPaidList().reduce((a, p) => a + (p.tip || 0), 0) * 100) / 100; // its tip went with the first go
+    if (method === 'cash') state.cashGiven = cashDue().toFixed(2);
+    else state.cardAmount = (state.payShare.amount + cardTipPending()).toFixed(2); // a gift card's rest goes on a card next
+    render();
+    return true;
+  }
   const paidNow = splitPaidMap();
   const next = share ? (((activeOpenOrder() || {}).splitParts || []).find(p => !paidNow[p.key]) || null) : null;
   // The next guest's part of a tip spread over the shares (the last one takes the odd cent).
@@ -27577,6 +27618,15 @@ function sendKeyHtml(extra) {
 // The sheet's row: resting, it is the whole docket in one line (a tap on it
 // opens the rest, Send sends); open, the same row is the sheet's header and
 // carries the table's Tools in Send's place.
+// What the row says the table owes is what Bills and Pay say: the venue's
+// automatic rule in, the parts already paid out, and what is waiting to be
+// sent added on. It said the bare cart — $285 on a table with $35 left, and
+// $84 where Pay asked $92.40 (11 Oct '26).
+function dkPeekOwing(openOrder, t) {
+  if (state.discount) return Math.max(0, amountOwing() - cardTipPending());
+  const o = Object.assign({ orderType: state.orderType, covers: state.covers }, openOrder || {}, { items: [...((openOrder && openOrder.items) || []), ...state.cart] });
+  return Math.max(0, openBillTotal(o, t) - (openOrder ? billPaidOf(openOrder) : 0));
+}
 function dkPeekRowHtml(openOrder) {
   const t = findTableById(state.table);
   const who = state.orderType !== 'dine-in' ? (state.orderType === 'takeaway' ? 'Takeaway' : 'Delivery') : t ? 'Table ' + t.label : 'Table';
@@ -27587,7 +27637,7 @@ function dkPeekRowHtml(openOrder) {
   return `<div class="dk-peek" data-act="toggle-mobile-cart" role="button" aria-label="${open ? 'Close the docket' : 'Open the docket'}">
     <span class="dk-grip" aria-hidden="true"></span>
     <span class="dk-peek-who"><b>${esc(who)}</b><small>${esc(what)}</small></span>
-    <b class="dk-peek-total">${money(cartTotal())}</b>
+    <b class="dk-peek-total">${money(dkPeekOwing(openOrder, t))}</b>
     ${open ? `<button class="dk-peek-tools" data-act="toggle-account-menu"${state.table == null ? ' disabled' : ''}>Tools</button>` : sendKeyHtml(' dk-peek-send')}
   </div>`;
 }
@@ -28618,7 +28668,7 @@ function renderRosterShiftModal() {
       </div>
       <label>Role / station <span class="ts">(optional)</span></label>
       <input id="roster-role" type="text" value="${esc(m.role || '')}" placeholder="e.g. Bar, Floor, Kitchen" list="roster-roles">
-      <datalist id="roster-roles">${staffRoles().map(r => `<option value="${r.charAt(0).toUpperCase() + r.slice(1)}">`).join('')}</datalist>
+      <datalist id="roster-roles">${staffRoles().map(r => `<option value="${esc(r.charAt(0).toUpperCase() + r.slice(1))}">`).join('')}</datalist>
       <label>Note <span class="ts">(optional)</span></label>
       <input id="roster-note" type="text" value="${esc(m.note || '')}" placeholder="e.g. training, close">
       <div class="modal-actions">
@@ -29023,7 +29073,7 @@ function renderExpensesAdmin() {
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
       <div><label class="field-label">Date</label>${dateKey('expense-date-input', f.date)}</div>
       <div><label class="field-label">Amount</label><input id="expense-amount-input" type="number" min="0" step="0.01" value="${f.amount}" placeholder="0.00" style="${fld}"></div>
-      <div style="grid-column:1 / -1;"><label class="field-label">Category</label><input id="expense-category-input" type="text" value="${f.category}" placeholder="e.g. Produce, Utilities, Repairs" style="${fld}"></div>
+      <div style="grid-column:1 / -1;"><label class="field-label">Category</label><input id="expense-category-input" type="text" value="${esc(f.category || '')}" placeholder="e.g. Produce, Utilities, Repairs" style="${fld}"></div>
       <div style="grid-column:1 / -1;"><label class="field-label">Note</label><input id="expense-note-input" type="text" value="${esc(f.note)}" placeholder="Optional" style="${fld}"></div>
     </div>
     <div style="display:flex;justify-content:flex-end;margin-top:12px;"><button class="btn-add inline" data-act="submit-expense">+ Expense</button></div>
@@ -29428,11 +29478,11 @@ function renderInventoryItemModal() {
       <label>Item Name *</label>
       <input id="inventory-item-name" type="text" value="${esc(m.name)}" placeholder="e.g. Fresh Tomatoes">
       <label>Category</label>
-      <input id="inventory-item-category" type="text" value="${m.category}" placeholder="e.g. Produce">
+      <input id="inventory-item-category" type="text" value="${esc(m.category || '')}" placeholder="e.g. Produce">
       <label>SKU</label>
-      <input id="inventory-item-sku" type="text" value="${m.sku}" placeholder="e.g. TOMA-001">
+      <input id="inventory-item-sku" type="text" value="${esc(m.sku || '')}" placeholder="e.g. TOMA-001">
       <label>Unit</label>
-      <input id="inventory-item-unit" type="text" value="${m.unit}" placeholder="e.g. kg, unit, case">
+      <input id="inventory-item-unit" type="text" value="${esc(m.unit || '')}" placeholder="e.g. kg, unit, case">
       <label>Cost per Unit ($)</label>
       <input id="inventory-item-cost" type="number" step="0.01" value="${m.costPerUnit}" placeholder="0.00">
       <label>Minimum Stock</label>
@@ -31324,7 +31374,12 @@ function activeHappyHour() {
 function applyHappyHour(id) {
   const hh = state.happyHours.find(h => h.id === id);
   if (!hh) return;
-  state.discount = { type: 'percent', value: hh.discountPercent, reason: hh.name, kind: 'discount' };
+  const d = { type: 'percent', value: hh.discountPercent, reason: hh.name, kind: 'discount' };
+  // The promotion's door obeys what every money-off door does: never under
+  // what parts have paid (11 Oct '26 — it stranded a part-paid table).
+  if (offUnderTaken(d)) { state.toast = toastFail(`${money(paidOfBill())} has been paid — that would take the bill under it.`); armToastTimer(TOAST_SHORT); render(); return; }
+  state.discount = d;
+  resizeEvenSplit();
   // Kept on the table like the Discount pane's money off: it lived on this
   // till only, so another till — or this one after a reload — lost it (Sep '26).
   saveTableDiscount(state.table, state.discount);
@@ -33230,7 +33285,7 @@ function renderStaffAdmin() {
               <div style="display:flex;flex-direction:column;max-width:200px;">
                 <label class="field-label">Job title</label>
                 <select class="staff-role-quick-edit" data-id="${s.id}" style="padding:8px 8px;border:0.5px solid var(--steel-300);border-radius:var(--r-control);font-size:var(--fs-md);background:var(--surface);color:var(--text-primary);" onchange="saveStaffRole('${s.id}', this.value)">
-                  ${staffRoles().map(r => `<option value="${r}" ${s.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
+                  ${staffRoles().map(r => `<option value="${esc(r)}" ${s.role === r ? 'selected' : ''}>${esc(r.charAt(0).toUpperCase() + r.slice(1))}</option>`).join('')}
                 </select>
               </div>
               ${state.settings.tipsEnabled ? `
@@ -33301,7 +33356,7 @@ function renderBulkStaffModal() {
       <h2>Set job title for ${n} staff member${n === 1 ? '' : 's'}</h2>
       <label>Job title</label>
       <div class="pay-options" style="flex-wrap:wrap;">
-        ${staffRoles().map(r => `<div class="pay-opt ${m.role === r ? 'active' : ''}" style="flex:none;text-transform:capitalize;" data-act="bulk-staff-role" data-val="${r}">${r}</div>`).join('')}
+        ${staffRoles().map(r => `<div class="pay-opt ${m.role === r ? 'active' : ''}" style="flex:none;text-transform:capitalize;" data-act="bulk-staff-role" data-val="${esc(r)}">${esc(r)}</div>`).join('')}
       </div>
       <div class="modal-actions">
         <button class="icon-action neutral" data-act="close-bulk-staff">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
@@ -36315,7 +36370,7 @@ function renderStaffModal() {
       <input id="staff-pin-input" type="text" maxlength="8" value="${m.pin}" placeholder="1234">
       <label>Job title</label>
       <select id="staff-role-input">
-        ${staffRoles().map(r => `<option value="${r}" ${m.role === r ? 'selected' : ''}>${r.charAt(0).toUpperCase() + r.slice(1)}</option>`).join('')}
+        ${staffRoles().map(r => `<option value="${esc(r)}" ${m.role === r ? 'selected' : ''}>${esc(r.charAt(0).toUpperCase() + r.slice(1))}</option>`).join('')}
       </select>
       ${state.settings.tipsEnabled ? `
       <label>Tip share</label>
@@ -44129,7 +44184,7 @@ function renderVoidModal() {
       <h2>Void order #${m.orderId}</h2>
       <label>Reason</label>
       <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;">
-        ${state.voidReasons.map(r => `<button type="button" class="pay-opt sm ${m.reason === r ? 'active' : ''}" data-act="pick-void-reason" data-val="${r}">${r}</button>`).join('')}
+        ${state.voidReasons.map(r => `<button type="button" class="pay-opt sm ${m.reason === r ? 'active' : ''}" data-act="pick-void-reason" data-val="${esc(r)}">${esc(r)}</button>`).join('')}
       </div>
       <label>Note (optional)</label>
       <input id="void-note-input" type="text" value="${esc(m.note)}">
@@ -44322,14 +44377,20 @@ function healNoteCategoryIds() {
 }
 function duplicateSelectedNoteTypes() {
   const sel = new Set(state.selectedNoteTypeIds || []);
-  const dupes = state.noteCategories.filter(c => sel.has(c.id)).map(c => ({
-    id: 'note-' + Date.now() + '-' + Math.floor(state.noteCategories.length + Math.random() * 1000),
+  // THE COPY IS ITS OWN (11 Oct '26): its new id came before the card's own
+  // fields, so the original's id overwrote it — a twin, and deleting the copy
+  // deleted both.
+  const scope = Object.assign({}, (state.settings || {}).noteTypeScope || {});
+  const dupes = state.noteCategories.filter(c => sel.has(c.id)).map((c, i) => {
+    const id = 'note-' + Date.now() + '-' + i + '-' + Math.floor(Math.random() * 1000);
+    if (scope[c.id]) scope[id] = scope[c.id];
     // THE WHOLE CARD COMES WITH IT — where it prints and what it is about. The
     // copy used to keep only the name, colour and presets, so it printed on
     // every docket and flipped to "a seat" (Sep '26).
-    ...c, name: c.name + ' copy', presets: (c.presets || []).map(p => ({ ...p })),
-  }));
+    return { ...c, id, name: c.name + ' copy', presets: (c.presets || []).map(p => ({ ...p })) };
+  });
   if (!dupes.length) return;
+  saveTicketSetting({ noteTypeScope: scope });
   saveNoteCategories([...state.noteCategories, ...dupes]); // originals stay selected
 }
 function deleteSelectedNoteTypes() {
@@ -48417,7 +48478,10 @@ function handleActClick(el, e) {
         // whole table's $19.20 on that $40, and only $20.80 reached the bill.
         const typedRaw = state.payShare ? '' : state.paymentMethod === 'card' ? String(state.cardAmount || '') : state.paymentMethod === 'cash' ? String(state.cashGiven || '') : '';
         const typed = typedRaw !== '' ? Math.max(0, (parseFloat(typedRaw) || 0) - before) : null;
-        const part = state.payShare ? state.payShare.amount : typed != null && typed > 0.005 && typed < amountOwing() - 0.005 ? typed : null;
+        // …and on the LAST share of a split, or any part-paid bill, the base is
+        // what is still owed — not the whole table (11 Oct '26: 15% on share 2
+        // of a $132 ÷2 put $19.80 on a $66 share).
+        const part = state.payShare ? state.payShare.amount : typed != null && typed > 0.005 && typed < amountOwing() - 0.005 ? typed : splitPaidList().length ? billOwing() : null;
         state.cardTip = Math.round(Math.max(already, p ? (part != null ? already + part * p / 100 : cartTotal() * p / 100) : 0) * 100) / 100;
         shareCardFollowsTip(before); render();
       }
@@ -49209,7 +49273,7 @@ function handleActClick(el, e) {
         // (where searching lives) and opens there. One search, one home.
         if (state.table && barPagerOn()) { resetFloorPicker(); if (state.mobileCartOpen) closeMobileCart(); }
         state.searchOpen = true; render();
-        const si = document.getElementById('search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); }
+        const si = document.getElementById('search-input'); if (si) { if (oskEligible()) oskShow(si); si.focus(); } // the keyboard first: the field is hidden until it shows, and a hidden field cannot take the focus (11 Oct '26)
       }
       else if (act === 'close-search') { if (_searchHideFired) { _searchHideFired = false; return; } state.searchOpen = false; state.search = ''; oskHide(); render(); }
       else if (act === 'admin-search-toggle') { if (_searchHideFired) { _searchHideFired = false; return; } state.adminSearchOpen = !state.adminSearchOpen; if (!state.adminSearchOpen) { state.adminSearch = ''; oskHide(); } render(); if (state.adminSearchOpen) { const si = document.getElementById('admin-search-input'); if (si) { si.focus(); if (oskEligible()) oskShow(si); } } }
@@ -50420,8 +50484,28 @@ setInterval(() => {
       return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings(), refreshDeskColours()]).then(followMovedParty).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary();
         return Promise.all([api('/api/menu'), storeMoved ? api('/api/categories').catch(() => null) : null, storeMoved ? api('/api/subcategories').catch(() => null) : null,
           storeMoved ? api('/api/combos').catch(() => null) : null, storeMoved ? api('/api/modifier-groups').catch(() => null) : null,
-          storeMoved ? api('/api/happy-hours').catch(() => null) : null]); })
-        .then(([menu, cats, subs, combos, mods, hhs]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs; if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
+          storeMoved ? api('/api/happy-hours').catch(() => null) : null,
+          // AND EVERYTHING ELSE A TILL SELLS BY (11 Oct '26): GST switched to
+          // "added on top" on one till left another asking $99 while the server
+          // took $108.90 in cash; a stale void-reason list saved over the new one.
+          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets'].map(u => api(u).catch(() => null))) : null]); })
+        .then(([menu, cats, subs, combos, mods, hhs, rest]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs;
+          if (rest && !typingInField()) {
+            const [st, dp, nc, qn, vr, ps, sp] = rest;
+            // Only what ANOTHER till changed comes in, key by key — never a
+            // setting this till is still holding or trying out.
+            if (st && typeof st === 'object' && !Array.isArray(st)) {
+              const was = _srvSettings || {};
+              Object.keys(st).forEach(k => { if (JSON.stringify(st[k]) !== JSON.stringify(was[k])) state.settings[k] = st[k]; });
+              _srvSettings = JSON.parse(JSON.stringify(st));
+            }
+            if (Array.isArray(dp)) state.discountPresets = dp;
+            if (Array.isArray(nc)) state.noteCategories = normNoteCategories(nc);
+            if (Array.isArray(qn)) state.quickNotePresets = normPresetList(qn);
+            if (Array.isArray(vr)) state.voidReasons = vr;
+            if (Array.isArray(ps)) state.printerStations = ps;
+            if (Array.isArray(sp)) state.sizePresets = sp;
+          } if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (!typingInField()) renderWhenStill(); });
     });
   }

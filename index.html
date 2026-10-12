@@ -8818,8 +8818,21 @@ function loadAndMigrate() {
   return data;
 }
 
+// WHEN THIS PARTY SAT DOWN (12 Oct '26). A table's covers go up from nothing
+// on a dozen roads (the covers pad, a move, the desk, a combine), so the
+// stamp is put on here, the one road every change takes: a table seated with
+// no stamp gets one, an empty table loses it. A bill paid after it is this
+// party's — paid and staying, not a party that has not ordered yet.
+function stampSittings(data) {
+  (data.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+    if (!t || t.type === 'decor') return;
+    if ((t.covers || 0) > 0) { if (!(t.sitAt > 0)) t.sitAt = Date.now(); }
+    else if (t.sitAt !== undefined) delete t.sitAt;
+  }));
+}
 function writeData(data) {
   ensureStore();
+  stampSittings(data);
   if (!CAN_SHARD) {
     // Single-file mode (preview shim): the whole store, orders included,
     // exactly as it always worked before sharding.
@@ -9161,7 +9174,7 @@ function practiceRefused(req, data, order) {
   const id = req.body && req.body.staffId, name = req.get('X-Staff-Name');
   const sender = (data.staff || []).find(x => (id && x.id === id) || (!id && name && x.name === name));
   if (!sender || !!sender.trainee === !!order.practice) return null;
-  return order.practice ? 'That is a practice table' : `Table ${order.table} is in real service`;
+  return order.practice ? 'That is a practice table' : order.table != null ? `Table ${order.table} is in real service` : 'That bill is in real service';
 }
 // A manager PROVES it: the PIN a signed-in manager's till sends with every
 // request, or a manager PIN typed into a popup. Anything on the wifi could
@@ -10588,6 +10601,12 @@ app.put('/api/settings', (req, res) => {
     if (req.body[k] === undefined) continue;
     const n = parseInt(req.body[k], 10);
     if (!isNaN(n)) data.settings[k] = Math.max(lo, Math.min(hi, n));
+  }
+  // Amber comes before red, or amber never shows on the cook's screen (12 Oct
+  // '26: amber after 30 with red after 20 turned every ticket straight red).
+  if ((req.body.kdsWarnMins !== undefined || req.body.kdsLateMins !== undefined)
+      && (parseInt(data.settings.kdsWarnMins, 10) || 10) >= (parseInt(data.settings.kdsLateMins, 10) || 20)) {
+    return res.status(400).json({ error: 'Amber must be under red' });
   }
   // The venue's own job titles. Six were fixed in the code.
   if (Array.isArray(req.body.staffRoles)) {
@@ -12429,7 +12448,9 @@ app.post('/api/orders/:id/print-course', (req, res) => {
 function paidStillSeated(data, order) {
   if (!order || order.status !== 'paid' || order.orderType !== 'dine-in') return false;
   const label = String(order.table);
-  const seated = (data.floorPlans || []).some(fp => (fp.tables || []).some(t => t.type !== 'decor' && String(t.label) === label && (t.covers || 0) > 0));
+  // …by THIS party: a table seated again after the bill closed is the next
+  // party, and the last one's held course is not theirs to call (12 Oct '26).
+  const seated = (data.floorPlans || []).some(fp => (fp.tables || []).some(t => t.type !== 'decor' && String(t.label) === label && (t.covers || 0) > 0 && !(t.sitAt > (order.closedAt || 0))));
   return seated && !(data.orders || []).some(o => o !== order && o.orderType === 'dine-in' && String(o.table) === label && o.status !== 'void' && (o.status === 'open' || (o.createdAt || 0) > (order.createdAt || 0)));
 }
 
@@ -14470,6 +14491,9 @@ app.post('/api/orders/:id/close', (req, res) => {
     return res.status(400).json({ error: 'This ticket is not an open tab' });
   }
   const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId, cardType } = req.body;
+  // A TRAINEE NEVER TAKES REAL MONEY (12 Oct '26): Bills opened a real
+  // takeaway's Pay for a trainee and their Confirm closed it as paid.
+  { const no = practiceRefused(req, data, order); if (no) return res.status(400).json({ error: no }); }
 
   const subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   // THE BILL THE TILL SHOWED IS THE BILL THAT CLOSES. Another till moved a
@@ -14636,6 +14660,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { key, label, amount, method, staffName, parts, cardType, tip, giftCardCode } = req.body || {};
+  { const no = practiceRefused(req, data, order); if (no) return res.status(400).json({ error: no }); } // a trainee's part is never real money
   const k = String(key || '').slice(0, 40);
   if (!k) return res.status(400).json({ error: 'That part has no name' });
   order.splitPaid = order.splitPaid || [];
@@ -19203,8 +19228,14 @@ try {
     if (state.theme.mode === 'auto') { applyTheme(); render(); }
   });
 } catch (e) {}
-// Lock-screen clock stays right while nobody's signed in.
-setInterval(() => { if (!state.currentStaff) render(); }, 30000);
+// Lock-screen clock stays right while nobody's signed in — and so do the
+// NAMES (12 Oct '26): a till left on this screen never asked again, so a
+// waiter added on the office till was not on it, and one made a manager got
+// "A manager signs in with their PIN" with no pad to type it on.
+setInterval(() => {
+  if (state.currentStaff) return;
+  api('/api/staff').then(l => { if (Array.isArray(l)) state.staffList = l; }).catch(() => {}).then(() => { if (!state.currentStaff) render(); });
+}, 30000);
 // §§ On-screen keyboard (touch tablets / tills)
 // Text fields get the app's own compact keyboard instead of the OS one.
 // Lives OUTSIDE #app so render() never rebuilds it mid-word; appears only
@@ -19223,8 +19254,10 @@ let _oskGhostGuard = 0;
 function _fpKeysOutsideTap(e) {
   if (!state.fpViewOpen || state._fpClosing) return;
   const t = e.target;
-  if (!t || !t.closest || t.closest('.fp-float-keys')) return;
-  if (!t.closest('.middle-view.tp-view')) return;
+  // Only a tap on the ROOM itself — what the old sheet covered. The dock's
+  // other keys (a room, a view, the pencil) and the search's finds sat above
+  // that sheet and still do their job; they were swallowed here (12 Oct '26).
+  if (!t || !t.closest || !t.closest('.middle-view.tp-view .fp-body')) return;
   e.preventDefault(); e.stopPropagation();
   const key = document.querySelector('.middle-view .fp-float-keys [data-act="fp-view-toggle"]');
   if (key) key.click(); else { state.fpViewOpen = null; render(); }
@@ -20063,6 +20096,13 @@ async function pressLoginName(id) {
     const r = await api('/api/staff/sign-in', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ staffId: id }) });
     if (r && r.id) finishLogin(r, warm);
   } catch (e) {
+    // Made a manager on another till since this screen last asked: the names
+    // are read again, and the pad opens for their PIN.
+    if (e.status === 403 || e.status === 404) {
+      try { state.staffList = await api('/api/staff'); } catch (e2) {}
+      const now = (state.staffList || []).find(x => x.id === id);
+      if (now && now.role === 'manager') { state.loginSelectedId = id; state.loginPin = ''; state.loginError = ''; render(); return; }
+    }
     state.toast = toastFail(state.online ? (e.message || 'Could not sign in') : 'Offline — sign-in returns when online');
     render(); armToastTimer(TOAST_SHORT);
   }
@@ -20425,7 +20465,7 @@ async function refreshTableSittings() {
     const x = srv.get(t.id);
     if (!x || (t._savedAt && t._savedAt > asked - 3000)) return;
     const was = { covers: t.covers || 0, notes: t.notes || [], discount: t.discount || null };
-    t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null;
+    t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null; t.sitAt = x.sitAt;
     // …and the table this till has OPEN follows too, where the waiter has not
     // changed it here: the desk made the party 6, the open table kept 4 and
     // the first round put 4 on the bill.
@@ -20860,6 +20900,7 @@ function closeBillSplit() {
   // Nothing is settled in here, so walking away costs nothing — the plan is
   // saved on the order and holding Bill brings it straight back.
   state.billSplit = null;
+  if (state.discount && state.discount.auto) state.discount = null; // re-asked when the split or Pay opens again
   state.splitAmtPad = null; // nothing outlives its screen
   render();
 }
@@ -21804,11 +21845,20 @@ function setDishLocked(line, delta) {
   render(); armToastTimer(TOAST_SHORT);
   return true;
 }
+// …AND THE SET'S PRICE STAYS WITH THE SET (12 Oct '26): it rides on the first
+// dish, so "no hummus" took the whole $65 off and the rest of the set went to
+// the kitchen at $0 (or sat "Not sent" on a waiter's till). A dish of a set
+// coming off hands the price to the next dish of the same set.
+function keepSetPrice(line) {
+  if (!line || !line.comboRef || !(line.price > 0)) return;
+  const next = state.cart.find(c => c !== line && c.comboRef === line.comboRef && c.comboStamp === line.comboStamp && !(c.price > 0));
+  if (next) { next.price = line.price; line.price = 0; }
+}
 function changeQty(idx, delta) {
   if (setDishLocked(state.cart[idx], delta)) return;
   if (delta < 0 && lineWaitingToSend(idx)) return;
   if (!growCartLine(idx, delta)) state.cart[idx].qty += delta;
-  if (state.cart[idx].qty <= 0) state.cart.splice(idx, 1);
+  if (state.cart[idx].qty <= 0) { keepSetPrice(state.cart[idx]); state.cart.splice(idx, 1); }
   render();
 }
 // §§ Docket line editor
@@ -21974,6 +22024,7 @@ function editLineToggleComponent(invId) {
 function removeLine(idx) {
   if (lineWaitingToSend(idx)) return;
   const line = state.cart[idx];
+  keepSetPrice(line);
   state.cart.splice(idx, 1);
   _undoAction = null; // this row owns the undo toast now
   state.lastRemoved = { line, idx };
@@ -22260,7 +22311,8 @@ async function saveTableCovers(tableId, covers) {
   const t = fp.tables.find(x => x.id === tableId);
   if (t) { t.covers = covers; t._savedAt = Date.now(); }
   try {
-    await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ covers }) });
+    const back = await api(`/api/floorplans/${fp.id}/tables/${tableId}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ covers }) });
+    if (t && back && back.id === tableId) t.sitAt = back.sitAt; // the server's own stamp of when the party sat
   } catch (e) {
     // A COVERS OR NOTE SAVE THAT FAILED SAYS SO (7 Oct '26). It was swallowed,
     // and the next poll quietly put the old one back — an allergy typed with
@@ -22565,17 +22617,25 @@ async function saveDiscountModal() {
   saveTableDiscount(state.table, state.discount);
   render();
 }
-function removeDiscount() { state.discount = null; saveTableDiscount(state.table, null); resizeEvenSplit(); render(); }
+function removeDiscount() {
+  // A SURCHARGE TAKEN OFF OBEYS THE SAME FLOOR (12 Oct '26): $105 paid on a
+  // $110 bill, the ✕ took the 10% off, and the table could never close —
+  // "refund it first", on a bill that cannot be refunded while open.
+  if (offUnderTaken(null)) { state.toast = toastFail(`${money(paidOfBill())} has been paid — taking that off would take the bill under it.`); armToastTimer(TOAST_SHORT); render(); return; }
+  state.discount = null; saveTableDiscount(state.table, null); resizeEvenSplit(); render();
+}
 // What the parts have paid of the BILL — their tips are the guests' own, not
 // bill money (the server's close judges it the same way).
 function paidOfBill() { return splitPaidList().reduce((a, p) => a + (p.amount || 0) - (p.tip || 0), 0); }
 // Would this money off take the bill under what has been paid of it? The
 // close then refuses ("refund it first") and an open bill cannot be refunded:
 // a voucher or points put on after a part stranded the table (8 Oct '26).
+// d is the money off or on the bill would carry instead — null for none, so
+// taking a surcharge off (or making it smaller) is asked too.
 function offUnderTaken(d) {
-  if (!splitPaidList().length || !d || d.kind === 'surcharge') return false;
+  if (!splitPaidList().length) return false;
   const had = state.discount;
-  state.discount = d;
+  state.discount = d || null;
   const under = cartTotal() < paidOfBill() - 0.005;
   state.discount = had;
   return under;
@@ -22991,6 +23051,11 @@ function closeCheckout() {
   // A tip typed on a part-paid bill waits for the last part (the parts fill
   // the bill first), so it is kept for this bill, not binned on the way out.
   state._keptTip = splitPaidList().length && state.openOrderId ? { orderId: state.openOrderId, tip: parseFloat(state.cardTip) || 0 } : null;
+  // AN AUTOMATIC RULE LEAVES WITH THE PAY SCREEN (12 Oct '26): it is asked
+  // again on every Pay, but it stayed on the table after Cancel — a dish came
+  // off, the bill no longer fitted "spend $100", and the printed bill, the
+  // Bills card and the phone row still took 10% off while Pay asked full price.
+  if (state.discount && state.discount.auto) state.discount = null;
   // The card picked is this payment's: an Amex picked and cancelled stayed lit for the next table (Oct '26 hunt).
   state.cardType = null;
   state.showCheckout = false; state.billSplit = null; state.splitAmtPad = null; state.cardAmount = ''; state.cardTip = 0; render();
@@ -24306,6 +24371,20 @@ function render() {
     return sc && cv ? cv.getBoundingClientRect().top - sc.getBoundingClientRect().top : null;
   })();
 
+  // THE BOX YOU CLICKED INTO KEEPS YOU (12 Oct '26). An admin box saves on
+  // leaving it and redraws the page — and the redraw replaced the NEXT box the
+  // mouse had just clicked, so a price typed there went nowhere: rename a
+  // modifier option, click its price, type 4, and the option stayed at $0.
+  // A keyboard-and-mouse till only; a touch screen's keyboard holds the box.
+  const _focusKeep = (() => {
+    if (oskEligible()) return null;
+    const a = document.activeElement;
+    if (!a || !app.contains(a) || !a.matches('input, textarea') || a.type === 'checkbox' || a.type === 'radio') return null;
+    let sel = a.id ? '#' + CSS.escape(a.id) : a.tagName.toLowerCase() + [...a.classList].map(c => '.' + CSS.escape(c)).join('');
+    if (!a.id) for (const k of ['id', 'idx', 'oidx', 'key', 'preset', 'field']) if (a.dataset[k] !== undefined) sel += `[data-${k}="${CSS.escape(a.dataset[k])}"]`;
+    let at = null; try { at = [a.selectionStart, a.selectionEnd]; } catch (e) {}
+    return { sel, typed: a.value !== a.defaultValue ? a.value : null, at };
+  })();
   app.innerHTML = `
     ${renderTopbar()}
     <div class="app-body">
@@ -24379,6 +24458,15 @@ function render() {
   // two rows tall, the scroll was put back against that, and then it shrank
   // to one — every tap moved the list 52px (Oct '26 sweep).
   dressSelects(app);
+  if (_focusKeep && (!document.activeElement || !app.contains(document.activeElement))) {
+    const hits = app.querySelectorAll(_focusKeep.sel);
+    if (hits.length === 1) {
+      const f = hits[0];
+      if (_focusKeep.typed !== null) f.value = _focusKeep.typed;
+      f.focus({ preventScroll: true });
+      try { if (_focusKeep.at && _focusKeep.at[0] != null) f.setSelectionRange(_focusKeep.at[0], _focusKeep.at[1]); } catch (e) {}
+    }
+  }
   // Flag up while the panes are put back, so the scroll events these
   // assignments fire are not read as the owner scrolling away.
   _scrollRestoring++;
@@ -27765,7 +27853,9 @@ function sendKeyHtml(extra) {
 // sent added on. It said the bare cart — $285 on a table with $35 left, and
 // $84 where Pay asked $92.40 (11 Oct '26).
 function dkPeekOwing(openOrder, t) {
-  if (state.discount) return Math.max(0, amountOwing() - cardTipPending());
+  // …less what the parts paid OF THE BILL: a part's tip is the guest's own,
+  // and taking it off the bill read $27.60 on a table with $32.60 left (12 Oct '26).
+  if (state.discount) return Math.max(0, Math.round((cartTotal() - paidOfBill()) * 100) / 100);
   const o = Object.assign({ orderType: state.orderType, covers: state.covers }, openOrder || {}, { items: [...((openOrder && openOrder.items) || []), ...state.cart] });
   return Math.max(0, openBillTotal(o, t) - (openOrder ? billPaidOf(openOrder) : 0));
 }
@@ -36992,6 +37082,9 @@ function tablePassOrder(t) {
   const mine = (state.orders || []).filter(o => o.orderType === 'dine-in' && o.status !== 'void' && String(o.table) === String(t.label))
     .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
   if (!mine || mine.status !== 'paid' || !!mine.practice !== isTrainee()) return undefined;
+  // …THIS party's bill: paid before they sat down, it was the LAST party's,
+  // and its held dessert came up on the new party's row with a Call away.
+  if (t.sitAt > 0 && (mine.closedAt || 0) < t.sitAt) return undefined;
   const food = (state.settings.courses || []).map((c, i) => i + 1).filter(courseInKitchen);
   return passCells(mine, food).some(c => c.kind === 'hold') ? mine : undefined;
 }
@@ -37043,6 +37136,11 @@ function statusColor(key, fallback) {
 const WASH = 0.78;
 function washOpacity() { return WASH; }
 const PALE = .32; // a seated table that has not ordered: its colour at a third
+// A bill on this table closed since the party sat down (the server stamps
+// sitAt when the covers go on): paid, and still at the table.
+function paidThisSitting(t) {
+  return t.sitAt > 0 && (state.orders || []).some(o => o.orderType === 'dine-in' && o.status === 'paid' && String(o.table) === String(t.label) && (o.closedAt || 0) >= t.sitAt);
+}
 // WHERE THE TABLE'S COLOUR COMES FROM (owner, Sep '26: "add option for table
 // status to take colours from reservations app. As in seated, paid etc" →
 // "do a split"). Two tills' worth of language, and they are not the same
@@ -37160,7 +37258,9 @@ function tableStatusFx(t, cs, lock) {
   if (o) return nothingSent(o) ? wash(statusColor('occupied'), op * PALE) : wash(statusColor('occupied'));
   // Seated counts as active: covers entered but nothing ordered yet — pale,
   // as above, never bare wood.
-  if (t.covers > 0) return wash(statusColor('occupied'), op * PALE);
+  // …but a party that PAID AND STAYED ("Close the table?" No) has ordered:
+  // pale there sent the waiter to take an order from a table that had eaten.
+  if (t.covers > 0) return paidThisSitting(t) ? wash(statusColor('occupied')) : wash(statusColor('occupied'), op * PALE);
   return none; // empty — a table at rest is just a table
 }
 // The little pill under the table number follows the lens: course dot +
@@ -37711,12 +37811,25 @@ async function claimTableLock(tableId, force, retake) {
 // the way the road back from Admin does; taken, say who has it and stay put.
 function backToHeldTable(go) {
   if (!tableLocksOn() || state.table == null) { go(); return; }
-  claimTableLock(state.table).then(r => {
+  claimTableLock(state.table).then(async r => {
     if (r === 'released') return; // a manager freed it: that toast already says so
     if (r === 'busy') {
       const t = findTableById(state.table);
       state.toast = toastFail(`Table ${t ? t.label : ''} is open on ${state._lockBusyStaff || 'another'}'s till`);
       armToastTimer(TOAST_LONG); render(); return;
+    }
+    // THE TABLE AS IT IS NOW (12 Oct '26): let go on the floor, it may have
+    // been opened on another till and a round sent. Coming back without a
+    // ticket in hand, this till takes the table's ticket, as a tap would —
+    // it came back to an empty docket and a $0 bill over that round.
+    if (!state.openOrderId) { try { await refreshOrders(); } catch (e) {} }
+    const t = findTableById(state.table);
+    const oo = !state.openOrderId && t && (state.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(t.label) && !!o.practice === isTrainee());
+    if (oo) {
+      state.openOrderId = oo.id;
+      state.firedCourses = { ...(oo.firedCourses || {}) };
+      state.attachedCustomerId = oo.customerId || null;
+      if (!state.covers) state.covers = t.covers || oo.covers || 0;
     }
     go();
   });
@@ -38035,14 +38148,22 @@ function passCells(o, courses) {
   // the skipped 2nd into a tick and its food never reached the kitchen. A
   // drinks course nobody called still steps back.
   const passed = n => firedNs.some(m => m > n && (fired[n] > 0 ? fired[m] >= fired[n] : !courseInKitchen(n)));
-  const sentAt = {};
-  (o.rounds || []).forEach(r => courseLines(r.items).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; }));
+  const sentAt = {}, lineSent = new Map();
+  (o.rounds || []).forEach(r => courseLines(r.items).forEach(i => { const c = i.course || 1; if (!sentAt[c]) sentAt[c] = r.sentAt; const k = i.uid || i.lineKey; if (k && !lineSent.has(k)) lineSent.set(k, r.sentAt); }));
+  // AWAY IS TIMED FROM WHAT IS STILL COOKING (12 Oct '26): one more bread
+  // on starters served half an hour ago went out in red, timed from the
+  // starters' call. A dish sent after the call is timed from its own send —
+  // the kitchen's screen already did.
+  const awaySince = (n, items) => {
+    const live = items.filter(i => i.status !== 'served');
+    return live.length ? Math.min(...live.map(i => Math.max(fired[n], i.sentAt || lineSent.get(i.uid || i.lineKey) || 0))) : fired[n];
+  };
   let next = false;
   return courses.map(n => {
     const items = courseLines(o.items).filter(i => (i.course || 1) === n && i.qty > 0);
     if (!items.length) return { n, kind: 'none' };
     if (items.every(i => i.status === 'served') || passed(n)) return { n, kind: 'done', items };
-    if (fired[n] > 0) return { n, kind: 'away', since: fired[n], items };
+    if (fired[n] > 0) return { n, kind: 'away', since: awaySince(n, items), items };
     const cell = { n, kind: 'hold', since: sentAt[n], items };
     if (!next) { next = true; cell.next = true; }
     return cell;
@@ -38066,6 +38187,8 @@ function courseClockHtml(o, n, fired) {
   // course, one reading — blue while it cooks, gold running long, red late.
   // LATE IS THE ONE ALARM LOOK (owner, 6 Oct '26: "yes do it"): the Pass's
   // red pill with the clock on it, not a dark-red dot beside the words.
+  const cell = o && passCells(o, [n])[0];
+  if (cell && cell.kind === 'away' && cell.since) fired = cell.since; // the Pass's own clock
   const lvl = courseAwayLevel(fired);
   if (lvl === 'lvl-late') return `<span class="cg-away late-pill" data-away="${fired}">${elapsedMinLabel(fired)}</span>`;
   return `<span class="cg-away ${lvl}" data-away="${fired}"><i></i>Away · ${elapsedMinLabel(fired)}</span>`;
@@ -38607,7 +38730,9 @@ function renderTimeline(fp) {
     // DONE IS THE PASS'S WORD, NOT THE ORDER OF CALLS (Sep '26): two courses
     // called together — the 2nd, then the 3rd a few minutes on — showed 2nd
     // as finished here while the Pass said it was still away.
-    const kindOf = new Map(passCells(o, calls).map(c => [c.n, c.kind]));
+    const cellOf = new Map(passCells(o, calls).map(c => [c.n, c]));
+    const kindOf = new Map([...cellOf].map(([n, c]) => [n, c.kind]));
+    const awayAt = n => (cellOf.get(n) || {}).since || fired[n]; // the Pass's own clock
     // EACH COURSE IN ITS OWN COLOUR (owner, 1 Oct '26: "the fill should be
     // the colour of the course colours set in admin" … "keep it simple"): a
     // plain fill in the colour Settings › Courses gives it, the words in
@@ -38623,12 +38748,12 @@ function renderTimeline(fp) {
       if (k === 'done' || (k === 'none' && to)) return `<div class="tl-bar done${pc.cls}" style="${pc.css}left:${at(from)};width:${len(from, to || now)}"><i>${esc(courseInfo(n).name)}</i></div>`;
       // The clock is the course's own — from its call, not from the sitting
       // the first bar is stretched back to.
-      const lvl = pillClockLevel(mins(now - fired[n]), 'course');
+      const lvl = pillClockLevel(mins(now - awayAt(n)), 'course');
       // A COURSE JUST CALLED IS SEEN AT ONCE (owner, 1 Oct '26: "courses
       // dissapear when called"). It was a bar from the call to now — one pixel
       // wide the moment it went, so the held chip vanished and nothing took
       // its place. It stands at the now line and is never narrower than a key.
-      return `<div class="tl-bar away lvl-${lvl}${pc.cls}" data-grow="${from}" style="${pc.css}right:calc(100% - ${at(now)});width:${len(from, now)}"><i>${lvl === 'late' ? `<span class="tl-cn">${esc(courseInfo(n).name)}</span> <span class="late-pill">${pillDur(mins(now - fired[n]))}</span>` : `${esc(courseInfo(n).name)} · ${pillDur(mins(now - fired[n]))}`}</i></div>`;
+      return `<div class="tl-bar away lvl-${lvl}${pc.cls}" data-grow="${from}" style="${pc.css}right:calc(100% - ${at(now)});width:${len(from, now)}"><i>${lvl === 'late' ? `<span class="tl-cn">${esc(courseInfo(n).name)}</span> <span class="late-pill">${pillDur(mins(now - awayAt(n)))}</span>` : `${esc(courseInfo(n).name)} · ${pillDur(mins(now - awayAt(n)))}`}</i></div>`;
     }).join('');
     const sat = sat0;
     const held = passCells(o, courses).filter(c => c.kind === 'hold');
@@ -48319,7 +48444,7 @@ function handleActClick(el, e) {
       else if (act === 'close-line-edit') {
         // Save: a line counted down to 0 comes off the docket here.
         const i = state.editLine ? state.editLine.idx : -1;
-        if (i >= 0 && state.cart[i] && state.cart[i].qty <= 0) state.cart.splice(i, 1);
+        if (i >= 0 && state.cart[i] && state.cart[i].qty <= 0) { keepSetPrice(state.cart[i]); state.cart.splice(i, 1); }
         state.editLine = null; render();
       }
       else if (act === 'cancel-line-edit') {
@@ -48686,6 +48811,9 @@ function handleActClick(el, e) {
         // An open takeaway on Bills opens ITS order screen, to add to or pay —
         // it opened a details popup with only Print and Void (Sep '26).
         const o = state.orders.find(x => x.id === parseInt(el.dataset.id, 10) && x.status === 'open');
+        // …and only to whoever may ring on it, as a table asks: a trainee
+        // reached a real takeaway's Pay from Bills and closed it (12 Oct '26).
+        if (o && !!o.practice !== isTrainee()) { state.toast = toastFail(o.practice ? 'That is a practice bill' : `${o.customerName || 'That bill'} is in real service`); render(); armToastTimer(TOAST_SHORT); return; }
         if (o) {
           if (state.table && state.cart.length) draftStash(state.table); else if (state.cart.length) { state.cart = []; clearSendState(); }
           if (state.table) releaseTableLock(state.table);
@@ -50634,7 +50762,7 @@ document.addEventListener('scroll', (e) => { if (e.target && e.target.classList 
 // server's data version; the big fetches and the rebuild only follow a
 // change. A slow heartbeat (60s) still repaints the clocks and stale badges.
 // A server without /api/version (the preview) falls back to the old path.
-let _dataVersion = null, _lastBgRender = 0;
+let _dataVersion = null, _lastBgRender = 0, _restOwed = false;
 setInterval(() => {
   // THE HOLD ON A TABLE OUTLIVES A PANE (7 Oct '26). The heartbeat lived
   // inside the poll, which sleeps while Pay is open — 75s on the pay screen and
@@ -50658,9 +50786,13 @@ setInterval(() => {
       // AND THE PROMOTIONS (10 Oct '26): one switched off on the iPad was
       // still offered here, and Pay then refused the half price the guest
       // had been promised.
-      const storeMoved = !(v && _dataVersion && v.store === _dataVersion.store);
+      // A CHANGE SKIPPED WHILE SOMEONE TYPED IS STILL OWED (12 Oct '26): the
+      // version was marked seen and the settings never asked for again, so GST
+      // switched on the office till while a waiter typed a search stayed the
+      // old way here until the next save anywhere.
+      const storeMoved = !(v && _dataVersion && v.store === _dataVersion.store) || _restOwed;
       if (v) _dataVersion = v;
-      if (same) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
+      if (same && !_restOwed) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
       return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings(), refreshDeskColours()]).then(followMovedParty).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary();
         return Promise.all([api('/api/menu'), storeMoved ? api('/api/categories').catch(() => null) : null, storeMoved ? api('/api/subcategories').catch(() => null) : null,
           storeMoved ? api('/api/combos').catch(() => null) : null, storeMoved ? api('/api/modifier-groups').catch(() => null) : null,
@@ -50668,9 +50800,10 @@ setInterval(() => {
           // AND EVERYTHING ELSE A TILL SELLS BY (11 Oct '26): GST switched to
           // "added on top" on one till left another asking $99 while the server
           // took $108.90 in cash; a stale void-reason list saved over the new one.
-          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets'].map(u => api(u).catch(() => null))) : null]); })
+          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets', '/api/sales-categories'].map(u => api(u).catch(() => null))) : null]); })
         .then(([menu, cats, subs, combos, mods, hhs, rest]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs;
-          if (rest && !typingInField()) {
+          if (rest) _restOwed = typingInField();
+          if (rest && !_restOwed) {
             const [st, dp, nc, qn, vr, ps, sp] = rest;
             // Only what ANOTHER till changed comes in, key by key — never a
             // setting this till is still holding or trying out.
@@ -50685,8 +50818,11 @@ setInterval(() => {
             if (Array.isArray(vr)) state.voidReasons = vr;
             if (Array.isArray(ps)) state.printerStations = ps;
             if (Array.isArray(sp)) state.sizePresets = sp;
+            // …and the sales groups (12 Oct '26): the bill on screen filed a
+            // dish under no heading while the printed bill named its new group.
+            if (Array.isArray(rest[7])) state.salesCategories = rest[7];
           } if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
-        .catch(() => { if (!typingInField()) renderWhenStill(); });
+        .catch(() => { if (storeMoved) _restOwed = true; if (!typingInField()) renderWhenStill(); });
     });
   }
 }, 15000);

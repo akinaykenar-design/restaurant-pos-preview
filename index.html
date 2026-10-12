@@ -24692,7 +24692,69 @@ function snapshotMotion() {
   if (motionOff()) return null;
   const lineTops = {}, qtys = {}, bases = new Set();
   _lineKeys().forEach(L => { lineTops[L.key] = L.top; if (L.qty != null) qtys[L.key] = L.qty; bases.add(L.base); });
-  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001') };
+  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001'), flips: _flipTops(), washes: _washSnap() };
+}
+// NOTHING TELEPORTS (owner, 12 Oct '26, picked from filmed before/afters:
+// "Pass rows make room", "Kitchen tickets glide to place"). A list the till
+// rebuilds whole — the Pass's rows, the kitchen's tickets — used to put every
+// row in its new place in one frame when one arrived or left, so the row under
+// the eye was suddenly another one. Each row is keyed; one that survived the
+// redraw glides from where it was (--t-move), one that is new fades in
+// (--t-state). The same trick the docket's lines use (iOS lists, Apple Maps).
+const FLIP_LISTS = [['.pass-rows .pass-row', 'id'], ['.kds-ticket', 'order']];
+function _flipTops() {
+  const out = {};
+  FLIP_LISTS.forEach(([sel, k]) => document.querySelectorAll(sel).forEach(el => {
+    const r = el.getBoundingClientRect(); out[sel + '|' + el.dataset[k]] = [r.left, r.top];
+  }));
+  return out;
+}
+function _motionMs(tok) { return (parseFloat(getComputedStyle(document.documentElement).getPropertyValue(tok)) || 0) * 1000; }
+function _applyFlips(prev) {
+  const was = prev.flips || {}, move = _motionMs('--t-move'), fade = _motionMs('--t-state');
+  FLIP_LISTS.forEach(([sel, k]) => {
+    const els = [...document.querySelectorAll(sel)];
+    const had = Object.keys(was).some(key => key.startsWith(sel + '|'));
+    if (!had) return; // the list just arrived: the screen's own fade carries it
+    els.forEach(el => {
+      const p = was[sel + '|' + el.dataset[k]];
+      if (!p) { if (fade) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: fade, easing: 'ease' }); return; }
+      const r = el.getBoundingClientRect(), dx = p[0] - r.left, dy = p[1] - r.top;
+      if ((Math.abs(dx) < 2 && Math.abs(dy) < 2) || Math.abs(dx) > 1500 || Math.abs(dy) > 1500 || !move) return;
+      el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }], { duration: move, easing: 'cubic-bezier(.2,.8,.3,1)' });
+    });
+  });
+}
+// A TABLE CHANGES COLOUR GENTLY (owner, 12 Oct '26: "Floor colours change
+// gently"). A send or a payment on another till repainted a table in one
+// frame at the edge of the eye — the kind of change that steals a glance
+// (Weiser & Brown's calm technology). Its wash now eases from what it was.
+// An alarm (a glowing table) still snaps: when only the alarm snaps, a snap
+// means act now.
+function _washSnap() {
+  const out = {};
+  document.querySelectorAll('.middle-view :is(.floor-marker, .simple-table-btn)[data-act="pick-table"]').forEach(m => {
+    const w = m.querySelector(':scope > .tbl-wash'), cs = w && getComputedStyle(w);
+    out[m.dataset.id] = w ? { bg: cs.backgroundColor, op: cs.opacity, html: w.outerHTML } : null;
+  });
+  return out;
+}
+function _applyWashes(prev) {
+  const was = prev.washes || {}, dur = _motionMs('--t-state');
+  if (!dur) return;
+  document.querySelectorAll('.middle-view :is(.floor-marker, .simple-table-btn)[data-act="pick-table"]').forEach(m => {
+    if (!(m.dataset.id in was) || m.classList.contains('tbl-glow')) return;
+    const old = was[m.dataset.id], w = m.querySelector(':scope > .tbl-wash');
+    if (w) {
+      const cs = getComputedStyle(w);
+      if (old && old.bg === cs.backgroundColor && old.op === cs.opacity) return;
+      w.animate([old ? { backgroundColor: old.bg, opacity: old.op } : { opacity: 0 }, {}], { duration: dur, easing: 'ease-out' });
+    } else if (old) {
+      m.insertAdjacentHTML('afterbegin', old.html);
+      const g = m.firstElementChild;
+      g.animate([{ opacity: old.op }, { opacity: 0 }], { duration: dur, easing: 'ease-out' }).onfinish = () => g.remove();
+    }
+  });
 }
 // Every middle that can ARRIVE: the hub (.menu-panel) and the panes that take
 // its place (.middle-view). Keyed by what it is, not by how it is moving —
@@ -24789,6 +24851,8 @@ function applyMotion(prev) {
       }
     }
   });
+  _applyFlips(prev);
+  _applyWashes(prev);
 }
 let _lastMenuGridGeom = null;
 // Biggest table in the whole venue — the seat pad is built to hold it.

@@ -8545,6 +8545,17 @@ function loadAndMigrate() {
     }
     if (dirty) writeData(data);
   }
+  // APPLE'S SOLID COLOURS REACH A TILL ALREADY RUNNING (13 Oct '26 hunt). The
+  // change went into the seed and the new-till defaults only, and a running
+  // till never reads the seed again — so the venue kept the pastels. Once: a
+  // course still wearing the old pastel default takes its Apple twin; a
+  // colour the venue picked itself is left alone.
+  if (data.settings.courseColours !== 'apple') {
+    const TWIN = { '#B8C2CE': '#8E8E93', '#5AB0FF': '#0071E3', '#5EDB86': '#34C759', '#FFD966': '#FFCC00', '#FFAE6B': '#FF9500', '#D49BFA': '#5856D6', '#F59AC6': '#9F45D4', '#C49A74': '#8A6D4B' };
+    (data.settings.courses || []).forEach(c => { const to = c && typeof c.color === 'string' && TWIN[c.color.toUpperCase()]; if (to) c.color = to; });
+    data.settings.courseColours = 'apple';
+    writeData(data);
+  }
   // Every course says Food or Beverage from the first start (3 Oct '26). A
   // course saved before the choice existed was guessed from its name at its
   // next save — the NEW name, so renaming Drinks to "Wine list" made it food.
@@ -9570,6 +9581,17 @@ app.put('/api/note-categories', (req, res) => {
     const gone = oldN.filter(nm => !newN.includes(nm));
     const came = newN.filter(nm => !oldN.includes(nm));
     if (gone.length === 1 && came.length === 1) sweepPresetRename(data, gone[0], came[0], nc.id);
+  }
+  // A NEW TYPE REACHES THE KITCHEN (13 Oct '26 hunt). The docket designer
+  // keeps the list of types it SHOWS once any one is unticked, so every type
+  // made after that — or copied — was on no list and printed nowhere, on the
+  // kitchen screen neither. A new type joins every such list; "none at all"
+  // stays none.
+  const fresh = cleaned.map(c => c.id).filter(id => !(data.noteCategories || []).some(o => o.id === id));
+  const addTo = (cfg) => { if (cfg && Array.isArray(cfg.noteTypes) && cfg.noteTypes.length && !cfg.noteTypes.includes('__none__')) cfg.noteTypes = [...new Set([...cfg.noteTypes, ...fresh])].slice(0, 30); };
+  if (fresh.length) {
+    addTo((data.settings || {}).docket);
+    ((data.settings || {}).docketDesigns || []).forEach(d => addTo(d && d.cfg));
   }
   data.noteCategories = cleaned;
   logAudit(data, staffFromReq(req), 'Updated note categories');
@@ -17889,8 +17911,8 @@ function printKitchenDocket(courseNumber) {
     covers: state.settings.coversEnabled && state.covers ? state.covers : null,
     timeLabel: fmtTime(Date.now()),
     orderNo: null,
-    vip: (notesOfType('vip', table && table.notes).filter(n => !n.course)[0] || {}).text || null,
-    allergies: notesOfType('allergy', table && table.notes).filter(n => !n.course)
+    vip: (notesOfType('vip', table && table.notes).filter(n => !n.course || n.course === courseNumber)[0] || {}).text || null,
+    allergies: notesOfType('allergy', table && table.notes).filter(n => !n.course || n.course === courseNumber)
       .map(n => ({ seat: n.seat, allergy: n.text, notes: n.note || '' })),
     courses: firedNumbers.map(n => {
       const info = courseInfo(n);
@@ -18205,6 +18227,7 @@ async function printSample(kind) {
 }
 
 let _srvSettings = null; // the settings as the server last said them — the poll brings in what changed since
+let _srvTheme = null;    // …and the venue's look (Admin › Design), the same way
 // ONE TAP, ONE UNDO (10 Oct '26): the server folded every delete within 4s
 // of the last into one snapshot, so deleting dish A on purpose and dish B by
 // mistake a moment later made B's Undo bring back both — from any till. Every
@@ -19882,7 +19905,7 @@ async function loadInitial() {
     const [theme, settings, floorPlans] = boot
       ? [boot.theme, boot.settings, boot.floorPlans]
       : await Promise.all([api('/api/theme'), api('/api/settings'), api('/api/floorplans')]);
-    state.theme = theme; applyTheme();
+    state.theme = theme; applyTheme(); _srvTheme = JSON.parse(JSON.stringify(theme || {}));
     state.settings = settings; applyPanelLayout();
     _srvSettings = JSON.parse(JSON.stringify(settings || {}));
     state.floorPlans = floorPlans;
@@ -22200,10 +22223,27 @@ function discardCartUndoable() {
     notes: state.notes, discount: state.discount,
     activeCourse: state.activeCourse, firedCourses: state.firedCourses,
     callAway: state.callAway,
+    // WHERE AND HOW FAR IT GOT (13 Oct '26 hunt): the round belongs to its
+    // table — Undo after walking to the next one put it on THAT docket — and
+    // a round that did not go comes back still saying "Not sent", with its
+    // key (a retry must not ring it twice), its staged call-away and note.
+    table: state.table, orderType: state.orderType,
+    sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
+    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation,
   };
   clearCart();
   offerUndo('Discarded', () => {
+    if (state.table !== snap.table || state.orderType !== snap.orderType) {
+      const t = findTableById(snap.table);
+      state.toast = toastFail(`Could not undo — that round was ${t ? 'table ' + t.label + '’s' : 'on another order'}`);
+      armToastTimer(TOAST_SHORT); return;
+    }
+    // …and it comes back onto the DOCKET, never into an open Pay: Pay adds
+    // unsent lines to what it asks, but the close only takes what was sent.
+    if (state.showCheckout || state.billSplit) closeCheckout();
     state.cart = snap.cart;
+    state.sendKey = snap.sendKey; state.sendFailed = snap.sendFailed; state.stagedCallAway = snap.stagedCallAway;
+    state.quickNote = snap.quickNote; state.quickNoteStation = snap.quickNoteStation;
     state.activeSeat = snap.activeSeat; state.covers = snap.covers;
     state.notes = snap.notes;
     state.discount = snap.discount;
@@ -24395,6 +24435,7 @@ function render() {
   // working the bottom of the Pass opened a table, sent, came back — and was
   // at the top again, every table (Oct '26 hunt).
   FLOOR_LISTS.forEach(sel => { const el = document.querySelector(sel); if (el) _floorListAt[sel] = { top: el.scrollTop, left: el.scrollLeft }; });
+  const _tlWas = timelineAt(); // the Timeline keeps its place in TIME (placeTimelineNow)
   // Some devices scroll the WINDOW rather than an inner pane — keep that too, so
   // a change never yanks the admin page back to the top.
   const savedWin = (window.scrollY || window.scrollX) ? { x: window.scrollX, y: window.scrollY } : null;
@@ -24718,7 +24759,7 @@ function render() {
   const lit = document.querySelector('.admin-sidebar .current');
   if (lit && !_scrollRestoring) lit.scrollIntoView({ block: 'nearest' });
   markRailEnds();
-  placeTimelineNow();
+  placeTimelineNow(_tlWas);
   fitTimelineWords();
   markBlindSpots();
   settleDockEntrance();
@@ -29334,7 +29375,7 @@ function kdsTickets(rows) {
     const tb = o && o.orderType === 'dine-in' && allTables().find(x => String(x.label) === String(o.table));
     const shown = dkNoteTypesShown(docketCfg());
     t.notes = ((tb && tb.notes) || []).filter(n => n && shown.includes(n.categoryId) && !n.course); // a note riding with a course waits for it
-    t.table = tb;
+    t.tb = tb; // the table itself, for the notes riding with a course — t.table stays the name the card's head shows
   });
   return tickets.sort((a, b) => a.since - b.since);
 }
@@ -29387,7 +29428,7 @@ function kdsTicketHtml(t) {
         const info = courseInfo(c.n);
         return `
       <div class="kds-course">
-        <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>${courseRemindHtml(t.table, c.n)}
+        <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>${courseRemindHtml(t.tb, c.n)}
         ${c.rows.map(r => {
           const done = r.item.status === 'ready';
           return `
@@ -39133,14 +39174,25 @@ function tickTimeline() {
 // The Timeline opens with now a third in, once per visit; inside a visit
 // every redraw keeps the swipe where the hand left it (the scroll law).
 let _tlNowPlaced = false;
-function placeTimelineNow() {
+function timelineAt() {
+  const tl = document.querySelector('.tline[data-t0]'), rows = tl && tl.querySelector('.tl-rows');
+  return rows ? { t0: +tl.dataset.t0, left: rows.scrollLeft } : null;
+}
+function placeTimelineNow(was) {
   const rows = document.querySelector('.tline .tl-rows'), tl = rows && rows.closest('.tline');
   if (!rows) { _tlNowPlaced = false; return; }
-  if (_tlNowPlaced) return;
-  _tlNowPlaced = true;
   const lead = rows.querySelector('.tl-row .pass-lead, .tl-head > span');
   const leadW = lead ? lead.getBoundingClientRect().width + 8 : 0;
   const strip = rows.scrollWidth - leadW, vis = rows.clientWidth - leadW;
+  // THE SWIPE IS KEPT IN TIME, NOT PIXELS: the window starts at the oldest
+  // table, so when that table pays (or the half hour turns on a long night)
+  // every hour slides left — kept in pixels, the view jumped hours and the
+  // now line left the screen. Shift by what the start moved.
+  if (_tlNowPlaced) {
+    if (was && tl.dataset.t0 && was.t0 !== +tl.dataset.t0) rows.scrollLeft = Math.max(0, was.left + (was.t0 - +tl.dataset.t0) / +tl.dataset.span * strip);
+    return;
+  }
+  _tlNowPlaced = true;
   const nowX = (Date.now() - +tl.dataset.t0) / +tl.dataset.span * strip;
   rows.scrollLeft = Math.max(0, nowX - vis / 3);
 }
@@ -40227,9 +40279,13 @@ async function doTransferToTable(newTableId, opts) {
 // Undo of a move onto an empty table: the party walks back — unless, in the
 // six seconds, another till opened the table it went to or someone sat at
 // the one it left. Then the move stands and the toast says why.
-function moveTableBack(fromId, toId) {
+async function moveTableBack(fromId, toId) {
+  // ASK, DON'T REMEMBER: this till's lock list and orders are re-read only at
+  // the poll, so inside the six seconds it never knew another till had just
+  // opened either table — and walked the party out from under that waiter.
+  await Promise.all([refreshTableLocks(), refreshOrders().catch(() => {})]);
   const from = findTableById(fromId), to = findTableById(toId);
-  const held = tableLocksOn() && tableLockedBy(fromId);
+  const held = tableLocksOn() && [fromId, toId].map(tableLockedBy).find(Boolean);
   const taken = to && (state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(to.label)) || (to.covers || 0) > 0);
   if (!from || !to || held || taken) { state.toast = toastFail(held ? `Could not undo — in use, ${held.staff}` : `Could not undo — table ${to ? to.label : ''} is taken`); render(); return; }
   state.transferFrom = fromId;
@@ -44410,14 +44466,14 @@ async function deleteModifierGroupAction(id) {
   }
 }
 
-function setThemeModeDraft(mode) { state.theme = { ...state.theme, mode }; applyTheme(); render(); saveAppearance(); }
+function setThemeModeDraft(mode) { state.theme = { ...state.theme, mode }; applyTheme(); render(); saveAppearance({ mode }); }
 // Dragging the preview's edge moves the value without a re-render, so the
 // stepper has to be told where it landed or it lies until the finger lifts.
 function syncSegbar(field, val) {
   const el = document.querySelector(`.grid-step-val[data-step-val="${field}"]`);
   if (el) el.textContent = SIZE_LABELS[val] || val;
 }
-function setThemeDraft(patch) { state.theme = { ...state.theme, ...patch }; applyTheme(); render(); saveAppearance(); }
+function setThemeDraft(patch) { state.theme = { ...state.theme, ...patch }; applyTheme(); render(); saveAppearance(patch); }
 
 
 async function setSeatNumbersEnabled(val) {
@@ -44546,6 +44602,16 @@ async function remapCourseRefs(mapFn) {
     const groups = c.groups.map(g => Object.assign({}, g, g.course ? { course: mapFn(g.course) } : {}));
     jobs.push(api('/api/combos/' + c.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ groups }) }));
   });
+  // …and a note riding with a course ("Candle — with Dessert"): it kept the
+  // old number, so deleting an empty course before Dessert sent the candle
+  // out with whatever moved into that slot, or with none at all (13 Oct '26
+  // hunt). One whose course went goes back to All night — on the head.
+  (state.floorPlans || []).forEach(fp => (fp.tables || []).forEach(t => {
+    if (!(t.notes || []).some(n => n && n.course && mapFn(n.course) !== n.course)) return;
+    const notes = t.notes.map(n => { if (!n || !n.course) return n; const to = mapFn(n.course); const x = { ...n }; if (to) x.course = to; else delete x.course; return x; });
+    t.notes = notes; if (String(state.table) === String(t.id)) state.notes = notes;
+    jobs.push(api(`/api/floorplans/${fp.id}/tables/${t.id}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notes }) }));
+  }));
   if (!jobs.length) return;
   try {
     await Promise.all(jobs);
@@ -44908,7 +44974,8 @@ async function saveNoteCategories(categories) {
   try {
     state.noteCategories = normNoteCategories(await api('/api/note-categories', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ categories }) }));
     // A rename sweeps item tags and table notes server-side - pull them in.
-    try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); } catch (e2) {}
+    // …and a new type joins the docket's list of types it shows.
+    try { state.menu = await api('/api/menu'); state.floorPlans = await api('/api/floorplans'); const st = await api('/api/settings'); state.settings.docket = st.docket; state.settings.docketDesigns = st.docketDesigns; } catch (e2) {}
     render();
   } catch (e) { listRefused(e, async () => { state.noteCategories = normNoteCategories(await api('/api/note-categories')); }); }
 }
@@ -45302,10 +45369,14 @@ async function settingRefused(e) {
   render(); armToastTimer(TOAST_LONG);
 }
 
-async function saveAppearance() {
+// THE LOOK IS ONE RECORD FOR THE VENUE, so a change sends only what changed
+// (13 Oct '26 hunt): the whole look went every time, and a till signed in
+// before the office switched dark mode on sent its old light look back with
+// its next size change — for every till.
+async function saveAppearance(patch) {
   try {
-    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, subcatSize: state.theme.subcatSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, gridCols: state.theme.gridCols, gridRows: state.theme.gridRows, lockStyle: state.theme.lockStyle }) });
-    state.theme = theme;
+    const theme = await api('/api/theme', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch || { accent: state.theme.accent, mode: state.theme.mode, itemSize: state.theme.itemSize, tileHeight: state.theme.tileHeight, fontSize: state.theme.fontSize, tktFontSize: state.theme.tktFontSize, subcatSize: state.theme.subcatSize, railHeight: state.theme.railHeight, tileGap: state.theme.tileGap, tktGap: state.theme.tktGap, gridCols: state.theme.gridCols, gridRows: state.theme.gridRows, lockStyle: state.theme.lockStyle }) });
+    state.theme = theme; _srvTheme = JSON.parse(JSON.stringify(theme || {}));
     applyTheme();
   } catch (e) {
     state.toast = toastFail('Could not save appearance.');
@@ -51135,7 +51206,7 @@ setInterval(() => {
           // AND EVERYTHING ELSE A TILL SELLS BY (11 Oct '26): GST switched to
           // "added on top" on one till left another asking $99 while the server
           // took $108.90 in cash; a stale void-reason list saved over the new one.
-          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets', '/api/sales-categories'].map(u => api(u).catch(() => null))) : null]); })
+          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets', '/api/sales-categories', '/api/theme'].map(u => api(u).catch(() => null))) : null]); })
         .then(([menu, cats, subs, combos, mods, hhs, rest]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs;
           if (rest) _restOwed = typingInField();
           if (rest && !_restOwed) {
@@ -51156,6 +51227,17 @@ setInterval(() => {
             // …and the sales groups (12 Oct '26): the bill on screen filed a
             // dish under no heading while the printed bill named its new group.
             if (Array.isArray(rest[7])) state.salesCategories = rest[7];
+            // …and the venue's look (13 Oct '26 hunt): dark mode switched on at
+            // the office stayed light on the floor until a reload. Key by key,
+            // like the settings, so a look this till is trying out stays.
+            const th = rest[8];
+            if (th && typeof th === 'object' && !Array.isArray(th)) {
+              const was = _srvTheme || {};
+              let moved = false;
+              Object.keys(th).forEach(k => { if (JSON.stringify(th[k]) !== JSON.stringify(was[k])) { state.theme[k] = th[k]; moved = true; } });
+              _srvTheme = JSON.parse(JSON.stringify(th));
+              if (moved) applyTheme();
+            }
           } if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (storeMoved) _restOwed = true; if (!typingInField()) renderWhenStill(); });
     });

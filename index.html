@@ -5664,6 +5664,8 @@ select.ie-field{font-weight:700;}
   box-shadow:inset 0 0 0 var(--ring) var(--glass-rim); -webkit-mask-image:-webkit-radial-gradient(white, black); }
 .fp-float .track .fp-chip{ background:none; -webkit-backdrop-filter:none; backdrop-filter:none; box-shadow:none; -webkit-mask-image:none; color:var(--text-primary); }
 .fp-float .track .fp-chip.active{ background:var(--glass-on); color:var(--here-ink); box-shadow:none; }
+.track > .lit-slide{ position:absolute; z-index:0; pointer-events:none; } /* the light on its way to the picked key — app.js § THE LIT KEY SLIDES */
+.fp-float .track .fp-chip.active.lit-going{ background:none; transition:none; } /* the light lands as a hand-over, never a second fade */
 /* THE VIEWS ARE A SWITCH ON TOP (owner, 9 Oct '26: "I like J", picked from
    eleven places drawn for the bar and the keys, then "Build it"). Map · Pass
    · Timeline · Bills sit centred at the top of the floor like a phone's photo
@@ -24793,7 +24795,7 @@ function snapshotMotion() {
   if (motionOff()) return null;
   const lineTops = {}, qtys = {}, bases = new Set();
   _lineKeys().forEach(L => { lineTops[L.key] = L.top; if (L.qty != null) qtys[L.key] = L.qty; bases.add(L.base); });
-  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001'), flips: _flipTops(), washes: _washSnap(), panel: _panelKey(), money: _moneySnap() };
+  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001'), flips: _flipTops(), washes: _washSnap(), panel: _panelKey(), money: _moneySnap(), lit: _litSnap() };
 }
 // NOTHING TELEPORTS (owner, 12 Oct '26, picked from filmed before/afters:
 // "Pass rows make room", "Kitchen tickets glide to place"). A list the till
@@ -24809,6 +24811,44 @@ function _flipTops() {
     const r = el.getBoundingClientRect(); out[sel + '|' + el.dataset[k]] = [r.left, r.top];
   }));
   return out;
+}
+// THE LIT KEY SLIDES (owner, 13 Oct '26: "Maybe the selected button
+// there's a move graphic instead of instant switch" → "Can you get it to
+// slide?"). Map · Pass · Timeline · Bills lit one key and put it out on the
+// other in the same frame; now the light travels from the key you left to
+// the key you picked (iPhone switches, Apple Music's tabs). One mechanism: a
+// copy of the lit key's own paint rides under the words for --t-move, the
+// picked key stays bare until it lands, then wears its own light again —
+// so the resting look is untouched. A track joins SLIDE_TRACKS to slide too.
+const SLIDE_TRACKS = ['.fp-float-views'];
+function _litSnap() {
+  const out = {};
+  SLIDE_TRACKS.forEach(sel => { const t = document.querySelector(sel), on = t && t.querySelector(':scope > .active');
+    if (on) { const a = t.getBoundingClientRect(), r = on.getBoundingClientRect(); out[sel] = { x: r.left - a.left, y: r.top - a.top, w: r.width, h: r.height, i: [...t.querySelectorAll(':scope > button')].indexOf(on) }; } });
+  return out;
+}
+let _litRide = {}; // sel → { from, to, at } — a redraw inside the slide carries it on from where it was
+function _applyLit(prev) {
+  const was = prev.lit || {}, ms = _motionMs('--t-move'), now = performance.now();
+  if (!ms) return;
+  SLIDE_TRACKS.forEach(sel => {
+    const w = was[sel], t = document.querySelector(sel), on = t && t.querySelector(':scope > .active');
+    if (!on) { delete _litRide[sel]; return; }
+    const i = [...t.querySelectorAll(':scope > button')].indexOf(on), a = t.getBoundingClientRect(), r = on.getBoundingClientRect();
+    const to = { x: r.left - a.left, y: r.top - a.top, w: r.width, h: r.height, i };
+    let ride = _litRide[sel];
+    if (w && w.i !== i) ride = _litRide[sel] = { from: w, at: now };
+    else if (!ride || ride.to.i !== i || now - ride.at >= ms) { delete _litRide[sel]; return; }
+    ride.to = to;
+    const cs = getComputedStyle(on), g = document.createElement('i');
+    g.className = 'lit-slide';
+    g.style.cssText = `left:${to.x}px;top:${to.y}px;width:${to.w}px;height:${to.h}px;background:${cs.backgroundColor};border-radius:${cs.borderRadius}`;
+    t.prepend(g); on.classList.add('lit-going');
+    const anim = g.animate([{ transform: `translate(${ride.from.x - to.x}px,${ride.from.y - to.y}px)`, width: ride.from.w + 'px' }, { transform: 'none', width: to.w + 'px' }],
+      { duration: ms, easing: 'cubic-bezier(.2,.8,.2,1)' });
+    anim.currentTime = now - ride.at;
+    anim.onfinish = () => { g.remove(); on.style.transition = 'none'; on.classList.remove('lit-going'); void on.offsetWidth; on.style.transition = ''; if (_litRide[sel] === ride) delete _litRide[sel]; };
+  });
 }
 function _motionMs(tok) { return (parseFloat(getComputedStyle(document.documentElement).getPropertyValue(tok)) || 0) * 1000; }
 function _applyFlips(prev) {
@@ -25056,6 +25096,7 @@ function applyMotion(prev) {
   _applyFlips(prev);
   _applyWashes(prev);
   _applyMoney(prev);
+  _applyLit(prev);
 }
 let _lastMenuGridGeom = null;
 // Biggest table in the whole venue — the seat pad is built to hold it.

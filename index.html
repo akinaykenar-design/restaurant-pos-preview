@@ -38200,6 +38200,15 @@ function billsOn() { return floorViewOn('bills'); }
 // what was sent, what was called away (stamped on the order, so every till
 // agrees) and what the kitchen screen marked served. A course the kitchen has
 // already moved past — a later one was called — is done.
+// Does this venue's kitchen mark dishes (the cook's screen's Ready/Served)?
+// Read off today's tickets, at most once every few seconds.
+let _kdsMarks = { at: 0, v: false };
+function kitchenMarksDishes() {
+  const now = Date.now();
+  if (now - _kdsMarks.at < 5000) return _kdsMarks.v;
+  _kdsMarks = { at: now, v: (state.orders || []).some(o => (o.items || []).some(i => i.status === 'ready' || i.status === 'served')) };
+  return _kdsMarks.v;
+}
 function passCells(o, courses) {
   const fired = o.firedCourses || {};
   const firedNs = Object.keys(fired).filter(k => fired[k] > 0).map(Number);
@@ -38228,7 +38237,23 @@ function passCells(o, courses) {
     const items = courseLines(o.items).filter(i => (i.course || 1) === n && i.qty > 0);
     if (!items.length) return { n, kind: 'none' };
     if (items.every(i => i.status === 'served') || passed(n)) return { n, kind: 'done', items };
-    if (fired[n] > 0) return { n, kind: 'away', since: awaySince(n, items), items };
+    if (fired[n] > 0) {
+      const since = awaySince(n, items);
+      // A LATE ALARM ENDS WHEN THE FOOD MUST BE OUT (owner, 13 Oct '26: "build
+      // late red ending at 30 min"). A venue on paper dockets never marks a
+      // dish served, so the last course called stayed red until the bill —
+      // half the Pass shouting at 9:30 about food eaten an hour ago, and a red
+      // nobody can act on teaches staff to ignore the red that matters (ICU
+      // alarm-fatigue research). Red from the course's late minutes until late
+      // + the kitchen's cook time (15 + 15 out of the box), then the quiet
+      // Done the Pass already draws. A venue whose kitchen marks dishes keeps
+      // today's reading: there, served IS the ending.
+      if (since && !kitchenMarksDishes()) {
+        const endMs = (pillClockMins('course').over + kitchenTrafficCfg().cookMins) * 60000;
+        if (Date.now() - since >= endMs) return { n, kind: 'done', items, ended: true };
+      }
+      return { n, kind: 'away', since, items };
+    }
     const cell = { n, kind: 'hold', since: sentAt[n], items };
     if (!next) { next = true; cell.next = true; }
     return cell;

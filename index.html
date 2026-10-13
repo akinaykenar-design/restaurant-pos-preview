@@ -13471,7 +13471,7 @@ app.get('/api/version', (req, res) => { res.json(dataVersion()); });
 
 app.get('/api/table-locks', (req, res) => {
   const out = {};
-  for (const [id, l] of tableLocks) if (lockFresh(l)) out[id] = { staff: l.staff, device: l.device };
+  for (const [id, l] of tableLocks) if (lockFresh(l)) out[id] = { staff: l.staff, staffId: l.staffId || null, device: l.device };
   res.json(out);
 });
 // A manager's unlock used to last 15s: the freed till's heartbeat took the
@@ -13481,10 +13481,15 @@ app.get('/api/table-locks', (req, res) => {
 const forcedFree = new Map(); // tableId -> { device, at }
 const FORCED_FREE_MS = 2 * 60 * 1000;
 app.post('/api/table-locks/claim', (req, res) => {
-  const { tableId, staff, device, force, retake } = req.body || {};
+  const { tableId, staff, staffId, device, force, retake } = req.body || {};
   if (!tableId || !device) return res.status(400).json({ error: 'tableId and device required' });
   const cur = tableLocks.get(String(tableId));
-  if (lockFresh(cur) && cur.device !== String(device) && !force) {
+  // YOUR OWN TABLE, ANY TILL (owner, 13 Oct '26: "do them all", from a
+  // drawing borrowed from Apple Handoff): the same staff member on another
+  // till carries on — the hold moves with them; the first till lets go at
+  // its next heartbeat. Judged by the staff id, not the name.
+  const mine = retake && cur && staffId && cur.staffId && String(cur.staffId) === String(staffId); // a tap, never a heartbeat: two tills must not trade it back and forth
+  if (lockFresh(cur) && cur.device !== String(device) && !force && !mine) {
     return res.status(409).json({ error: `In use — ${cur.staff}`, staff: cur.staff });
   }
   const freed = forcedFree.get(String(tableId));
@@ -13492,7 +13497,7 @@ app.post('/api/table-locks/claim', (req, res) => {
     return res.status(409).json({ error: 'Unlocked by a manager', released: true });
   }
   forcedFree.delete(String(tableId));
-  tableLocks.set(String(tableId), { staff: String(staff || 'Someone'), device: String(device), ts: Date.now() });
+  tableLocks.set(String(tableId), { staff: String(staff || 'Someone'), staffId: staffId ? String(staffId).slice(0, 60) : null, device: String(device), ts: Date.now() });
   res.json({ ok: true });
 });
 app.post('/api/table-locks/release', (req, res) => {
@@ -38034,7 +38039,9 @@ const DEVICE_ID = (() => {
 function tableLocksOn() { return state.settings.tableLockEnabled !== false; }
 function tableLockedBy(tableId) {
   const l = (state.tableLocks || {})[String(tableId)];
-  return l && l.device !== DEVICE_ID ? l : null;
+  // Your own hold on another till is not a wall: a tap carries it over
+  // (Apple Handoff, 13 Oct '26).
+  return l && l.device !== DEVICE_ID && !(l.staffId && state.currentStaff && String(l.staffId) === String(state.currentStaff.id)) ? l : null;
 }
 // Returns true (ours), 'busy' (another till holds it — the server said 409),
 // 'released' (a manager unlocked it from under us) or false (no server).
@@ -38043,7 +38050,7 @@ function tableLockedBy(tableId) {
 async function claimTableLock(tableId, force, retake) {
   if (!tableLocksOn() || tableId == null) return true;
   try {
-    await api('/api/table-locks/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID, force: !!force, retake: !!retake }) });
+    await api('/api/table-locks/claim', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tableId, staff: state.currentStaff ? state.currentStaff.name : 'Someone', staffId: state.currentStaff ? state.currentStaff.id : null, device: DEVICE_ID, force: !!force, retake: !!retake }) });
     state.tableLocks = { ...(state.tableLocks || {}), [String(tableId)]: { staff: state.currentStaff ? state.currentStaff.name : 'Someone', device: DEVICE_ID } };
     if (state._lockReleased === String(tableId)) state._lockReleased = null;
     if (state._lostTable === String(tableId)) state._lostTable = null;

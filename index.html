@@ -24723,8 +24723,8 @@ function applySentFlash(lines) {
   if (!f) return;
   const gone = Date.now() - f.at;
   if (gone >= sentFlashMs()) { state._sentFlash = null; sweepSentFlash(); return; }
-  lines.forEach(({ el, base }) => {
-    if (!el.classList.contains('sent') || !f.names.has(base.slice(0, -2))) return;
+  lines.forEach(({ el, base, key }) => {
+    if (!el.classList.contains('sent') || !(f.names.has(base.slice(0, -2)) || (f.keys && f.keys.has(key)))) return;
     el.style.animationDelay = '-' + gone + 'ms';
     el.classList.add('mo-just-sent');
   });
@@ -24789,7 +24789,7 @@ function snapshotMotion() {
 // the eye was suddenly another one. Each row is keyed; one that survived the
 // redraw glides from where it was (--t-move), one that is new fades in
 // (--t-state). The same trick the docket's lines use (iOS lists, Apple Maps).
-const FLIP_LISTS = [['.pass-rows .pass-row', 'id'], ['.kds-ticket', 'order']];
+const FLIP_LISTS = [['.pass-rows .pass-row', 'id'], ['.kds-ticket', 'order'], ['.bills .bl-card', 'id']]; // Bills joined 13 Oct '26: a bill printed on another till moved every card a column
 function _flipTops() {
   const out = {};
   FLIP_LISTS.forEach(([sel, k]) => document.querySelectorAll(sel).forEach(el => {
@@ -24919,8 +24919,28 @@ function applyMotion(prev) {
     const name = base.slice(0, -2);
     if (!prev.bases.has(name + '|n') || prev.bases.has(name + '|s')) return;
     const f = state._sentFlash;
-    if (!f || Date.now() - f.at > sentFlashMs()) state._sentFlash = { names: new Set([name]), at: Date.now() };
+    if (!f || Date.now() - f.at > sentFlashMs()) state._sentFlash = { names: new Set([name]), keys: new Set(), at: Date.now() };
     else f.names.add(name);
+  });
+  // …AND A DISH ORDERED AGAIN LIGHTS UP TOO (owner, 12 Oct '26: "do the calm
+  // animations"). The rule above only lit a name never sent before, so a
+  // second round of Olives dropped straight to the sent grey while a new dish
+  // beside it held and faded — the most common round told the least. A repeat
+  // is lit by the LINE, not the name, so the first round's Olives stay still:
+  // the line that was waiting a moment ago (same place) or whose sent count
+  // grew is the one that just went.
+  const pendTops = {};
+  Object.keys(prev.lineTops).forEach(k => { const m = k.match(/^(.*)\|n#\d+$/); if (m) (pendTops[m[1]] = pendTops[m[1]] || []).push(prev.lineTops[k]); });
+  lines.forEach(({ el, base, key, top, qty }) => {
+    if (!el.classList.contains('sent')) return;
+    const name = base.slice(0, -2);
+    if (!prev.bases.has(name + '|n') || !prev.bases.has(name + '|s')) return;
+    const wasHere = (pendTops[name] || []).some(t => Math.abs(t - top) < 4);
+    const grew = key in prev.qtys && qty != null && qty > prev.qtys[key];
+    if (!wasHere && !grew) return;
+    const f = state._sentFlash;
+    if (!f || Date.now() - f.at > sentFlashMs()) state._sentFlash = { names: new Set(), keys: new Set([key]), at: Date.now() };
+    else (f.keys = f.keys || new Set()).add(key);
   });
   applySentFlash(lines);
   lines.forEach(L => {
@@ -37107,6 +37127,10 @@ function upcomingBookingFor(tableId, aheadMin) {
 // thing they are deciding with (seat a walk-in or not). It joins the table's
 // upright stack under its pill, so a turned table reads it level and two
 // badges never land on each other.
+// NOTHING UNDER A TABLE WITHOUT A KEY LIT (owner, 13 Oct '26: "none of this
+// without a filter attached"): the "in 44m" booking chip sat under tables
+// on the plain floor. It shows only while a floor key is lit; the Booked key's
+// own pill already says it.
 function tableResChip(t) {
   if (t.type === 'decor') return '';
   const r = upcomingBookingFor(t.id, 180);
@@ -37713,7 +37737,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // own corner, so it turned with a turned table, lay over the number and
   // clipped the name to "Jam…" (owner's walk, Sep '26).
   const lockHtml = opts.lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(opts.lock.staff)}</span>` : '';
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock || !state.floorStatusView || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
 }
 
 // EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
@@ -38457,7 +38481,7 @@ function billDocket(o) {
   const door = t ? `data-act="pick-table" data-id="${t.id}"`
     : o.orderType !== 'dine-in' ? `data-act="open-takeaway" data-id="${o.id}"` : `data-act="detail" data-id="${o.id}"`;
   return `
-      <div class="bl-card${billSpendLevel(o) ? ' spend-' + billSpendLevel(o) : ''}">
+      <div class="bl-card${billSpendLevel(o) ? ' spend-' + billSpendLevel(o) : ''}" data-id="${o.id}">
         <button class="bl-door" ${door} aria-label="Open ${esc(name)}">${esc(name)}</button>
         <div class="bl-mid" data-act="bill-unfold" data-id="${o.id}" role="button" aria-expanded="${unfolded}">${st ? `<div class="bl-st ${st[0]}">${esc(st[1])}</div>` : ''}<small>${esc(meta)}</small></div>
         <b class="bl-owe" data-act="bill-unfold" data-id="${o.id}" aria-label="${paid > 0.005 ? 'Left to pay' : 'To pay'}">${money(Math.max(0, billTotal(o) - paid))}</b>
@@ -39054,7 +39078,7 @@ function renderTablePickerMiddle() {
                    badges do too — a turned plan table hung its stack upside
                    down above the button. The booking countdown sits INSIDE
                    the button here: under it, it landed on the next row. */ ''}
-              ${!lock && state.floorStatusView !== 'booked' ? tableResChip(t) : ''}
+              ${!lock && state.floorStatusView && state.floorStatusView !== 'booked' ? tableResChip(t) : ''}
               ${uprightBadges({ ...t, rotation: 0 }, (() => { const loud = missedBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return loud || (!lock ? landingBadgeHtml(t) : ''); })())}
               ${transferFxHtml(t)}
             </div>`;

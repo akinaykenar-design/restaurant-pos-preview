@@ -40019,6 +40019,11 @@ function transferToTable(newTableId, extra) {
   const srcN = qtyOf(srcOrder) + (oldTableId === state.table ? state.cart.reduce((s, i) => s + (i.qty || 1), 0) : 0);
   const destN = qtyOf(destOpenOrder);
   const part = (lbl, n) => n ? `${lbl} (${n} item${n === 1 ? '' : 's'})` : lbl;
+  // ONTO AN EMPTY TABLE IT JUST MOVES, with Undo (owner, 13 Oct '26: "do
+  // them all"). Nothing there can be lost, so the question was a speed bump;
+  // the toast's Undo walks the party back. Onto a table with a tab or a
+  // sitting it still asks: two tabs becoming one is not a slip to undo.
+  if (!destOpenOrder && !(newTable.covers > 0) && !(newTable.notes || []).length) { doTransferToTable(newTableId, { undoable: true }); return; }
   openConfirm({
     message: destOpenOrder
       ? `Move ${part(tableDisplayLabel(oldTableId), srcN)} to ${part(tableDisplayLabel(newTableId), destN)}? The two tabs become one.`
@@ -40029,7 +40034,7 @@ function transferToTable(newTableId, extra) {
     onCancel: extra && extra.onCancel,
   }, () => doTransferToTable(newTableId));
 }
-async function doTransferToTable(newTableId) {
+async function doTransferToTable(newTableId, opts) {
   const oldTableId = state.transferFrom || state.table;
   const oldTable = findTableById(oldTableId);
   const newTable = findTableById(newTableId);
@@ -40129,10 +40134,23 @@ async function doTransferToTable(newTableId) {
   state.transferFx = { tableId: newTableId, from: String(movedLabel || '') };
   clearTimeout(_transferFxTimer);
   _transferFxTimer = setTimeout(() => { state.transferFx = null; render(); }, 2400);
-  state.toast = combined ? `Combined table ${String(movedLabel)} into ${String(newTable.label)}`
+  const said = combined ? `Combined table ${String(movedLabel)} into ${String(newTable.label)}`
     : movingOwn ? `Moved to ${tableDisplayLabel(newTableId)}` : `Moved table ${String(movedLabel)} to ${String(newTable.label)}`;
+  if (opts && opts.undoable && !combined && oldTableId) { offerUndo(said, () => moveTableBack(newTableId, oldTableId)); return; }
+  state.toast = said;
   render();
   armToastTimer(TOAST_SHORT);
+}
+// Undo of a move onto an empty table: the party walks back — unless, in the
+// six seconds, another till opened the table it went to or someone sat at
+// the one it left. Then the move stands and the toast says why.
+function moveTableBack(fromId, toId) {
+  const from = findTableById(fromId), to = findTableById(toId);
+  const held = tableLocksOn() && tableLockedBy(fromId);
+  const taken = to && (state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(to.label)) || (to.covers || 0) > 0);
+  if (!from || !to || held || taken) { state.toast = toastFail(held ? `Could not undo — in use, ${held.staff}` : `Could not undo — table ${to ? to.label : ''} is taken`); render(); return; }
+  state.transferFrom = fromId;
+  doTransferToTable(toId);
 }
 let _transferFxTimer = 0;
 // The chip + bloom that mark where a moved table landed (floor + simple grid).
@@ -48794,8 +48812,11 @@ function handleActClick(el, e) {
       else if (act === 'clear') {
         // Money has been taken on this table — the bill has to be finished.
         if (splitPaidList().length) { state.toast = toastFail('Parts of this bill are paid — finish it.'); render(); return; }
-        // Discarding wipes the unsent items — confirm first (mirrors log-off).
-        if (state.cart.length) openConfirm({ message: 'Discard the unsent items on this docket?', confirmLabel: 'Discard', danger: true }, () => discardCartUndoable());
+        // UNDO, NOT "ARE YOU SURE?" (owner, 13 Oct '26: "do them all", from a
+        // drawing borrowed from Gmail's Undo send): the round goes at once and
+        // the toast carries Undo for six seconds — the question only stood in
+        // front of an Undo that was already there.
+        if (state.cart.length) discardCartUndoable();
         else clearCart();
       }
       else if (act === 'checkout') { openCheckout(); }

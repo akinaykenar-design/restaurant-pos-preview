@@ -1738,7 +1738,7 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   .modal-bg, .pop-scrim{ animation: none; }
   .modal-bg .modal{ animation: mo-settle var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .middle-view, .mo-swap{ animation: mo-fade var(--t-state) ease; } /* ONE SCREEN SWITCH (12 Oct '26): a screen arrives by a fade, nothing moves; popups keep their settle, the floor its slide */
-  :root{ --hub-in: mo-fade var(--t-state) ease; --floor-in: none; /* A FLOOR WITH NOTHING BEHIND IT DOES NOT SLIDE (slide law 12): the entrance belongs to the JOURNEY, not to the floor, so it is off until the floor is actually coming over an order screen. THE MAP USES ONE CURVE BOTH WAYS (owner, Sep '26: "one slide seems faster than the other"). It came in on the pane curve — a decelerate, most of the distance covered early — and went out on ease. Same duration, different shape, so the two directions did not match. Ease is the phone's, and the phone is the one that reads right. */ }
+  :root{ --hub-in: mo-fade var(--t-state) ease; --floor-in: mo-fade var(--t-state) ease; /* …but it still arrives by the one fade, like every screen (13 Oct '26 audit: after login the floor appeared in one frame). A FLOOR WITH NOTHING BEHIND IT DOES NOT SLIDE (slide law 12): the entrance belongs to the JOURNEY, not to the floor, so it is off until the floor is actually coming over an order screen. THE MAP USES ONE CURVE BOTH WAYS (owner, Sep '26: "one slide seems faster than the other"). It came in on the pane curve — a decelerate, most of the distance covered early — and went out on ease. Same duration, different shape, so the two directions did not match. Ease is the phone's, and the phone is the one that reads right. */ }
   body[data-tp-over]{ --floor-in: pane-in-left var(--t-map) ease; }
   /* Admin is a pane that appears, so it settles in like the others — it used
      to just be there, while the floor slid in on the way back (owner, Sep
@@ -1760,6 +1760,7 @@ input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-
   .qty-pop{ animation: mo-pad var(--t-state) cubic-bezier(.2,.8,.3,1); } /* every pad arrives the same way: the 8 and .975 the covers and options pads use (calm audit, Sep '26) */
   .qty-pop.covers-pop, .io-pop{ animation: mo-pop var(--t-state) cubic-bezier(.2,.8,.3,1); }
   .toast{ animation: mo-rise .18s cubic-bezier(.2,.8,.3,1); }
+  .osk.open{ --pop-y:0px; animation: mo-pop var(--t-state) cubic-bezier(.2,.8,.3,1); } /* the keyboard is a pad: it settles once, like every pad (13 Oct '26 audit) */
   .toast.leaving{ opacity:0; transform:translate(-50%, 8px); transition:opacity .18s ease, transform .18s ease; } /* it LEAVES the way it came, not in one frame (calm audit, Sep '26) */
   /* THE ROUND THAT JUST WENT simply FADES to its sent look — no colour, no
      mark. The state change is the feedback; that is what the good apps do
@@ -24322,6 +24323,7 @@ function render() {
   if (!state.currentStaff) {
     app.innerHTML = renderLoginScreen() + (state.frozen ? renderFreezeOverlay() : '');
     bindEvents();
+    fadeArrivals();
     return;
   }
 
@@ -24791,7 +24793,7 @@ function snapshotMotion() {
   if (motionOff()) return null;
   const lineTops = {}, qtys = {}, bases = new Set();
   _lineKeys().forEach(L => { lineTops[L.key] = L.top; if (L.qty != null) qtys[L.key] = L.qty; bases.add(L.base); });
-  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001'), flips: _flipTops(), washes: _washSnap() };
+  return { surfaces: _motionSurfaces(), lineTops, qtys, bases, lineSet: Object.keys(lineTops).sort().join('\u0001'), flips: _flipTops(), washes: _washSnap(), panel: _panelKey() };
 }
 // NOTHING TELEPORTS (owner, 12 Oct '26, picked from filmed before/afters:
 // "Pass rows make room", "Kitchen tickets glide to place"). A list the till
@@ -24873,6 +24875,38 @@ function _middleKeys() {
   });
   return keys;
 }
+// EVERY PIECE OF A SCREEN ARRIVES BY THE ONE FADE (owner, 13 Oct '26: "i
+// don't think the pay screen fades in, check everything"). The audit found the
+// Pay screen fading only its middle: the rail on the left turned into Card /
+// Cash / Vouchers and the docket turned into the bill in one frame, so the
+// eye saw a snap. Each piece below is keyed by WHAT IT IS; when that changes
+// it fades once, and a render inside the fade carries it on rather than
+// restarting or stopping it. Card and Cash are choices on one form, not
+// screens, so they share a key.
+const _midArrived = {};
+const ARRIVALS = [
+  ['.main > .catrail', el => el.querySelector('[data-act="pay-rail"]') ? 'pay' : 'menu'],
+  ['.main > .ticket-panel', el => el.classList.contains('split-panel') ? 'split' : el.classList.contains('bill-panel') ? 'bill' : 'docket'],
+  ['.pay-pane:not(.line-edit-pane)', () => { const a = document.querySelector('.catrail .cat-btn.active[data-act="pay-rail"]'); const v = a ? a.dataset.val : ''; return v === 'card' || v === 'cash' ? 'pay' : v; }],
+  ['.kds-view', () => 'kds'],
+  ['.login-screen:not(.freeze-scrim)', () => 'login'],
+  ['.freeze-scrim', () => 'lock'],
+];
+const _arrived = {};
+function _panelKey() { const el = document.querySelector('.main > .ticket-panel'); return el ? ARRIVALS[1][1](el) : ''; }
+function fadeArrivals() {
+  if (motionOff()) return;
+  const now = performance.now(), dur = _motionMs('--t-state') || 120;
+  for (const [sel, keyOf] of ARRIVALS) {
+    const el = document.querySelector(sel);
+    if (!el) { delete _arrived[sel]; continue; }
+    const k = keyOf(el), m = _arrived[sel];
+    if (!m || m.k !== k) _arrived[sel] = { k, at: now };
+    const gone = now - _arrived[sel].at;
+    if (!m && sel.startsWith('.main')) continue; // the first screen after a reload arrives with the page, not as a switch
+    if (gone < dur) el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: dur, delay: -gone, easing: 'ease' });
+  }
+}
 function applyMotion(prev) {
   if (!prev) return;
   const cur = _motionSurfaces();
@@ -24894,7 +24928,17 @@ function applyMotion(prev) {
   // constant re-renders; the floor is judged on its own, so the hub under it
   // keeps still while the map slides.
   const prevKeys = new Set(prev.surfaces.middleKeys || []);
-  _middleKeys().forEach((el, k) => { el.style.animation = prevKeys.has(k) ? 'none' : ''; });
+  // …and a SECOND render inside the fade carries it on from where it was
+  // (13 Oct '26 audit: Discount → Card rendered twice, and the second render
+  // stamped the arrival still at 0 — no fade at all).
+  const tNow = performance.now(), fadeMs = _motionMs('--t-state') || 120;
+  _middleKeys().forEach((el, k) => {
+    if (!prevKeys.has(k)) { _midArrived[k] = tNow; el.style.animation = ''; return; }
+    const gone = tNow - (_midArrived[k] || -1e9);
+    if (gone < fadeMs) { el.style.animation = ''; el.style.animationDelay = -Math.round(gone) + 'ms'; }
+    else el.style.animation = 'none';
+  });
+  fadeArrivals();
   // Admin settles in once, on arrival — not on every tab change inside it.
   const ad = document.querySelector('.admin-shell');
   if (ad && prev.surfaces.admin) ad.style.animation = 'none';
@@ -24962,7 +25006,9 @@ function applyMotion(prev) {
     // Glide ONLY when the same set of lines changed ORDER (course move,
     // merge). A new line pushing the others down must not send the whole
     // docket sliding (owner: "items act weird when you add them").
-    if ((sameSet || shrank) && key in prev.lineTops) {
+    // …never across a panel change: the docket becoming the bill or the split
+    // is a new screen piece, and it fades rather than sliding its lines.
+    if ((sameSet || shrank) && key in prev.lineTops && prev.panel === _panelKey()) {
       const d = prev.lineTops[key] - L.top;
       if (Math.abs(d) >= 6 && Math.abs(d) < 500) {
         el.style.transition = 'none';

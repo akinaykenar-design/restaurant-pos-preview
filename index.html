@@ -6733,6 +6733,9 @@ body[data-theme="dark"]{ --spend-1:color-mix(in srgb, var(--green) 14%, var(--su
 .bl-card[class*="spend-"] .bl-grp{ color:inherit; }
 .spend-swatch{ flex:none; width:24px; height:24px; border-radius:var(--btn-radius); box-shadow:inset 0 0 0 var(--ring) var(--tbl-edge); }
 .spend-swatch.spend-1{ background:var(--spend-1); } .spend-swatch.spend-2{ background:var(--spend-2); } .spend-swatch.spend-3{ background:var(--spend-3); }
+/* REMIND ME AT DESSERT (13 Oct '26): a note riding with a course comes back on that course's box once it is called — on a white strip so it reads on any course colour. */
+.course-remind{ display:block; margin-top:4px; padding:4px 8px; border-radius:var(--btn-radius); background:var(--surface); color:var(--text-primary); font-size:var(--fs-chip); line-height:1.35; }
+.course-remind i{ font-style:normal; color:var(--text-secondary); }
 </style>
 <div id="app">Loading…</div>
 <div class="turn-card" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="13" rx="2"/><path d="M12 2v3M10 3.5l2 1.5 2-1.5"/></svg><b>Turn it sideways</b><span>The till works lying down</span></div>
@@ -11491,6 +11494,9 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
         // The one line of words that rides with the picks — an allergy entry
         // has carried one for months; every note type has one now.
         note: String((n && n.note) || '').trim().slice(0, 200),
+        // A note may ride with a course ("Birthday — candle" with Dessert): it
+        // stays off the kitchen's head until that course is called away.
+        ...(parseInt(n.course) > 0 ? { course: parseInt(n.course) } : {}),
       }));
   }
   if (mergedInto !== undefined) table.mergedInto = mergedInto || null;
@@ -12450,7 +12456,7 @@ app.post('/api/orders/:id/print-course', (req, res) => {
   const courseName = (((data.settings || {}).courses || [])[course - 1] || {}).name || `Course ${course}`;
   // A call-away prints a SLIM slip (banner + course + table) — not the whole
   // course again; the kitchen already has those items from the send.
-  printing.printCallAwaySlips(data, order, items, courseName);
+  printing.printCallAwaySlips(data, order, items, courseName, course);
   // Remember which courses have been called away (drives "next course" on the
   // table peek) and reset the call-away timer, same as a floor call-away.
   order.firedCourses = order.firedCourses || {};
@@ -12564,7 +12570,7 @@ app.post('/api/printers/print-sample', (req, res) => {
   const course = Math.max(...order.items.map(i => i.course || 1));
   const items = order.items.filter(i => (i.course || 1) === course);
   if (kind === 'callaway') {
-    printing.printCallAwaySlips(data, order, items, printing.courseNameOf(data.settings, course));
+    printing.printCallAwaySlips(data, order, items, printing.courseNameOf(data.settings, course), course);
     return res.json({ ok: true });
   }
   printing.printDocketsForRound(data, order, items, 0);
@@ -17878,8 +17884,8 @@ function printKitchenDocket(courseNumber) {
     covers: state.settings.coversEnabled && state.covers ? state.covers : null,
     timeLabel: fmtTime(Date.now()),
     orderNo: null,
-    vip: (notesOfType('vip', table && table.notes)[0] || {}).text || null,
-    allergies: notesOfType('allergy', table && table.notes)
+    vip: (notesOfType('vip', table && table.notes).filter(n => !n.course)[0] || {}).text || null,
+    allergies: notesOfType('allergy', table && table.notes).filter(n => !n.course)
       .map(n => ({ seat: n.seat, allergy: n.text, notes: n.note || '' })),
     courses: firedNumbers.map(n => {
       const info = courseInfo(n);
@@ -22423,7 +22429,7 @@ function seatWordLower() {
 // no per-type "how many" any more, and nothing on the floor decides it either:
 // picking gathers, the tick saves, and the ONLY thing that decides whether the
 // cover pad opens is whether the type is about a seat.
-function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', note: '', picks: [], seats: [], wholeTable: false }; }
+function freshCustomNoteDraft(categoryId) { return { categoryId: categoryId || (state.noteCategories[0] ? state.noteCategories[0].id : ''), text: '', note: '', picks: [], seats: [], wholeTable: false, course: null }; }
 
 function toggleQuickNotePad() {
   if (state.quickNotePad) { state.quickNotePad = false; render(); return; }
@@ -22494,7 +22500,7 @@ function toggleNotesPanel() {
 function closeNotesPanel() {
   state.notesPanel = null;
   state.customNoteDraft = null;
-  state.noteSeatPop = false;
+  state.noteSeatPop = false; state.noteCoursePop = false;
   state.adminError = '';
   render();
 }
@@ -22532,7 +22538,7 @@ function saveCustomNoteDraft() {
   }
   const targets = m.wholeTable ? [null] : m.seats;
   const extra = String(m.note || '').trim();
-  const newEntries = targets.flatMap(seat => texts.map(t => ({ seat, categoryId: m.categoryId || null, text: t, note: extra })));
+  const newEntries = targets.flatMap(seat => texts.map(t => ({ seat, categoryId: m.categoryId || null, text: t, note: extra, ...(m.course ? { course: m.course } : {}) })));
   // Editing an existing chip replaces it instead of appending a duplicate.
   const kept = m.editIdx !== undefined ? state.notes.filter((_, i) => i !== m.editIdx) : state.notes;
   const updated = [...kept, ...newEntries];
@@ -22550,7 +22556,7 @@ function saveCustomNoteDraft() {
   saveTableNotes(state.table, updated);
   if (wasEdit) { closeNotesPanel(); return; }
   state.customNoteDraft = freshCustomNoteDraft(m.categoryId);
-  state.noteSeatPop = false;
+  state.noteSeatPop = false; state.noteCoursePop = false;
   state.adminError = '';
   render();
 }
@@ -24460,6 +24466,7 @@ function render() {
     ${state.seatRowPop && seatRowOn() ? renderSeatRowPop() : ''}
     ${state.itemOptions && !state.itemOptions.seatOnly && !state.allergenWarnModal ? renderItemOptionsPop() : ''}
     ${state.noteSeatPop && state.customNoteDraft ? renderNoteSeatPop() : ''}
+    ${state.noteCoursePop && state.customNoteDraft ? renderNoteCoursePop() : ''}
     ${state.orderHistoryPop ? renderOrderHistoryPop() : ''}
     ${state.priceEntry ? renderPricePop() : ''}
     ${state.splitAmtPad ? renderSplitAmtPop() : ''}
@@ -27613,6 +27620,7 @@ function renderNotesMiddle() {
       </div>
       <div class="modal-actions">
         ${state.customNoteDraft ? noteSeatChip(state.customNoteDraft, 'open-note-seat-pop', state.customNoteDraft.categoryId) : ''}
+        ${state.customNoteDraft ? noteCourseChip(state.customNoteDraft) : ''}
         <button class="icon-action neutral" data-act="close-notes-panel">${ACT_CROSS_SVG}<span class="ia-label">Close</span></button>
         <button class="icon-action send" data-act="save-custom-note" ${paneSaveEnabled() ? '' : 'disabled'}>${ACT_TICK_SVG}<span class="ia-label">Save</span></button>
       </div>
@@ -27647,6 +27655,44 @@ function noteSeatChip(m, act, typeId) {
     : (m.seats && m.seats.length) ? esc(seatText(m.seats[0]))
     : esc((state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat');
   return `<button type="button" class="icon-action bill" data-act="${act}">${DKT_USER_SVG}<span class="ia-label">${label}</span></button>`;
+}
+// REMIND ME AT DESSERT (owner, 13 Oct '26: "do them all", from a drawing
+// borrowed from the iPhone's "remind me when I get home"). A note may ride
+// with a course: "Birthday — candle" with Dessert. Until that course is
+// called it stays off the kitchen's head; when it is called it comes back —
+// on the Pass's course box, the kitchen's card and the call-away slip — so
+// the candle goes out with the cake. All night (the default) is every note
+// as it always was. The key reads the course, in the pane's own action row.
+// The notes riding with course n, as one line each where that course is now.
+function courseNotes(t, n) { return ((t && t.notes) || []).filter(x => x && x.course === n); }
+function courseRemindHtml(t, n) {
+  const list = courseNotes(t, n);
+  if (!list.length) return '';
+  return `<span class="course-remind">${list.map(x => { const cat = (state.noteCategories || []).find(c => c.id === x.categoryId);
+    return `<b>${esc(x.text)}</b>${x.note ? ' — ' + esc(x.note) : ''}${cat ? ` <i>${esc(cat.name)}</i>` : ''}`; }).join('<br>')}</span>`;
+}
+function noteFoodCourses() {
+  return (state.settings.courses || []).map((c, i) => ({ n: i + 1, c })).filter(({ n, c }) => c.enabled !== false && courseInKitchen(n));
+}
+function noteCourseChip(m) {
+  if (!noteFoodCourses().length) return '';
+  const label = m.course ? esc(courseInfo(m.course).name) : 'All night';
+  return `<button type="button" class="icon-action bill" data-act="open-note-course-pop" aria-label="Comes back with">${DKT_FLAME_SVG}<span class="ia-label">${label}</span></button>`;
+}
+function renderNoteCoursePop() {
+  const m = state.customNoteDraft;
+  if (!m) return '';
+  return `
+      <div class="pop-scrim"></div>
+      <div class="qty-pop covers-pop seat-pop num-pad">
+        <div class="covers-pad-grid qp-grid seat-grid">
+          <button class="covers-pad-key util${!m.course ? ' assigned' : ''}" data-act="note-pick-course" data-course="">All night</button>
+          ${noteFoodCourses().map(({ n, c }) => `<button class="covers-pad-key${m.course === n ? ' assigned' : ''}" data-act="note-pick-course" data-course="${n}">${esc(c.name)}</button>`).join('')}
+        </div>
+        <div class="qp-row qp-actions">
+          <button class="icon-action neutral" data-act="close-note-course-pop">${ACT_CROSS_SVG}</button>
+        </div>
+      </div>`;
 }
 function renderNoteSeatPop() {
   const m = state.customNoteDraft;
@@ -29282,7 +29328,8 @@ function kdsTickets(rows) {
     const o = (state.orders || []).find(x => x.id === t.orderId);
     const tb = o && o.orderType === 'dine-in' && allTables().find(x => String(x.label) === String(o.table));
     const shown = dkNoteTypesShown(docketCfg());
-    t.notes = ((tb && tb.notes) || []).filter(n => n && shown.includes(n.categoryId));
+    t.notes = ((tb && tb.notes) || []).filter(n => n && shown.includes(n.categoryId) && !n.course); // a note riding with a course waits for it
+    t.table = tb;
   });
   return tickets.sort((a, b) => a.since - b.since);
 }
@@ -29335,7 +29382,7 @@ function kdsTicketHtml(t) {
         const info = courseInfo(c.n);
         return `
       <div class="kds-course">
-        <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>
+        <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>${courseRemindHtml(t.table, c.n)}
         ${c.rows.map(r => {
           const done = r.item.status === 'ready';
           return `
@@ -37533,7 +37580,7 @@ function noteChipHtml(n, cls, attrs) {
   const cat = (state.noteCategories || []).find(c => c.id === n.categoryId);
   const cc = cat && (cat.color || noteTypeColour(cat.id));
   const style = cc ? `background:${cc};color:${contrastTextColor(cc)};border-color:${cc};` : '';
-  return `<span class="seat-chip${cls || ''}" style="${style}cursor:pointer;"${attrs || ''}>${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)}${n.note ? ' — ' + esc(n.note) : ''}${n.seat && n.seat !== 'all' && seatText(n.seat) ? ' · ' + esc(seatText(n.seat)) : ''}</span>`;
+  return `<span class="seat-chip${cls || ''}" style="${style}cursor:pointer;"${attrs || ''}>${cat ? esc(cat.name) + ': ' : ''}${esc(n.text)}${n.note ? ' — ' + esc(n.note) : ''}${n.seat && n.seat !== 'all' && seatText(n.seat) ? ' · ' + esc(seatText(n.seat)) : ''}${n.course ? ' · with ' + esc(courseInfo(n.course).name) : ''}</span>`;
 }
 function guestMarks() {
   return (state.noteCategories || []).map(c => ({
@@ -38597,6 +38644,7 @@ function renderPass(fp) {
                again — the row's lead carries that. */ ''}
           ${c.kind === 'hold' ? '' : `<span class="pass-st">${c.kind === 'away' ? '' : `<span class="pass-w">${WORD[c.kind]}</span>`}${c.kind === 'away' && c.since ? `<span class="pass-t${lvl === ' lvl-late' ? ' late-pill' : ''}">${pillDur(mins(c.since))}</span>` : ''}</span>`}
           <span class="pass-items">${esc(passItemsText(c.items))}</span>
+          ${c.kind === 'away' ? courseRemindHtml(t, c.n) : ''}
           ${keyed ? `<button class="pass-go${c.next && !cellsOf.get(o.id).some(x => x.kind === 'away') ? ' ready' : ''}" data-act="pass-callaway" data-order="${o.id}" data-course="${c.n}" aria-label="Call away ${esc(courseInfo(c.n).name)}">${DKT_FLAME_SVG}<span>Call away</span>${adds(c)}</button>` : ''}
         </div>`; }).join('')}
       </div>`).join('')}
@@ -50778,6 +50826,9 @@ function handleActClick(el, e) {
       }
       else if (act === 'save-custom-note') { saveCustomNoteDraft(); }
       else if (act === 'note-pick-seat') { pickNoteSeat(el.dataset.seat === 'all' ? 'all' : parseInt(el.dataset.seat)); }
+      else if (act === 'open-note-course-pop') { state.noteCoursePop = true; render(); }
+      else if (act === 'close-note-course-pop') { state.noteCoursePop = false; render(); }
+      else if (act === 'note-pick-course') { if (state.customNoteDraft) state.customNoteDraft.course = parseInt(el.dataset.course) || null; state.noteCoursePop = false; render(); }
       else if (act === 'close-note-seat-pop') { state.noteSeatPop = false; render(); }
       else if (act === 'open-note-seat-pop') { if (state.settings.seatNumbersEnabled && state.covers > 1) { state.noteSeatPop = true; state.adminError = ''; render(); } }
       else if (act === 'edit-note-entry') {
@@ -50790,7 +50841,7 @@ function handleActClick(el, e) {
           // lit, and changing Peanuts to Nuts saved both (Sep '26).
           const cat = (state.noteCategories || []).find(c => c.id === n.categoryId);
           const isKey = !!(cat && (cat.presets || []).some(p => p.name === n.text));
-          state.customNoteDraft = { ...freshCustomNoteDraft(n.categoryId), text: isKey ? '' : n.text, picks: isKey ? [n.text] : [], note: n.note || '', wholeTable: n.seat == null, seats: n.seat == null ? [] : [n.seat], editIdx: idx };
+          state.customNoteDraft = { ...freshCustomNoteDraft(n.categoryId), text: isKey ? '' : n.text, picks: isKey ? [n.text] : [], note: n.note || '', wholeTable: n.seat == null, seats: n.seat == null ? [] : [n.seat], course: n.course || null, editIdx: idx };
           state.notesPanel = { tab: n.categoryId || (state.noteCategories[0] && state.noteCategories[0].id) };
           render();
         }

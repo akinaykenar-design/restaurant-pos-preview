@@ -9192,6 +9192,8 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 // the next till that opened the floor. Only #rgb, #rrggbb or #rrggbbaa is kept.
 const COLOUR_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 const cleanColour = v => (typeof v === 'string' && COLOUR_RE.test(v.trim())) ? v.trim() : null;
+// A picture is an uploaded file or an inline image — nothing that can close a quote.
+const SAFE_IMAGE_RE = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0-9+\/=]+)$/;
 
 // The client's api() wrapper attaches this header on every mutating request,
 // so every endpoint can log "who did it" without every call site needing to
@@ -9223,7 +9225,7 @@ function managerFromReq(req, data) {
   if (!pins.length) return null;
   if (pinLockedNow(req)) return null;
   const m = data.staff.find(s => s.role === 'manager' && pins.includes(s.pin)) || null;
-  if (!m && !data.staff.some(s => pins.includes(s.pin))) pinRecordFailure(req);
+  if (!m && !data.staff.some(s => pins.includes(s.pin))) pinRecordFailure(req, pins.join('|'));
   return m;
 }
 
@@ -9271,10 +9273,20 @@ function pinLockedNow(req) {
   const rec = pinAttempts.get(req.ip || req.connection?.remoteAddress || 'unknown');
   return !!(rec && rec.lockUntil > Date.now());
 }
-function pinRecordFailure(req) {
+// A GUESS IS COUNTED ONCE (14 Oct '26 hunt). A manager whose PIN was changed
+// on another till kept sending the old one with every round, and each send
+// counted as a wrong guess — ten rounds and the iPad refused every PIN for
+// five minutes, the right one included. A script trying PINs still pays for
+// every new one; the same wrong PIN again is not another guess.
+function pinRecordFailure(req, pin) {
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   const now = Date.now();
   const rec = pinAttempts.get(ip) || { fails: [], lockUntil: 0 };
+  if (pin) {
+    rec.tried = rec.tried || new Set();
+    if (rec.tried.has(pin)) { pinAttempts.set(ip, rec); return; }
+    if (rec.tried.size < 1000) rec.tried.add(pin);
+  }
   rec.fails = rec.fails.filter(ts => now - ts < PIN_WINDOW_MS);
   rec.fails.push(now);
   if (rec.fails.length >= PIN_MAX_FAILS) {
@@ -9472,8 +9484,11 @@ app.post('/api/saved-colors', (req, res) => {
 // colour; legacy stores hold plain strings, normalized on the way out.
 function normPresetObj(p, maxLen) {
   const name = String((p && p.name !== undefined ? p.name : p) || '').trim().slice(0, maxLen);
-  const color = (p && typeof p === 'object' && p.color) || null;
-  const image = (p && typeof p === 'object' && typeof p.image === 'string' && p.image) || null;
+  // A COLOUR IS A COLOUR here too (14 Oct '26 hunt): a preset's colour and
+  // picture are painted straight into the quick-note pane, so a "colour" of
+  // page code saved by anything on the wifi ran on a manager's till.
+  const color = (p && typeof p === 'object' && cleanColour(p.color)) || null;
+  const image = (p && typeof p === 'object' && typeof p.image === 'string' && SAFE_IMAGE_RE.test(p.image) && p.image) || null;
   // A single preset may out-route its type ("Food Critic" -> Kitchen), the
   // same as a venue's own note preset has always been able to.
   const station = (p && typeof p === 'object' && p.station) ? String(p.station).slice(0, 60) : null;
@@ -11547,6 +11562,13 @@ app.post('/api/tables/move-sitting', (req, res) => {
   // Onto a table with a discount of its own, that one stands.
   if (from && from !== to && from.discount && !to.discount) to.discount = from.discount;
   if (from && from !== to) { from.covers = 0; from.notes = []; from.discount = null; tillMovesSitting(data, from.id, to.id); }
+  // …and the bill already on that table seats them too: a seated party with
+  // nothing ordered pulled onto a tab left the bill on the tab's old count —
+  // what the Pass, Bills and a covers rule read (Oct '26 hunt).
+  if (to.covers > 0) {
+    const open = (data.orders || []).find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(to.label));
+    if (open) open.covers = to.covers;
+  }
   writeData(data);
   res.json({ from: from || null, to });
 });
@@ -13954,6 +13976,7 @@ app.post('/api/orders', (req, res) => {
     for (const fp of data.floorPlans || []) { const t = (fp.tables || []).find(x => x.id === String(req.body.tableId) && x.type !== 'decor'); if (t) { table = String(t.label); break; } }
   }
   let rawItems = sentItems;
+  { const gone = staffGone(data, staffId); if (gone) return res.status(403).json({ error: gone }); }
   {
     const underPrice = priceFloorRefused(req, data, rawItems, null);
     if (underPrice) return res.status(403).json({ error: underPrice });
@@ -14147,7 +14170,7 @@ function nextRoundId(order) { return (order.rounds || []).reduce((m, r) => Math.
 // Courses already called away go with the dishes: a combined ticket forgot
 // them, so the pass offered to call the mains a second time (Sep '26).
 // The earliest call stands; only the courses given (or all) are carried.
-function carryCallAways(dest, src, courses) {
+function carryCallAways(dest, src, courses, isFood) {
   const fired = src.firedCourses || {};
   Object.keys(fired).forEach(c => {
     if (courses && !courses.includes(parseInt(c, 10))) return;
@@ -14156,7 +14179,10 @@ function carryCallAways(dest, src, courses) {
   });
   if (dest.firedCourses && Object.keys(dest.firedCourses).length && src.calledAwayAt) dest.calledAwayAt = Math.max(dest.calledAwayAt || 0, src.calledAwayAt);
   // The party's first food already went: nothing that follows it is auto-called.
-  if (src.firstFoodCalled) dest.firstFoodCalled = true;
+  // …but only when FOOD came over. Two drinks moved from the bar to an empty
+  // table stamped "first food went" on the new ticket, so its own first
+  // starter was never called: Held on the Pass, hidden on the cook's screen.
+  if (src.firstFoodCalled && (!courses || !isFood || courses.some(isFood))) dest.firstFoodCalled = true;
 }
 // A CALLED COURSE WITH NOTHING LEFT IN IT IS NOT AWAY (3 Oct '26): its only
 // dish taken off or moved, the stamp stayed, so the Timeline ran the empty
@@ -14268,6 +14294,14 @@ function noteRungKeys(order, items) {
   const ks = (items || []).map(i => i && i.lineKey).filter(Boolean).map(String);
   if (ks.length) order.rungKeys = [...new Set([...(order.rungKeys || []), ...ks])];
 }
+// REMOVED IS REMOVED (14 Oct '26 hunt). A person taken off the team while
+// signed in on an iPad carried on ringing tables under a name no longer on
+// it, until they chose to log off. A send names who rang it; one from a
+// person who is not on the team is refused (Undo of the removal lets them in).
+function staffGone(data, staffId) {
+  if (!staffId) return null;
+  return (data.staff || []).some(x => x.id === String(staffId)) ? null : 'You are no longer on the team — ask a manager.';
+}
 function unseenLines(order, rawItems) {
   const known = knownLineKeys(order);
   return (rawItems || []).filter(i => !(i.lineKey && known.has(String(i.lineKey))));
@@ -14298,6 +14332,7 @@ app.post('/api/orders/:id/rounds', (req, res) => {
   const fresh = unseenLines(order, rawItems);
   const dropped = (rawItems || []).length - fresh.length;
   if (dropped > 0 && fresh.length === 0) return res.json(order);
+  { const gone = staffGone(data, req.body.staffId); if (gone) return res.status(403).json({ error: gone }); }
   const back = req.body.restore ? new Set((order.lineVoids || []).filter(v => v.menuItemId).map(v => v.menuItemId + '|' + ((v.value || 0) / (v.qty || 1)).toFixed(2))) : null;
   const underPrice = priceFloorRefused(req, data, fresh, order, back);
   if (underPrice) return res.status(403).json({ error: underPrice });
@@ -14854,6 +14889,31 @@ app.post('/api/orders/:id/void', (req, res) => {
   res.json(order);
 });
 
+// MONEY BACK GOES THE WAY IT CAME, FOOD FIRST (14 Oct '26). A refund was
+// spread over the bill's ways of paying by their gross, tips and all: $32 of
+// food paid on a gift card, with a $10 card tip added later, put $24.38 back
+// on the gift card and called $7.62 of it a card refund — while the tip, as
+// everywhere else, is refunded last. Each way's share of the FOOD comes back
+// first, then each way's share of the tip. One answer for the refund and the
+// cash-up: [{ method, cardType, code, amount }].
+function refundByWay(o, food, tip) {
+  const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0, tipT = o.tip || 0;
+  const late = (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+  let ways;
+  if (Array.isArray(o.splitPaid) && o.splitPaid.length) {
+    ways = o.splitPaid.map(p => ({ method: p.method || 'card', cardType: p.cardType || null, code: p.giftCardCode || null, food: Math.max(0, (p.amount || 0) - (p.tip || 0)), tip: p.tip || 0 }));
+  } else if (o.paymentMethod === 'split' && Array.isArray(o.payments) && gt > 0) {
+    const f = Math.max(0, gt - tipT) / gt, t = Math.max(0, tipT - late) / gt;
+    ways = o.payments.map(p => ({ method: p.method, cardType: null, code: null, food: p.amount * f, tip: p.amount * t }));
+  } else {
+    ways = [{ method: o.paymentMethod || 'card', cardType: o.cardType || null, code: o.giftCardCode || null, food: Math.max(0, gt - tipT), tip: Math.max(0, tipT - late) }];
+  }
+  // A tip added after the bill is card money (see the cash-up's lateTips).
+  if (late > 0) ways.push({ method: 'card', cardType: o.paymentMethod === 'card' ? o.cardType : null, code: null, food: 0, tip: late });
+  const fs = ways.reduce((a, w) => a + w.food, 0), ts = ways.reduce((a, w) => a + w.tip, 0);
+  return ways.map(w => ({ method: w.method, cardType: w.cardType, code: w.code,
+    amount: (fs > 0 ? food * w.food / fs : 0) + (ts > 0 ? tip * w.tip / ts : 0) }));
+}
 app.post('/api/orders/:id/refund', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
@@ -14894,13 +14954,11 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // A REFUND OF GIFT-CARD MONEY GOES BACK ON THE CARD (Sep '26): it went
   // nowhere — the card stayed spent and the cash-up showed it handed back.
   // A split bill gives the card back its share of the refund.
-  const cardBack = [];
-  // …only the gift card's share: a tip added later was paid by card (Sep '26).
-  const lateGc = (order.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
-  if (order.paymentMethod === 'giftcard' && order.giftCardCode) cardBack.push([order.giftCardCode, grandTotal > 0 ? r2(value * Math.max(0, grandTotal - lateGc) / grandTotal) : value]);
-  else if ((order.splitPaid || []).some(p => p.method === 'giftcard' && p.giftCardCode) && grandTotal > 0) {
-    (order.splitPaid || []).filter(p => p.method === 'giftcard' && p.giftCardCode).forEach(p => cardBack.push([p.giftCardCode, r2(value * (p.amount || 0) / grandTotal)]));
-  }
+  // …its share of the FOOD first, the tip last (14 Oct '26 — see refundByWay).
+  const foodAll = Math.max(0, grandTotal - (order.tip || 0));
+  const foodNow = Math.min(alreadyRefunded + value, foodAll) - Math.min(alreadyRefunded, foodAll);
+  const cardBack = refundByWay(order, foodNow, Math.max(0, value - foodNow))
+    .filter(w => w.method === 'giftcard' && w.code).map(w => [w.code, r2(w.amount)]);
   cardBack.forEach(([code, amt]) => {
     const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
     if (c && amt > 0) { c.balance = r2((c.balance || 0) + amt); c.active = true; logAudit(data, staff, `Put $${amt.toFixed(2)} back on gift card ${c.code} (refund on #${order.id})`); }
@@ -14956,18 +15014,25 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   if (order.status !== 'open') return res.status(400).json({ error: 'That table has already been paid' });
   if ((order.splitPaid || []).length) return res.status(400).json({ error: 'Money has been taken on this table in parts — finish the bill here first' });
   const oldTable = order.table;
+  // The party coming over sits after the one already there (the till says by
+  // how many): two parties never share a seat number (Oct '26 hunt).
+  const shift = Math.max(0, parseInt(req.body.seatShift, 10) || 0);
+  const bump = i => shift && parseInt(i.seat, 10) > 0 ? { ...i, seat: parseInt(i.seat, 10) + shift } : i;
   // Destination already has an open tab → COMBINE: its lines and rounds ride
   // over, totals re-add, and the source ticket closes as merged.
   const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
   if (dest && practiceClash(order, dest)) return res.status(400).json({ error: practiceClash(order, dest) });
   if (dest) {
-    dest.items = [...(dest.items || []), ...(order.items || [])];
+    dest.items = [...(dest.items || []), ...(order.items || []).map(bump)];
     const base = nextRoundId(dest) - 1;
-    dest.rounds = [...(dest.rounds || []), ...(order.rounds || []).map((r, k) => ({ ...r, id: base + k + 1 }))];
+    dest.rounds = [...(dest.rounds || []), ...(order.rounds || []).map((r, k) => ({ ...r, id: base + k + 1, items: (r.items || []).map(bump) }))];
     carryCallAways(dest, order);
     // The loyalty guest comes too, or the combined bill earns them nothing.
     if (!dest.customerId && order.customerId) dest.customerId = order.customerId;
     if (order.covers) dest.covers = (dest.covers || 0) + order.covers;
+    // The till says what the joined party now seats — the sitting's own move
+    // may already have counted the newcomers (Oct '26 hunt).
+    if (parseInt(req.body.covers, 10) > 0) dest.covers = parseInt(req.body.covers, 10);
     const sub = dest.items.reduce((s, i) => s + i.price * i.qty, 0);
     dest.subtotal = sub; dest.total = sub; dest.grandTotal = sub;
     // A bill printed before more food came onto it is out of date — it
@@ -14981,6 +15046,9 @@ app.post('/api/orders/:id/transfer', (req, res) => {
     return res.json(dest);
   }
   order.table = table;
+  // Onto a table where friends already sat, the bill seats them all (Oct '26 hunt).
+  if (parseInt(req.body.covers, 10) > 0) order.covers = parseInt(req.body.covers, 10);
+  if (shift) { order.items = (order.items || []).map(bump); order.rounds = (order.rounds || []).map(r => ({ ...r, items: (r.items || []).map(bump) })); }
   logAudit(data, staffName || 'Unknown', `Transferred Ticket #${order.id} from Table ${oldTable} to Table ${table}`);
   writeData(data);
   res.json(order);
@@ -15061,6 +15129,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   if (!moving.length) return res.status(400).json({ error: 'Those items are no longer on the ticket' });
   const there = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
   if (there && practiceClash(order, there)) return res.status(400).json({ error: practiceClash(order, there) });
+  const movedFood = n => courseKind(((data.settings || {}).courses || [])[n - 1] || { name: '' }) === 'food';
   // A MOVED DISH KEEPS ITS CLOCK (9 Oct '26): it rides a round stamped at the
   // move, so the cook's screen started it again at 0m and dealt its card to
   // the back of the rail. Each line keeps when it first went to the kitchen.
@@ -15079,7 +15148,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   if (dest) {
     dest.items = (dest.items || []).concat(moving);
     dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true }];
-    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
+    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))], movedFood);
     retotal(dest);
     dest.billPrinted = false; // its printed bill no longer holds these dishes
   } else {
@@ -15101,7 +15170,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
       // practice dishes make a practice bill — it goes with the clear-out
       ...(order.practice ? { practice: true } : {}),
     };
-    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))]);
+    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))], movedFood);
     retotal(dest);
     data.orders.push(dest);
     data.ticketCounter += 1;
@@ -15448,7 +15517,9 @@ function computePeriodSummary(data, fromTs, toTs) {
     return { card, rest: amt - card, base: { ...o, grandTotal: gt - lt, tip: (o.tip || 0) - lt } };
   };
   const giveBack = (o, amt) => { const x = lateSplit(o, amt); cardNet -= x.card; takeBy(x.base, -1, x.rest); };
-  refunded.forEach(o => giveBack(o, refundIn(o)));
+  // A refund goes back the way it came, food first (refundByWay).
+  refunded.forEach(o => { const x = refundSplit(o); refundByWay(o, x.food, x.tip).forEach(w => {
+    if (w.method === 'cash') cashNet -= w.amount; else if (w.method === 'giftcard') giftNet -= w.amount; else cardNet -= w.amount; }); });
   lateVoids.forEach(o => {
     if (!hasParts(o)) { giveBack(o, lateVoidOut(o)); return; }
     partsBefore(o).forEach(p => {
@@ -15478,7 +15549,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   paid.forEach(o => { if (!hasParts(o)) cardBy(o, 1, null); });
   partsIn.forEach(o => o.splitPaid.forEach(p => { if (p.method === 'card' && inWin(p.at || periodAt(o))) addCard(p.cardType, p.amount || 0); }));
   const cardBack = (o, amt) => { const x = lateSplit(o, amt); addCard(o.paymentMethod === 'card' ? o.cardType : null, -x.card); cardBy(x.base, -1, x.rest); };
-  refunded.forEach(o => cardBack(o, refundIn(o)));
+  refunded.forEach(o => { const x = refundSplit(o); refundByWay(o, x.food, x.tip).forEach(w => { if (w.method === 'card') addCard(w.cardType, -w.amount); }); });
   lateVoids.forEach(o => { if (hasParts(o)) partsBefore(o).forEach(p => { if (p.method === 'card') addCard(p.cardType, -(p.amount || 0)); }); else cardBack(o, lateVoidOut(o)); });
   lateTips.forEach(t => addCard(t.o.paymentMethod === 'card' ? t.o.cardType : null, t.amount));
 
@@ -20537,6 +20608,13 @@ async function refreshTableSittings() {
   }));
 }
 async function followMovedParty() {
+  // A TAKEAWAY PAID ON ANOTHER TILL is let go too (14 Oct '26): only a table
+  // was, so the takeaway till kept ringing onto the paid ticket and every
+  // Send sat on "Not sent" for good.
+  if (state.orderType !== 'dine-in' && state.openOrderId && !state.sending && !state.showCheckout) {
+    const tk = (state.orders || []).find(x => x.id === state.openOrderId);
+    if (tk && tk.status !== 'open') { state.openOrderId = null; state.firedCourses = {}; state.attachedCustomerId = null; }
+  }
   if (state.orderType !== 'dine-in' || state.table == null || state.transferFrom || state.sending) { _sitWas = null; return; }
   const here = findTableById(state.table);
   if (!here) return;
@@ -20751,7 +20829,11 @@ function cartTipAmount() {
   // whether or not tip prompting is switched on (owner-asked, Aug '26).
   // ONE tip (owner, Sep '26: "there is two tips"): the tip field. The preset
   // percentages fill that field; nothing stacks a second tip on top of it.
-  return Math.max(0, parseFloat(state.cardTip) || 0);
+  // …and never less than the tips the parts already carried: a part taken on
+  // ANOTHER till with a $5 tip read as bill money here, so this till asked $5
+  // short and the close refused the bill (14 Oct '26).
+  const taken = splitPaidList().reduce((a, p) => a + (p.tip || 0), 0);
+  return Math.max(0, parseFloat(state.cardTip) || 0, Math.round(taken * 100) / 100);
 }
 
 // §§ Paying by card
@@ -21188,6 +21270,17 @@ function billSplitParts() {
     const tipsIn = Object.keys(paidMap).filter(k => !frozen.some(p => p.key === k) && !inShare(k)).reduce((a, k) => a + (paidMap[k].tip || 0), 0);
     const extra = Math.round((cartTotal() - (parts.reduce((a, p) => a + p.amount, 0) - tipsIn)) * 100) / 100;
     if (extra > 0.005) parts.push({ key: 'later' + (parts.length + 1), label: 'Added since', amount: extra });
+    // …and a dish TAKEN OFF since shrinks what is left (14 Oct '26): share 1
+    // of $96 ÷2 paid, a $32 dish came off, and share 2 still printed $48
+    // with $16 owing. The shares still to pay come down, the last first.
+    const partIn = Object.keys(paidMap).filter(inShare).reduce((a, k) => a + (paidMap[k].amount || 0) - (paidMap[k].tip || 0), 0);
+    let over = Math.round((parts.filter(p => !paidMap[p.key]).reduce((a, p) => a + p.amount, 0) - partIn - (cartTotal() - paidOfBill())) * 100) / 100;
+    for (let i = parts.length - 1; i >= 0 && over > 0.005; i--) {
+      if (paidMap[parts[i].key]) continue;
+      const cut = Math.min(parts[i].amount, over);
+      parts[i] = { ...parts[i], amount: Math.round((parts[i].amount - cut) * 100) / 100 };
+      over = Math.round((over - cut) * 100) / 100;
+    }
     return parts;
   }
   // Money already taken (a card, an earlier part) stays as its own row, and
@@ -21861,7 +21954,7 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
     // 'later' groups start empty — added from the line editor.
   });
   const composed = composeCartLine(item, variantId, modSelections);
-  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, qty, course, filedCourse: course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
+  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, menuPrice: composed.price, qty, course, filedCourse: course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
   // A noted line never merges into a differently-noted one — the note is
   // part of what the kitchen reads. Under Auto the same dish meets itself by
   // the course it was FILED under, since the slide may have moved the first.
@@ -21996,7 +22089,27 @@ function editLineRecompose(line) {
   const item = state.menu.find(m => m.id === line.menuItemId);
   if (!item) return;
   const c = composeCartLine(item, line.variantId, line.modSelections || {});
-  line.id = c.id; line.name = c.name; line.price = c.price;
+  line.id = c.id; line.name = c.name; line.price = c.price; line.menuPrice = c.price;
+}
+// A PRICE CHANGED IN ADMIN REACHES THE CART (14 Oct '26 hunt). A dish rung
+// before the office till put its price up stayed at the old price, which the
+// server refuses from a waiter as "under its price" — every Send, for ever,
+// with the table's food never reaching the kitchen. A line nobody re-priced
+// by hand goes at the menu's price as it is NOW.
+function repriceUntouchedCart() {
+  state.cart.forEach(l => {
+    if (l.menuPrice === undefined || l.price !== l.menuPrice || l.giftcardSale) return;
+    if (l.comboRef) { // a set menu's price rides on its first dish; the rest stay $0
+      const set = (state.combos || []).find(x => x.id === l.comboRef);
+      if (set && l.price > 0 && set.price !== l.price) { l.price = set.price; l.menuPrice = set.price; }
+      return;
+    }
+    const item = state.menu.find(m => m.id === l.menuItemId);
+    if (!item) return;
+    const c = composeCartLine(item, l.variantId, l.modSelections || {});
+    // the same dish, size and picks it was rung as — a size deleted since is not repriced
+    if (c.id === l.id && c.price !== l.price) { l.price = c.price; l.menuPrice = c.price; }
+  });
 }
 function editLineQty(delta) {
   const idx = state.editLine ? state.editLine.idx : -1;
@@ -22228,12 +22341,16 @@ function discardCartUndoable() {
     // a round that did not go comes back still saying "Not sent", with its
     // key (a retry must not ring it twice), its staged call-away and note.
     table: state.table, orderType: state.orderType,
+    // …and a takeaway is its TICKET and its name: every takeaway has no table,
+    // so Sam's discarded drink came back on Kim's takeaway (14 Oct '26).
+    openOrderId: state.openOrderId, customerName: state.customerName,
     sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
     quickNote: state.quickNote, quickNoteStation: state.quickNoteStation,
   };
   clearCart();
   offerUndo('Discarded', () => {
-    if (state.table !== snap.table || state.orderType !== snap.orderType) {
+    if (state.table !== snap.table || state.orderType !== snap.orderType
+        || (snap.orderType !== 'dine-in' && (state.openOrderId !== snap.openOrderId || (state.customerName || '') !== (snap.customerName || '')))) {
       const t = findTableById(snap.table);
       state.toast = toastFail(`Could not undo — that round was ${t ? 'table ' + t.label + '’s' : 'on another order'}`);
       armToastTimer(TOAST_SHORT); return;
@@ -22286,11 +22403,20 @@ function courseHasItems(n) {
 function stageCourse(n) {
   if (!courseHasItems(n)) { state.toast = toastFail(`Nothing on ${courseInfo(n).name}`); render(); armToastTimer(TOAST_SHORT); return; }
   state.stagedCallAway = state.stagedCallAway === n ? null : n;
+  state.stagedCallAwayAt = state.stagedCallAway ? Date.now() : null;
   state.callAway = false;
   if (state._callAwayReturn) { state._callAwayReturn = false; state.showTablePicker = true; }
   state.toast = state.stagedCallAway ? `${courseInfo(n).name} will call away on Send` : 'Call away cancelled';
   render();
   armToastTimer(TOAST_SHORT);
+}
+// A STAGED CALL IS NOT MADE TWICE (Oct '26 hunt): staged here, then called
+// from the Pass on another till before this Send — the Send called it again:
+// a second slip at the kitchen and the course's clock started over, so a late
+// table stopped looking late. Called by anyone since it was staged, it is done.
+function stagedStillDue(n, o) {
+  const at = ((o && o.firedCourses) || {})[n];
+  return !(at > 0 && state.stagedCallAwayAt && at >= state.stagedCallAwayAt);
 }
 function fireCourse(n) {
   // ONE course is away at a time (owner rule): calling the next clears the
@@ -23804,7 +23930,7 @@ async function sendToKitchen() {
   if (!state.cart.length && !(state.quickNote || '').trim() && state.stagedCallAway
       && !(state.orderType === 'dine-in' && state.table && (state.notes.length > 0))) {
     const n0 = state.stagedCallAway; state.stagedCallAway = null;
-    fireCourse(n0);
+    if (stagedStillDue(n0, activeOpenOrder())) fireCourse(n0); else { syncFiredCourses(); render(); }
     return;
   }
   // A dine-in docket needs a table — prompt for one instead of sending nowhere.
@@ -23816,6 +23942,7 @@ async function sendToKitchen() {
     if (mis.length) { state.stockWarnModal = mis; render(); return; }
   }
   state._stockWarnAck = false;
+  repriceUntouchedCart();
   // ONE key per attempt at THIS cart names the ticket a retry belongs to; and
   // EVERY LINE carries its own key (mintLineKey), which is what the server
   // actually dedupes on — so a retry after a dropped reply rings only the
@@ -23892,7 +24019,7 @@ async function sendToKitchen() {
     state.sendKey = null; state.sendFailed = null;
     state.quickNote = ''; state.quickNoteStation = null; // one-shot: it went out on this docket, never again
     // The staged call-away goes out WITH the round it was staged behind.
-    if (state.stagedCallAway) { const n0 = state.stagedCallAway; state.stagedCallAway = null; fireCourse(n0); }
+    if (state.stagedCallAway) { const n0 = state.stagedCallAway; state.stagedCallAway = null; if (stagedStillDue(n0, order)) fireCourse(n0); else syncFiredCourses(); }
     // Keep any called-away courses (and their timers) — sending a round must not
     // wipe fire state, so the "send the order, fire mains later" flow works.
     // Docket's away — when the venue runs one till for many staff, hand it
@@ -23985,22 +24112,34 @@ setInterval(() => {
 // ever sent it: the wifi came back and it sat there until somebody tapped the
 // table. Same keys as the first try, so a round that did land is not rung twice.
 let _leftResend = false;
+// …AND IT GOES WHOEVER IS SIGNED IN, OR NOBODY (Oct '26 hunt): the idle
+// log-off put a "Will send" round down as its table's draft and signed the
+// waiter out, and only the signed-in waiter's drafts were ever resent — so
+// the wifi came back to a login screen and the kitchen never heard. Every
+// waiter's round that failed on the wire goes, under its own waiter's name.
 function leftRoundsDue() {
-  if (!state.currentStaff) return [];
-  const mine = draftsMine();
-  return Object.keys(mine).filter(tid => tid !== state.table && mine[tid].sendFailed && mine[tid].sendFailed.net && mine[tid].cart.length);
+  const me = state.currentStaff ? String(state.currentStaff.id) : null;
+  if (me) draftsMine(); // the signed-in waiter's drafts follow their party first
+  const all = draftsLoad(), out = [];
+  for (const who of Object.keys(all)) for (const tid of Object.keys(all[who] || {})) {
+    const d = all[who][tid];
+    if (who === me && tid === state.table) continue;
+    if (d && d.sendFailed && d.sendFailed.net && (d.cart || []).length) out.push({ who, tid });
+  }
+  return out;
 }
 async function resendLeftRounds() {
   if (_leftResend) return;
-  const mine = draftsMine(), due = leftRoundsDue();
+  const all = draftsLoad(), due = leftRoundsDue();
   if (!due.length) return;
   _leftResend = true;
   let lines = 0;
   try {
-    for (const tid of due) {
-      const d = mine[tid], t = findTableById(tid);
-      if (!t) continue;
-      const body = { items: d.cart, staffName: state.currentStaff.name, staffId: state.currentStaff.id, sendKey: d.sendKey, quickNote: d.quickNote || null, quickNoteStation: d.quickNoteStation || null };
+    for (const { who, tid } of due) {
+      const mine = all[who] || {}, d = mine[tid], t = findTableById(tid);
+      if (!d || !t) continue;
+      const st = (state.staffList || []).find(x => String(x.id) === who) || (state.currentStaff && String(state.currentStaff.id) === who ? state.currentStaff : null);
+      const body = { items: d.cart, staffName: st ? st.name : 'Unknown', staffId: who, sendKey: d.sendKey, quickNote: d.quickNote || null, quickNoteStation: d.quickNoteStation || null };
       try {
         const o = d.openOrderId
           ? await api(`/api/orders/${d.openOrderId}/rounds`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -25716,7 +25855,7 @@ function isTrainee() {
   const me = state.currentStaff;
   if (!me) return false;
   const rec = (state.staffList || []).find(x => x.id === me.id);
-  return !!((rec && rec.trainee) || me.trainee);
+  return rec ? !!rec.trainee : !!me.trainee; // the record as the server has it now, not as it was at sign-in
 }
 function renderPracticeBanner() {
   if (!isTrainee()) return '';
@@ -27996,12 +28135,24 @@ function payConfirmLabel() {
   return `Confirm ${money(grand)}`;
 }
 
+// §§ Taking a part of the bill
 // One card of several: the money is taken now, so it is written onto the order
 // now — the same parts the split screen uses, so the table still cannot close
 // a dollar short.
 async function takeCardPart(amount) { return takePart(amount, 'card'); }
 async function takePart(amount, method, giftCardCode, change) {
-  const order = activeOpenOrder();
+  let order = activeOpenOrder();
+  // A FIRST ROUND PAID IN PARTS GOES ON THE TICKET FIRST (14 Oct '26): $20
+  // cash towards a fresh $64 table said "Send the order first." and took
+  // nothing — a part lives on a ticket. Pay sends it, as it does a voucher
+  // sold on Pay, then takes the part.
+  if (!order && state.cart.length) {
+    state._voucherSend = true;
+    try { await sendToKitchen(); } finally { state._voucherSend = false; }
+    order = activeOpenOrder();
+    if (!order || state.cart.length) return false; // the send said why it did not go
+    state.showCheckout = true;
+  }
   if (!order) { state.toast = toastFail('Send the order first.'); render(); return; }
   const n = (order.splitPaid || []).filter(p => String(p.key).indexOf(method) === 0).length + 1;
   // EACH ATTEMPT HAS ITS OWN NAME, kept only for its retries. "card" + the
@@ -38084,6 +38235,15 @@ function tableLockedBy(tableId) {
   // (Apple Handoff, 13 Oct '26).
   return l && l.device !== DEVICE_ID && !(l.staffId && state.currentStaff && String(l.staffId) === String(state.currentStaff.id)) ? l : null;
 }
+// …but a hold on ANOTHER TILL is still a wall for MOVING the table (Oct '26
+// hunt). Handoff is for opening it; moving it out from under a till that has
+// a round rung up left that round to open a new ticket on the empty table —
+// no allergy on the docket, the party sat somewhere else. Your own other till
+// included: it cannot see the move until its next poll either.
+function tableHeldElsewhere(tableId) {
+  const l = (state.tableLocks || {})[String(tableId)];
+  return l && l.device !== DEVICE_ID ? l : null;
+}
 // Returns true (ours), 'busy' (another till holds it — the server said 409),
 // 'released' (a manager unlocked it from under us) or false (no server).
 // A deliberate tap passes retake, which is allowed to take a table back
@@ -38368,7 +38528,7 @@ async function doMoveItems(targetTableId) {
   // A TABLE ANOTHER TILL HAS OPEN TAKES NO DISHES (Sep '26): moved lines
   // landed on a ticket a waiter was still ringing up. Refused the way moving
   // the whole table already is.
-  const held = tableLocksOn() && tableLockedBy(target.id);
+  const held = tableLocksOn() && tableHeldElsewhere(target.id);
   if (held) { state.toast = toastFail(`In use — ${held.staff}`); render(); armToastTimer(TOAST_SHORT); return; }
   const n = state.moveItems.sel.length;
   // Moving lines rewrites two tables' dockets — say what's about to happen
@@ -40135,7 +40295,7 @@ function transferToTable(newTableId, extra) {
   // A TABLE ANOTHER TILL HAS OPEN DOES NOT MOVE (Sep '26): dragging it moved
   // the party and its allergy notes while that till's round still rang on the
   // old number. Refused the way a tap on it is; a manager unlocks it first.
-  const held = tableLocksOn() && [oldTableId, newTableId].map(tableLockedBy).find(Boolean);
+  const held = tableLocksOn() && [oldTableId, newTableId].map(tableHeldElsewhere).find(Boolean);
   if (held) {
     state.transferFrom = null;
     state.toast = toastFail(`In use — ${held.staff}`);
@@ -40182,17 +40342,20 @@ async function doTransferToTable(newTableId, opts) {
   // of lag"; measured three round trips end to end: transfer, then a full
   // orders fetch, then the sitting). The server handles them one after the
   // other whatever order they land in, so nothing can cross.
-  const tabMove = srcOrderId
-    ? api(`/api/orders/${srcOrderId}/transfer`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ table: newTable.label, staffName }),
-      })
-    : null;
+  // JOINED PARTIES KEEP THEIR OWN SEATS (Oct '26 hunt): two guests moved onto
+  // two already there kept seats 1 and 2, so four people shared two seat
+  // numbers — a seat-2 peanut allergy read as both seat-2 guests, and Split by
+  // seat made two shares of two. The party coming over sits after the ones
+  // already there: its dishes and its seat notes move up by that many.
+  const destTab = state.orders.find(o => (!srcOrder || o.id !== srcOrder.id) && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
+  const seatShift = destTab || (newTable.covers || 0) > 0 || (newTable.notes || []).length
+    ? Math.max(newTable.covers || 0, ...((destTab && destTab.items) || []).map(i => parseInt(i.seat, 10) || 0), ...(newTable.notes || []).map(n => parseInt(n.seat, 10) || 0))
+    : 0;
+  const bumpSeat = x => seatShift && parseInt(x.seat, 10) > 0 ? { ...x, seat: parseInt(x.seat, 10) + seatShift } : x;
   // Sitting details ride along. Moving this till's own table uses the live
   // till state; any other table's details come off the table object itself.
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
-  const notes = movingOwn ? (state.notes || []) : (oldTable && oldTable.notes) || [];
+  const notes = (movingOwn ? (state.notes || []) : (oldTable && oldTable.notes) || []).map(bumpSeat);
   // Combining into a live table: sitting details ADD to what's there. Live
   // means a tab OR a sitting there — judged on the table being moved TO: a
   // seated table with nothing ordered moved onto a busy one replaced its
@@ -40211,6 +40374,17 @@ async function doTransferToTable(newTableId, opts) {
   if (oldT2) { oldT2.covers = 0; oldT2.notes = []; }
   newTable.covers = combined ? ((newTable.covers || 0) + covers) : covers;
   newTable.notes = combined ? [...(newTable.notes || []), ...notes] : notes;
+  // THE BILL SEATS WHO THE TABLE SEATS (Oct '26 hunt): a tab of 2 moved onto 3
+  // already seated kept "2 covers" on its bill — the count the Pass, Bills,
+  // the floor search and a covers rule read — while the floor said 5. The move
+  // says the party's size once, and the bill takes it.
+  const tabMove = srcOrderId
+    ? api(`/api/orders/${srcOrderId}/transfer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ table: newTable.label, staffName, covers: newTable.covers || 0, seatShift }),
+      })
+    : null;
   const sittingMove = api('/api/tables/move-sitting', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ fromId: oldTableId, toId: newTableId, covers, notes, combine: combined }) }).catch(() => {});
   if (tabMove) {
@@ -40251,6 +40425,8 @@ async function doTransferToTable(newTableId, opts) {
     if (oldTableId && oldTableId !== newTableId) releaseTableLock(oldTableId);
     claimTableLock(newTableId).catch(() => {});
     state.table = newTableId;
+    // the round still on the docket sits where its party now sits
+    if (seatShift) { state.cart = state.cart.map(bumpSeat); if (parseInt(state.activeSeat, 10) > 0) state.activeSeat = parseInt(state.activeSeat, 10) + seatShift; }
     // After a combine the live tab is the DESTINATION's order — re-point.
     state.openOrderId = (state.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label)) || {}).id || null;
     state.covers = newTable.covers || 0; state.discount = newTable.discount || null;
@@ -40285,7 +40461,7 @@ async function moveTableBack(fromId, toId) {
   // opened either table — and walked the party out from under that waiter.
   await Promise.all([refreshTableLocks(), refreshOrders().catch(() => {})]);
   const from = findTableById(fromId), to = findTableById(toId);
-  const held = tableLocksOn() && [fromId, toId].map(tableLockedBy).find(Boolean);
+  const held = tableLocksOn() && [fromId, toId].map(tableHeldElsewhere).find(Boolean);
   const taken = to && (state.orders.some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(to.label)) || (to.covers || 0) > 0);
   if (!from || !to || held || taken) { state.toast = toastFail(held ? `Could not undo — in use, ${held.staff}` : `Could not undo — table ${to ? to.label : ''} is taken`); render(); return; }
   state.transferFrom = fromId;
@@ -40765,6 +40941,7 @@ function addComboToCart() {
         category: it.category,
         name: `${combo.name} · ${it.name}`,
         price: priced ? 0 : combo.price,
+        menuPrice: priced ? 0 : combo.price,
         qty: 1,
         course: g.course || it.defaultCourse || state.activeCourse,
         comboRef: combo.id,
@@ -51206,7 +51383,7 @@ setInterval(() => {
           // AND EVERYTHING ELSE A TILL SELLS BY (11 Oct '26): GST switched to
           // "added on top" on one till left another asking $99 while the server
           // took $108.90 in cash; a stale void-reason list saved over the new one.
-          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets', '/api/sales-categories', '/api/theme'].map(u => api(u).catch(() => null))) : null]); })
+          storeMoved ? Promise.all(['/api/settings', '/api/discount-presets', '/api/note-categories', '/api/quicknote-presets', '/api/void-reasons', '/api/printer-stations', '/api/size-presets', '/api/sales-categories', '/api/theme', '/api/staff'].map(u => api(u).catch(() => null))) : null]); })
         .then(([menu, cats, subs, combos, mods, hhs, rest]) => { state.menu = menu; if (Array.isArray(hhs)) state.happyHours = hhs;
           if (rest) _restOwed = typingInField();
           if (rest && !_restOwed) {
@@ -51237,6 +51414,15 @@ setInterval(() => {
               Object.keys(th).forEach(k => { if (JSON.stringify(th[k]) !== JSON.stringify(was[k])) { state.theme[k] = th[k]; moved = true; } });
               _srvTheme = JSON.parse(JSON.stringify(th));
               if (moved) applyTheme();
+            }
+            // …and WHO THIS TILL IS (14 Oct '26 hunt): Trainee switched on or
+            // off at the office left the iPad as it was — still "practice" while
+            // every table it rang printed and counted, or still real while the
+            // server made each new table practice and the kitchen got nothing.
+            if (Array.isArray(rest[9])) {
+              state.staffList = rest[9];
+              const me = state.currentStaff && rest[9].find(x => x.id === state.currentStaff.id);
+              if (me) state.currentStaff.trainee = !!me.trainee;
             }
           } if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (storeMoved) _restOwed = true; if (!typingInField()) renderWhenStill(); });

@@ -912,6 +912,18 @@ body[data-fixed-rows="1"] .menu-panel .grid .item-card{height:var(--fixed-row-h,
    the 3 the setting asked for. */
 .mk-wrap[data-fixed-cols="1"] .mk-menu .grid,
 .mk-wrap[data-fixed-cols="1"] .mk-mob-menu .grid{grid-template-columns:repeat(var(--grid-cols,5),minmax(0,1fr));}
+/* LIST OR TILES — the section decides (owner, 16 Oct '26). A section set to
+   List reads like the wine list: two columns of rows (one on a phone), the
+   whole name and the price, the venue's paint kept as a strip down the left
+   edge. Rows grow with the name; a tile's fixed height does not apply. */
+body .sec-list .grid.grid{grid-template-columns:repeat(2,minmax(0,1fr));grid-auto-rows:auto;gap:8px;align-items:stretch;}
+body .sec-list .grid .item-card.as-row{height:auto;min-height:56px;flex-direction:row;align-items:center;gap:12px;padding:8px 16px 8px 20px;text-align:left;
+  background:var(--surface);color:var(--text-primary);overflow:hidden;}
+body .sec-list .grid .item-card.as-row:not(.out)::after{ /* a sold-out row keeps its "Sold out" label */ content:"";position:absolute;left:0;top:0;bottom:0;width:8px;background:var(--paint,transparent);pointer-events:none;}
+body .sec-list .grid .item-card.as-row .item-name{display:block;-webkit-line-clamp:unset;overflow:visible;flex:1;min-width:0;padding:0;text-align:left;}
+.sec-list .row-price{font-family:var(--font-mono);font-weight:700;font-size:calc(var(--item-name-size,13.5px)*var(--menu-fs,1));font-variant-numeric:tabular-nums;white-space:nowrap;}
+.sec-list .item-card.as-row .tile-count{position:static;flex:none;}
+@media (max-width:768px){ body .sec-list .grid.grid{grid-template-columns:minmax(0,1fr);} }
 /* THE value control on the Design page: minus, the value, plus. Every setting
    uses it - grid, text size, docket width - so the page has ONE way to change
    a number (owner, Aug '26: "make all options the same as 1 the grid"). */
@@ -9812,7 +9824,9 @@ app.put('/api/categories/:id', (req, res) => {
   if (disabled !== undefined) cat.disabled = !!disabled;
   if (image !== undefined) cat.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) cat.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
-  if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined || req.body.defaultCourse !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
+  // Show as: tiles (the default) or list — the till reads it (16 Oct '26).
+  if (req.body.view !== undefined) cat.view = req.body.view === 'list' ? 'list' : 'tiles';
+  if (!name || !name.trim()) { if (disabled !== undefined || image !== undefined || req.body.defaultCourse !== undefined || req.body.view !== undefined) { writeData(data); return res.json(cat); } return res.status(400).json({ error: 'Category name is required' }); }
   const oldName = cat.name;
   // Sections are joined to their dishes BY NAME, so a rename onto a name in
   // use welded two sections into one that could not be pulled apart (Sep '26).
@@ -25626,7 +25640,7 @@ function fitTileNames() {
   const byId = new Map(state.menu.map(x => [String(x.id), x]));
   if (_fitCache.size > 3000) _fitCache.clear();
   const tiles = [];
-  document.querySelectorAll('.item-card[data-id] .item-name').forEach(el => {
+  document.querySelectorAll('.item-card[data-id]:not(.as-row) .item-name').forEach(el => {
     const m = byId.get(String(el.closest('.item-card').dataset.id));
     if (m) tiles.push({ el, name: m.name });
   });
@@ -26310,6 +26324,13 @@ function setOrderType(v) {
   }
 }
 
+// LIST OR TILES — the section decides (owner, 16 Oct '26: "activate this
+// option in the section admin"). One choice on the section card; a long list
+// like the wine reads as rows with the whole name and the price.
+function sectionAsList(catName) {
+  const c = (state.categories || []).find(x => x.name === catName);
+  return !!(c && c.view === 'list');
+}
 // The scrolling menu results (repeat chips + category grids). Split out so the
 // menu search can refresh JUST this container on each keystroke — re-rendering
 // the whole panel tore down the search input and bounced the mobile keyboard.
@@ -26330,7 +26351,7 @@ function renderMenuScrollBody() {
       <div class="item-name">${esc(combo.name)}</div>
     </button>`;
   return `
-        ${catsToShow.map(cat => {
+        ${catsToShow.map(cat => { const _sec = (() => {
           const catObj = state.categories.find(c => c.name === cat);
           const catIcon = catObj && catObj.iconEnabled !== false ? (catObj.icon || CATEGORY_ICONS[cat] || '') : '';
           const items = hubOrder(sortMenuItems(filtered.filter(m => m.category === cat)));
@@ -26361,13 +26382,16 @@ function renderMenuScrollBody() {
             })();
             // rowBreak: this tile opens a FRESH grid row — the admin's manual
             // line break in the arrangement.
-            const tstyle = `${item.color && state.settings.tileColors !== false ? `background:${item.color};color:${contrastTextColor(item.color)};` : ''}${item.rowBreak ? 'grid-column-start:1;' : ''}`;
+            const asRow = sectionAsList(cat);
+            const paint = item.color && state.settings.tileColors !== false;
+            const tstyle = asRow ? (paint ? `--paint:${item.color};` : '')
+              : `${paint ? `background:${item.color};color:${contrastTextColor(item.color)};` : ''}${item.rowBreak ? 'grid-column-start:1;' : ''}`;
             return `
-            <button class="item-card ${sizeClass} ${item.out ? 'out' : ''} ${inCartQty ? 'in-cart' : ''}${state.itemOptions && state.itemOptions.itemId === item.id ? ' prompting' : ''}${state.qtyPopItemId === item.id ? ' qp-held' : ''}" data-act="${menuEditOn() ? 'menu-edit-item' : 'add'}" data-id="${item.id}" ${tstyle ? `style="${tstyle}"` : ''}>
+            <button class="item-card ${asRow ? 'as-row ' : ''}${sizeClass} ${item.out ? 'out' : ''} ${inCartQty ? 'in-cart' : ''}${state.itemOptions && state.itemOptions.itemId === item.id ? ' prompting' : ''}${state.qtyPopItemId === item.id ? ' qp-held' : ''}" data-act="${menuEditOn() ? 'menu-edit-item' : 'add'}" data-id="${item.id}" ${tstyle ? `style="${tstyle}"` : ''}>
               ${item.image ? `<img class="tile-photo" src="${item.image}" alt="">` : ''}
               ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
               ${inCartQty ? `<span class="tile-qn">${inCartQty}</span>` : ''}
-              <div class="item-name">${esc(item.name)}</div>${warnMark}${comingBackHtml(item)}
+              <div class="item-name">${esc(item.name)}</div>${warnMark}${comingBackHtml(item)}${asRow ? `<span class="row-price">${money(item.price)}</span>` : ''}
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots${item.trackStock || itemServingsLeft(item) !== null ? ' shift' : ''}">⋯</span>` : ''}
               ${(item.trackStock || itemServingsLeft(item) !== null) && !item.out /* a sold-out tile says so once — no red 0 under "Sold out" (6 Oct '26) */ ? (() => {
                 // Countdown: live remaining = stock minus what's on this docket.
@@ -26473,6 +26497,10 @@ function renderMenuScrollBody() {
             : activeTopSub ? renderSubGroup(activeTopSub, 0, false)
             : `<div class="grid">${items.filter(i => i.subcategoryId === activeSub).map(renderItemCard).join('')}</div>`}
           `;
+          })();
+          // A section set to List in Admin reads like the wine list: rows,
+          // the full name and the price (owner, 16 Oct '26).
+          return _sec && sectionAsList(cat) ? `<div class="sec-list">${_sec}</div>` : _sec;
         }).join('')}`;
 }
 
@@ -34201,6 +34229,7 @@ function renderCategoriesAdmin() {
             <label class="ie-chip"><small>Default course</small>
               <select class="pp-select" onchange="saveSectionCourse('category', '${cat.id}', this.value)">${courseOptionsHtml(cat.defaultCourse)}</select></label>
           </div>
+          <div class="ie-chip"><small>Show as</small>${optionPair(cat.view === 'list' ? 'list' : 'tiles', 'section-view', [['tiles', 'Tiles'], ['list', 'List']], `data-id="${cat.id}"`)}</div>
           ${renderAdminSubcatTree(cat.id, null, 0)}
           <button class="btn-add inline" data-act="add-subcategory-for" data-category="${cat.id}" style="align-self:flex-end;margin-top:2px;">+ Subsection</button>
         </div>` : ''}
@@ -34387,7 +34416,10 @@ function smartNameKey(n) {
   // tie-break, so vintages of one wine still line up oldest-first.
   const s = String(n || '');
   const years = [];
-  const base = s.replace(/\b(1[89]\d{2}|20\d{2})\b/g, (y) => { years.push(y); return ''; })
+  // "NV/16" (non-vintage, base 2016) steps out too — it kept the Selosse
+  // under N (owner, 16 Oct '26: "the NV and year not being the catalyst").
+  const base = s.replace(/\bN\.?V\.?\/(\d{2,4})\b/gi, (m, y) => { years.push(y); return ''; })
+    .replace(/\b(1[89]\d{2}|20\d{2})\b/g, (y) => { years.push(y); return ''; })
     .replace(/\bN\.?V\.?(?=\s|$)/gi, '')
     .replace(/\s{2,}/g, ' ').trim();
   return (base || s) + '  ' + years.join(' ');
@@ -48987,6 +49019,16 @@ function handleActClick(el, e) {
         state.view = 'order'; if (state.orderType !== 'dine-in') setOrderType('dine-in'); render(); }
       else if (act === 'toggle-mobile-cart') {
         if (state.mobileCartOpen) closeMobileCart(); else openMobileCart();
+      }
+      else if (act === 'section-view') {
+        const id = el.closest('[data-id]') && el.closest('[data-id]').dataset.id;
+        const cat = state.categories.find(c => c.id === id);
+        if (cat && (cat.view || 'tiles') !== el.dataset.val) {
+          const was = cat.view;
+          cat.view = el.dataset.val; render();
+          api('/api/categories/' + id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ view: el.dataset.val }) })
+            .catch(() => { cat.view = was; state.toast = toastFail('Could not save Show as.'); render(); });
+        }
       }
       else if (act === 'cat') {
         const switchCat = () => {

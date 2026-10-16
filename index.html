@@ -923,6 +923,12 @@ body .sec-list .grid .item-card.as-row:not(.out)::after{ /* a sold-out row keeps
 body .sec-list .grid .item-card.as-row .item-name{display:block;-webkit-line-clamp:unset;overflow:visible;flex:1;min-width:0;padding:0;text-align:left;}
 .sec-list .row-price{font-family:var(--font-mono);font-weight:700;font-size:calc(var(--item-name-size,13.5px)*var(--menu-fs,1));font-variant-numeric:tabular-nums;white-space:nowrap;}
 .sec-list .item-card.as-row .tile-count{position:static;flex:none;}
+/* A dish photo on a row is a thumbnail beside the name, never the tile's full-width picture: it took the whole row, crushed the name to nothing and ran it under the price. */
+body .sec-list .grid .item-card.as-row .tile-photo{flex:none;width:40px;height:40px;margin:0;}
+/* …and so do the ⋯ and the Sold out pill: in a tile's corner they sat on the row's price. In the row they stand in the flow just before it, so every price keeps the right edge. */
+body .sec-list .grid .item-card.as-row .item-opt-dots,body .sec-list .grid .item-card.as-row.out::after{position:static;flex:none;order:1;}
+body .sec-list .grid .item-card.as-row .tile-count{order:1;}
+body .sec-list .grid .item-card.as-row .row-price{order:2;}
 @media (max-width:768px){ body .sec-list .grid.grid{grid-template-columns:minmax(0,1fr);} }
 /* THE value control on the Design page: minus, the value, plus. Every setting
    uses it - grid, text size, docket width - so the page has ONE way to change
@@ -9797,6 +9803,9 @@ app.post('/api/categories', (req, res) => {
     return res.status(400).json({ error: 'That category already exists' });
   }
   const cat = { id: 'cat' + Date.now(), name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
+  // A copy keeps how it is shown and where it cooks (16 Oct '26 hunt).
+  if (req.body.view === 'list') cat.view = 'list';
+  if (req.body.defaultCourse) cat.defaultCourse = Math.max(1, parseInt(req.body.defaultCourse) || 0) || null;
   data.categories.push(cat);
   // welcome on every course that keeps a list of sections, as it would be on one that keeps none (7 Oct '26)
   ((data.settings || {}).courses || []).forEach(k => { if (k && Array.isArray(k.sections)) k.sections.push(cat.id); });
@@ -12203,14 +12212,21 @@ async function doshiiPollOnce() {
       // was Pay — cash or card the venue never took. The app's money comes
       // with the order: it is its own way of paying, on its own cash-up line,
       // never in the drawer or on the terminal.
-      const appPaid = Math.round(doshii.prepaidTotal(dOrder) * 100) / 100;
+      const appSaid = {};
+      const appPaid = Math.round(doshii.prepaidTotal(dOrder, appSaid) * 100) / 100;
       if (appPaid > 0.005) {
         const now = order.createdAt;
         if (appPaid >= subtotal - 0.005) {
+          // THE TIP IS WHAT THE APP SAYS WAS TIP (16 Oct '26 hunt): everything
+          // over the dishes was booked as the guest's tip, so a $5 delivery fee
+          // went into the staff tips. The rest over the dishes is the app's
+          // fees — the venue's money, on the bill as a surcharge.
           const r = (parseFloat(taxSettings(data).ratePercent) || 0) / 100;
-          order.tax = taxSettings(data).mode === 'none' || !(r > 0) ? 0 : Math.round((subtotal - subtotal / (1 + r)) * 100) / 100; // what the app charged holds its tax
-          order.tip = Math.round(Math.max(0, appPaid - subtotal) * 100) / 100;
-          order.grandTotal = Math.round((subtotal + order.tip) * 100) / 100;
+          order.tip = Math.round(Math.min(Math.max(0, appSaid.tip || 0), Math.max(0, appPaid - subtotal)) * 100) / 100;
+          const fees = Math.round((appPaid - order.tip - subtotal) * 100) / 100;
+          if (fees > 0.005) { order.discount = { type: 'fixed', value: fees, reason: 'App fees', amount: -fees, kind: 'surcharge' }; order.total = Math.round((subtotal + fees) * 100) / 100; }
+          order.tax = taxSettings(data).mode === 'none' || !(r > 0) ? 0 : Math.round((order.total - order.total / (1 + r)) * 100) / 100; // what the app charged holds its tax
+          order.grandTotal = Math.round((order.total + order.tip) * 100) / 100;
           order.paymentMethod = 'app'; order.status = 'paid'; order.closedAt = now; order.closedBy = 'App order'; order.paidAt = now;
           order.loyaltyCredited = 0;
         } else {
@@ -12302,7 +12318,8 @@ async function doshiiPayAtTableOnce() {
       // 2) Has the terminal taken payment for this order?
       if (order.status === 'open' && order.doshiiSyncId) {
         try {
-          const paid = await doshii.getPaidTotal(config, order.doshiiSyncId);
+          const termSaid = {};
+          const paid = await doshii.getPaidTotal(config, order.doshiiSyncId, termSaid);
           data = readData(); order = data.orders.find(o => o.id === id);
           if (!order || order.status !== 'open') continue;
           const pb = payAtTableBill(data, order);
@@ -12313,10 +12330,15 @@ async function doshiiPayAtTableOnce() {
           // took since the till last looked is a part, like one taken at the till.
           const termSoFar = (order.splitPaid || []).filter(p => p.terminal).reduce((a, p) => a + (p.amount || 0), 0);
           const fresh = Math.round((paid - termSoFar) * 100) / 100;
-          if (due > 0 && fresh > 0.005 && fresh < due - 0.005) {
+          // …and a TIP added on the terminal is the guest's tip, not bill money
+          // (16 Oct '26 hunt): half + $5 tip went down as $25 of the bill, the
+          // second guest was asked $5 less and the waiter's $5 was gone.
+          const tipSoFar = (order.splitPaid || []).filter(p => p.terminal).reduce((a, p) => a + (p.tip || 0), 0);
+          const freshTip = Math.min(fresh, Math.max(0, Math.round(((termSaid.tip || 0) - tipSoFar) * 100) / 100));
+          if (due > 0 && fresh > 0.005 && fresh - freshTip < due - 0.005) {
             const now = Date.now();
             order.splitPaid = order.splitPaid || [];
-            order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: fresh, method: 'card', giftCardCode: null, cardType: null, tip: 0, at: now, staffName: 'EFTPOS terminal', terminal: true });
+            order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: fresh, method: 'card', giftCardCode: null, cardType: null, tip: freshTip, at: now, staffName: 'EFTPOS terminal', terminal: true });
             order.doshiiSyncHash = null; // the terminal shows what is left
             logAudit(data, 'EFTPOS terminal', `Took Pay at table ($${fresh.toFixed(2)}, card) on Ticket #${order.id}`);
             writeData(data);
@@ -14410,6 +14432,9 @@ app.post('/api/orders/:id/rounds', (req, res) => {
 // The client identifies the item(s) by a composite signature (name+seat+note+
 // price+course) — the same grouping the ticket shows — and this updates both
 // order.items and the round copies, then recomputes the open total.
+// What a set menu's dish carries of the SET'S price (its menuPrice), apart
+// from any paid pick riding on it. A line from before menuPrice: its price.
+function setShareOf(i) { return i.menuPrice != null ? (Number(i.menuPrice) || 0) : (Number(i.price) || 0); }
 app.post('/api/orders/:id/modify-item', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
@@ -14443,7 +14468,9 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const have = (order.items || []).filter(matches);
     const count = have.reduce((a, i) => a + i.qty, 0);
     const n = action === 'remove' && qty ? Math.min(count, parseInt(qty, 10) || 0) : count;
-    const drop = action === 'remove' ? n * Number(match.price) : count * (Number(match.price) - (parseFloat(newPrice) || 0));
+    // A set's price that passes to the next dish of the set stays on the bill.
+    const stays = action === 'remove' && n > 0 ? have.filter(i => i.comboRef && setShareOf(i) > 0 && (order.items || []).some(j => j !== i && j.comboRef === i.comboRef && j.comboStamp === i.comboStamp && !(setShareOf(j) > 0))).slice(0, 1).reduce((a, i) => a + setShareOf(i), 0) : 0;
+    const drop = action === 'remove' ? n * Number(match.price) - stays : count * (Number(match.price) - (parseFloat(newPrice) || 0));
     const itemsNow = order.items.reduce((a, i) => a + i.price * i.qty, 0);
     // Judged on the BILL — after the discount or surcharge the till holds and
     // tax on top — not on the dishes: $40 taken on a $100 bill at half price
@@ -14500,17 +14527,21 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     // dish, so taking that dish off a SENT set took the whole $65 off and the
     // rest of the set stayed on the bill at $0. The price passes to a dish of
     // the same set still on the ticket, as the docket does before a send.
+    // …and it is the SET'S share that passes (menuPrice), never a paid pick
+    // riding on the dish (16 Oct '26 hunt: "+ Peppercorn $5" on the steak went
+    // to the Focaccia with the $65).
     const handed = new Set();
-    removed.filter(r => r.comboRef && r.price > 0).forEach(r => {
-      const heir = (order.items || []).find(i => i.comboRef === r.comboRef && i.comboStamp === r.comboStamp && !(i.price > 0) && !handed.has(i));
+    removed.filter(r => r.comboRef && setShareOf(r) > 0).forEach(r => {
+      const heir = (order.items || []).find(i => i.comboRef === r.comboRef && i.comboStamp === r.comboStamp && !(setShareOf(i) > 0) && !handed.has(i));
       if (!heir) return;
-      handed.add(heir); heir.price = r.price;
-      (order.rounds || []).forEach(rd => (rd.items || []).forEach(i => { if (i !== heir && heir.uid && i.uid === heir.uid) i.price = r.price; }));
-      r.handedOn = true;
+      const s = setShareOf(r), r2 = n => Math.round(n * 100) / 100;
+      handed.add(heir); heir.price = r2(heir.price + s); heir.menuPrice = s;
+      (order.rounds || []).forEach(rd => (rd.items || []).forEach(i => { if (i !== heir && heir.uid && i.uid === heir.uid) { i.price = heir.price; i.menuPrice = s; } }));
+      r.handedOn = s;
     });
     if (!order.practice) adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
-    const value = removed.reduce((s, i) => s + (i.handedOn ? 0 : i.price * i.qty), 0);
+    const value = removed.reduce((s, i) => s + (i.price - (i.handedOn || 0)) * i.qty, 0);
     const why = reason ? ` (${reason})` : '';
     logAudit(data, staff, `Removed ${qtyRemoved}× ${match.name} from Ticket #${order.id}${why}`);
     // The ticket remembers who took money off it and how much, reason or not
@@ -18422,6 +18453,14 @@ async function api(path, opts) {
       body = await res.json();
       if (body && body.error) message = body.error;
     } catch (e2) {}
+    // A MANAGER WHOSE PIN CHANGED ON ANOTHER TILL proves it again (16 Oct
+    // '26 hunt): this till kept sending the old PIN, and every manager job
+    // answered "Only a manager…" to a signed-in manager until they logged off.
+    // The screen locks; their new PIN on the lock pad carries on.
+    if (res.status === 403 && /^Only a manager/.test(message) && state.currentStaff && state.currentStaff.role === 'manager' && state.staffPin && !state.frozen) {
+      message = 'Your PIN has changed — enter it to carry on';
+      setTimeout(freezeScreen, 0);
+    }
     const err = new Error(message);
     err.status = res.status; err.body = body;
     throw err;
@@ -20357,7 +20396,11 @@ async function pressFrzEnter() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pin: state.frozenPin, force: true }),
     });
-    if (r && r.id && (r.id === state.frozen.id || r.role === 'manager')) { unfreezeScreen(); return; }
+    if (r && r.id && (r.id === state.frozen.id || r.role === 'manager')) {
+      // The holder's own PIN is the one this till proves with from now on.
+      if (state.currentStaff && r.id === state.currentStaff.id) { state.currentStaff.role = r.role; state.staffPin = r.role === 'manager' ? state.frozenPin : ''; }
+      unfreezeScreen(); return;
+    }
   } catch (e) {
     if (pinLockedOut(e)) { state.frozenPin = ''; state.toast = toastFail(e.message); render(); armToastTimer(TOAST_ALARM); return; }
   }
@@ -22089,10 +22132,15 @@ function setDishSays() {
 // dish, so "no hummus" took the whole $65 off and the rest of the set went to
 // the kitchen at $0 (or sat "Not sent" on a waiter's till). A dish of a set
 // coming off hands the price to the next dish of the same set.
+// …and it is the SET'S price that moves, never a paid pick riding on the dish
+// (16 Oct '26 hunt): "+ Peppercorn $5" on the steak went to the Focaccia with
+// the $65. The set's share is the line's menuPrice; a pick stays with its dish.
+function setShare(l) { return l.menuPrice != null ? (Number(l.menuPrice) || 0) : (Number(l.price) || 0); }
 function keepSetPrice(line) {
-  if (!line || !line.comboRef || !(line.price > 0)) return;
-  const next = state.cart.find(c => c !== line && c.comboRef === line.comboRef && c.comboStamp === line.comboStamp && !(c.price > 0));
-  if (next) { next.price = line.price; line.price = 0; }
+  if (!line || !line.comboRef || !(setShare(line) > 0)) return;
+  const share = setShare(line), r2 = n => Math.round(n * 100) / 100;
+  const next = state.cart.find(c => c !== line && c.comboRef === line.comboRef && c.comboStamp === line.comboStamp && !(setShare(c) > 0));
+  if (next) { next.price = r2(next.price + share); next.menuPrice = share; line.price = r2(line.price - share); line.menuPrice = 0; }
 }
 function changeQty(idx, delta) {
   if (setDishLocked(state.cart[idx], delta)) return;
@@ -23988,10 +24036,15 @@ function draftTake(tableId) {
   if (d.sendKey && d.openOrderId === state.openOrderId) { state.sendKey = d.sendKey; state.sendFailed = d.sendFailed || null; }
 }
 // A table that moves takes its drafts with it — every waiter's.
-function draftsMove(fromId, toId) {
+function draftsMove(fromId, toId, seatShift) {
   const all = draftsLoad(); let moved = false;
+  // A party joining friends sits after them (doTransferToTable's seatShift):
+  // its unsent round moves up with its sent dishes and its seat notes, or the
+  // newcomers' drinks went out on the seats of the guests already there.
+  const bump = l => seatShift && parseInt(l.seat, 10) > 0 ? { ...l, seat: parseInt(l.seat, 10) + seatShift } : l;
   for (const who of Object.keys(all)) {
-    const d = all[who][fromId]; if (!d) continue;
+    let d = all[who][fromId]; if (!d) continue;
+    if (seatShift) d = { ...d, cart: d.cart.map(bump) };
     const there = all[who][toId];
     all[who][toId] = there ? { ...there, cart: [...there.cart, ...d.cart], ts: Date.now() } : d;
     delete all[who][fromId]; moved = true;
@@ -27146,6 +27199,16 @@ async function commitRemoveSent(match, reason, qty, then, managerPin) {
       // a set menu's dish comes back as the set's, not as a $0 dish of its own
       ...(i.comboRef ? { comboRef: i.comboRef, comboStamp: i.comboStamp } : {}) };
   }).filter(Boolean);
+  // THE SET'S PRICE THAT STAYS ON THE BILL IS NOT OFF IT (16 Oct '26 hunt):
+  // the server hands the $65 to the next dish of the set, but the toast said
+  // "$65 off" and Undo put the dish back AT $65 — one set at $130.
+  removed.forEach(r => {
+    const src = (o.items || []).find(i => i.comboRef && i.comboRef === r.comboRef && i.comboStamp === r.comboStamp && i.name === r.name);
+    const s = src ? setShare(src) : 0;
+    if (s > 0 && (o.items || []).some(i => i !== src && i.comboRef === r.comboRef && i.comboStamp === r.comboStamp && !(setShare(i) > 0))) {
+      r.price = Math.round((r.price - s) * 100) / 100; r.menuPrice = 0;
+    }
+  });
   try {
     await api(`/api/orders/${o.id}/modify-item`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ match, uids: matchUids(o, match), action: 'remove', qty: qty || null, reason: reason || null, discount: billDiscount(o, billTableOf(o)), managerPin: managerPin || undefined, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
@@ -29904,8 +29967,8 @@ function renderExpensesAdmin() {
       <div class="order-row sel-head${(state.selectedExpenseIds || []).includes(e.id) ? ' selected' : ''}" data-sellist="expense" data-selkey="${e.id}">
         <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="expense" data-key="${e.id}" ${(state.selectedExpenseIds || []).includes(e.id) ? 'checked' : ''}>
         <div class="order-info">
-          <div class="t1">${e.category} <span class="status-chip void">-${money(e.amount)}</span></div>
-          <div class="t2">${e.date} · ${esc(e.note || '')} · ${esc(e.staffName)}</div>
+          <div class="t1">${esc(e.category)} <span class="status-chip void">-${money(e.amount)}</span></div>
+          <div class="t2">${esc(e.date)} · ${esc(e.note || '')} · ${esc(e.staffName)}</div>
         </div>
       </div>
     `).join('')}
@@ -29931,9 +29994,9 @@ function renderInventoryAdmin() {
       <div class="th" style="color:var(--red);">${SYS_WARN_SVG} Low stock items (${lowStockItems.length})</div>
       ${lowStockItems.map(i => `
         <div class="detail-line" style="margin-bottom:8px;">
-          <span><strong>${esc(i.name)}</strong> (${i.sku})</span>
+          <span><strong>${esc(i.name)}</strong> (${esc(i.sku)})</span>
           <span style="display:flex;align-items:center;gap:8px;">
-            <span class="status-chip ${i.currentStock <= 0 ? 'void' : 'course'}">${i.currentStock} / ${i.minStock} ${i.unit}</span>
+            <span class="status-chip ${i.currentStock <= 0 ? 'void' : 'course'}">${i.currentStock} / ${i.minStock} ${esc(i.unit)}</span>
             <button class="btn-secondary" style="width:auto;padding:4px 8px;font-size:var(--fs-chip);" data-act="open-adjust-inventory" data-id="${i.id}">± Adjust</button>
           </span>
         </div>
@@ -29989,10 +30052,10 @@ function renderInventoryRows() {
           <input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="inventory-item" data-key="${i.id}" ${sel.includes(i.id) ? 'checked' : ''}>
           <span style="min-width:0;">
             <span class="t1" style="display:block;font-weight:700;font-size:var(--fs-md);">${esc(i.name)}</span>
-            <span class="t2" style="display:block;">SKU: ${i.sku} · ${i.category} · ${i.unit}</span>
+            <span class="t2" style="display:block;">SKU: ${esc(i.sku)} · ${esc(i.category)} · ${esc(i.unit)}</span>
           </span>
           <span style="flex:1;"></span>
-          <span class="status-chip ${i.currentStock <= 0 ? 'void' : i.currentStock < i.minStock ? 'course' : 'paid'}" style="flex-shrink:0;">${i.currentStock} ${i.unit}</span>
+          <span class="status-chip ${i.currentStock <= 0 ? 'void' : i.currentStock < i.minStock ? 'course' : 'paid'}" style="flex-shrink:0;">${i.currentStock} ${esc(i.unit)}</span>
         </div>
         ${(state.expandedInventoryItemIds || []).includes(i.id) ? `
         <div style="padding:0 12px 12px 40px;">
@@ -30007,7 +30070,7 @@ function renderInventoryRows() {
             </div>
             <div>
               <div class="t2" style="color:var(--text-secondary);font-size:var(--fs-chip);margin-bottom:4px;">COST</div>
-              <div style="font-size:var(--fs-md);">$${i.costPerUnit.toFixed(2)}/${i.unit}</div>
+              <div style="font-size:var(--fs-md);">$${i.costPerUnit.toFixed(2)}/${esc(i.unit)}</div>
             </div>
           </div>
           ${i.supplierId ? `<div class="t2" style="margin-top:12px;">Supplier: ${esc(suppliers.find(s => s.id === i.supplierId)?.name || 'Unknown')}</div>` : ''}
@@ -40551,7 +40614,7 @@ async function doTransferToTable(newTableId, opts) {
     }
   }
   await sittingMove;
-  draftsMove(oldTableId, newTableId); // an unsent round follows its party
+  draftsMove(oldTableId, newTableId, seatShift); // an unsent round follows its party, in its new seats
   refreshOrders().then(() => render()).catch(() => {});
   const movedLabel = oldTable ? oldTable.label : '';
   if (movingOwn) {
@@ -43206,7 +43269,15 @@ function _dishLift(g) {
   const cs = getComputedStyle(src);
   ['--tile-h-real', '--item-pad', '--item-name-size', '--item-icon-size', '--item-img-h'].forEach(k => { const v = cs.getPropertyValue(k).trim(); if (v) gh.style.setProperty(k, v); });
   Object.assign(gh.style, { left: g.rect.left + 'px', top: g.rect.top + 'px', width: g.rect.width + 'px', height: g.rect.height + 'px' });
-  document.body.appendChild(gh);
+  // A row of a List section is drawn by its list (.sec-list .grid): off it,
+  // the copy fell back to a tile — name centred and sliced, no paint strip.
+  // It rides in a box that IS a list, so the row in the hand is the row.
+  if (src.closest('.sec-list')) {
+    g.host = document.createElement('div'); g.host.className = 'sec-list';
+    g.host.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;';
+    const grid = document.createElement('div'); grid.className = 'grid';
+    grid.appendChild(gh); g.host.appendChild(grid); document.body.appendChild(g.host);
+  } else document.body.appendChild(gh);
   g.ghost = gh;
   src.classList.add('mk-drag-src');
   paintDropRoom();
@@ -43247,11 +43318,11 @@ function _dishGrabEnd(g, drop) {
     else g.ghost.style.setProperty('opacity', '0', 'important');
     // The tile is whole again when the copy reaches it; the redraw waits for
     // the hand (a second finger that ended the carry may still be down).
-    setTimeout(() => { g.ghost.remove(); document.querySelectorAll('.mk-drag-src').forEach(el => el.classList.remove('mk-drag-src')); state._sortDragging = false; renderWhenStill(); }, cssMs('--t-move'));
+    setTimeout(() => { (g.host || g.ghost).remove(); document.querySelectorAll('.mk-drag-src').forEach(el => el.classList.remove('mk-drag-src')); state._sortDragging = false; renderWhenStill(); }, cssMs('--t-move'));
     return;
   }
   state._sortDragging = false;
-  setTimeout(() => { g.ghost.remove(); moveDishTo(dish, t); }, 0); // after the touchend reaches the document
+  setTimeout(() => { (g.host || g.ghost).remove(); moveDishTo(dish, t); }, 0); // after the touchend reaches the document
 }
 // THE LIST HOLDS STILL. A dish leaving a group above the view takes a row with
 // it, and render() puts the raw scroll back, so the group under the hand
@@ -45003,7 +45074,7 @@ async function duplicateSelectedSections() {
     for (const id of ids) {
       const c = state.categories.find(x => x.id === id);
       if (!c) continue;
-      sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), color: c.color, icon: c.icon, iconEnabled: c.iconEnabled }) }));
+      sectionMade(await api('/api/categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: dupName(c.name), color: c.color, icon: c.icon, iconEnabled: c.iconEnabled, view: c.view, defaultCourse: c.defaultCourse }) }));
     }
     state.categories = await api('/api/categories');
   } catch (e) { state.toast = toastFail('Could not duplicate some sections.'); }
@@ -49540,7 +49611,12 @@ function handleActClick(el, e) {
         if (o) {
           if (state.table && state.cart.length) draftStash(state.table); else if (state.cart.length) { state.cart = []; clearSendState(); }
           if (state.table) releaseTableLock(state.table);
-          state.table = null; setOrderType(o.orderType); state.openOrderId = o.id; state.customerName = o.customerName || '';
+          // ITS OWN type, whatever the venue's switches say (16 Oct '26 hunt):
+          // with Takeaway off, an app pickup became a dine-in with no table,
+          // the floor came up and Pay never opened. The switches stop NEW
+          // takeaways, not this one.
+          state.table = null; setOrderType(o.orderType); state.orderType = o.orderType; state.covers = 0; state.notes = [];
+          state.openOrderId = o.id; state.customerName = o.customerName || '';
           // ITS guest and no money off of its own — it carried the last
           // table's guest and surcharge onto the takeaway (4 Oct '26).
           state.attachedCustomerId = o.customerId || null; state.discount = null;
@@ -51568,6 +51644,15 @@ setInterval(() => {
               state.staffList = rest[9];
               const me = state.currentStaff && rest[9].find(x => x.id === state.currentStaff.id);
               if (me) state.currentStaff.trainee = !!me.trainee;
+              // REMOVED IS SIGNED OFF (16 Oct '26 hunt): a person taken off the
+              // team kept their iPad and took cash on their tables until they
+              // chose to log off. The round they were on stays as a draft.
+              else if (state.currentStaff && !state.frozen) {
+                if (state.table && state.cart.length) draftStash(state.table);
+                const who = state.currentStaff.name;
+                logOut();
+                state.toast = toastFail(`${who} is no longer on the team — signed off.`); armToastTimer(TOAST_LONG);
+              }
             }
           } if (Array.isArray(cats)) state.categories = cats; if (Array.isArray(subs)) state.subcategories = subs; if (Array.isArray(combos)) state.combos = combos; if (Array.isArray(mods)) state.modifierGroups = mods; _lastBgRender = Date.now(); if (!typingInField()) renderWhenStill(); })
         .catch(() => { if (storeMoved) _restOwed = true; if (!typingInField()) renderWhenStill(); });

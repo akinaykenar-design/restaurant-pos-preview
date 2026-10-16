@@ -4648,7 +4648,8 @@ body[data-rail-pos="top"] .admin-sidebar .exp-body, body[data-rail-pos="bottom"]
 
 .kds-ticket{ background:var(--surface); border-radius:var(--radius); box-shadow:var(--lift-1); padding:12px; }
 .kds-ticket-head{ display:flex; align-items:center; gap:8px; }
-.kds-ticket-name{ font-weight:800; font-size:var(--fs-xl); color:var(--text-primary); }
+.kds-ticket-name{ min-width:0; overflow-wrap:anywhere; font-weight:800; font-size:var(--fs-xl); color:var(--text-primary); }
+.kds-ticket-by{ flex-shrink:0; max-width:50%; font-size:var(--fs-md); color:var(--charcoal-soft); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } /* who rang it in — quiet ink (16 Oct '26); it keeps its width and a long takeaway name wraps instead, or the caller was squeezed to "J…" */
 .kds-age{ margin-left:auto; font-family:var(--font-mono); font-size:var(--fs-md); font-weight:700; color:var(--charcoal-soft); white-space:nowrap; }
 .kds-age.kds-age-warn{ color:var(--gold); }
 .kds-age.late-pill{ color:#fff; font-family:inherit; }
@@ -6447,6 +6448,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .bl-pay{ flex:none; min-width:88px; height:var(--sq-ctl); padding:0 16px; border:1px solid var(--pay-yellow); border-radius:var(--btn-radius);
   background:var(--pay-yellow); color:#3A2C00; font-family:'Noto Sans',sans-serif; font-size:var(--fs-md); font-weight:800; cursor:pointer; }
 .bl-pay.quiet{ background:var(--surface); border-color:var(--steel-300); color:var(--text-primary); } /* one yellow: only a bill waiting to pay wears it */
+.bl-pay:disabled{ opacity:var(--dim); cursor:default; } /* a held bill paid on another till (16 Oct '26) */
 /* Closed today: one line each — the door to the receipt, when, how, how much. */
 .bl-rows{ margin-bottom:24px; background:var(--surface); border-radius:var(--radius); box-shadow:var(--lift-1); color:var(--text-primary); }
 .bl-row{ display:flex; align-items:center; gap:12px; padding:8px 12px; border-top:1px solid var(--border); font-size:var(--fs-md); }
@@ -6455,6 +6457,17 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
 .bl-how{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text-secondary); }
 .bl-row b{ flex:none; font-family:'IBM Plex Mono',monospace; font-weight:700; }
 @media (max-width:768px){ .bl-cols{ display:block; } }
+/* BILLS HOLDS STILL (owner, 16 Oct '26): what the poll would reorder waits,
+   and this pill says so beside the filter key — a box of no height, so it lies
+   over the first heading's row and moves nothing; quiet, the bill's own gold dot. */
+.bl-news-at{ position:relative; height:0; z-index:var(--z-panel); display:flex; justify-content:flex-end;
+  padding-right:calc(var(--sq-ctl) + 16px); pointer-events:none; }
+.bl-news{ pointer-events:auto; display:flex; align-items:center; gap:8px; min-width:0; max-width:calc(100% - 128px); height:var(--sq-ctl); padding:0 16px;
+  border:1px solid var(--border); border-radius:calc(var(--sq-ctl) / 2); background:var(--surface); box-shadow:var(--lift-1); color:var(--text-secondary);
+  font-family:'Noto Sans',sans-serif; font-size:var(--fs-md); font-weight:700; white-space:nowrap; cursor:pointer; }
+.bl-news::before{ content:''; width:8px; height:8px; border-radius:50%; background:var(--gold); flex:none; }
+.bl-news span{ color:var(--text-primary); min-width:0; overflow:hidden; text-overflow:ellipsis; }
+@media (max-width:768px){ .bl-news{ padding:0 12px; font-size:var(--fs-chip); } } /* the phone's room between the heading and the filter */
 /* Live wages on Admin › Dashboard, in the Staff on card: the label over its
    number, the share big; red only when the hour is over its usual. */
 .wg-row{ display:flex; flex-wrap:wrap; gap:12px 24px; align-items:flex-end; margin-bottom:12px; }
@@ -29632,7 +29645,8 @@ function kdsItemRows() {
     // so every dish was timed from the table's first send (Sep '26).
     const keyOf = it => it.uid || it.lineKey;
     const sentAtByItem = new Map();
-    (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { const k = keyOf(it); if (k && !sentAtByItem.has(k)) sentAtByItem.set(k, rd.sentAt); }));
+    const byItem = new Map(); // who rang each dish in — the round's sender, as the paper docket prints it
+    (o.rounds || []).forEach(rd => (rd.items || []).forEach(it => { const k = keyOf(it); if (k && !sentAtByItem.has(k)) { sentAtByItem.set(k, rd.sentAt); byItem.set(k, rd.staffName); } }));
     const fired = o.firedCourses || {};
     // A table that has had its food called is PACED: a course not called now
     // waits — a taken-back call put every held course on the stove.
@@ -29654,6 +29668,7 @@ function kdsItemRows() {
         // for one, from the send when it went straight away.
         since: fired[course] > 0 ? Math.max(sentAt, fired[course]) : sentAt,
         held: paced && !(fired[course] > 0),
+        by: byItem.get(keyOf(item)) || o.staffName || '',
         table: o.orderType === 'dine-in' ? String(o.table == null ? '' : o.table) : (o.customerName || o.orderType),
       });
     });
@@ -29664,12 +29679,12 @@ function kdsItemRows() {
 // ticket on the till shifted every place after it, and the cook's tap moved
 // the dish below the one they pressed (Sep '26). The place is only the
 // fallback for a line too old to carry an id.
-async function bumpItemStatus(orderId, idx, status, uid) {
-  try {
-    await api(`/api/orders/${orderId}/items/${idx}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, uid: uid || null }) });
-  } catch (e) {
-    state.toast = toastFail(e.message || 'Could not move that dish.');
-  }
+// A merged line carries every dish it counts (16 Oct '26): one tap crosses
+// them all off, each by its own call, and a second puts them all back.
+async function bumpItemStatus(orderId, idxs, status, uids) {
+  const res = await Promise.allSettled(idxs.map((idx, i) => api(`/api/orders/${orderId}/items/${idx}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status, uid: uids[i] || null }) })));
+  const fail = res.find(x => x.status === 'rejected');
+  if (fail) state.toast = toastFail((fail.reason && fail.reason.message) || 'Could not move that dish.');
   try { await refreshOrders(); } catch (e) {}
   render();
 }
@@ -29699,9 +29714,10 @@ function kdsTickets(rows) {
   const tmap = new Map();
   rows.forEach(r => {
     let t = tmap.get(r.orderId);
-    if (!t) { t = { orderId: r.orderId, table: r.table, rows: [], held: new Set(), since: Infinity }; tmap.set(r.orderId, t); }
+    if (!t) { t = { orderId: r.orderId, table: r.table, rows: [], held: new Set(), since: Infinity, by: '', byAt: -Infinity }; tmap.set(r.orderId, t); }
     if (r.held) { if (r.item.status !== 'ready') t.held.add(r.course); return; }
     t.rows.push(r);
+    if (r.by && r.sentAt >= t.byAt) { t.by = r.by; t.byAt = r.sentAt; } // the latest round on the card is whose call it is
     if (r.item.status !== 'ready' && r.since < t.since) t.since = r.since;
   });
   // A card whose every dish is crossed off STAYS for its Ready: it left on the
@@ -29711,7 +29727,7 @@ function kdsTickets(rows) {
     if (t.since === Infinity) t.since = Math.min(...t.rows.map(r => r.since));
     const cmap = new Map();
     t.rows.forEach(r => { if (!cmap.has(r.course)) cmap.set(r.course, []); cmap.get(r.course).push(r); });
-    t.courses = [...cmap.entries()].sort((a, b) => a[0] - b[0]).map(([n, rs]) => ({ n, rows: rs }));
+    t.courses = [...cmap.entries()].sort((a, b) => a[0] - b[0]).map(([n, rs]) => ({ n, rows: rs, lines: kdsMergeRows(rs) }));
     t.next = [...t.held].sort((a, b) => a - b).map(n => courseInfo(n).name);
     // THE TABLE'S NOTES RIDE ON ITS CARD, as on the paper docket (9 Oct '26):
     // a peanut allergy printed on paper and the cook's screen said nothing.
@@ -29723,6 +29739,45 @@ function kdsTickets(rows) {
     t.tb = tb; // the table itself, for the notes riding with a course — t.table stays the name the card's head shows
   });
   return tickets.sort((a, b) => a.since - b.since);
+}
+
+// COUNT FIRST, SEATS AFTER (owner, 16 Oct '26, picked from the drawn sheet:
+// "Okay good do them"). One ticket read "Hummus (4)", "Hummus (5, 6, 7 & 8)",
+// "Hummus (1 & 2)" — three lines for one dish, and a seat in brackets read
+// like a count. The same dish in the same course, built the same way (same
+// mods, same note, same taken-off), is ONE line with the total; its seats go
+// to a quiet grey line under it. Anything that differs stays its own line,
+// and so does a crossed-off one, so a line is only ever all done or not.
+// ONE SEND, ONE LINE: a later round of the same dish is its own line, or
+// crossing it off folded it into the plated one above (the card lost a line
+// under the cook's finger) and the next tap back un-plated the lot.
+function kdsMergeRows(rows) {
+  const sig = r => { const it = r.item, m = it.modSelections || {};
+    return [r.sentAt, it.id, it.name, it.note || '', JSON.stringify(it.removed || []),
+      Object.keys(m).sort().map(k => k + ':' + [].concat(m[k]).sort().join('+')).join('|'),
+      it.status === 'ready' ? 1 : 0].join('\u0001'); };
+  const map = new Map();
+  rows.forEach(r => { const k = sig(r); if (!map.has(k)) map.set(k, []); map.get(k).push(r); });
+  return [...map.values()].map(rs => ({ rows: rs, item: rs[0].item, qty: rs.reduce((a, r) => a + (r.item.qty || 1), 0), done: rs[0].item.status === 'ready', seats: kdsSeatsText(rs) }));
+}
+// "Seats 1 · 2 · 4–8" — every seat the line feeds, shared ones opened out,
+// in order, a run of three or more as a span. The word is the venue's seat
+// word, and "Seat" when the venue left it blank: a bare grey "4" under a
+// count reads as four more, which is the fault this line was made to end.
+function kdsSeatsText(rs) {
+  const nums = new Set(), extra = new Set();
+  rs.forEach(r => { const s = r.item.seat;
+    if (s == null || s === '') return;
+    if (s === 'all') { const t = seatText(s); if (t) extra.add(t); return; }
+    String(s).split(',').map(x => x.trim()).filter(Boolean).forEach(x => /^\d+$/.test(x) ? nums.add(+x) : extra.add(x)); });
+  const list = [...nums].sort((a, b) => a - b), parts = [];
+  for (let i = 0; i < list.length;) {
+    let k = i; while (k + 1 < list.length && list[k + 1] === list[k] + 1) k++;
+    if (k - i >= 2) parts.push(`${list[i]}–${list[k]}`); else for (let q = i; q <= k; q++) parts.push(String(list[q]));
+    i = k + 1;
+  }
+  const word = (state.settings.seatPrefix || '').trim() || 'Seat';
+  return [parts.length ? `${word}${list.length > 1 ? 's' : ''} ${parts.join(' · ')}` : '', ...extra].filter(Boolean).join(' · ');
 }
 
 // "All day" — what the line still has to cook, per dish, across every ticket.
@@ -29758,14 +29813,25 @@ function kdsColCount() {
 }
 function kdsColsHtml(tickets) {
   const n = kdsColCount();
-  const cols = dealCols(tickets.map(kdsTicketHtml), n, tickets.map(t => 4 + t.rows.length + (t.next.length ? 1 : 0) + (t.notes.length ? 1 : 0)));
+  const cols = dealCols(tickets.map(kdsTicketHtml), n, tickets.map(t => 4 + t.courses.reduce((a, c) => a + c.lines.reduce((b, L) => b + 1 + (L.seats ? .4 : 0) + (L.item.note ? .4 : 0), 0), 0) + (t.next.length ? 1 : 0) + (t.notes.length ? 1 : 0)));
   return `<div class="kds-board" data-n="${n}">${cols.map(c => `<div class="kds-col">${c.join('')}</div>`).join('')}</div>`;
+}
+// CALLER ID ON THE CARD (owner, 16 Oct '26, picked from the drawn sheet: "Okay
+// good do them"): the paper docket always printed who sent the round, the
+// screen never did — so a ready 41 meant "Service!" to the whole room. The
+// sender's first name rides beside the number, in quiet ink; no name, nothing.
+// Not a waiter: the app's own sources ("App order") are not a person to call.
+function kdsCaller(name) {
+  const n = String(name || '').trim();
+  if (!n || n === 'Unknown' || n === 'App order') return '';
+  return n.split(/\s+/)[0];
 }
 function kdsTicketHtml(t) {
   return `
     <div class="kds-ticket" data-order="${t.orderId}">
       <div class="kds-ticket-head">
         <span class="kds-ticket-name">${esc(t.table)}</span>
+        ${kdsCaller(t.by) ? `<span class="kds-ticket-by">${esc(kdsCaller(t.by))}</span>` : ''}
         <span class="kds-age ${kdsAgeClass(t.since)}" data-kds-since="${t.since}">${elapsedMinLabel(t.since)}</span>
       </div>
       ${t.notes.length ? `<div class="kds-notes">${t.notes.map(n => noteChipHtml(n)).join('')}</div>` : ''}
@@ -29774,12 +29840,12 @@ function kdsTicketHtml(t) {
         return `
       <div class="kds-course">
         <div class="kds-course-label"><span class="course-dot" style="background:${info.color || 'var(--steel-300)'};"></span>${esc(info.name)}</div>${courseRemindHtml(t.tb, c.n)}
-        ${c.rows.map(r => {
-          const done = r.item.status === 'ready';
+        ${c.lines.map(L => {
+          const done = L.done;
           return `
-        <button class="kds-dish${done ? ' done' : ''}" data-act="bump-item" data-order="${r.orderId}" data-idx="${r.idx}" data-uid="${esc(r.item.uid || '')}" data-status="${done ? 'ordered' : 'ready'}" aria-pressed="${done}">
-          <span class="kds-qty">${r.item.qty}</span>
-          <span class="kds-dish-name">${esc(r.item.name)}${seatTag(r.item.seat)}${r.item.note ? `<span class="kds-note">${esc(r.item.note)}</span>` : ''}</span>
+        <button class="kds-dish${done ? ' done' : ''}" data-act="bump-item" data-order="${t.orderId}" data-idx="${L.rows.map(r => r.idx).join(',')}" data-uid="${esc(L.rows.map(r => r.item.uid || '').join(','))}" data-status="${done ? 'ordered' : 'ready'}" aria-pressed="${done}">
+          <span class="kds-qty">${L.qty}</span>
+          <span class="kds-dish-name">${esc(L.item.name)}${L.seats ? `<span class="kds-note kds-seats">${esc(L.seats)}</span>` : ''}${L.item.note ? `<span class="kds-note">${esc(L.item.note)}</span>` : ''}</span>
         </button>`;
         }).join('')}
       </div>`;
@@ -39133,7 +39199,10 @@ function billDocket(o) {
   const name = billName(o);
   const mins = Math.max(0, Math.round((Date.now() - (o.createdAt || Date.now())) / 60000));
   const meta = [o.covers ? `${o.covers} cover${o.covers === 1 ? '' : 's'}` : '', pillDur(mins), String(o.staffName || '').replace(/\s*\(.*\)\s*$/, '')].filter(Boolean).join(' · ');
-  const st = billStatus(o);
+  // A bill the poll paid, or took away, while Bills holds still (16 Oct '26)
+  // stays where it sat but says so: Paid, nothing to pay, its Pay dimmed.
+  const done = o.status !== 'open' || !(state.orders || []).includes(o);
+  const st = done ? (o.status === 'paid' ? ['part', 'Paid'] : null) : billStatus(o);
   const paid = billPaidOf(o);
   // THE WHOLE BILL IS ONE TAP ON THE LINE (owner, 12 Oct '26: "i want to
   // quickly see whole bill"): it opens under the line, on Bills, as the
@@ -39154,8 +39223,8 @@ function billDocket(o) {
       <div class="bl-card${billSpendLevel(o) ? ' spend-' + billSpendLevel(o) : ''}" data-id="${o.id}">
         <button class="bl-door" ${door} aria-label="Open ${esc(name)}">${esc(name)}</button>
         <div class="bl-mid" data-act="bill-unfold" data-id="${o.id}" role="button" aria-expanded="${unfolded}">${st ? `<div class="bl-st ${st[0]}">${esc(st[1])}</div>` : ''}<small>${esc(meta)}</small></div>
-        <b class="bl-owe" data-act="bill-unfold" data-id="${o.id}" aria-label="${paid > 0.005 ? 'Left to pay' : 'To pay'}">${money(Math.max(0, billTotal(o) - paid))}</b>
-        <button class="bl-pay${billWaiting(o) ? '' : ' quiet'}" data-act="bill-pay" data-id="${o.id}">Pay</button>
+        <b class="bl-owe" data-act="bill-unfold" data-id="${o.id}" aria-label="${paid > 0.005 ? 'Left to pay' : 'To pay'}">${money(done ? 0 : Math.max(0, billTotal(o) - paid))}</b>
+        <button class="bl-pay${billWaiting(o) ? '' : ' quiet'}" data-act="bill-pay" data-id="${o.id}"${done ? ' disabled' : ''}>Pay</button>
         ${unfolded ? `<div class="bl-lines">${lines}</div>` : ''}
       </div>`;
 }
@@ -39268,7 +39337,17 @@ window.addEventListener('resize', () => {
   const c = document.querySelector('.bl-cols'), k = document.querySelector('.kds-board[data-n]');
   if ((c && +c.dataset.n !== billColCount()) || (k && +k.dataset.n !== kdsColCount())) renderWhenStill();
 });
-function billsBodyHtml() {
+// BILLS HOLDS STILL (owner, 16 Oct '26, from a drawing — Twitter's "new
+// posts" pill: "Okay good do them"). The 15s poll re-sorted Bills under the
+// finger: a waiter going for 23's Pay got 44's, because 44's bill printed on
+// another till and jumped into the Waiting row. Now what the POLL brings that
+// would reorder the cards — a bill printed, a new bill, a paid one — waits,
+// and one quiet pill beside the filter says what changed; a tap sorts. What a
+// card says (its amount, its words) still changes where it sits: only the
+// ORDER waits. Anything this till does, and every fresh visit to Bills, sorts
+// at once — the hold is only ever the poll's.
+const billsHold = { shown: null, polled: null, objs: {} };
+function billsFresh() {
   const live = o => !o.practice || isTrainee();
   const from = tradingDayStart(Date.now());
   const only = billsPick('pos.billsOnly', BILLS_ONLY), how = billsPick('pos.billsOrder', BILLS_ORDER);
@@ -39281,19 +39360,56 @@ function billsBodyHtml() {
   waiting.sort(pick || ((a, b) => (a.billPrintedAt || a.createdAt || 0) - (b.billPrintedAt || b.createdAt || 0)));
   rest.sort(pick || billSortFn('earliest'));
   closed.sort(pick || billSortFn('earliest'));
+  const ids = l => l.map(o => String(o.id));
+  return { view: [only, how, (state.billFind || '').trim()].join('|'), w: ids(waiting), r: ids(rest), c: ids(closed), only };
+}
+const billsSig = l => JSON.stringify([l.view, l.w, l.r, l.c]);
+// The poll marks what it brought; a list that is exactly that is held.
+function billsPolled() { if (billsOn()) billsHold.polled = billsSig(billsFresh()); }
+// What the pill says: one change by name, more by count.
+function billsNews(was, now) {
+  const at = l => { const m = {}; ['w', 'r', 'c'].forEach(k => l[k].forEach(id => { m[id] = k; })); return m; };
+  const a = at(was), b = at(now);
+  const moved = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(id => a[id] !== b[id]);
+  if (moved.length > 1) return `${moved.length} changes`;
+  if (!moved.length) return 'Order changed';
+  const id = moved[0], o = (state.orders || []).find(x => String(x.id) === id) || billsHold.objs[id];
+  const word = b[id] === 'w' ? (o && (o.splitPaid || []).length ? 'part paid' : 'bill printed') : b[id] === 'c' ? 'paid' : !a[id] ? 'new bill' : b[id] ? 'open' : 'gone';
+  return `${o ? billName(o) : 'A bill'} ${word}`;
+}
+function billsBodyHtml() {
+  const fresh = billsFresh(), h = billsHold;
+  // Held only while Bills was already on screen, the filter is the same, and
+  // the difference is the poll's alone.
+  const up = !!document.querySelector('.tp-view .bills');
+  let lay = fresh, news = '';
+  if (up && h.shown && h.shown.view === fresh.view && billsSig(h.shown) !== billsSig(fresh) && billsSig(fresh) === h.polled) {
+    lay = h.shown; news = billsNews(h.shown, fresh);
+  } else h.shown = fresh;
+  const byId = {};
+  (state.orders || []).forEach(o => { byId[String(o.id)] = o; });
+  const objs = {};
+  const of = l => l.map(id => (objs[id] = byId[id] || h.objs[id])).filter(Boolean);
+  const waiting = of(lay.w), rest = of(lay.r), closed = of(lay.c);
+  h.objs = objs;
+  const only = fresh.only;
   const parts = [
     ['Waiting to pay', waiting.length ? billCols(waiting.map(billDocket)) : ''],
     ['Open', rest.length ? billCols(rest.map(billDocket)) : ''],
     ['Closed today', closed.length ? `<div class="bl-rows">${closed.map(billRow).join('')}</div>` : ''],
   ].filter(([, html]) => html);
+  // The pill rides a box of no height, so it lands over the first heading's
+  // row and pushes nothing (layout-shift law). It scrolls away with that row: pinned,
+  // it lay over the top card's Pay, and a tap meant for Pay re-sorted the page.
+  const pill = news ? `<div class="bl-news-at"><button class="bl-news" data-act="bills-sort"><span>${esc(news)}</span>· tap to sort</button></div>` : '';
   // A SECTION IS ITS NAME, and the filter rides the first one's row — nothing
   // stands above the bills but the bills.
   const head = (word, first) => `<div class="bl-hd"><b>${word}</b>${first ? billsFilterHtml() : ''}</div>`;
   if (!parts.length) {
     const none = state.billFind && state.billFind.trim() ? 'No bill matches' : only === 'open' ? 'No open bills' : only === 'closed' ? 'No bills closed today' : 'No bills today';
-    return `<div class="bl-hd">${billsFilterHtml()}</div><div class="pass-empty">${none}</div>`;
+    return `${pill}<div class="bl-hd">${billsFilterHtml()}</div><div class="pass-empty">${none}</div>`;
   }
-  return parts.map(([word, html], i) => head(word, i === 0) + html).join('');
+  return pill + parts.map(([word, html], i) => head(word, i === 0) + html).join('');
 }
 function renderBills() { return `<div class="bills">${billsBodyHtml()}</div>`; }
 // Typing repaints the bills alone, never the bar the field sits in — a whole
@@ -49374,6 +49490,7 @@ function handleActClick(el, e) {
         render();
       }
       else if (act === 'bill-pay') { payFromBills(el.dataset.id); }
+      else if (act === 'bills-sort') { billsHold.shown = null; repaintBills(); }
       else if (act === 'floor-find') {
         if (_searchHideFired) { _searchHideFired = false; return; }
         state.floorFindOpen = !state.floorFindOpen;
@@ -51354,7 +51471,7 @@ function handleActClick(el, e) {
         const input = document.getElementById(el.dataset.target);
         if (input) { input.value = el.dataset.icon; input.dispatchEvent(new Event('input', { bubbles: true })); }
       }
-      else if (act === 'bump-item') { bumpItemStatus(parseInt(el.dataset.order), parseInt(el.dataset.idx), el.dataset.status, el.dataset.uid); }
+      else if (act === 'bump-item') { bumpItemStatus(parseInt(el.dataset.order), el.dataset.idx.split(',').map(n => parseInt(n)), el.dataset.status, (el.dataset.uid || '').split(',')); }
       else if (act === 'kds-ready') { kdsTicketReady(parseInt(el.dataset.order)); }
       else if (act === 'apply-happy-hour') { applyHappyHour(el.dataset.id); }
       else if (act === 'happy-hour-toggle-open') {
@@ -51597,7 +51714,7 @@ setInterval(() => {
       const storeMoved = !(v && _dataVersion && v.store === _dataVersion.store) || _restOwed;
       if (v) _dataVersion = v;
       if (same && !_restOwed) { if (Date.now() - _lastBgRender > 60000 && !typingInField()) { _lastBgRender = Date.now(); renderWhenStill(); } return; }
-      return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings(), refreshDeskColours()]).then(followMovedParty).then(() => { if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary();
+      return Promise.all([refreshOrders(), refreshReservations(), refreshTableSittings(), refreshDeskColours()]).then(followMovedParty).then(() => { billsPolled(); if (state.view === 'admin' && state.adminTab === 'orders') refreshSummary();
         return Promise.all([api('/api/menu'), storeMoved ? api('/api/categories').catch(() => null) : null, storeMoved ? api('/api/subcategories').catch(() => null) : null,
           storeMoved ? api('/api/combos').catch(() => null) : null, storeMoved ? api('/api/modifier-groups').catch(() => null) : null,
           storeMoved ? api('/api/happy-hours').catch(() => null) : null,

@@ -7379,6 +7379,7 @@ body[data-theme="dark"]{ --spend-1:color-mix(in srgb, var(--green) 14%, var(--su
     toDoshiiOrder: function () { return {}; },
     pushOrder: function () { return Promise.resolve(null); },
     getPaidTotal: function () { return Promise.resolve(0); },
+    prepaidTotal: function () { return 0; },
     DEFAULT_BASES: {},
   };
   var pvCrypto = (function () {
@@ -12197,10 +12198,29 @@ async function doshiiPollOnce() {
         doshiiId,
         source: 'doshii',
       };
+      // PAID IN THE APP IS PAID (15 Oct '26): an order the guest paid for in
+      // the app landed as an open, unpaid ticket, and the only way to clear it
+      // was Pay — cash or card the venue never took. The app's money comes
+      // with the order: it is its own way of paying, on its own cash-up line,
+      // never in the drawer or on the terminal.
+      const appPaid = Math.round(doshii.prepaidTotal(dOrder) * 100) / 100;
+      if (appPaid > 0.005) {
+        const now = order.createdAt;
+        if (appPaid >= subtotal - 0.005) {
+          const r = (parseFloat(taxSettings(data).ratePercent) || 0) / 100;
+          order.tax = taxSettings(data).mode === 'none' || !(r > 0) ? 0 : Math.round((subtotal - subtotal / (1 + r)) * 100) / 100; // what the app charged holds its tax
+          order.tip = Math.round(Math.max(0, appPaid - subtotal) * 100) / 100;
+          order.grandTotal = Math.round((subtotal + order.tip) * 100) / 100;
+          order.paymentMethod = 'app'; order.status = 'paid'; order.closedAt = now; order.closedBy = 'App order'; order.paidAt = now;
+          order.loyaltyCredited = 0;
+        } else {
+          order.splitPaid = [{ key: 'app-' + now, label: 'Paid in the app', amount: appPaid, method: 'app', giftCardCode: null, cardType: null, tip: 0, at: now, staffName: 'App order' }];
+        }
+      }
       adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
       data.orders.push(order);
       data.ticketCounter += 1;
-      logAudit(data, 'Doshii', `App order received — Order #${order.id} (${meta.customerName || meta.table || meta.orderType})`);
+      logAudit(data, 'Doshii', `App order received — Order #${order.id} (${meta.customerName || meta.table || meta.orderType})${appPaid > 0.005 ? ` — $${appPaid.toFixed(2)} paid in the app` : ''}`);
       writeData(data);
       printing.printDocketsForRound(data, order, items, 1);
       doshiiSeen.add(doshiiId);
@@ -12287,14 +12307,29 @@ async function doshiiPayAtTableOnce() {
           if (!order || order.status !== 'open') continue;
           const pb = payAtTableBill(data, order);
           const due = pb.due;
-          if (due > 0 && paid >= due - 0.005) {
+          // THE TERMINAL'S MONEY IS ONLY COUNTED ONCE, AND A PART IS A PART
+          // (15 Oct '26): half the bill paid on the terminal was on no bill at
+          // all — the till still asked for the whole of it. What the terminal
+          // took since the till last looked is a part, like one taken at the till.
+          const termSoFar = (order.splitPaid || []).filter(p => p.terminal).reduce((a, p) => a + (p.amount || 0), 0);
+          const fresh = Math.round((paid - termSoFar) * 100) / 100;
+          if (due > 0 && fresh > 0.005 && fresh < due - 0.005) {
+            const now = Date.now();
+            order.splitPaid = order.splitPaid || [];
+            order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: fresh, method: 'card', giftCardCode: null, cardType: null, tip: 0, at: now, staffName: 'EFTPOS terminal', terminal: true });
+            order.doshiiSyncHash = null; // the terminal shows what is left
+            logAudit(data, 'EFTPOS terminal', `Took Pay at table ($${fresh.toFixed(2)}, card) on Ticket #${order.id}`);
+            writeData(data);
+            continue;
+          }
+          if (due > 0 && fresh >= due - 0.005) {
             const now = Date.now();
             // Money past what was owed is the guest's tip on the terminal.
-            const tip = Math.max(0, Math.round((paid - due) * 100) / 100);
+            const tip = Math.max(0, Math.round((fresh - due) * 100) / 100);
             if ((order.splitPaid || []).length) {
               // The terminal finishes a bill already part paid: it is the last
               // PART, and the parts are the payment — as the till's close does.
-              order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: Math.round(paid * 100) / 100, method: 'card', giftCardCode: null, cardType: null, tip, at: now, staffName: 'EFTPOS terminal' });
+              order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: fresh, method: 'card', giftCardCode: null, cardType: null, tip, at: now, staffName: 'EFTPOS terminal', terminal: true });
               const byMethod = {};
               order.splitPaid.forEach(p => { byMethod[p.method || 'card'] = (byMethod[p.method || 'card'] || 0) + (p.amount || 0); });
               order.payments = Object.entries(byMethod).map(([method, amount]) => ({ method, amount: Math.round(amount * 100) / 100 }));
@@ -12327,7 +12362,7 @@ async function doshiiPayAtTableOnce() {
             if (!order.practice) { order.loyaltyCredited = Math.max(0, (order.total || 0) - voucherSaleTotal(order.items || []) - giftParts); creditLoyalty(data, order.customerId, order.loyaltyCredited); }
             order.doshiiSyncHash = null; // force a final status push next cycle
             tillEndsSitting(data, order);
-            logAudit(data, 'EFTPOS terminal', `Order #${order.id} paid at the terminal (${paid.toFixed(2)}) — table closed automatically`);
+            logAudit(data, 'EFTPOS terminal', `Order #${order.id} paid at the terminal (${fresh.toFixed(2)}) — table closed automatically`);
             writeData(data);
             if (data.settings.autoPrintReceipt) printing.printReceiptForOrder(data, order);
             console.log(`Doshii: Order #${order.id} paid at the terminal — closed`);
@@ -12438,7 +12473,7 @@ function missedWhereNow(data, list) {
 app.get('/api/missed-prints', (req, res) => { res.json(missedWhereNow(readData(), printing.getMissed())); });
 app.post('/api/missed-prints/:id', async (req, res) => {
   const how = (req.body || {}).how === 'reprint' ? 'reprint' : 'walked';
-  const m = await printing.settleMissed(parseInt(req.params.id, 10), how, readData().printerStations || []);
+  const m = await printing.settleMissed(parseInt(req.params.id, 10), how, readData().printerStations || [], readData());
   if (!m) return res.status(404).json({ error: 'Already sorted' });
   // READ AFTER THE WAIT, never before it (8 Oct '26): a printer that is off
   // holds this for seconds, and the copy read before it was written back over
@@ -13390,11 +13425,16 @@ app.post('/api/shifts', (req, res) => {
 
 app.post('/api/shifts/clock-in', (req, res) => {
   const data = readData();
-  const { staffId, staffName } = req.body;
+  const { staffId } = req.body;
   if (!staffId) return res.status(400).json({ error: 'Missing staff id' });
+  // The shift carries the name ON THE TEAM, never the one the request typed
+  // (16 Oct '26 hunt): any device could clock "anyone" in under any words.
+  const who = (data.staff || []).find(s => s.id === staffId);
+  if (!who) return res.status(400).json({ error: 'Unknown staff member' });
+  const staffName = who.name;
   const existing = (data.shifts || []).find(s => s.staffId === staffId && s.clockOut === null);
   if (existing) return res.json(existing);
-  const shift = { id: 'sh' + Date.now(), staffId, staffName: staffName || 'Unknown', clockIn: Date.now(), clockOut: null };
+  const shift = { id: 'sh' + Date.now(), staffId, staffName, clockIn: Date.now(), clockOut: null };
   data.shifts = [...(data.shifts || []), shift];
   logAudit(data, staffName || 'Unknown', `Clocked in`);
   writeData(data);
@@ -13705,7 +13745,12 @@ function adjustStockForItems(data, items, sign, ref) {
   const takenBy = (id) => {
     if (sign < 0 || !ticket) return null;
     // A combined ticket answers for the tickets folded into it too.
-    const nums = [ticket, ...(data.orders || []).filter(o => new RegExp('^Combined into Ticket #' + ticket + '\\b').test(o.voidReason || '')).map(o => String(o.id))];
+    // …and so does a ticket whose dishes were MOVED onto it (16 Oct '26 hunt):
+    // they were sold under their first ticket, so a void of the table they
+    // went to put back only what that table had sold itself.
+    const self = (data.orders || []).find(o => String(o.id) === ticket);
+    const movedIn = ((self && self.rounds) || []).filter(r => r.moved && r.from != null).map(r => String(r.from));
+    const nums = [ticket, ...movedIn, ...(data.orders || []).filter(o => new RegExp('^Combined into Ticket #' + ticket + '\\b').test(o.voidReason || '')).map(o => String(o.id))];
     const rows = (data.inventoryAdjustments || []).filter(r => r.inventoryItemId === id && nums.some(t => new RegExp('#' + t + '(\\D|$)').test(r.reason || '')));
     return rows.length ? Math.max(0, -rows.reduce((a, r) => a + (r.change || 0), 0)) : null;
   };
@@ -14451,9 +14496,21 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
         if (i.qty <= 0) r.items.splice(k, 1);
       }
     });
+    // THE SET'S PRICE STAYS WITH THE SET (15 Oct '26): it rides on its first
+    // dish, so taking that dish off a SENT set took the whole $65 off and the
+    // rest of the set stayed on the bill at $0. The price passes to a dish of
+    // the same set still on the ticket, as the docket does before a send.
+    const handed = new Set();
+    removed.filter(r => r.comboRef && r.price > 0).forEach(r => {
+      const heir = (order.items || []).find(i => i.comboRef === r.comboRef && i.comboStamp === r.comboStamp && !(i.price > 0) && !handed.has(i));
+      if (!heir) return;
+      handed.add(heir); heir.price = r.price;
+      (order.rounds || []).forEach(rd => (rd.items || []).forEach(i => { if (i !== heir && heir.uid && i.uid === heir.uid) i.price = r.price; }));
+      r.handedOn = true;
+    });
     if (!order.practice) adjustStockForItems(data, removed, 1, `Ticket #${order.id}`);
     const qtyRemoved = removed.reduce((s, i) => s + i.qty, 0);
-    const value = removed.reduce((s, i) => s + i.price * i.qty, 0);
+    const value = removed.reduce((s, i) => s + (i.handedOn ? 0 : i.price * i.qty), 0);
     const why = reason ? ` (${reason})` : '';
     logAudit(data, staff, `Removed ${qtyRemoved}× ${match.name} from Ticket #${order.id}${why}`);
     // The ticket remembers who took money off it and how much, reason or not
@@ -14478,7 +14535,12 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     let n = 0;
     const note = (newNote === undefined) ? undefined : String(newNote || '').trim().slice(0, 120);
     const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined) i.course = course; if (note !== undefined) i.note = note; };
+    // …but a NOTE is about the dish (15 Oct '26): "no chilli" typed on a sent
+    // Pita showed on the till and never reached the cook. The changed line
+    // goes to its station again, under the note banner the quick note uses.
+    const reNoted = note !== undefined ? (order.items || []).filter(i => matches(i) && (i.note || '') !== note) : [];
     (order.items || []).forEach(i => { if (matches(i)) { apply(i); n++; } });
+    if (reNoted.length) printing.printDocketsForRound(data, order, reNoted.filter(i => !i.giftcardSale && i.qty > 0), 0, { quickNote: note ? 'NOTE CHANGED' : 'NOTE REMOVED' });
     (order.rounds || []).forEach(r => (r.items || []).forEach(i => { if (matches(i)) apply(i); }));
     if (n === 0) return res.status(404).json({ error: 'Item not found on this ticket' });
     const bits = [];
@@ -15161,7 +15223,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   let dest = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
   if (dest) {
     dest.items = (dest.items || []).concat(moving);
-    dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true }];
+    dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true, from: order.id }];
     carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))], movedFood);
     retotal(dest);
     dest.billPrinted = false; // its printed bill no longer holds these dishes
@@ -15174,7 +15236,7 @@ app.post('/api/orders/:id/move-items', (req, res) => {
       customerName: null,
       covers: null,
       items: moving,
-      rounds: [{ id: 1, sentAt: Date.now(), color: null, items: moving, moved: true }],
+      rounds: [{ id: 1, sentAt: Date.now(), color: null, items: moving, moved: true, from: order.id }],
       subtotal: 0, discount: null, tax: 0, total: 0, tip: 0, grandTotal: 0,
       paymentMethod: null,
       status: 'open',
@@ -15482,6 +15544,7 @@ function computePeriodSummary(data, fromTs, toTs) {
   let cashNet = 0;
   let cardNet = 0;
   let giftNet = 0;
+  let appNet = 0; // paid in an ordering app: neither the drawer nor the terminal
   // Who took what — the owner's per-terminal view: every order knows the
   // staff member who rang it.
   const byStaff = {};
@@ -15494,18 +15557,20 @@ function computePeriodSummary(data, fromTs, toTs) {
     const gt = o.grandTotal !== undefined ? o.grandTotal : o.total;
     if (o.paymentMethod === 'split' && Array.isArray(o.payments) && o.payments.length) {
       const gross = m => o.payments.filter(p => p.method === m).reduce((s, p) => s + p.amount, 0);
-      const cashGross = gross('cash'), cardGross = gross('card'), giftGross = gross('giftcard');
+      const cashGross = gross('cash'), cardGross = gross('card'), giftGross = gross('giftcard'), appGross = gross('app');
       // A gift-card share is gift-card money: it was in no line at all, so a
       // $40 card share went missing from the cash-up (Sep '26).
       const share = v => amt === null ? v : (gt > 0 ? amt * v / gt : 0);
       cashNet += sign * share(cashGross);
       cardNet += sign * share(cardGross);
       giftNet += sign * share(giftGross);
+      appNet += sign * share(appGross);
     } else {
       const v = amt === null ? gt : amt;
       if (o.paymentMethod === 'cash') cashNet += sign * v;
       else if (o.paymentMethod === 'card') cardNet += sign * v;
       else if (o.paymentMethod === 'giftcard') giftNet += sign * v;
+      else if (o.paymentMethod === 'app') appNet += sign * v;
     }
   };
   // Money taken in PARTS is in the drawer the moment it is taken, so it
@@ -15518,6 +15583,7 @@ function computePeriodSummary(data, fromTs, toTs) {
     if (!inWin(p.at || periodAt(o))) return;
     if (p.method === 'cash') cashNet += p.amount || 0;
     else if (p.method === 'giftcard') giftNet += p.amount || 0;
+    else if (p.method === 'app') appNet += p.amount || 0;
     else cardNet += p.amount || 0;
   }));
   // A tip added AFTER the bill is card money (see lateTips): money handed back
@@ -15533,12 +15599,13 @@ function computePeriodSummary(data, fromTs, toTs) {
   const giveBack = (o, amt) => { const x = lateSplit(o, amt); cardNet -= x.card; takeBy(x.base, -1, x.rest); };
   // A refund goes back the way it came, food first (refundByWay).
   refunded.forEach(o => { const x = refundSplit(o); refundByWay(o, x.food, x.tip).forEach(w => {
-    if (w.method === 'cash') cashNet -= w.amount; else if (w.method === 'giftcard') giftNet -= w.amount; else cardNet -= w.amount; }); });
+    if (w.method === 'cash') cashNet -= w.amount; else if (w.method === 'giftcard') giftNet -= w.amount; else if (w.method === 'app') appNet -= w.amount; else cardNet -= w.amount; }); });
   lateVoids.forEach(o => {
     if (!hasParts(o)) { giveBack(o, lateVoidOut(o)); return; }
     partsBefore(o).forEach(p => {
       if (p.method === 'cash') cashNet -= p.amount || 0;
       else if (p.method === 'giftcard') giftNet -= p.amount || 0;
+      else if (p.method === 'app') appNet -= p.amount || 0;
       else cardNet -= p.amount || 0;
     });
   });
@@ -15586,6 +15653,7 @@ function computePeriodSummary(data, fromTs, toTs) {
     cashNet,
     cardNet,
     giftNet,
+    appNet,
     byStaff,
     paidOuts,
     paidOutTotal,
@@ -22007,10 +22075,15 @@ function lineWaitingToSend(idx) {
 // sent a second Labneh at $0 — the set's price rides on its first dish only.
 // Another of the set is the set again; another Labneh is a Labneh.
 function setDishLocked(line, delta) {
-  if (!(delta > 0 && line && line.comboRef && !(line.price > 0))) return false;
+  // The dish that carries the set's price is locked too (15 Oct '26): its ＋
+  // made "2 × Banquet · Pita" at $130 with one Focaccia.
+  if (!(delta > 0 && line && line.comboRef)) return false;
+  setDishSays();
+  return true;
+}
+function setDishSays() {
   state.toast = toastFail('A set menu dish comes one each — add the dish on its own');
   render(); armToastTimer(TOAST_SHORT);
-  return true;
 }
 // …AND THE SET'S PRICE STAYS WITH THE SET (12 Oct '26): it rides on the first
 // dish, so "no hummus" took the whole $65 off and the rest of the set went to
@@ -22099,11 +22172,27 @@ function openLineEdit(idx) {
   state.itemOptions = null; state.comboBuilder = null;
   render();
 }
-function editLineRecompose(line) {
+function editLineRecompose(line, was) {
   const item = state.menu.find(m => m.id === line.menuItemId);
   if (!item) return;
   const c = composeCartLine(item, line.variantId, line.modSelections || {});
+  // A SET MENU'S DISH STAYS THE SET'S (15 Oct '26): "Medium" on the Banquet's
+  // steak made it a plain $8 steak — the $65 set price went with it, or a $0
+  // dish of the set became a full-price one. A pick on a set dish changes
+  // only what the pick itself costs; the line keeps the set's name and share.
+  if (line.comboRef && was) {
+    const set = (state.combos || []).find(x => x.id === line.comboRef);
+    const delta = Math.round((c.price - was.price) * 100) / 100;
+    line.id = c.id; line.name = `${set ? set.name : String(line.name).split(' · ')[0]} · ${c.name}`;
+    line.price = Math.round((line.price + delta) * 100) / 100; // menuPrice kept: a set price is never repriced from a dish
+    return;
+  }
   line.id = c.id; line.name = c.name; line.price = c.price; line.menuPrice = c.price;
+}
+// What the line's own picks cost before a change — the base a set dish's change is measured from.
+function lineBuildPrice(line) {
+  const item = state.menu.find(m => m.id === line.menuItemId);
+  return item ? composeCartLine(item, line.variantId, line.modSelections || {}) : null;
 }
 // A PRICE CHANGED IN ADMIN REACHES THE CART (14 Oct '26 hunt). A dish rung
 // before the office till put its price up stayed at the old price, which the
@@ -22157,7 +22246,8 @@ function splitCartLine() {
 function editLineSetVariant(variantId) {
   const line = state.cart[state.editLine ? state.editLine.idx : -1];
   if (!line) return;
-  line.variantId = variantId; editLineRecompose(line); render();
+  const was = lineBuildPrice(line);
+  line.variantId = variantId; editLineRecompose(line, was); render();
 }
 function editLineSetModifier(gid, oid) {
   const line = state.cart[state.editLine ? state.editLine.idx : -1];
@@ -22175,8 +22265,9 @@ function editLineSetModifier(gid, oid) {
     else if (arr.length < max) arr.push(oid);
     else return;
   }
+  const was = lineBuildPrice(line);
   line.modSelections = { ...(line.modSelections || {}), [gid]: arr };
-  editLineRecompose(line); render();
+  editLineRecompose(line, was); render();
 }
 // A hand-picked course STAYS. Auto files dishes by section; once somebody has
 // placed a line themselves, Auto stops re-filing this cart (cascadeAutoCourses)
@@ -26703,8 +26794,14 @@ async function saveEditSent() {
       const up = Math.max(0, d.qty - agg.qty);
       if (up > 0 && state.editSent) {
         const o = activeOpenOrder(); const it = o && (o.items || []).find(i => sentItemMatches(i, state.editSent));
-        if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: it.price, qty: up,
-          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections });
+        // More of a dish is charged like Add another and Same again: at its own
+        // price, not a comp the manager gave the first one (15 Oct '26: + on
+        // a dish comped to $0 sent the second free) — unless this Save sets a
+        // new price, which the added servings wear. The build ("No Tomato")
+        // comes too.
+        if (it && it.comboRef) setDishSays();
+        else if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: d.price !== agg.price ? d.price : (it.origPrice !== undefined ? it.origPrice : it.price), qty: up,
+          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections, removed: (it.removed || []).slice() });
       }
       if (d.price !== agg.price && state.editSent) { const c = lineOffChoice(d.off); await doRepriceSent(state.editSent, d.price, c ? c.label : ''); }
     }
@@ -26738,9 +26835,14 @@ function doAddServing(match) {
   const o = activeOpenOrder();
   const item = (o && match) ? (o.items || []).find(i => sentItemMatches(i, match)) : null;
   if (!item) return false;
+  // A SET MENU'S DISH COMES ONE EACH once it is sent too (15 Oct '26): the
+  // copy left its set, so another Hummus went out at the whole set's $65 and
+  // another Labneh at $0. The docket's ＋ already says so; so does this.
+  if (item.comboRef) { setDishSays(); return false; }
   const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: 1,
     course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
-    variantId: item.variantId, modSelections: item.modSelections, removed: [] };
+    // …the same BUILD too: "No Tomato" went out as a plain Pita (15 Oct '26).
+    variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
   // ANOTHER ONE IS ANOTHER ONE, NOT ANOTHER LINE (owner, Sep '26: "adding a
   // second quantity to an item in docket bar creates a separate item …
   // clicking the quantity a second time"). This pushed a raw line every tap.
@@ -28865,6 +28967,7 @@ function renderRegisterAdmin() {
       `<div class="detail-line sub-line"><span>${k === 'other' ? 'Not recorded' : cardTypeLabel(k)}</span><span>${money(v)}</span></div>`).join('')}
     <div class="detail-line"><span>Cash</span><span>${money(cur.cashNet)}</span></div>
     ${cur.giftNet ? `<div class="detail-line"><span>Gift cards</span><span>${money(cur.giftNet)}</span></div>` : ''}
+    ${cur.appNet ? `<div class="detail-line"><span>Paid in apps</span><span>${money(cur.appNet)}</span></div>` : ''}
   </div>
   ${(cur.byStaff && Object.keys(cur.byStaff).length) ? `
   <div class="settings-card">
@@ -28941,7 +29044,7 @@ function renderHoursAdmin() {
   <div class="settings-card">
     <div class="th">Total hours logged</div>
     ${Object.keys(totalsByStaff).length === 0 ? `<div class="ts">No shifts logged yet.</div>` : Object.entries(totalsByStaff).map(([name, hrs]) => `
-      <div class="detail-line"><span>${name}</span><span>${fmtHours(hrs)}</span></div>
+      <div class="detail-line"><span>${esc(name)}</span><span>${fmtHours(hrs)}</span></div>
     `).join('')}
   </div>
   <div class="hd-row" style="display:flex;align-items:center;margin-bottom:10px;max-width:var(--admin-list-w,600px);">
@@ -29972,7 +30075,7 @@ function renderAdjustmentsTab() {
     ${adjustments.length === 0 ? `<div class="empty-hist">No stock adjustments yet.</div>` : adjustments.map(a => `
       <div class="order-row">
         <div class="order-info">
-          <div class="t1">${a.itemName} <span class="status-chip ${a.change > 0 ? 'paid' : 'void'}">${a.change > 0 ? '+' : ''}${a.change}</span></div>
+          <div class="t1">${esc(a.itemName)} <span class="status-chip ${a.change > 0 ? 'paid' : 'void'}">${a.change > 0 ? '+' : ''}${a.change}</span></div>
           <div class="t2">${fmtDate(a.timestamp)} ${fmtTime(a.timestamp)} · ${esc(a.reason)} · ${esc(a.staffName)}</div>
           <div class="t2" style="margin-top:4px;font-size:var(--fs-chip);">Stock: ${a.previousStock} → ${a.newStock}</div>
         </div>
@@ -30090,7 +30193,7 @@ function renderAdjustInventoryModal() {
   return `
   <div class="modal-bg">
     <div class="modal" data-stop="1">
-      <h2>Adjust stock — ${m.itemName}</h2>
+      <h2>Adjust stock — ${esc(m.itemName)}</h2>
       <div class="sub">Current: ${m.currentStock} ${esc(m.unit && m.unit !== 'unit' ? m.unit : 'units')}</div>
 <div class="pay-options" style="margin-bottom:12px;">
         ${[['add', 'Add'], ['remove', 'Remove']].map(([v, l]) => `<div class="pay-opt ${(m.dir || 'add') === v ? 'active' : ''}" data-act="adjust-dir" data-modal="inventory" data-val="${v}">${l}</div>`).join('')}

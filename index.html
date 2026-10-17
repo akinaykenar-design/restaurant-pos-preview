@@ -12229,21 +12229,27 @@ async function doshiiPollOnce() {
       const appPaid = Math.round(doshii.prepaidTotal(dOrder, appSaid) * 100) / 100;
       if (appPaid > 0.005) {
         const now = order.createdAt;
-        if (appPaid >= subtotal - 0.005) {
+        // WHAT THE APP TOOK OFF IS OFF, AND ITS TIP IS NOT THE BILL (17 Oct '26
+        // hunt): a $5 promo paid in full arrived owing the $5, and a deposit's
+        // tip was counted as food, so the counter asked the guest too little.
+        const appTip = Math.max(0, Math.min(appSaid.tip || 0, appPaid));
+        const appOff = Math.min(0, (Array.isArray(dOrder.surcounts) ? dOrder.surcounts : []).reduce((a, x) => a + (parseInt(x && x.amount, 10) || 0), 0) / 100);
+        if (appPaid - appTip >= subtotal + appOff - 0.005) {
           // THE TIP IS WHAT THE APP SAYS WAS TIP (16 Oct '26 hunt): everything
           // over the dishes was booked as the guest's tip, so a $5 delivery fee
           // went into the staff tips. The rest over the dishes is the app's
           // fees — the venue's money, on the bill as a surcharge.
           const r = (parseFloat(taxSettings(data).ratePercent) || 0) / 100;
-          order.tip = Math.round(Math.min(Math.max(0, appSaid.tip || 0), Math.max(0, appPaid - subtotal)) * 100) / 100;
+          order.tip = Math.round(appTip * 100) / 100;
           const fees = Math.round((appPaid - order.tip - subtotal) * 100) / 100;
           if (fees > 0.005) { order.discount = { type: 'fixed', value: fees, reason: 'App fees', amount: -fees, kind: 'surcharge' }; order.total = Math.round((subtotal + fees) * 100) / 100; }
+          else if (fees < -0.005) { order.discount = { type: 'fixed', value: -fees, reason: 'App discount', amount: -fees, kind: 'discount' }; order.total = Math.round((subtotal + fees) * 100) / 100; }
           order.tax = taxSettings(data).mode === 'none' || !(r > 0) ? 0 : Math.round((order.total - order.total / (1 + r)) * 100) / 100; // what the app charged holds its tax
           order.grandTotal = Math.round((order.total + order.tip) * 100) / 100;
           order.paymentMethod = 'app'; order.status = 'paid'; order.closedAt = now; order.closedBy = 'App order'; order.paidAt = now;
           order.loyaltyCredited = 0;
         } else {
-          order.splitPaid = [{ key: 'app-' + now, label: 'Paid in the app', amount: appPaid, method: 'app', giftCardCode: null, cardType: null, tip: 0, at: now, staffName: 'App order' }];
+          order.splitPaid = [{ key: 'app-' + now, label: 'Paid in the app', amount: appPaid, method: 'app', giftCardCode: null, cardType: null, tip: Math.round(appTip * 100) / 100, at: now, staffName: 'App order' }];
         }
       }
       adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
@@ -12460,6 +12466,9 @@ app.get('/api/backups', (req, res) => {
 });
 
 app.post('/api/backups/now', (req, res) => {
+  // A manager's, as restoring is (17 Oct '26 hunt): thirty presses from any
+  // device pushed every older restore point out of the thirty kept.
+  if (!managerFromReq(req, readData())) return res.status(403).json({ error: 'Only a manager can take a backup' });
   try {
     const name = backups.snapshot('manual');
     const data = readData();
@@ -13650,8 +13659,14 @@ app.get('/api/backup', (req, res) => {
   // on the wifi could download it until Sep '26. The roster's till key never
   // leaves at all: a data file gets pasted into chats and committed as seed.
   if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can download the data' });
-  const out = data.settings && data.settings.roster
-    ? { ...data, settings: { ...data.settings, roster: { url: data.settings.roster.url || '' } } } : data;
+  // …nor do the app-orders secret and the card terminal's pairing (17 Oct '26
+  // hunt): the same file is committed as the seed and rides in the public
+  // preview. Loading the file back keeps the till's own (see /api/import).
+  const st = data.settings || {};
+  const out = { ...data, settings: { ...st,
+    ...(st.roster ? { roster: { url: st.roster.url || '' } } : {}),
+    ...(st.doshii ? { doshii: { ...st.doshii, clientSecret: '' } } : {}),
+    ...(st.terminal && st.terminal.linkly ? { terminal: { ...st.terminal, linkly: { ...st.terminal.linkly, secret: '' } } } : {}) } };
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="pos-backup-${stamp}.json"`);
@@ -13669,6 +13684,13 @@ app.post('/api/import', (req, res) => {
   // till's link rather than quietly unlinking it (Sep '26).
   if (incoming && incoming.settings && current.settings && current.settings.roster && current.settings.roster.key
       && !((incoming.settings.roster || {}).key)) incoming.settings.roster = current.settings.roster;
+  // …and its app-orders secret and terminal pairing, which a data file never carries either.
+  if (incoming && incoming.settings && current.settings) {
+    const cd = current.settings.doshii, id = incoming.settings.doshii;
+    if (cd && cd.clientSecret && id && typeof id === 'object' && !id.clientSecret && (id.clientId || '') === (cd.clientId || '')) id.clientSecret = cd.clientSecret;
+    const cl = current.settings.terminal && current.settings.terminal.linkly, it = incoming.settings.terminal;
+    if (cl && cl.secret && it && typeof it === 'object' && it.linkly && typeof it.linkly === 'object' && !it.linkly.secret && (it.linkly.username || '') === (cl.username || '')) it.linkly.secret = cl.secret;
+  }
   if (!incoming || typeof incoming !== 'object' || !Array.isArray(incoming.menu) || !incoming.settings || !Array.isArray(incoming.orders)) {
     return res.status(400).json({ error: 'That file does not look like POS data.' });
   }
@@ -14447,7 +14469,9 @@ app.post('/api/orders/:id/rounds', (req, res) => {
 // order.items and the round copies, then recomputes the open total.
 // What a set menu's dish carries of the SET'S price (its menuPrice), apart
 // from any paid pick riding on it. A line from before menuPrice: its price.
-function setShareOf(i) { return i.menuPrice != null ? (Number(i.menuPrice) || 0) : (Number(i.price) || 0); }
+// …never more than the line still charges: a dish the manager comped to $0
+// carries no set price to hand on (17 Oct '26 hunt: taking it off put $65 back).
+function setShareOf(i) { const p = Number(i.price) || 0; return Math.max(0, i.menuPrice != null ? Math.min(Number(i.menuPrice) || 0, p) : p); }
 app.post('/api/orders/:id/modify-item', (req, res) => {
   const data = readData();
   const order = data.orders.find(o => o.id === parseInt(req.params.id, 10));
@@ -15137,7 +15161,12 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   // The party coming over sits after the one already there (the till says by
   // how many): two parties never share a seat number (Oct '26 hunt).
   const shift = Math.max(0, parseInt(req.body.seatShift, 10) || 0);
-  const bump = i => shift && parseInt(i.seat, 10) > 0 ? { ...i, seat: parseInt(i.seat, 10) + shift } : i;
+  // Every seat of a shared dish moves ("1,2" → "3,4"): read as one number it
+  // landed on seat 3 alone, and the guest on 4 dropped off it (17 Oct '26).
+  const up = s => { const n = parseInt(s, 10); return n > 0 ? n + shift : s; };
+  const bump = i => !shift || i.seat == null ? i
+    : typeof i.seat === 'string' && i.seat.indexOf(',') !== -1 ? { ...i, seat: i.seat.split(',').map(x => up(x.trim())).join(',') }
+    : parseInt(i.seat, 10) > 0 ? { ...i, seat: up(i.seat) } : i;
   // Destination already has an open tab → COMBINE: its lines and rounds ride
   // over, totals re-add, and the source ticket closes as merged.
   const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
@@ -16809,6 +16838,13 @@ function esc(v) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+// A PICTURE IS A PICTURE (17 Oct '26 hunt). A dish's photo — and a section's,
+// a course's, a set menu's — was painted straight into the page, and the server
+// keeps whatever text it is sent: a "photo" that closed its quote ran page code
+// on every till that showed the menu, and could read the signed-in manager's
+// PIN. Only an uploaded file, an inline image or a plain web address is drawn.
+const IMG_OK = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0-9+\/=]+|https?:\/\/[^\s"'<>()\\`]+)$/;
+function imgUrl(v) { return typeof v === 'string' && IMG_OK.test(v.trim()) ? v.trim() : ''; }
 
 // §§ Money, time and text formatting
 // The minus goes BEFORE the $ — "-$4.00", the way money is written. It came
@@ -18470,7 +18506,10 @@ async function api(path, opts) {
     // '26 hunt): this till kept sending the old PIN, and every manager job
     // answered "Only a manager…" to a signed-in manager until they logged off.
     // The screen locks; their new PIN on the lock pad carries on.
-    if (res.status === 403 && /^Only a manager/.test(message) && state.currentStaff && state.currentStaff.role === 'manager' && state.staffPin && !state.frozen) {
+    // …every manager refusal, not one wording of it (17 Oct '26 hunt): a void
+    // said "A manager PIN is needed to void this ticket" and took a sent dish
+    // off "A manager PIN is needed to take money off", and neither locked.
+    if (res.status === 403 && /^(Only a manager|A manager PIN is needed)/.test(message) && state.currentStaff && state.currentStaff.role === 'manager' && state.staffPin && !state.frozen) {
       message = 'Your PIN has changed — enter it to carry on';
       setTimeout(freezeScreen, 0);
     }
@@ -18637,8 +18676,10 @@ function colorDotButton(kind, id, color, opts) {
   // (opts.size is ignored on purpose). The geometry is --swatch in CSS;
   // this button carries nothing but its colour.
 
-  const img = opts.image || '';
-  const bg = img ? `center/cover no-repeat url("${img}")` : (color || opts.bg || 'transparent');
+  const img = imgUrl(opts.image);
+  // url('…'), not url("…"): it sits inside style="…", and the " closed the
+  // style, so every photo box on Admin was drawn empty (17 Oct '26 hunt).
+  const bg = img ? `center/cover no-repeat url('${img}')` : (color || opts.bg || 'transparent');
   // opts.pencil: selection bars use the standard pencil icon (matching every
   // other bulk-edit button) that opens the same colour popover.
   if (opts.pencil) {
@@ -18656,7 +18697,7 @@ function colorPopoverInnerHTML(color, allowClear, palette, photo, image, photoOn
   if (photoOnly) return `
       <div class="color-popover-photo">
         <div class="color-popover-photo-row">
-          ${image ? `<img src="${image}" alt="" class="cp-photo-thumb">` : `<span class="cp-photo-icon">${SYS_IMAGE_SVG}</span>`}
+          ${imgUrl(image) ? `<img src="${esc(imgUrl(image))}" alt="" class="cp-photo-thumb">` : `<span class="cp-photo-icon">${SYS_IMAGE_SVG}</span>`}
           <input type="text" class="color-popover-photo-url" value="${esc(image || '')}" placeholder="Photo URL">
         </div>
         <label class="color-popover-photo-upload">${SYS_CAMERA_SVG} Upload photo<input type="file" accept="image/*" class="color-popover-photo-file"></label>
@@ -18681,7 +18722,7 @@ function colorPopoverInnerHTML(color, allowClear, palette, photo, image, photoOn
     ${photo ? `
       <div class="color-popover-photo">
         <div class="color-popover-photo-row">
-          ${image ? `<img src="${image}" alt="" class="cp-photo-thumb">` : `<span class="cp-photo-icon">${SYS_IMAGE_SVG}</span>`}
+          ${imgUrl(image) ? `<img src="${esc(imgUrl(image))}" alt="" class="cp-photo-thumb">` : `<span class="cp-photo-icon">${SYS_IMAGE_SVG}</span>`}
           <input type="text" class="color-popover-photo-url" value="${esc(image || '')}" placeholder="Photo URL">
         </div>
         <label class="color-popover-photo-upload">${SYS_CAMERA_SVG} Upload photo<input type="file" accept="image/*" class="color-popover-photo-file"></label>
@@ -20398,6 +20439,16 @@ function freezeScreen() {
 function unfreezeScreen() {
   state.frozen = null; state.frozenPin = ''; state.frozenErr = '';
   try { localStorage.removeItem('pos-frozen'); } catch (e) {}
+  // REMOVED IS SIGNED OFF, LOCKED OR NOT (17 Oct '26 hunt): the poll skips a
+  // locked screen, so a manager unlocking a removed waiter's iPad handed it
+  // back to them, taking cash under a name no longer on the team.
+  const me = state.currentStaff;
+  if (me && Array.isArray(state.staffList) && state.staffList.length && !state.staffList.some(x => x.id === me.id)) {
+    if (state.table && state.cart.length) draftStash(state.table);
+    logOut();
+    state.toast = toastFail(`${me.name} is no longer on the team — signed off.`); armToastTimer(TOAST_LONG); render();
+    return;
+  }
   resetIdleTimer();
   render();
 }
@@ -21533,7 +21584,12 @@ function seatShares() {
   let shared = 0;
   all.forEach(i => {
     const amt = chargedLineWeight(i);
-    if (typeof i.seat === 'number') bySeat[i.seat] = (bySeat[i.seat] || 0) + amt;
+    // A dish two guests shared ("1,2") is theirs, half each — it went into the
+    // table's pot, so their seats came off the split and the guests who never
+    // touched it paid for it (17 Oct '26).
+    const own = typeof i.seat === 'number' ? [i.seat]
+      : typeof i.seat === 'string' && /^\d+(\s*,\s*\d+)+$/.test(i.seat) ? i.seat.split(',').map(x => parseInt(x, 10)) : null;
+    if (own) own.forEach(s => { bySeat[s] = (bySeat[s] || 0) + amt / own.length; });
     else shared += amt;
   });
   let seats = Object.keys(bySeat).map(Number).sort((a, b) => a - b);
@@ -21849,7 +21905,12 @@ function allergenMatches(item, seat) {
   if (!tags.length) return [];
   const names = tags.map(t => t.name.toLowerCase());
   const hits = [];
-  const seatOk = (s) => !(seat !== undefined && s != null && !(seat == null || seat === 'all' || s === seat));
+  // A dish SHARED by seats ("1,2") is every one of those guests' dish: read
+  // as one seat it matched nobody's allergy, so a Pita shared with the
+  // gluten-free guest went on with no warning and no mark (17 Oct '26).
+  const shared = typeof seat === 'string' && seat.indexOf(',') !== -1 ? seat.split(',').map(x => parseInt(x, 10)) : null;
+  const seatOk = (s) => shared ? (s == null || s === 'all' || shared.includes(parseInt(s, 10)))
+    : !(seat !== undefined && s != null && !(seat == null || seat === 'all' || s === seat));
   for (const n of notesOfType('allergy')) {
     if (!seatOk(n.seat)) continue;
     const base = String(n.text || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase();
@@ -22148,7 +22209,8 @@ function setDishSays() {
 // …and it is the SET'S price that moves, never a paid pick riding on the dish
 // (16 Oct '26 hunt): "+ Peppercorn $5" on the steak went to the Focaccia with
 // the $65. The set's share is the line's menuPrice; a pick stays with its dish.
-function setShare(l) { return l.menuPrice != null ? (Number(l.menuPrice) || 0) : (Number(l.price) || 0); }
+// …never more than the line still charges: a comped dish hands on nothing (17 Oct '26 hunt).
+function setShare(l) { const p = Number(l.price) || 0; return Math.max(0, l.menuPrice != null ? Math.min(Number(l.menuPrice) || 0, p) : p); }
 function keepSetPrice(line) {
   if (!line || !line.comboRef || !(setShare(line) > 0)) return;
   const share = setShare(line), r2 = n => Math.round(n * 100) / 100;
@@ -22697,7 +22759,7 @@ async function saveTableCovers(tableId, covers) {
 // colour, so the chip and the floor disagreed on a safety mark. The type owns
 // the colour; a preset owns its name, its station, its kinds and its picture.
 function presetCardStyle(p, cat) {
-  if (p.image) return `style="background:center/cover no-repeat url('${p.image}');"`;
+  if (imgUrl(p.image)) return `style="background:center/cover no-repeat url('${imgUrl(p.image)}');"`; // imgUrl lets no quote or bracket through
   // With a type, the type's colour. Without one this is a QUICK note — its own
   // list, its own colours, and nobody asked to change those.
   const c = cat ? (cat.color || noteTypeColour(cat.id)) : p.color;
@@ -24048,13 +24110,22 @@ function draftTake(tableId) {
   // when the draft comes back to a ticket the send itself opened (Sep '26).
   if (d.sendKey && d.openOrderId === state.openOrderId) { state.sendKey = d.sendKey; state.sendFailed = d.sendFailed || null; }
 }
+// A seat moved up by `by` — one seat, or every seat of a shared dish ("1,2"
+// → "3,4"): read as one number, a dish two guests shared landed on the first
+// of them alone (17 Oct '26). "All" and no seat stay as they are.
+function seatShifted(seat, by) {
+  const up = s => { const n = parseInt(s, 10); return n > 0 ? n + by : s; };
+  if (!by || seat == null || seat === '' || seat === 'all') return seat;
+  return typeof seat === 'string' && seat.indexOf(',') !== -1 ? seat.split(',').map(x => up(x.trim())).join(',') : up(seat);
+}
+const seatNums = seat => String(seat == null ? '' : seat).split(',').map(x => parseInt(x, 10) || 0);
 // A table that moves takes its drafts with it — every waiter's.
 function draftsMove(fromId, toId, seatShift) {
   const all = draftsLoad(); let moved = false;
   // A party joining friends sits after them (doTransferToTable's seatShift):
   // its unsent round moves up with its sent dishes and its seat notes, or the
   // newcomers' drinks went out on the seats of the guests already there.
-  const bump = l => seatShift && parseInt(l.seat, 10) > 0 ? { ...l, seat: parseInt(l.seat, 10) + seatShift } : l;
+  const bump = l => seatShift ? { ...l, seat: seatShifted(l.seat, seatShift) } : l;
   for (const who of Object.keys(all)) {
     let d = all[who][fromId]; if (!d) continue;
     if (seatShift) d = { ...d, cart: d.cart.map(bump) };
@@ -26545,8 +26616,8 @@ function renderMenuScrollBody() {
               : `${paint ? `background:${item.color};color:${contrastTextColor(item.color)};` : ''}${item.rowBreak ? 'grid-column-start:1;' : ''}`;
             return `
             <button class="item-card ${asRow ? 'as-row ' : ''}${sizeClass} ${item.out ? 'out' : ''} ${inCartQty ? 'in-cart' : ''}${state.itemOptions && state.itemOptions.itemId === item.id ? ' prompting' : ''}${state.qtyPopItemId === item.id ? ' qp-held' : ''}" data-act="${menuEditOn() ? 'menu-edit-item' : 'add'}" data-id="${item.id}" ${tstyle ? `style="${tstyle}"` : ''}>
-              ${item.image ? `<img class="tile-photo" src="${item.image}" alt="">` : ''}
-              ${showIcon ? `<div class="item-tile-icon">${item.icon}</div>` : ''}
+              ${imgUrl(item.image) ? `<img class="tile-photo" src="${esc(imgUrl(item.image))}" alt="">` : ''}
+              ${showIcon ? `<div class="item-tile-icon">${esc(item.icon)}</div>` : ''}
               ${inCartQty ? `<span class="tile-qn">${inCartQty}</span>` : ''}
               <div class="item-name">${esc(item.name)}</div>${warnMark}${comingBackHtml(item)}${asRow ? `<span class="row-price">${money(item.price)}</span>` : ''}
               ${(item.modifierGroupIds || []).length || (item.variants || []).length ? `<span class="item-opt-dots${item.trackStock || itemServingsLeft(item) !== null ? ' shift' : ''}">⋯</span>` : ''}
@@ -26886,9 +26957,18 @@ function findSentAggregate() {
   if (!all.length) return null;
   return { ...all[0], qty: all.reduce((s, i) => s + i.qty, 0) };
 }
+// A sent line's seat, as its row wrote it: none, "all", one seat, or the
+// seats of a shared dish ("1,2") kept whole — read as a number, "1,2" was seat
+// 1, and the row's own dish was nowhere to be found: another one added
+// nothing and the line would not open (17 Oct '26).
+function seatFromAttr(v) {
+  if (v === '' || v === undefined || v === null) return null;
+  if (v === 'all' || String(v).indexOf(',') !== -1) return String(v);
+  return parseInt(v, 10);
+}
 function openEditSent(el) {
   const d = el.dataset;
-  const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
+  const seat = seatFromAttr(d.seat);
   keepMobileDrawer();
   state.editSent = { name: d.name, seat, note: d.note || '', price: parseFloat(d.price), course: parseInt(d.course) || 1, rm: d.rm };
   state.editLine = null; state.callAway = false; state.notesPanel = null; state.showCheckout = false;
@@ -26928,7 +27008,7 @@ function doAddServing(match) {
 // Tapping the qty pill on a sent line adds another serving straight away.
 function serveAnotherFromEl(el) {
   const d = el.dataset;
-  const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
+  const seat = seatFromAttr(d.seat);
   doAddServing({ name: d.name, seat, note: d.note || '', price: parseFloat(d.price), course: parseInt(d.course) || 1, rm: d.rm });
 }
 async function doRepriceSent(match, newPrice, reason) {
@@ -26985,7 +27065,7 @@ function openPriceEntry(el) {
                original: parseFloat(d.oldprice) || 0, qty: parseInt(d.qty, 10) || 1 };
   if (d.scope === 'cart') pe.idx = parseInt(d.idx, 10);
   else {
-    const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
+    const seat = seatFromAttr(d.seat);
     pe.match = { name: d.name, seat, note: d.note || '', price: parseFloat(d.oldprice), course: parseInt(d.course) || 1, rm: d.rm };
   }
   state.priceEntry = pe;
@@ -27252,7 +27332,7 @@ async function reAddSentLine(orderId, items) {
 // The inline ✕ on a sent line (managers only) — removes without opening the pane.
 function removeSentLine(el) {
   const d = el.dataset;
-  const seat = (d.seat === '' || d.seat === undefined) ? null : (d.seat === 'all' ? 'all' : parseInt(d.seat));
+  const seat = seatFromAttr(d.seat);
   doRemoveSent({ name: d.name, seat, note: d.note || '', price: parseFloat(d.price), course: parseInt(d.course) || 1, rm: d.rm });
 }
 // A SENT line and an UNSENT line are the SAME screen (owner, Aug '26: "match
@@ -35011,7 +35091,7 @@ function menuItemRowHtml(m) {
         <div class="menu-item-header mi-head" data-id="${m.id}">
           <input type="checkbox" class="menu-item-select-cb" ${state.selectedMenuItemIds.includes(m.id) ? 'checked' : ''} onclick="event.stopPropagation();toggleMenuItemSelection('${m.id}');">
           ${colorDotButton('menu-item', m.id, m.color, { size: 20, image: m.image, photo: true })}
-          ${m.icon && m.iconEnabled ? `<span class="mi-icon">${m.icon}</span>` : ''}
+          ${m.icon && m.iconEnabled ? `<span class="mi-icon">${esc(m.icon)}</span>` : ''}
           <span class="t1 mi-name">${esc(m.name)}</span>
           <span class="mi-gap"></span>
           <span class="mi-price">${money(m.price || 0)}</span>
@@ -36237,7 +36317,7 @@ function renderScreenMockup() {
   const mkCard = (m) => {
     const showIcon = state.settings.showItemIcons !== false && !!m.icon;
     // Mockup mirrors the till: colour + manual row breaks.
-    return `<div class="item-card" data-act="mock-jump" data-target="ctl-tiles" data-mkel="itemSize" data-mkname="Menu tile" ${(() => { const s = `${m.color && state.settings.tileColors !== false ? `background:${m.color};color:${contrastTextColor(m.color)};` : ''}${m.rowBreak ? 'grid-column-start:1;' : ''}`; return s ? `style="${s}"` : ''; })()}>${m.image ? `<img class="tile-photo" src="${m.image}" alt="">` : ''}${showIcon ? `<div class="item-tile-icon" data-mkel="toggle:itemIcons" data-mkname="Item icon">${m.icon}</div>` : ''}<div class="item-name" data-mkel="tileFont" data-mkname="Tile text">${esc(m.name)}</div></div>`;
+    return `<div class="item-card" data-act="mock-jump" data-target="ctl-tiles" data-mkel="itemSize" data-mkname="Menu tile" ${(() => { const s = `${m.color && state.settings.tileColors !== false ? `background:${m.color};color:${contrastTextColor(m.color)};` : ''}${m.rowBreak ? 'grid-column-start:1;' : ''}`; return s ? `style="${s}"` : ''; })()}>${imgUrl(m.image) ? `<img class="tile-photo" src="${esc(imgUrl(m.image))}" alt="">` : ''}${showIcon ? `<div class="item-tile-icon" data-mkel="toggle:itemIcons" data-mkname="Item icon">${esc(m.icon)}</div>` : ''}<div class="item-name" data-mkel="tileFont" data-mkname="Tile text">${esc(m.name)}</div></div>`;
   };
   // Every region of the carbon copy is a door to its settings card below.
   // Subsections preview as the bar OR as folder tiles, matching the setting.
@@ -40663,9 +40743,9 @@ async function doTransferToTable(newTableId, opts) {
   // already there: its dishes and its seat notes move up by that many.
   const destTab = state.orders.find(o => (!srcOrder || o.id !== srcOrder.id) && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(newTable.label));
   const seatShift = destTab || (newTable.covers || 0) > 0 || (newTable.notes || []).length
-    ? Math.max(newTable.covers || 0, ...((destTab && destTab.items) || []).map(i => parseInt(i.seat, 10) || 0), ...(newTable.notes || []).map(n => parseInt(n.seat, 10) || 0))
+    ? Math.max(newTable.covers || 0, ...((destTab && destTab.items) || []).flatMap(i => seatNums(i.seat)), ...(newTable.notes || []).flatMap(n => seatNums(n.seat)))
     : 0;
-  const bumpSeat = x => seatShift && parseInt(x.seat, 10) > 0 ? { ...x, seat: parseInt(x.seat, 10) + seatShift } : x;
+  const bumpSeat = x => seatShift ? { ...x, seat: seatShifted(x.seat, seatShift) } : x;
   // Sitting details ride along. Moving this till's own table uses the live
   // till state; any other table's details come off the table object itself.
   const covers = movingOwn ? state.covers : (oldTable && oldTable.covers) || 0;
@@ -41062,6 +41142,12 @@ function confirmIoMultiSeats() {
   // becomes the covers joined, e.g. "1,2" — shown as "Seats 1 & 2".
   const seats = io.multiSeats.slice().sort((a, b) => a - b);
   const sharedSeat = seats.length > 1 ? seats.join(',') : seats[0];
+  // The same allergy check a single seat gets, for every guest sharing it.
+  if (!state._allergenAck) {
+    const hits = allergenMatches(item, sharedSeat);
+    if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, hits, resume: 'io-multi' }; render(); return; }
+  }
+  state._allergenAck = false;
   pushCartLine(item, variant, mods, sharedSeat, 1, note);
   state.itemOptions = null;
   render();
@@ -47141,7 +47227,7 @@ function renderRecipeEditorModal() {
           <div class="th">Cost breakdown</div>
           ${costs.ingredients.map(ing => `
             <div style="display:flex;justify-content:space-between;font-size:var(--fs-md);padding:4px 0;border-bottom:1px solid var(--steel-200);">
-              <span>${esc(ing.name)} × ${ing.quantity} ${ing.unit}</span>
+              <span>${esc(ing.name)} × ${esc(ing.quantity)} ${esc(ing.unit)}</span>
               <span style="font-family:var(--font-mono);">$${ing.totalCost.toFixed(2)}</span>
             </div>
           `).join('')}
@@ -49543,6 +49629,7 @@ function handleActClick(el, e) {
           state._allergenAck = true;
           if (m.resume === 'io-seat' && state.itemOptions) pickIoSeat(m.seat);
           else if (m.resume === 'io-confirm' && state.itemOptions) confirmItemOptions();
+          else if (m.resume === 'io-multi' && state.itemOptions) confirmIoMultiSeats();
           else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
         }

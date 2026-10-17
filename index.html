@@ -9224,8 +9224,10 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 // the next till that opened the floor. Only #rgb, #rrggbb or #rrggbbaa is kept.
 const COLOUR_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 const cleanColour = v => (typeof v === 'string' && COLOUR_RE.test(v.trim())) ? v.trim() : null;
-// A picture is an uploaded file or an inline image — nothing that can close a quote.
-const SAFE_IMAGE_RE = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0-9+\/=]+)$/;
+// A picture is an uploaded file, an inline image or a plain web address — the
+// same three the till draws (IMG_OK in app.js), nothing that can close a quote.
+// A pasted address was dropped here without a word while a dish kept it (18 Oct '26).
+const SAFE_IMAGE_RE = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0-9+\/=]+|https?:\/\/[^\s"'<>()\\`]+)$/;
 
 // The client's api() wrapper attaches this header on every mutating request,
 // so every endpoint can log "who did it" without every call site needing to
@@ -11725,7 +11727,11 @@ function roleOk(data, role) {
 app.get('/api/staff', (req, res) => {
   const data = readData();
   // Never send PINs to the browser - only what's needed to show the login grid.
-  const safeStaff = data.staff.map(({ id, name, role, tipShare, payRate, trainee }) => ({ id, name, role, tipShare: tipShare || 'full', payRate: payRate || 0, trainee: !!trainee }));
+  // …nor what anyone is paid (18 Oct '26 hunt): this list answers the sign-in
+  // screen with no sign-in at all, so every colleague's hourly rate reached any
+  // phone on the wifi. The rate is a manager's, read with their PIN.
+  const mgr = !!req.get('X-Staff-Pin') && !!managerFromReq(req, data);
+  const safeStaff = data.staff.map(({ id, name, role, tipShare, payRate, trainee }) => ({ id, name, role, tipShare: tipShare || 'full', ...(mgr ? { payRate: payRate || 0 } : {}), trainee: !!trainee }));
   res.json(safeStaff);
 });
 
@@ -11901,6 +11907,8 @@ app.delete('/api/staff/:id', (req, res) => {
     return res.status(400).json({ error: 'Keep at least one manager' });
   }
   data.staff = data.staff.filter(s => s.id !== req.params.id);
+  // …and lets go of every table they were holding, on any till.
+  for (const [tid, l] of tableLocks) if (l.staffId && l.staffId === String(req.params.id)) tableLocks.delete(tid);
   // A person removed while clocked in is clocked out now: nothing on any
   // screen could close that shift, and its hours climbed for ever (Sep '26).
   (data.shifts || []).forEach(sh => { if (sh.staffId === req.params.id && sh.clockOut === null) sh.clockOut = Date.now(); });
@@ -12196,6 +12204,14 @@ async function doshiiPollOnce() {
       const items = doshii.mapOrderItems(dOrder, data.menu);
       if (items.length === 0) { doshiiSeen.add(doshiiId); continue; }
       const meta = doshii.mapOrderMeta(dOrder);
+      // A QR ORDER FOR A TABLE THE FLOOR NO LONGER HAS (a renumbered table, an
+      // old sticker) is still cooked and still paid (18 Oct '26 hunt): on a
+      // table nobody can tap, its Pay did nothing and the rest of the money
+      // could never be taken. It comes in by name, like a pickup.
+      if (meta.orderType === 'dine-in' && (meta.table == null || tableOffFloor(data, meta.table))) {
+        meta.customerName = `Table ${meta.table == null ? '?' : meta.table} · ${meta.customerName || 'App order'}`;
+        meta.orderType = 'takeaway';
+      }
       const subtotal = items.reduce((sum, i) => sum + i.price * i.qty, 0);
       const order = {
         id: data.ticketCounter,
@@ -12250,6 +12266,13 @@ async function doshiiPollOnce() {
           order.loyaltyCredited = 0;
         } else {
           order.splitPaid = [{ key: 'app-' + now, label: 'Paid in the app', amount: appPaid, method: 'app', giftCardCode: null, cardType: null, tip: Math.round(appTip * 100) / 100, at: now, staffName: 'App order' }];
+          // …and on a PART paid in the app, what the app took off or put on is
+          // the bill's too (18 Oct '26 hunt): a $5 promo on a $10 deposit came
+          // to the counter as $5 more to pay. It rides on the order as the
+          // app's own money off (or fees), which Pay opens with.
+          const appOn = Math.round((Array.isArray(dOrder.surcounts) ? dOrder.surcounts : []).reduce((a, x) => a + (parseInt(x && x.amount, 10) || 0), 0)) / 100;
+          if (appOn < -0.005) order.discount = { type: 'fixed', value: -appOn, reason: 'App discount', amount: -appOn, kind: 'discount', app: true };
+          else if (appOn > 0.005) order.discount = { type: 'fixed', value: appOn, reason: 'App fees', amount: -appOn, kind: 'surcharge', app: true };
         }
       }
       adjustStockForItems(data, items, -1, `Ticket #${order.id}`);
@@ -13625,6 +13648,10 @@ const FORCED_FREE_MS = 2 * 60 * 1000;
 app.post('/api/table-locks/claim', (req, res) => {
   const { tableId, staff, staffId, device, force, retake } = req.body || {};
   if (!tableId || !device) return res.status(400).json({ error: 'tableId and device required' });
+  // NOBODY HOLDS A TABLE FOR SOMEONE OFF THE TEAM (18 Oct '26 hunt): a locked
+  // iPad kept claiming its table under a removed waiter's name, and every
+  // other till was told "In use" until a manager unlocked it by hand.
+  { const gone = staffGone(readData(), staffId); if (gone) { const c = tableLocks.get(String(tableId)); if (c && c.device === String(device)) tableLocks.delete(String(tableId)); return res.status(403).json({ error: gone }); } }
   const cur = tableLocks.get(String(tableId));
   // YOUR OWN TABLE, ANY TILL (owner, 13 Oct '26: "do them all", from a
   // drawing borrowed from Apple Handoff): the same staff member on another
@@ -13978,6 +14005,8 @@ function autoRuleFits(p, bill, now) {
     default: return false;
   }
 }
+// The money off an app order arrived with (its promo), or 0.
+function appOffOf(order) { const d = order && order.source === 'doshii' && order.discount; return d && d.app && d.kind !== 'surcharge' ? (parseFloat(d.value) || 0) : 0; }
 function moneyOffRefused(req, data, discount, bill) {
   if (!discount || discount.kind === 'surcharge' || !(parseFloat(discount.value) > 0)) return null;
   if (managerFromReq(req, data)) return null;
@@ -13993,6 +14022,8 @@ function moneyOffRefused(req, data, discount, bill) {
   }
   if (discount.auto && (data.discountPresets || []).some(p => p.auto && p.enabled !== false && p.kind !== 'surcharge' && (!discount.ruleId || p.id === discount.ruleId) && same(p) && autoRuleFits(p, bill, new Date()))) return null;
   if (typeOf(discount.type) === 'percent' && (data.happyHours || []).some(h => h.enabled && h.name === discount.reason && Math.abs((parseFloat(h.discountPercent) || 0) - parseFloat(discount.value)) < 0.005)) return null;
+  // What the ordering app took off, as the app order arrived with it.
+  if (bill && bill.appOff > 0 && typeOf(discount.type) === 'fixed' && Math.abs(parseFloat(discount.value) - bill.appOff) < 0.005) return null;
   return 'A manager PIN is needed for money off.';
 }
 // A PRICE BELOW THE MENU'S IS MONEY OFF TOO (Sep '26: two Sirloin rang at
@@ -14348,8 +14379,11 @@ function tableNotesSig(data, order) {
 }
 function ringRound(data, order, rawItems, body, staffName, sendKey) {
   const req = { body };
-  // A RESTORE (undo of a removed sent line) puts the line back on the ticket
-  // and nothing else: the kitchen made it already, the stock already moved.
+  // A RESTORE (undo of a removed sent line) puts the line back on the ticket:
+  // the kitchen made it already, so nothing prints and nothing is called.
+  // …but the STOCK moves again (18 Oct '26 hunt): taking the dish off put it
+  // back in the count, so an Undo that left the count alone read one more
+  // Mushroom than the fridge held, every time.
   const restore = !!(body && body.restore);
   const items = (rawItems || []).map(i => ({ ...i, uid: lineUid(i), status: i.status || 'ordered' }));
   const roundNumber = nextRoundId(order);
@@ -14364,7 +14398,7 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   order.subtotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   order.total = order.subtotal;
   order.grandTotal = order.subtotal;
-  if (!restore && !order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
+  if (!order.practice) adjustStockForItems(data, items, -1, `Ticket #${order.id} round ${roundNumber}`);
   // A NEW ROUND UN-PRINTS THE BILL. The mark stayed lit after more was
   // ordered, so Bill looked done and the table kept its bill colour while
   // the guest held a total missing the last round (owner, Sep '26).
@@ -14378,7 +14412,13 @@ function ringRound(data, order, rawItems, body, staffName, sendKey) {
   }
   if (restore && (order.lineVoids || []).length) {
     const worth = Math.round(items.reduce((s, i) => s + i.price * i.qty, 0) * 100) / 100;
-    for (let k = order.lineVoids.length - 1; k >= 0; k--) if (Math.abs(order.lineVoids[k].value - worth) < 0.01) { order.lineVoids.splice(k, 1); break; }
+    for (let k = order.lineVoids.length - 1; k >= 0; k--) if (Math.abs(order.lineVoids[k].value - worth) < 0.01) {
+      // …and the house log forgets it too (18 Oct '26 hunt): a dish taken off
+      // as Wastage and Undone was back on the bill AND still $32 of wastage.
+      const v = order.lineVoids[k], hl = data.houseLog || [];
+      if (v.reason) for (let j = hl.length - 1; j >= 0; j--) if (hl[j].ticket === order.id && hl[j].reason === v.reason && Math.abs((hl[j].value || 0) - v.value) < 0.01) { hl.splice(j, 1); break; }
+      order.lineVoids.splice(k, 1); break;
+    }
   }
   if (!restore) callFirstFood(data, order, items, round.sentAt);
   logAudit(data, staffName || order.staffName, `Sent round ${roundNumber} to Ticket #${order.id}`);
@@ -14722,6 +14762,9 @@ app.post('/api/orders/:id/close', (req, res) => {
     return res.status(400).json({ error: 'This ticket is not an open tab' });
   }
   const { paymentMethod, payments, giftCardCode, discount, tip, staffName, customerId, cardType } = req.body;
+  // …nor does someone taken off the team (18 Oct '26 hunt): the sign-off rides
+  // the poll, which sleeps while Pay is open, so their Confirm took the cash.
+  { const gone = staffGone(data, req.body.staffId); if (gone) return res.status(403).json({ error: gone }); }
   // A TRAINEE NEVER TAKES REAL MONEY (12 Oct '26): Bills opened a real
   // takeaway's Pay for a trainee and their Confirm closed it as paid.
   { const no = practiceRefused(req, data, order); if (no) return res.status(400).json({ error: no }); }
@@ -14751,7 +14794,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   }
   const extrasError = checkDiscountExtras(data, discount, customerId !== undefined ? customerId : order.customerId);
   if (extrasError) return res.status(400).json({ error: extrasError });
-  const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table });
+  const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order) });
   if (offRefused) return res.status(403).json({ error: offRefused });
   // A bill in parts closes only when every part has been taken — otherwise a
   // stray Pay would charge the table for money it has already handed over.
@@ -14891,6 +14934,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   if (!order) return res.status(404).json({ error: 'Order not found' });
   if (order.status !== 'open') return res.status(400).json({ error: 'This ticket is not an open tab' });
   const { key, label, amount, method, staffName, parts, cardType, tip, giftCardCode } = req.body || {};
+  { const gone = staffGone(data, (req.body || {}).staffId); if (gone) return res.status(403).json({ error: gone }); }
   { const no = practiceRefused(req, data, order); if (no) return res.status(400).json({ error: no }); } // a trainee's part is never real money
   const k = String(key || '').slice(0, 40);
   if (!k) return res.status(400).json({ error: 'That part has no name' });
@@ -14904,7 +14948,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // refused on its last part and could never close (Sep '26).
   const itemsTotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   // The discount that sizes a part is held to the same rule as the close's.
-  const partOff = moneyOffRefused(req, data, (req.body || {}).discount, { covers: order.covers, subtotal: itemsTotal, orderType: order.orderType, table: order.table });
+  const partOff = moneyOffRefused(req, data, (req.body || {}).discount, { covers: order.covers, subtotal: itemsTotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order) });
   if (partOff) return res.status(403).json({ error: partOff });
   // A voucher or points spent elsewhere are refused at the FIRST part, the way
   // the close refuses them — not after the guests have paid (8 Oct '26: a
@@ -18520,6 +18564,15 @@ async function api(path, opts) {
   return await res.json();
 }
 
+// The two files fetched by hand (the data file, the sales CSV) ask as api()
+// does: a signed-in manager refused gets the lock pad for their new PIN,
+// never a "Could not download" all shift (18 Oct '26 hunt).
+function managerPinRefused(status) {
+  if (status !== 403 || !state.currentStaff || state.currentStaff.role !== 'manager' || !state.staffPin || state.frozen) return false;
+  state.toast = toastFail('Your PIN has changed — enter it to carry on'); armToastTimer(TOAST_LONG);
+  setTimeout(freezeScreen, 0);
+  return true;
+}
 async function loadStaffList() {
   try {
     state.staffList = await api('/api/staff');
@@ -18903,7 +18956,10 @@ function applyImageForKind(kind, id, image) {
   else if (kind === 'subcategory') quickPutImage(`/api/subcategories/${id}`, image, async () => { state.subcategories = await api('/api/subcategories'); });
   else if (kind === 'modifier-group') quickPutImage(`/api/modifier-groups/${id}`, image, async () => { state.modifierGroups = await api('/api/modifier-groups'); });
   else if (kind === 'combo') quickPutImage(`/api/combos/${id}`, image, async () => { state.combos = await api('/api/combos'); });
-  else if (kind === 'course') updateCourseTemplate(parseInt(id), { image: image || null, ...(image ? { color: null } : {}) });
+  // A course KEEPS its colour (18 Oct '26 hunt): the Pass, the Timeline and the
+  // table pills paint a course by its colour and draw no photo anywhere, so a
+  // photo that cleared it left the course grey on the floor.
+  else if (kind === 'course') updateCourseTemplate(parseInt(id), { image: image || null });
 }
 // Shared "set this entity's photo" PUT — a photo replaces the colour, same as
 // item tiles and preset buttons.
@@ -20274,6 +20330,9 @@ function finishLogin(staff, warm) {
   // A manager's till carries their PIN on every request: the server now
   // refuses to show a PIN or void a paid ticket without one.
   state.staffPin = staff.role === 'manager' ? state.loginPin : '';
+  // The names came before anyone signed in, so without the pay rates the
+  // roster costs by; a manager reads them again with their PIN (18 Oct '26).
+  if (state.staffPin) api('/api/staff').then(l => { if (Array.isArray(l)) state.staffList = l; }).catch(() => {});
   try { localStorage.setItem('pos-signed-in', String(staff.id)); } catch (e) {}
   // A fresh PIN entry proves the person — any held screen from before the
   // reload is spent (the login screen was the lock in the meantime).
@@ -23448,6 +23507,8 @@ function openCheckout() {
   state.callAway = false;
   state.editLine = null; state.editSent = null; state.priceEntry = null;
   state.showCheckout = true;
+  // What an ordering app took off rides with its order, at a table too.
+  { const ao = activeOpenOrder(); if (!state.discount && ao && ao.source === 'doshii' && ao.discount && ao.discount.app) state.discount = { ...ao.discount }; }
   maybeApplyAutoSurcharge();
   state.paymentMethod = 'card';
   // Every bill picks its own card: the pay-without-send close never let go of
@@ -24537,7 +24598,7 @@ async function confirmPaymentInner() {
       const order = await api(`/api/orders/${state.openOrderId}/close`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ payKey: state.payKey, paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType,
+        body: JSON.stringify({ payKey: state.payKey, paymentMethod: state.paymentMethod, payments, discount: state.discount, tip: tipAmount, staffName, staffId: state.currentStaff ? state.currentStaff.id : null, customerId: state.attachedCustomerId, giftCardCode: state.giftCardAppliedCode || null, cardType: state.cardType,
           expectItems: activeOpenOrder() ? activeOpenOrder().items.reduce((a, i) => a + i.price * i.qty, 0) : undefined }),
       });
       state.openOrderId = null;
@@ -26938,7 +26999,7 @@ async function saveEditSent() {
         // comes too.
         if (it && it.comboRef) setDishSays();
         else if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: d.price !== agg.price ? d.price : (it.origPrice !== undefined ? it.origPrice : it.price), qty: up,
-          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections, removed: (it.removed || []).slice() });
+          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections, removed: (it.removed || []).slice(), ...(it.giftcardSale ? { giftcardSale: true } : {}) });
       }
       if (d.price !== agg.price && state.editSent) { const c = lineOffChoice(d.off); await doRepriceSent(state.editSent, d.price, c ? c.label : ''); }
     }
@@ -26985,10 +27046,22 @@ function doAddServing(match) {
   // copy left its set, so another Hummus went out at the whole set's $65 and
   // another Labneh at $0. The docket's ＋ already says so; so does this.
   if (item.comboRef) { setDishSays(); return false; }
+  // ANOTHER ONE IS ASKED ABOUT LIKE THE FIRST (18 Oct '26 hunt): the guest on
+  // seat 2 said "gluten-free" after the Pita went, and a tap on its number put
+  // a second Pita on for them with no warning — the menu tile stops and asks.
+  const mi = state.menu.find(x => x.id === item.menuItemId);
+  if (mi && !state._allergenAck) {
+    const hits = allergenMatches(mi, item.seat != null ? item.seat : null);
+    if (hits.length) { state.allergenWarnModal = { itemId: mi.id, hits, resume: 'serving', match }; render(); return false; }
+  }
+  state._allergenAck = false;
   const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: 1,
     course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
     // …the same BUILD too: "No Tomato" went out as a plain Pita (15 Oct '26).
-    variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
+    variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice(),
+    // …and another voucher is a VOUCHER (18 Oct '26 hunt): it went as a plain
+    // $100 line — paid for, never made, taxed as food.
+    ...(item.giftcardSale ? { giftcardSale: true } : {}) };
   // ANOTHER ONE IS ANOTHER ONE, NOT ANOTHER LINE (owner, Sep '26: "adding a
   // second quantity to an item in docket bar creates a separate item …
   // clicking the quantity a second time"). This pushed a raw line every tap.
@@ -27289,6 +27362,13 @@ async function commitRemoveSent(match, reason, qty, then, managerPin) {
     return n <= 0 ? null : { id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: n,
       course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
       variantId: i.variantId, modSelections: i.modSelections,
+      // …a gift voucher comes back as a VOUCHER, and a build as its build
+      // (18 Oct '26 hunt): Undo brought a $100 voucher back as a plain line —
+      // paid for, never made, and taxed as food on the cash-up.
+      ...(i.giftcardSale ? { giftcardSale: true } : {}), removed: (i.removed || []).slice(),
+      // …and what the kitchen did stays done: a served Pita came back on the
+      // cook's screen at 0m as a new dish to cook (18 Oct '26 hunt).
+      status: i.status || 'ordered', sentAt: i.sentAt || ((o.rounds || []).find(rd => (rd.items || []).some(x => x.uid && x.uid === i.uid)) || {}).sentAt || undefined,
       // a set menu's dish comes back as the set's, not as a $0 dish of its own
       ...(i.comboRef ? { comboRef: i.comboRef, comboStamp: i.comboStamp } : {}) };
   }).filter(Boolean);
@@ -28479,7 +28559,7 @@ async function takePart(amount, method, giftCardCode, change) {
         label: method === 'cash' ? 'Cash' : method === 'giftcard' ? 'Gift card ' + giftCardCode : cardTypeLabel(state.cardType),
         amount, method, giftCardCode: giftCardCode || null, discount: state.discount,
         cardType: method === 'card' ? state.cardType : null,
-        tip: method === 'giftcard' ? 0 : cardTipPending(), staffName }),
+        tip: method === 'giftcard' ? 0 : cardTipPending(), staffName, staffId: state.currentStaff ? state.currentStaff.id : null }),
     });
     const i = state.orders.findIndex(o => o.id === updated.id);
     if (i >= 0) state.orders[i] = updated; else state.orders.push(updated);
@@ -30993,7 +31073,7 @@ function renderBackupsSettingsAdmin() {
 async function downloadDataFile() {
   try {
     const r = await fetch('/api/backup', { headers: state.staffPin ? { 'X-Staff-Pin': state.staffPin } : {} });
-    if (!r.ok) throw new Error('Could not read data.');
+    if (!r.ok) { if (managerPinRefused(r.status)) { render(); return; } throw new Error('Could not read data.'); }
     const text = await r.text();
     const preview = typeof window.__POS_SEED__ !== 'undefined';
     let out = text;
@@ -39235,6 +39315,7 @@ function billHow(o) {
 function billDiscount(o, t, sub) {
   if (state.discount && activeOpenOrder() && activeOpenOrder().id === o.id) return state.discount;
   if (t && t.discount) return t.discount;
+  if (o.status === 'open' && o.source === 'doshii' && o.discount && o.discount.app) return o.discount; // what the app took off
   const s = sub !== undefined ? sub : (o.items || []).filter(i => i.qty > 0).reduce((a, i) => a + i.price * i.qty, 0);
   const r = matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: s, orderType: o.orderType, table: t ? t.id : '' });
   // …and the rule Pay leaves off, they leave off: one that would take the bill
@@ -41069,7 +41150,9 @@ function ioAssignRestTo(seat) {
   if (!item) return;
   if (!state._allergenAck) {
     const hits = allergenMatches(item, seat);
-    if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, seat, hits, resume: 'io-seat' }; render(); return; }
+    // …and Add anyway puts THE REST there, as the hold asked (18 Oct '26 hunt:
+    // it resumed as one tap, which the hold's own flag then swallowed — none).
+    if (hits.length) { state.allergenWarnModal = { itemId: io.itemId, seat, hits, resume: 'io-rest' }; render(); return; }
   }
   state._allergenAck = false;
   const remaining = io.qty - (io.assigned || 0);
@@ -41149,6 +41232,15 @@ function confirmIoMultiSeats() {
   }
   state._allergenAck = false;
   pushCartLine(item, variant, mods, sharedSeat, 1, note);
+  // ONE SHARED SERVING OF SEVERAL (18 Oct '26 hunt): with 3 typed and the pad
+  // placing them one by one, the share took one and the pad shut — the other
+  // two were gone. It counts as one placed serving; the pad stays for the rest.
+  if (Number.isInteger(io.qty) && io.qty > 1 && itemAddNeedsSeatPrompt() && !ioHasChoiceButton()) {
+    io.assigned = (io.assigned || 0) + 1;
+    io.assignedSeats = [...(io.assignedSeats || []), ...seats];
+    io.multiSeats = null; io.seat = null;
+    if (io.assigned < io.qty) { render(); return; }
+  }
   state.itemOptions = null;
   render();
 }
@@ -49630,6 +49722,8 @@ function handleActClick(el, e) {
           if (m.resume === 'io-seat' && state.itemOptions) pickIoSeat(m.seat);
           else if (m.resume === 'io-confirm' && state.itemOptions) confirmItemOptions();
           else if (m.resume === 'io-multi' && state.itemOptions) confirmIoMultiSeats();
+          else if (m.resume === 'serving') doAddServing(m.match);
+          else if (m.resume === 'io-rest' && state.itemOptions) { _seatHoldFired = false; ioAssignRestTo(m.seat); }
           else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
         }
@@ -49823,7 +49917,9 @@ function handleActClick(el, e) {
           state.openOrderId = o.id; state.customerName = o.customerName || '';
           // ITS guest and no money off of its own — it carried the last
           // table's guest and surcharge onto the takeaway (4 Oct '26).
-          state.attachedCustomerId = o.customerId || null; state.discount = null;
+          // …except the app's own (18 Oct '26 hunt): an app order part paid in
+          // the app arrives with the promo it took off, and Pay asks the rest.
+          state.attachedCustomerId = o.customerId || null; state.discount = o.source === 'doshii' && o.discount && o.discount.app ? { ...o.discount } : null;
           state.firedCourses = { ...(o.firedCourses || {}) }; state.showTablePicker = false; state.view = 'order';
         }
         render();
@@ -51374,8 +51470,8 @@ function handleActClick(el, e) {
         // the till page, and in the preview (no real server) it was a 404 with
         // no file and no till (Sep '26).
         fetch('/api/orders/export.csv' + (params.toString() ? '?' + params.toString() : ''), { headers: state.staffPin ? { 'X-Staff-Pin': state.staffPin } : {} })
-          .then(r => { if (!r.ok) throw new Error(); return r.blob(); })
-          .then(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `sales-${from || 'all'}${to && to !== from ? '-to-' + to : ''}.csv`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); })
+          .then(r => { if (!r.ok) { if (managerPinRefused(r.status)) { render(); return null; } throw new Error(); } return r.blob(); })
+          .then(b => { if (!b) return; const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = `sales-${from || 'all'}${to && to !== from ? '-to-' + to : ''}.csv`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000); })
           .catch(() => { state.toast = toastFail('Could not download the sales file.'); render(); armToastTimer(TOAST_SHORT); });
       }
       else if (act === 'download-backup') { downloadDataFile(); }

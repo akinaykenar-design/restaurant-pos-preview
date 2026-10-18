@@ -7593,7 +7593,11 @@ function createHmac(alg, key) {
         var s = appState(); if (!s || !s.currentStaff) return;
         // The whole person, not an id: the staff list is only fetched after a
         // login, so an id has nothing to look up against at boot.
-        localStorage.setItem(PLACE, JSON.stringify({ at: Date.now(), staff: s.currentStaff,
+        // …and a manager's PIN (18 Oct '26 hunt): without it Get latest came
+        // back as the manager with nothing to prove it, and Download data file,
+        // voids and refunds all said a manager was needed. The preview's whole
+        // store, PINs and all, is in this same browser storage already.
+        localStorage.setItem(PLACE, JSON.stringify({ at: Date.now(), staff: s.currentStaff, pin: s.staffPin || '',
           view: s.view, adminTab: s.adminTab, table: s.table, picker: !!s.showTablePicker, lens: s.floorStatusView }));
       } catch (e) {}
     }
@@ -7615,6 +7619,7 @@ function createHmac(alg, key) {
         var s = appState();
         if (!s || typeof appRender() !== 'function') { if (tries++ < 60) setTimeout(waitForApp, 100); return; }
         s.currentStaff = p.staff;
+        s.staffPin = p.staff.role === 'manager' ? (p.pin || '') : '';
         s.view = p.view || 'order';
         if (p.adminTab) s.adminTab = p.adminTab;
         if (p.table) s.table = p.table;
@@ -7648,6 +7653,8 @@ function createHmac(alg, key) {
         // swallowed it and NOTHING was ever loaded: Get latest came back to an
         // empty floor reading "No floor plan layouts yet" (owner, Sep '26).
         try { if (typeof loadInitial === 'function') keep(loadInitial()); } catch (e) {}
+        // the names came before anyone was back; a manager reads them again with the PIN (pay rates)
+        try { if (s.staffPin && typeof api === 'function') keep(api('/api/staff').then(function (l) { if (Array.isArray(l)) s.staffList = l; })); } catch (e) {}
         try { if (typeof loadShift === 'function') keep(loadShift()); } catch (e) {}
         try { if (typeof refreshOrders === 'function') keep(refreshOrders()); } catch (e) {}
         try { if (typeof refreshTableLocks === 'function') keep(refreshTableLocks()); } catch (e) {}
@@ -9330,7 +9337,11 @@ function pinRecordFailure(req, pin) {
   pinAttempts.set(ip, rec);
 }
 
-function pinRecordSuccess(req) {
+// Only a MANAGER'S PIN clears the count (18 Oct '26 hunt): any right PIN
+// wiped it, so a waiter's own PIN between every nine guesses kept a script
+// guessing the manager's PIN for ever, never once locked out.
+function pinRecordSuccess(req, who) {
+  if (who && who.role !== 'manager') return;
   const ip = req.ip || req.connection?.remoteAddress || 'unknown';
   pinAttempts.delete(ip);
 }
@@ -9412,7 +9423,12 @@ function computeTax(data, taxable) {
 // ---------- Audit log ----------
 app.get('/api/audit-log', (req, res) => {
   const data = readData();
-  res.json(data.auditLog || []);
+  // A PAY RATE IS A MANAGER'S TO READ, on the log too (18 Oct '26 hunt): the
+  // staff list stopped carrying it, but "changed pay rate to 31.75" sat on
+  // Admin › Audit log for any waiter. Everyone else reads that it changed.
+  const log = data.auditLog || [];
+  if (req.get('X-Staff-Pin') && managerFromReq(req, data)) return res.json(log);
+  res.json(log.map(e => e && /pay rate to /.test(e.action || '') ? { ...e, action: String(e.action).replace(/pay rate to [^,]*/g, 'pay rate') } : e));
 });
 
 // ---------- House log: wastage / comps / staff meals ----------
@@ -9522,7 +9538,9 @@ function normPresetObj(p, maxLen) {
   // picture are painted straight into the quick-note pane, so a "colour" of
   // page code saved by anything on the wifi ran on a manager's till.
   const color = (p && typeof p === 'object' && cleanColour(p.color)) || null;
-  const image = (p && typeof p === 'object' && typeof p.image === 'string' && SAFE_IMAGE_RE.test(p.image) && p.image) || null;
+  // A bracket, quote or space in an address is written safely, as the till draws it.
+  const im = (p && typeof p === 'object' && typeof p.image === 'string') ? p.image.trim().replace(/[ ()']/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')) : '';
+  const image = (im && SAFE_IMAGE_RE.test(im) && im) || null;
   // A single preset may out-route its type ("Food Critic" -> Kitchen), the
   // same as a venue's own note preset has always been able to.
   const station = (p && typeof p === 'object' && p.station) ? String(p.station).slice(0, 60) : null;
@@ -11756,7 +11774,7 @@ app.post('/api/staff/verify-pin', (req, res) => {
     if (!req.body.force && data.staff.some(s => s.id !== match.id && typeof s.pin === 'string' && s.pin.length > pin.length && s.pin.startsWith(pin))) {
       return res.json({ pending: true });
     }
-    pinRecordSuccess(req);
+    pinRecordSuccess(req, match);
     // trainee rides the login: a trainee signing in by PIN got no practice till
     // (their orders counted and printed) — only the pick-a-face path carried it (Sep '26).
     return res.json({ id: match.id, name: match.name, role: match.role, trainee: !!match.trainee });
@@ -11766,7 +11784,7 @@ app.post('/api/staff/verify-pin', (req, res) => {
     pinRecordFailure(req);
     return res.status(401).json({ error: 'Incorrect PIN' });
   }
-  pinRecordSuccess(req);
+  pinRecordSuccess(req, staff);
   res.json({ id: staff.id, name: staff.name, role: staff.role, trainee: !!staff.trainee });
 });
 
@@ -15127,8 +15145,13 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // and a voucher already spent cannot give back what it no longer holds.
   const sold = (data.giftCards || []).filter(g => g.soldOnOrder === order.id && g.active !== false);
   const soldValue = (data.giftCards || []).filter(g => g.soldOnOrder === order.id).reduce((a, g) => a + (g.initialValue || 0), 0);
-  const rest = grandTotal - soldValue;
-  const intoVouchers = r2(Math.max(0, alreadyRefunded + value - rest) - Math.max(0, alreadyRefunded - rest));
+  // …and the TIP is refunded last, after the voucher (18 Oct '26 pm hunt): the
+  // tip counted as "the rest of the bill", so the meal and the voucher handed
+  // back with the tip left to staff left the voucher live for the tip's worth.
+  const foodAll = Math.max(0, grandTotal - (order.tip || 0));
+  const rest = foodAll - soldValue;
+  const upTo = x => Math.min(x, foodAll);
+  const intoVouchers = r2(Math.max(0, upTo(alreadyRefunded + value) - rest) - Math.max(0, upTo(alreadyRefunded) - rest));
   if (intoVouchers > 0.005) {
     const left = sold.reduce((a, g) => a + (g.balance || 0), 0);
     if (left + 0.005 < intoVouchers) {
@@ -15143,7 +15166,6 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // nowhere — the card stayed spent and the cash-up showed it handed back.
   // A split bill gives the card back its share of the refund.
   // …its share of the FOOD first, the tip last (14 Oct '26 — see refundByWay).
-  const foodAll = Math.max(0, grandTotal - (order.tip || 0));
   const foodNow = Math.min(alreadyRefunded + value, foodAll) - Math.min(alreadyRefunded, foodAll);
   const cardBack = refundByWay(order, foodNow, Math.max(0, value - foodNow))
     .filter(w => w.method === 'giftcard' && w.code).map(w => [w.code, r2(w.amount)]);
@@ -15159,8 +15181,13 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // Measured on the FOOD, as the cash-up refunds it (food first, tip last): a
   // whole meal refunded with the tip left to staff read as less than all of
   // it, so the points the guest spent never came back (4 Oct '26).
+  // …and on the MEAL, not a voucher sold beside it (18 Oct '26 pm hunt): the
+  // meal is refunded first and it is what earned the points, so a refunded
+  // meal on a bill that also sold a $100 voucher took back a sixth of them.
   const food = grandTotal - (order.tip || 0);
-  if (grandTotal > 0) takeBackLoyalty(data, order, food > 0 ? Math.min(1, order.refundedTotal / food) : 1, staff, 'refund');
+  const meal = Math.max(0, food - voucherSaleTotal(order.items));
+  const share = meal > 0.005 ? Math.min(1, order.refundedTotal / meal) : food > 0 ? Math.min(1, order.refundedTotal / food) : 1;
+  if (grandTotal > 0) takeBackLoyalty(data, order, share, staff, 'refund');
   logAudit(data, staff, `Refunded $${value.toFixed(2)} on Ticket #${order.id}${reason ? ' — ' + reason : ''}`);
   writeData(data);
   res.json(order);
@@ -15215,6 +15242,9 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   // over, totals re-add, and the source ticket closes as merged.
   const dest = data.orders.find(o => o.id !== order.id && o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(table));
   if (dest && practiceClash(order, dest)) return res.status(400).json({ error: practiceClash(order, dest) });
+  // The ticket counts how far its seats have moved, so a round still waiting
+  // on another till as a draft moves up by the same (draftsMine, 18 Oct '26).
+  if (shift) order.seatBase = (order.seatBase || 0) + shift;
   if (dest) {
     dest.items = [...(dest.items || []), ...(order.items || []).map(bump)];
     const base = nextRoundId(dest) - 1;
@@ -15645,7 +15675,13 @@ function computePeriodSummary(data, fromTs, toTs) {
     const before = refundsBefore(o), through = before + refundIn(o), food = foodOf(o);
     return { food: Math.min(through, food) - Math.min(before, food), tip: Math.max(0, through - food) - Math.max(0, before - food) };
   };
-  const taxBack = refunded.reduce((s, o) => s + (foodOf(o) > 0 ? (o.tax || 0) * refundSplit(o).food / foodOf(o) : 0), 0)
+  // …and the GST is the MEAL'S (18 Oct '26 pm hunt): a voucher sold on the bill
+  // carries none and is refunded after the meal, so a refunded meal beside a
+  // $100 voucher took back only its share of the whole bill — most of its GST
+  // stayed on the Z.
+  const mealOf = o => Math.max(0, foodOf(o) - voucherSaleTotal(o.items));
+  const mealBack = o => { const before = refundsBefore(o), through = before + refundIn(o), m = mealOf(o); return Math.min(through, m) - Math.min(before, m); };
+  const taxBack = refunded.reduce((s, o) => s + (mealOf(o) > 0 ? (o.tax || 0) * mealBack(o) / mealOf(o) : 0), 0)
     + lateVoids.reduce((s, o) => s + (gtOf(o) > 0 ? (o.tax || 0) * Math.min(1, lateVoidOut(o) / gtOf(o)) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0) - taxBack;
   // …and a bill voided here after its cash-up hands back its late tips with
@@ -16888,7 +16924,11 @@ function esc(v) {
 // on every till that showed the menu, and could read the signed-in manager's
 // PIN. Only an uploaded file, an inline image or a plain web address is drawn.
 const IMG_OK = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0-9+\/=]+|https?:\/\/[^\s"'<>()\\`]+)$/;
-function imgUrl(v) { return typeof v === 'string' && IMG_OK.test(v.trim()) ? v.trim() : ''; }
+// …and an address with a bracket, a quote or a space in it (Wikipedia's
+// "Pizza_(food).jpg") is the same address written safely, never refused in
+// silence (18 Oct '26 hunt: the dish kept it and its tile drew nothing).
+function imgSafe(v) { return String(v).trim().replace(/[ ()']/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0')); }
+function imgUrl(v) { if (typeof v !== 'string') return ''; const u = imgSafe(v); return IMG_OK.test(u) ? u : ''; }
 
 // §§ Money, time and text formatting
 // The minus goes BEFORE the $ — "-$4.00", the way money is written. It came
@@ -18953,8 +18993,11 @@ function applyImageForKind(kind, id, image) {
     }));
   }
   else if (kind === 'category') quickPutImage(`/api/categories/${id}`, image, async () => { state.categories = await api('/api/categories'); });
-  else if (kind === 'subcategory') quickPutImage(`/api/subcategories/${id}`, image, async () => { state.subcategories = await api('/api/subcategories'); });
-  else if (kind === 'modifier-group') quickPutImage(`/api/modifier-groups/${id}`, image, async () => { state.modifierGroups = await api('/api/modifier-groups'); });
+  // A subsection and an option group KEEP their colour too (18 Oct '26 hunt):
+  // the subsection tile and a picked option are painted by it and draw no
+  // photo, so a photo that cleared it turned "Signature" into a white tile.
+  else if (kind === 'subcategory') quickPutImage(`/api/subcategories/${id}`, image, async () => { state.subcategories = await api('/api/subcategories'); }, true);
+  else if (kind === 'modifier-group') quickPutImage(`/api/modifier-groups/${id}`, image, async () => { state.modifierGroups = await api('/api/modifier-groups'); }, true);
   else if (kind === 'combo') quickPutImage(`/api/combos/${id}`, image, async () => { state.combos = await api('/api/combos'); });
   // A course KEEPS its colour (18 Oct '26 hunt): the Pass, the Timeline and the
   // table pills paint a course by its colour and draw no photo anywhere, so a
@@ -18963,9 +19006,9 @@ function applyImageForKind(kind, id, image) {
 }
 // Shared "set this entity's photo" PUT — a photo replaces the colour, same as
 // item tiles and preset buttons.
-async function quickPutImage(url, image, refresh) {
+async function quickPutImage(url, image, refresh, keepColour) {
   try {
-    await api(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: image || '', ...(image ? { color: null } : {}) }) });
+    await api(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image: image || '', ...(image && !keepColour ? { color: null } : {}) }) });
     await refresh();
     render();
   } catch (e) { state.toast = toastFail('Could not update photo.'); render(); }
@@ -21761,9 +21804,10 @@ function sameAgainKey(n) {
   const word = courseIsDrinks(n) ? (q === 1 ? 'drink' : 'drinks') : (q === 1 ? 'dish' : 'dishes');
   return `<button class="same-again" data-act="same-again" data-course="${n}">${SYS_REPEAT_SVG}<span>Same again</span><small>${q} ${word}</small></button>`;
 }
-function doSameAgain(n) {
+function doSameAgain(n, asked) {
   const lines = sameAgainLines(n);
   if (!lines.length) return;
+  if (!asked) { askAnother(lines, () => doSameAgain(n, true)); return; }
   lines.forEach(item => {
     // Another round is charged at the menu price — a comp was for the round it was given on.
     const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: item.qty || 1,
@@ -24110,8 +24154,23 @@ function ticketNow(id) {
 // …and a draft FOLLOWS its party: another till moving or combining the table
 // deleted it, or left it on the empty table to open a new ticket there (Sep '26).
 function draftsMine() {
-  const mine = (state.currentStaff && draftsLoad()[state.currentStaff.id]) || {};
   let changed = false;
+  // A ROUND OF SOMEONE NO LONGER ON THE TEAM IS THE NEXT PERSON'S (18 Oct '26
+  // pm hunt). Taking a waiter off signs their iPad off and puts their unsent
+  // round down as THEIR draft — which only they are ever shown, and they can
+  // never sign in again: no tag on the floor, the table opened empty, and the
+  // guests' order was gone without a word. Whoever signs in on this till next
+  // finds it on its table, tagged like their own.
+  const all = draftsLoad(), me = state.currentStaff, team = state.staffList;
+  if (me && Array.isArray(team) && team.some(x => x.id === me.id)) {
+    for (const who of Object.keys(all)) {
+      if (who === String(me.id) || team.some(x => String(x.id) === who)) continue;
+      const to = all[me.id] || (all[me.id] = {});
+      for (const tid of Object.keys(all[who] || {})) { const d = all[who][tid], there = to[tid]; to[tid] = there ? { ...there, cart: [...there.cart, ...d.cart] } : d; }
+      delete all[who]; changed = true;
+    }
+  }
+  const mine = (me && all[me.id]) || {};
   for (const tid of Object.keys(mine)) {
     const d = mine[tid];
     if (!d || !(Date.now() - (d.ts || 0) < DRAFT_TTL)) { delete mine[tid]; changed = true; continue; }
@@ -24130,6 +24189,15 @@ function draftsMine() {
     if (!o) { delete mine[tid]; changed = true; continue; } // paid: the party has left
     const here = allTables().find(t => String(t.label) === String(o.table) && !(t.mergedInto && t.mergedInto !== t.id));
     if (o.id !== d.openOrderId || (here && here.id !== tid)) {
+      // …IN ITS NEW SEATS (18 Oct '26 pm hunt): joined to friends from another
+      // till, the party's sent food moved up past the friends' seats, and the
+      // round waiting here kept the old numbers — a seat-2 Pita landed on the
+      // friends' seat 2, the gluten-free guest. The ticket counts how far its
+      // seats have moved (seatBase); the draft moves up by what it missed.
+      const from = (state.orders || []).find(x => x.id === d.openOrderId);
+      const by = Math.max(0, ((from && from.seatBase) || 0) - (d.seatBase || 0));
+      if (by) d.cart = d.cart.map(l => ({ ...l, seat: seatShifted(l.seat, by) }));
+      d.seatBase = o.seatBase || 0;
       d.openOrderId = o.id; d.sendKey = null; d.sendFailed = null;
       if (here && here.id !== tid) {
         const there = mine[here.id];
@@ -24151,7 +24219,8 @@ function draftStash(tableId) {
   const there = mine[tableId]; // one already waiting there (a table moved onto it) keeps its lines
   mine[tableId] = { cart: there ? [...there.cart, ...state.cart] : state.cart, activeCourse: state.activeCourse, openOrderId: state.openOrderId,
     sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
-    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now(), since: (there && there.since) || Date.now() };
+    quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now(), since: (there && there.since) || Date.now(),
+    seatBase: ((state.orders || []).find(o => o.id === state.openOrderId) || {}).seatBase || 0 }; // where its ticket's seats stood (draftsMine)
   draftsWrite();
   state.cart = []; clearSendState();
 }
@@ -24189,7 +24258,7 @@ function draftsMove(fromId, toId, seatShift) {
   const bump = l => seatShift ? { ...l, seat: seatShifted(l.seat, seatShift) } : l;
   for (const who of Object.keys(all)) {
     let d = all[who][fromId]; if (!d) continue;
-    if (seatShift) d = { ...d, cart: d.cart.map(bump) };
+    if (seatShift) d = { ...d, cart: d.cart.map(bump), seatBase: (d.seatBase || 0) + seatShift };
     const there = all[who][toId];
     all[who][toId] = there ? { ...there, cart: [...there.cart, ...d.cart], ts: Date.now() } : d;
     delete all[who][fromId]; moved = true;
@@ -26976,10 +27045,12 @@ function matchUids(o, m) {
 // seat and note move, extra servings go into the cart as a new round to send,
 // and a new price lands last so the added servings wear it too. Count to 0 +
 // Save is the one way a sent line comes off; the Remove key is gone.
-async function saveEditSent() {
+async function saveEditSent(asked) {
   const m = state.editSent, agg = findSentAggregate();
   if (!m || !agg || !m.draft) { state.editSent = null; render(); return; }
   const d = m.draft;
+  // More of it asks what Add another asks — for the seat it is going to.
+  if (d.qty > agg.qty && !asked && !agg.comboRef) { askAnother([{ menuItemId: agg.menuItemId, seat: d.seat }], () => saveEditSent(true)); return; }
   const down = Math.max(0, agg.qty - d.qty);
   const rest = async () => {
     const cur = state.editSent; if (!cur) return;
@@ -27038,7 +27109,25 @@ function openEditSent(el) {
 }
 // Clone a sent item (identified by its signature) into the cart as one fresh
 // unsent serving — the way to "add another" of an already-sent item.
-function doAddServing(match) {
+// ANOTHER ONE IS ASKED ABOUT LIKE THE FIRST (18 Oct '26 hunt): the guest on
+// seat 2 said "gluten-free" after the Pita went, and a tap on its number put
+// a second Pita on for them with no warning — the menu tile stops and asks.
+// EVERY door to "another one" asks it, and asks what the tile asks: none left,
+// then the allergy (18 Oct '26 pm hunt: Same again and the line editor's +
+// put the Pita on for the gluten-free guest, and a sold-out dish on for a
+// kitchen that had none, without a word). One check; `go` adds them.
+let _anotherGo = null;
+function askAnother(lines, go, outOk) {
+  const dish = l => state.menu.find(x => x.id === l.menuItemId);
+  const out = outOk ? [] : [...new Set(lines.map(dish).filter(mi => mi && mi.out).map(mi => mi.name))];
+  if (out.length) { openConfirm({ message: `${out.join(', ')} ${out.length === 1 ? 'has' : 'have'} none left — order anyway?`, confirmLabel: 'Order' }, () => askAnother(lines, go, true)); return; }
+  for (const l of lines) {
+    const mi = dish(l), hits = mi ? allergenMatches(mi, l.seat != null ? l.seat : null) : [];
+    if (hits.length) { _anotherGo = go; state.allergenWarnModal = { itemId: mi.id, hits, resume: 'another' }; render(); return; }
+  }
+  go();
+}
+function doAddServing(match, asked) {
   const o = activeOpenOrder();
   const item = (o && match) ? (o.items || []).find(i => sentItemMatches(i, match)) : null;
   if (!item) return false;
@@ -27046,15 +27135,7 @@ function doAddServing(match) {
   // copy left its set, so another Hummus went out at the whole set's $65 and
   // another Labneh at $0. The docket's ＋ already says so; so does this.
   if (item.comboRef) { setDishSays(); return false; }
-  // ANOTHER ONE IS ASKED ABOUT LIKE THE FIRST (18 Oct '26 hunt): the guest on
-  // seat 2 said "gluten-free" after the Pita went, and a tap on its number put
-  // a second Pita on for them with no warning — the menu tile stops and asks.
-  const mi = state.menu.find(x => x.id === item.menuItemId);
-  if (mi && !state._allergenAck) {
-    const hits = allergenMatches(mi, item.seat != null ? item.seat : null);
-    if (hits.length) { state.allergenWarnModal = { itemId: mi.id, hits, resume: 'serving', match }; render(); return false; }
-  }
-  state._allergenAck = false;
+  if (!asked) { askAnother([item], () => doAddServing(match, true)); return false; }
   const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: 1,
     course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
     // …the same BUILD too: "No Tomato" went out as a plain Pita (15 Oct '26).
@@ -27356,8 +27437,12 @@ async function commitRemoveSent(match, reason, qty, then, managerPin) {
   if (!match || !o) return;
   // Grab the exact lines coming off so Undo can re-send them — only as many
   // as are going when the editor takes part of a line off.
+  // …the LATEST first, as the server takes them (18 Oct '26 pm hunt): one of
+  // two Pita off (the first served, the second still cooking) captured the
+  // served one, so Undo put back a served copy and the cook's screen lost the
+  // Pita it still had to make.
   let left = qty || Infinity;
-  const removed = (o.items || []).filter(i => sentItemMatches(i, match)).map(i => {
+  const removed = (o.items || []).filter(i => sentItemMatches(i, match)).reverse().map(i => {
     const n = Math.min(i.qty, left); left -= n;
     return n <= 0 ? null : { id: i.id, menuItemId: i.menuItemId, name: i.name, price: i.price, qty: n,
       course: i.course || 1, seat: i.seat != null ? i.seat : null, note: i.note || '',
@@ -27366,6 +27451,9 @@ async function commitRemoveSent(match, reason, qty, then, managerPin) {
       // (18 Oct '26 hunt): Undo brought a $100 voucher back as a plain line —
       // paid for, never made, and taxed as food on the cash-up.
       ...(i.giftcardSale ? { giftcardSale: true } : {}), removed: (i.removed || []).slice(),
+      // …and a comped or discounted dish comes back SAYING SO (18 Oct '26 pm
+      // hunt): back at $0 with no "was $8", another one of it rang at $0.
+      ...(i.origPrice !== undefined ? { origPrice: i.origPrice, ...(i.discountReason ? { discountReason: i.discountReason } : {}) } : {}),
       // …and what the kitchen did stays done: a served Pita came back on the
       // cook's screen at 0m as a new dish to cook (18 Oct '26 hunt).
       status: i.status || 'ordered', sentAt: i.sentAt || ((o.rounds || []).find(rd => (rd.items || []).some(x => x.uid && x.uid === i.uid)) || {}).sentAt || undefined,
@@ -40887,7 +40975,11 @@ async function doTransferToTable(newTableId, opts) {
     if (moved && moved.id) {
       const i = state.orders.findIndex(o => o.id === moved.id);
       if (i >= 0) state.orders[i] = moved; else state.orders.push(moved);
-      if (moved.id !== srcOrderId) { const src = state.orders.find(o => o.id === srcOrderId); if (src) src.status = 'void'; }
+      // …and says where it went and by how many seats it moved up, as the
+      // server's does: a draft waiting on the table follows its ticket by
+      // that line, and a bare "void" read as a party that had paid and left —
+      // the unsent round was deleted (18 Oct '26 pm hunt).
+      if (moved.id !== srcOrderId) { const src = state.orders.find(o => o.id === srcOrderId); if (src) { src.status = 'void'; src.voidReason = `Combined into Ticket #${moved.id} (Table ${newTable.label})`; src.seatBase = (src.seatBase || 0) + seatShift; } }
     }
   }
   await sittingMove;
@@ -49722,7 +49814,7 @@ function handleActClick(el, e) {
           if (m.resume === 'io-seat' && state.itemOptions) pickIoSeat(m.seat);
           else if (m.resume === 'io-confirm' && state.itemOptions) confirmItemOptions();
           else if (m.resume === 'io-multi' && state.itemOptions) confirmIoMultiSeats();
-          else if (m.resume === 'serving') doAddServing(m.match);
+          else if (m.resume === 'another') { state._allergenAck = false; const go = _anotherGo; _anotherGo = null; if (go) go(); }
           else if (m.resume === 'io-rest' && state.itemOptions) { _seatHoldFired = false; ioAssignRestTo(m.seat); }
           else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
@@ -51946,7 +52038,8 @@ setInterval(() => {
               if (me) state.currentStaff.trainee = !!me.trainee;
               // REMOVED IS SIGNED OFF (16 Oct '26 hunt): a person taken off the
               // team kept their iPad and took cash on their tables until they
-              // chose to log off. The round they were on stays as a draft.
+              // chose to log off. The round they were on stays as a draft, for
+              // whoever signs in on this till next (draftsMine).
               else if (state.currentStaff && !state.frozen) {
                 if (state.table && state.cart.length) draftStash(state.table);
                 const who = state.currentStaff.name;

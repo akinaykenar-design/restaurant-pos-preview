@@ -5716,6 +5716,24 @@ select.ie-field{font-weight:700;}
   background:var(--glass-sheen), var(--glass); -webkit-backdrop-filter:var(--glass-fx); backdrop-filter:var(--glass-fx); border-radius:var(--r-pill); box-shadow:inset 0 0 0 var(--ring) var(--glass-rim); z-index:var(--z-menu); }
 .fp-floating > .fp-float .fp-float-modes .fp-chip{ background:none; -webkit-backdrop-filter:none; backdrop-filter:none; box-shadow:none; -webkit-mask-image:none; min-width:84px; }
 .fp-floating > .fp-float .fp-float-modes.track::before{ display:none; }
+/* PAPER LOW, TOLD EARLY (owner, 19 Oct '26 — a car's low-fuel light). One quiet
+   card at the foot of the map, bottom left, opposite the rooms: the dock's own
+   glass, plain ink, no red, no motion — news, not an alarm. Its outer edge sits
+   where the rooms' groove does, so the foot reads as one line. A phone's dock
+   runs the width, so there it stands one row up (two with Takeaway's row).
+   It takes no tap: a table showing through the glass is still a table. */
+.fp-floating > .fp-float .paper-low{ position:absolute; left:calc(var(--hub-edge) - 4px); bottom:calc(var(--hub-edge) - 4px); max-width:calc(50% - var(--hub-edge));
+  min-height:calc(var(--sq-ctl) + 8px); box-sizing:border-box; display:flex; align-items:center; gap:8px; padding:4px 16px;
+  background:var(--glass-sheen), var(--glass); -webkit-backdrop-filter:var(--glass-fx); backdrop-filter:var(--glass-fx);
+  border-radius:var(--r-pill); box-shadow:inset 0 0 0 var(--ring) var(--glass-rim); color:var(--text-primary); font-size:var(--fs-md); font-weight:600; }
+.fp-float > .paper-low{ pointer-events:none; }
+.paper-low .sys-i{ flex:none; width:20px; height:20px; }
+.paper-low-lines{ display:flex; flex-direction:column; gap:4px; min-width:0; }
+.paper-low-lines > div{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+@media (max-width: 768px){
+  .fp-floating > .fp-float .paper-low{ left:var(--hub-edge); bottom:calc(var(--hub-edge) + var(--sq-ctl) + 16px); max-width:calc(100% - var(--hub-edge) * 2); }
+  .fp-floating > .fp-float:has(.fp-float-modes) .paper-low{ bottom:calc(var(--hub-edge) + var(--sq-ctl) * 2 + 32px); }
+}
 .deck-modes{ display:flex; align-items:center; position:relative; }
 body .deck-modes.track > .tab-btn{ position:relative; background:none; border-color:transparent; box-shadow:none; color:var(--text-primary); }
 body .deck-modes.track > .tab-btn.active{ background:var(--surface); border-color:transparent; box-shadow:var(--lift-1); color:var(--here-ink); }
@@ -7337,6 +7355,11 @@ body[data-theme="dark"]{ --spend-1:color-mix(in srgb, var(--green) 14%, var(--su
     // "Something went wrong on the server" (owner, Sep '26).
     drawerForSale: function () {},
     cashTaken: function () { return false; },
+    // Pretend printers have endless paper: the warning never lights here.
+    paperStatus: function () { return []; },
+    checkAllPaper: function () { return Promise.resolve(); },
+    watchPaper: function () {},
+    clearPaper: function () {},
     PRINTER_PORT: 9100,
   };
   // Simulated backups: the preview has no disk, so snapshots live in memory
@@ -10831,6 +10854,7 @@ app.put('/api/settings', (req, res) => {
   if (showCoversOnTicket !== undefined) data.settings.showCoversOnTicket = !!showCoversOnTicket;
   if (tilesBottomUp !== undefined) data.settings.tilesBottomUp = !!tilesBottomUp;
   if (req.body.tableLockEnabled !== undefined) data.settings.tableLockEnabled = !!req.body.tableLockEnabled;
+  if (req.body.paperLowWarning !== undefined) data.settings.paperLowWarning = !!req.body.paperLowWarning;
   if (printEnabled !== undefined) data.settings.printEnabled = !!printEnabled;
   if (autoPrintReceipt !== undefined) data.settings.autoPrintReceipt = !!autoPrintReceipt;
   if (autoPrintKitchenDocket !== undefined) data.settings.autoPrintKitchenDocket = !!autoPrintKitchenDocket;
@@ -10889,6 +10913,10 @@ app.put('/api/settings', (req, res) => {
     if (new Set(clean).size === 3) data.settings.panelOrder = clean;
   }
   writeData(data);
+  // The paper warning switched: off forgets every reading, on asks at once.
+  if (req.body.paperLowWarning !== undefined && typeof printing.clearPaper === 'function') {
+    if (data.settings.paperLowWarning) printing.checkAllPaper(data.printerStations || []).catch(() => {}); else printing.clearPaper();
+  }
   res.json(safeSettings(data.settings));
 });
 
@@ -12221,6 +12249,21 @@ app.get('/api/printer-stations', (req, res) => {
   res.json(readData().printerStations || []);
 });
 
+// PAPER LOW, TOLD EARLY (owner, 19 Oct '26 — a car's low-fuel light). The
+// printers that answer the paper question are asked after each job and every
+// five minutes; the floor reads the ones running low here, at its print poll.
+// Off in Admin › Printers means no card and no question to any printer.
+const paperWarnOn = () => readData().settings.paperLowWarning !== false;
+if (typeof printing.watchPaper === 'function') {
+  printing.watchPaper(paperWarnOn);
+  const round = () => printing.checkAllPaper(readData().printerStations || []).catch(() => {});
+  setTimeout(round, 5000);
+  setInterval(round, 5 * 60000);
+}
+app.get('/api/printer-paper', (req, res) => {
+  res.json(typeof printing.paperStatus === 'function' ? printing.paperStatus(readData().printerStations || []) : []);
+});
+
 // ---------- Doshii (app orders: QR ordering, delivery apps) ----------
 
 // Credentials are posted here, not through the normal settings PUT, so the
@@ -12800,7 +12843,7 @@ app.post('/api/orders/:id/print-receipt', (req, res) => {
 // Send a test page straight to an IP so setup can be verified in seconds.
 app.post('/api/printers/test', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
-  if (!/^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
+  if (!/^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
   try {
     let buf = printing.testPage(readData().settings);
     if (req.body && req.body.kind === 'impact') buf = printing.impactify(buf);
@@ -12871,7 +12914,7 @@ app.post('/api/printer-stations', (req, res) => {
   const data = readData();
   const { name, categories, ip, ips, backupIp, receipts, labels } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Station name is required' });
-  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
+  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i; // IP, or IP:port for a printer box on its own port
   const cleanIps = (Array.isArray(ips) ? ips : [ip]).map(x => String(x || '').trim()).filter(Boolean);
   if (cleanIps.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
   const cleanBackup = String(backupIp || '').trim();
@@ -12897,7 +12940,7 @@ app.put('/api/printer-stations/:id', (req, res) => {
   if (Array.isArray(req.body.subcategoryIds)) {
     station.subcategoryIds = req.body.subcategoryIds.filter(id => (data.subcategories || []).some(s => s.id === id));
   }
-  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}|COM\d+)$/i;
+  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i; // IP, or IP:port for a printer box on its own port
   if (Array.isArray(ips)) {
     const clean = ips.map(x => String(x || '').trim()).filter(Boolean);
     if (clean.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
@@ -20306,7 +20349,7 @@ async function saveRailPosition(val) {
   }
 }
 window.addEventListener('resize', applyPanelLayout);
-window.addEventListener('resize', () => markBlindSpotsSoon());
+window.addEventListener('resize', () => { markBlindSpotsSoon(); placePaperCardWhenStill(); });
 async function savePanelOrders(dev, order) {
   const orders = {};
   ['pc', 'mobile'].forEach(d => { orders[d] = d === dev ? order : panelOrderFor(d); });
@@ -25447,6 +25490,7 @@ function render() {
   placeTimelineNow(_tlWas);
   fitTimelineWords();
   markBlindSpots();
+  placePaperCard();
   settleDockEntrance();
   fitFloorBadges();
   // A designer menu opened from a key near the screen's right edge hung
@@ -31214,8 +31258,61 @@ async function pollPrintAlerts() {
     // The toast is the moment; the table keeps it (§ Missed call).
     const missed = await api('/api/missed-prints');
     if (JSON.stringify(missed) !== JSON.stringify(state.missedPrints || [])) { state.missedPrints = missed; renderWhenStill(); }
+    // The paper light rides the same poll (§ Paper low): a change waits for the hand.
+    const paper = paperWarnOn() ? await api('/api/printer-paper') : [];
+    if (Array.isArray(paper) && JSON.stringify(paper) !== JSON.stringify(state.paperLow || [])) { state.paperLow = paper; renderWhenStill(); }
   } catch (e) { /* server unreachable — the offline dot already shows that */ }
 }
+// §§ Paper low: a fuel light for the printer roll
+// (owner, 19 Oct '26: "Can we track low paper on all printers? Possibly ability
+// to turn off in admin" — borrowed from a car's low-fuel light). A printer with
+// a near-end sensor says its roll is nearly out; the floor says so ONCE, in one
+// quiet card at the foot of the map, before the roll runs out mid-rush. It is
+// news, not an alarm: no red, no motion. It goes when the roll is changed. A
+// roll that HAS run out still says "out" here — the act-now alarm stays the
+// Not printed one. Off in Admin › Printers: no card, no question to a printer.
+function paperWarnOn() { return state.settings.paperLowWarning !== false; }
+function paperCardHtml() {
+  const low = paperWarnOn() ? (state.paperLow || []) : [];
+  if (!low.length) return '';
+  return `<div class="paper-low" role="status">${SYS_PRINTER_SVG}<div class="paper-low-lines">${low.map(p =>
+    `<div>${esc(p.name)} ${p.paper === 'out' ? 'out of paper' : 'paper low'}</div>`).join('')}</div></div>`;
+}
+// IT NEVER LIES ON A TABLE (owner, 19 Oct '26: on a phone it sat over table
+// 26). The stylesheet's corner is the first choice; a phone tries the dock's
+// own row first. If that spot covers a table or a dock card, the card walks
+// up the left edge, then the right, to the first spot that covers nothing.
+// Placed after a render, a resize, and once a pan has come to rest — never
+// under a moving finger.
+function placePaperCard() {
+  const c = document.querySelector('.middle-view .fp-float > .paper-low');
+  const wrap = document.querySelector('.middle-view .tp-canvas-wrap');
+  if (!c || !wrap) return;
+  c.style.left = c.style.top = c.style.bottom = '';
+  const box = wrap.getBoundingClientRect(), op = c.offsetParent && c.offsetParent.getBoundingClientRect();
+  if (!box.width || !op) return;
+  const home = c.getBoundingClientRect(), cw = home.width, ch = home.height;
+  const tables = [...wrap.querySelectorAll('.floor-marker[data-act="pick-table"]')].map(e => e.getBoundingClientRect())
+    .filter(q => q.width && q.right > box.left && q.left < box.right && q.bottom > box.top && q.top < box.bottom);
+  const docks = [...document.querySelectorAll('.middle-view .fp-float > :not(.paper-low)')].map(e => e.getBoundingClientRect()).filter(q => q.width && q.height);
+  const hit = (x, y, q, m) => x < q.right + m && x + cw > q.left - m && y < q.bottom + m && y + ch > q.top - m;
+  const clear = (x, y) => x >= op.left && x + cw <= op.right && y >= op.top && y + ch <= op.bottom
+    && !tables.some(q => hit(x, y, q, 4)) && !docks.some(q => hit(x, y, q, 4));
+  // The card keeps the inset its corner gave it, on whichever edge it walks.
+  const E = home.left - op.left, foot = op.bottom - home.bottom;
+  const spots = [];
+  const side = document.querySelector('.middle-view .fp-float-side');
+  if (payPhone() && side) { const r = side.getBoundingClientRect(); spots.push([home.left, r.top + (r.height - ch) / 2]); }
+  spots.push([home.left, home.top]);
+  const views = docks.filter(q => q.top < op.top + op.height / 2);
+  const top = Math.max(op.top + E, ...views.map(q => q.bottom + 8));
+  for (const x of [home.left, op.right - E - cw]) for (let y = op.bottom - foot - ch; y >= top; y -= 4) spots.push([x, y]);
+  const at = spots.find(([x, y]) => clear(x, y));
+  if (!at || (at[0] === home.left && at[1] === home.top)) return;
+  c.style.left = (at[0] - op.left) + 'px'; c.style.top = (at[1] - op.top) + 'px'; c.style.bottom = 'auto';
+}
+let _paperPanTimer = 0;
+function placePaperCardWhenStill() { clearTimeout(_paperPanTimer); _paperPanTimer = setTimeout(placePaperCard, 260); }
 // §§ Missed call: a docket that did not print stays on its table
 // (owner, Sep '26 — a phone's missed-call badge). The toast went in six
 // seconds and named no table anyone could find, so a table whose docket
@@ -31243,7 +31340,7 @@ function markBlindSpots() {
   // under them. What they cover is measured off their own cards.
   // Only the cards at the FOOT: on a tablet the views switch sits at the top
   // (9 Oct '26) and is not what a tab at the bottom has to clear.
-  const cards = [...document.querySelectorAll('.middle-view .fp-float > *')].map(c => c.getBoundingClientRect()).filter(r => r.width && r.height && r.top > box.top + box.height / 2);
+  const cards = [...document.querySelectorAll('.middle-view .fp-float > :not(.paper-low)')].map(c => c.getBoundingClientRect()).filter(r => r.width && r.height && r.top > box.top + box.height / 2);
   const dk = cards.length ? { l: Math.min(...cards.map(r => r.left)), r: Math.max(...cards.map(r => r.right)), t: Math.min(...cards.map(r => r.top)) } : null;
   const seen = {};
   wrap.querySelectorAll('.floor-marker[data-act="pick-table"]').forEach(m => {
@@ -31610,7 +31707,12 @@ async function terminalTestCharge() {
 // comes out of them. They used to share one page behind a Printers | Papers
 // segment, which meant every paper edit started by picking the right level.
 function renderPrinterStationsSettingsAdmin() {
-  return `<div style="max-width:var(--admin-list-w,720px);">${renderPrintersSetupTab()}</div>`;
+  return `<div style="max-width:var(--admin-list-w,720px);">${renderPrintersSetupTab()}
+    <div class="settings-card">
+      <div class="th">Paper low warning</div>
+      <div class="pay-options">${togglePill(paperWarnOn(), 'set-paper-low-warning')}</div>
+    </div>
+  </div>`;
 }
 
 // Settings → Dockets. Laid out like the Design page (owner, Aug '26): the
@@ -40308,12 +40410,14 @@ function fpFloatHtml(fp) {
   const modes = modeKeys ? `<div class="fp-float-card fp-float-modes track">${modeKeys}</div>` : '';
   // The rooms are the map's alone: the Pass, the Timeline and Bills show every room.
   const side = `${pass ? '' : stackKey}${pass ? '' : rooms}`;
-  if (!side && !views && !modes) return '';
+  const paper = pass || state.moveItemsPicking || state.transferFrom ? '' : paperCardHtml();
+  if (!side && !views && !modes && !paper) return '';
   return `
   <div class="fp-float">
     ${pass ? '' : scrim}
     ${views}
     ${modes}
+    ${paper}
     ${side ? `<div class="fp-float-side">${side}</div>` : ''}
   </div>`;
 }
@@ -51431,6 +51535,7 @@ function handleActClick(el, e) {
       else if (act === 'set-phone-docket') { saveTicketSetting({ phoneDocket: el.dataset.val }); }
       else if (act === 'set-tiles-bottom') { saveTicketSetting({ tilesBottomUp: el.dataset.val === 'true' }); }
       else if (act === 'set-table-lock') { saveTicketSetting({ tableLockEnabled: el.dataset.val === 'true' }); }
+      else if (act === 'set-paper-low-warning') { const on = el.dataset.val === 'true'; if (!on) state.paperLow = []; saveTicketSetting({ paperLowWarning: on }); }
       else if (act === 'set-takeaway-enabled') { saveTicketSetting({ takeawayEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-delivery-enabled') { saveTicketSetting({ deliveryEnabled: el.dataset.val === 'true' }); }
       else if (act === 'printers-tab') { state.printersTab = el.dataset.val; if (el.dataset.val !== 'setup') state.papersTab = el.dataset.val; state.printEdit = null; render(); }
@@ -52209,7 +52314,7 @@ document.addEventListener('touchend', () => {
   }
 }, { passive: true, capture: true });
 document.addEventListener('touchcancel', () => { _tapOff(); _tapEl = null; }, { passive: true, capture: true });
-document.addEventListener('scroll', (e) => { if (e.target && e.target.classList && e.target.classList.contains('tp-canvas-wrap')) markBlindSpotsSoon(); _scrollUntil = Date.now() + 240; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
+document.addEventListener('scroll', (e) => { if (e.target && e.target.classList && e.target.classList.contains('tp-canvas-wrap')) { markBlindSpotsSoon(); placePaperCardWhenStill(); } _scrollUntil = Date.now() + 240; clearTimeout(_bgFlushTimer); _bgFlushTimer = setTimeout(_flushBgRender, 260); }, { passive: true, capture: true });
 
 // THE POLL ASKS BEFORE IT FETCHES. It used to pull every order (1.3MB here)
 // and the whole menu every 15s and rebuild the screen whether or not anything

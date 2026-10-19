@@ -15299,6 +15299,11 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // the bill is refunded first; only the part past it comes off the voucher,
   // and a voucher already spent cannot give back what it no longer holds.
   const sold = (data.giftCards || []).filter(g => g.soldOnOrder === order.id && g.active !== false);
+  // …and the card the guest HANDED BACK goes first (19 Oct '26 pm hunt): two
+  // vouchers on one bill, the second one returned, and the refund cancelled
+  // the first — a friend's card bounced while the returned one still paid.
+  const pick = String((req.body || {}).voucherCode || '').toLowerCase();
+  if (pick) sold.sort((a, b) => (String(b.code).toLowerCase() === pick) - (String(a.code).toLowerCase() === pick));
   const soldValue = (data.giftCards || []).filter(g => g.soldOnOrder === order.id).reduce((a, g) => a + (g.initialValue || 0), 0);
   // …and the TIP is refunded last, after the voucher (18 Oct '26 pm hunt): the
   // tip counted as "the rest of the bill", so the meal and the voucher handed
@@ -33377,7 +33382,8 @@ function renderRefundModal() {
       <div class="sub">Up to ${money(m.remaining)} remaining to refund.</div>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
       ${(m.vouchers || []).length ? `
-      ${optionPair(m.part, 'refund-part', [['meal', 'Meal'], ['voucher', 'Voucher']])}
+      ${optionPair(m.part === 'voucher' && m.code ? 'v:' + m.code : m.part, 'refund-part', [['meal', 'Meal'],
+        ...(m.vouchers.length > 1 ? m.vouchers.map(v => ['v:' + v.code, refundVoucherShort(v.code)]) : [['voucher', 'Voucher']])])}
       <div class="ts">${esc(refundVoucherNote(m))}</div>` : ''}
       <label>Amount</label>
       <input id="refund-amount-input" type="number" min="0" max="${m.remaining}" step="0.01" value="${m.amount}" placeholder="0.00">
@@ -46293,11 +46299,16 @@ async function openRefundModal(orderId) {
   render();
 }
 function refundVoucherLeft(m) { return Math.min(m.remaining, (m.vouchers || []).reduce((a, v) => a + v.balance, 0)); }
+// Several vouchers on one bill: each is its own key, named as its card reads,
+// so the one the guest hands back is the one cancelled.
+function refundVoucherShort(code) { const c = String(code).replace(/[^A-Za-z0-9]/g, ''); return `${c.slice(0, 4)}…${c.slice(-2)}`; }
 function setRefundPart(part) {
   const m = state.refundModal;
   if (!m) return;
-  m.part = part === 'voucher' ? 'voucher' : 'meal';
-  m.amount = (m.part === 'voucher' ? refundVoucherLeft(m) : m.remaining).toFixed(2);
+  const v = /^v:/.test(part) ? (m.vouchers || []).find(x => 'v:' + x.code === part) : null;
+  m.part = part === 'voucher' || v ? 'voucher' : 'meal';
+  m.code = v ? v.code : null;
+  m.amount = (v ? Math.min(m.remaining, v.balance) : m.part === 'voucher' ? refundVoucherLeft(m) : m.remaining).toFixed(2);
   state.adminError = '';
   render();
 }
@@ -46307,9 +46318,9 @@ function setRefundPart(part) {
 function refundVoucherNote(m) {
   if (m.part !== 'voucher') return 'Meal first, then voucher';
   const vs = m.vouchers || [], amt = parseFloat(m.amount) || 0;
-  const c = vs.length === 1 ? String(vs[0].code).replace(/[^A-Za-z0-9]/g, '') : '';
-  const which = vs.length === 1 ? `voucher ${c.slice(0, 4)}…${c.slice(-2)}` : `${vs.length} vouchers`;
-  return amt + 0.005 >= refundVoucherLeft(m) ? `Cancels ${which}` : `Takes ${money(amt)} off ${which}`;
+  const one = m.code ? vs.find(v => v.code === m.code) : vs.length === 1 ? vs[0] : null;
+  const which = one ? `voucher ${refundVoucherShort(one.code)}` : `${vs.length} vouchers`;
+  return amt + 0.005 >= (one ? Math.min(m.remaining, one.balance) : refundVoucherLeft(m)) ? `Cancels ${which}` : `Takes ${money(amt)} off ${which}`;
 }
 function closeRefundModal() { state.refundModal = null; state.adminError = ''; render(); }
 async function confirmRefundModal() {
@@ -46327,7 +46338,7 @@ async function confirmRefundModal() {
     const order = await api(`/api/orders/${m.orderId}/refund`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount: value, reason: m.reason.trim(), refundKey: m.key, part: m.part === 'voucher' ? 'voucher' : 'meal', staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+      body: JSON.stringify({ amount: value, reason: m.reason.trim(), refundKey: m.key, part: m.part === 'voucher' ? 'voucher' : 'meal', voucherCode: m.part === 'voucher' && m.code ? m.code : undefined, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
     });
     await refreshOrders();
     state.refundModal = null;

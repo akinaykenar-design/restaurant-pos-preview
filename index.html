@@ -10112,7 +10112,7 @@ app.put('/api/desk-colours', (req, res) => {
 // it to 1 point = $1, and the close trusts that rate).
 // Job titles are here because a title IS a power (Oct '26 hunt): a waiter's
 // till renamed "staff" to "manager" and every waiter came back a manager.
-const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'tipPresets', 'terminal', 'cardTypes', 'loyaltyPointsPerDollar', 'staffRoles', 'staffRoleRename'];
+const MONEY_SETTINGS = ['managerApprovalForVoid', 'askVoidReason', 'tax', 'tipsEnabled', 'voucherRefunds', 'tipPresets', 'terminal', 'cardTypes', 'loyaltyPointsPerDollar', 'staffRoles', 'staffRoleRename'];
 app.put('/api/settings', (req, res) => {
   const data = readData();
   if (MONEY_SETTINGS.some(k => req.body && req.body[k] !== undefined) && !managerFromReq(req, data)) {
@@ -10720,6 +10720,9 @@ app.put('/api/settings', (req, res) => {
     data.settings.roundColors = roundColors.map(cleanColour).filter(Boolean).slice(0, 10);
   }
   if (tipsEnabled !== undefined) data.settings.tipsEnabled = !!tipsEnabled;
+  // Off unless a venue switches it on (owner, 19 Oct '26): a refund may hand
+  // back a voucher sold on the bill before the meal.
+  if (req.body.voucherRefunds !== undefined) data.settings.voucherRefunds = !!req.body.voucherRefunds;
   if (Array.isArray(tipPresets)) {
     data.settings.tipPresets = tipPresets.map(p => parseFloat(p)).filter(p => !isNaN(p) && p >= 0 && p <= 100).slice(0, 8);
   }
@@ -12094,6 +12097,50 @@ function issueSoldVouchers(data, order, byName) {
 // tax base excludes voucher-sale lines.
 function voucherSaleTotal(items) {
   return (items || []).reduce((s, i) => s + (i.giftcardSale ? i.price * (i.qty || 1) : 0), 0);
+}
+// WHAT EACH REFUND GAVE BACK (owner, 19 Oct '26: "voucher refunds"). A paid
+// bill is three pots — the MEAL, a VOUCHER sold on it, the TIP — and a refund
+// comes out of them in an order: meal, voucher, tip, or voucher first when the
+// venue lets a guest hand back a voucher they never used. A new refund keeps
+// the `parts` it took; an older one is replayed meal → voucher → tip, exactly
+// as the money was split before, so an old bill reads the same. Every figure
+// that splits a refund — points, GST, tips, the kept share — reads it here.
+// `vValue` is the voucher pot when the caller knows better than the lines
+// (the refund route uses the cards actually sold).
+function refundPots(order, vValue) {
+  const gt = (order.grandTotal !== undefined ? order.grandTotal : order.total) || 0;
+  const food = Math.max(0, gt - (order.tip || 0));
+  const v = Math.min(food, Math.max(0, vValue === undefined ? voucherSaleTotal(order.items) : vValue));
+  return { meal: food - v, voucher: v, tip: Math.max(0, gt - food) };
+}
+const REFUND_ORDER = { meal: ['meal', 'voucher', 'tip'], voucher: ['voucher', 'meal', 'tip'] };
+function takeRefundParts(pots, used, amount, part, round) {
+  const got = { meal: 0, voucher: 0, tip: 0 };
+  let left = amount;
+  for (const k of REFUND_ORDER[part] || REFUND_ORDER.meal) {
+    const t = Math.max(0, Math.min(left, pots[k] - used[k])); got[k] = t; left -= t;
+  }
+  if (left > 0) got.tip += left; // past every pot, as the old maths put it
+  if (!round) return got;
+  const r2 = n => Math.round(n * 100) / 100;
+  const out = { meal: r2(got.meal), voucher: r2(got.voucher) };
+  out.tip = r2(amount - out.meal - out.voucher);
+  return out;
+}
+function refundParts(order, vValue) {
+  const pots = refundPots(order, vValue), used = { meal: 0, voucher: 0, tip: 0 };
+  const rs = Array.isArray(order.refunds) && order.refunds.length ? order.refunds
+    : (order.refundedTotal ? [{ amount: order.refundedTotal, timestamp: null }] : []);
+  return rs.map(r => {
+    const p = r.parts && typeof r.parts === 'object'
+      ? { meal: +r.parts.meal || 0, voucher: +r.parts.voucher || 0, tip: +r.parts.tip || 0 }
+      : takeRefundParts(pots, used, r.amount || 0, 'meal');
+    used.meal += p.meal; used.voucher += p.voucher; used.tip += p.tip;
+    return { r, ...p };
+  });
+}
+function refundPartsSum(list) {
+  return list.reduce((a, p) => ({ meal: a.meal + p.meal, voucher: a.voucher + p.voucher, tip: a.tip + p.tip }), { meal: 0, voucher: 0, tip: 0 });
 }
 
 app.get('/api/gift-cards/lookup/:code', (req, res) => {
@@ -15173,6 +15220,12 @@ app.post('/api/orders/:id/refund', (req, res) => {
   if (value > remaining + 0.001) return res.status(400).json({ error: `Cannot refund more than the remaining ${remaining.toFixed(2)}` });
   const staff = staffName || 'Unknown';
   const r2 = n => Math.round(n * 100) / 100;
+  // WHICH PART GOES BACK (owner, 19 Oct '26): the meal first, as always — or,
+  // where the venue switched Voucher refunds on, a voucher the guest hands
+  // back unused, so their $100 back cancels the $100 card instead of leaving
+  // it live for the meal's price.
+  const part = req.body.part === 'voucher' ? 'voucher' : 'meal';
+  if (part === 'voucher' && !data.settings.voucherRefunds) return res.status(400).json({ error: 'Voucher refunds are off — switch them on in Gift cards' });
   // A REFUND THAT REACHES A VOUCHER SOLD ON THIS TICKET CANCELS IT (Sep '26):
   // the guest had their $100 back and kept a working $100 card. The rest of
   // the bill is refunded first; only the part past it comes off the voucher,
@@ -15182,10 +15235,11 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // …and the TIP is refunded last, after the voucher (18 Oct '26 pm hunt): the
   // tip counted as "the rest of the bill", so the meal and the voucher handed
   // back with the tip left to staff left the voucher live for the tip's worth.
-  const foodAll = Math.max(0, grandTotal - (order.tip || 0));
-  const rest = foodAll - soldValue;
-  const upTo = x => Math.min(x, foodAll);
-  const intoVouchers = r2(Math.max(0, upTo(alreadyRefunded + value) - rest) - Math.max(0, upTo(alreadyRefunded) - rest));
+  // Each refund keeps what it took from each pot (refundParts).
+  const pots = refundPots(order, soldValue);
+  const used = refundPartsSum(refundParts(order, soldValue));
+  const parts = takeRefundParts(pots, used, value, part, true);
+  const intoVouchers = parts.voucher;
   if (intoVouchers > 0.005) {
     const left = sold.reduce((a, g) => a + (g.balance || 0), 0);
     if (left + 0.005 < intoVouchers) {
@@ -15200,14 +15254,14 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // nowhere — the card stayed spent and the cash-up showed it handed back.
   // A split bill gives the card back its share of the refund.
   // …its share of the FOOD first, the tip last (14 Oct '26 — see refundByWay).
-  const foodNow = Math.min(alreadyRefunded + value, foodAll) - Math.min(alreadyRefunded, foodAll);
-  const cardBack = refundByWay(order, foodNow, Math.max(0, value - foodNow))
+  const foodNow = parts.meal + parts.voucher;
+  const cardBack = refundByWay(order, foodNow, parts.tip)
     .filter(w => w.method === 'giftcard' && w.code).map(w => [w.code, r2(w.amount)]);
   cardBack.forEach(([code, amt]) => {
     const c = (data.giftCards || []).find(g => g.code.toLowerCase() === String(code).toLowerCase());
     if (c && amt > 0) { c.balance = r2((c.balance || 0) + amt); c.active = true; logAudit(data, staff, `Put $${amt.toFixed(2)} back on gift card ${c.code} (refund on #${order.id})`); }
   });
-  const refund = { amount: value, reason: reason || '', staffName: staff, timestamp: Date.now(), key: refundKey };
+  const refund = { amount: value, reason: reason || '', staffName: staff, timestamp: Date.now(), key: refundKey, parts };
   order.refunds = [...(order.refunds || []), refund];
   order.refundedTotal = alreadyRefunded + value;
   // Money back is points back, in the same share (Sep '26: a full refund of
@@ -15218,9 +15272,12 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // …and on the MEAL, not a voucher sold beside it (18 Oct '26 pm hunt): the
   // meal is refunded first and it is what earned the points, so a refunded
   // meal on a bill that also sold a $100 voucher took back a sixth of them.
+  // …and by the PARTS (19 Oct '26): a voucher handed back first gives back
+  // no meal, so it takes back no points.
   const food = grandTotal - (order.tip || 0);
   const meal = Math.max(0, food - voucherSaleTotal(order.items));
-  const share = meal > 0.005 ? Math.min(1, order.refundedTotal / meal) : food > 0 ? Math.min(1, order.refundedTotal / food) : 1;
+  const mealBack = refundPartsSum(refundParts(order)).meal;
+  const share = meal > 0.005 ? Math.min(1, mealBack / meal) : food > 0 ? Math.min(1, order.refundedTotal / food) : 1;
   if (grandTotal > 0) takeBackLoyalty(data, order, share, staff, 'refund');
   logAudit(data, staff, `Refunded $${value.toFixed(2)} on Ticket #${order.id}${reason ? ' — ' + reason : ''}`);
   writeData(data);
@@ -15701,20 +15758,16 @@ function computePeriodSummary(data, fromTs, toTs) {
   // the tips staff are paid out, and the $9.09 GST on the Z — a void took both
   // off, a refund neither. The food is refunded first, the tip last.
   const gtOf = o => (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0;
-  const foodOf = o => Math.max(0, gtOf(o) - (o.tip || 0));
-  const refundsBefore = o => Array.isArray(o.refunds) && o.refunds.length
-    ? o.refunds.reduce((s, r) => s + ((r.timestamp ? r.timestamp <= fromTs : periodAt(o) <= fromTs) ? (r.amount || 0) : 0), 0)
-    : (periodAt(o) <= fromTs ? (o.refundedTotal || 0) : 0);
-  const refundSplit = o => {
-    const before = refundsBefore(o), through = before + refundIn(o), food = foodOf(o);
-    return { food: Math.min(through, food) - Math.min(before, food), tip: Math.max(0, through - food) - Math.max(0, before - food) };
-  };
+  // …each refund by the parts it took (refundParts, 19 Oct '26), those given
+  // in this period — a voucher handed back first takes no meal and no GST.
+  const refundPartsIn = o => refundPartsSum(refundParts(o).filter(p => p.r.timestamp ? inWin(p.r.timestamp) : inWin(periodAt(o))));
+  const refundSplit = o => { const x = refundPartsIn(o); return { food: x.meal + x.voucher, tip: x.tip }; };
   // …and the GST is the MEAL'S (18 Oct '26 pm hunt): a voucher sold on the bill
   // carries none and is refunded after the meal, so a refunded meal beside a
   // $100 voucher took back only its share of the whole bill — most of its GST
   // stayed on the Z.
-  const mealOf = o => Math.max(0, foodOf(o) - voucherSaleTotal(o.items));
-  const mealBack = o => { const before = refundsBefore(o), through = before + refundIn(o), m = mealOf(o); return Math.min(through, m) - Math.min(before, m); };
+  const mealOf = o => refundPots(o).meal;
+  const mealBack = o => refundPartsIn(o).meal;
   const taxBack = refunded.reduce((s, o) => s + (mealOf(o) > 0 ? (o.tax || 0) * mealBack(o) / mealOf(o) : 0), 0)
     + lateVoids.reduce((s, o) => s + (gtOf(o) > 0 ? (o.tax || 0) * Math.min(1, lateVoidOut(o) / gtOf(o)) : 0), 0);
   const tax = paid.reduce((s, o) => s + o.tax, 0) - taxBack;
@@ -15902,10 +15955,12 @@ function computeReportsOverview(data) {
       // beside a $100 voucher still read $24 sold.
       const sub = o.subtotal || (o.items || []).reduce((a, i) => a + (i.price || 0) * (i.qty || 1), 0);
       const tot = o.total !== undefined ? o.total : sub;
-      const vs = voucherSaleTotal(o.items), mealSub = sub - vs, mealTot = Math.max(0, tot - vs), ref = o.refundedTotal || 0;
+      // …and each share loses what the refunds took from IT (refundParts, 19
+      // Oct '26): a voucher handed back first leaves the meal sold.
+      const vs = voucherSaleTotal(o.items), mealSub = sub - vs, mealTot = Math.max(0, tot - vs), back = refundPartsSum(refundParts(o));
       const preTax = ((data.settings.tax || {}).mode === 'exclusive') ? mealTot - (o.tax || 0) : mealTot;
-      const kept = mealSub > 0 && mealTot > 0 ? Math.max(0, preTax / mealSub) * Math.max(0, 1 - Math.min(ref, mealTot) / mealTot) : (mealSub > 0 ? 0 : 1);
-      const keptV = vs > 0 ? Math.max(0, 1 - Math.min(vs, Math.max(0, ref - mealTot)) / vs) : 1;
+      const kept = mealSub > 0 && mealTot > 0 ? Math.max(0, preTax / mealSub) * Math.max(0, 1 - Math.min(back.meal, mealTot) / mealTot) : (mealSub > 0 ? 0 : 1);
+      const keptV = vs > 0 ? Math.max(0, 1 - Math.min(vs, back.voucher) / vs) : 1;
       for (const it of o.items || []) {
         const line = (it.price || 0) * (it.qty || 1) * (it.giftcardSale ? keptV : kept);
         const cat = catOfItem(it);
@@ -15954,8 +16009,8 @@ function computeReportsOverview(data) {
   // …less a tip handed back with its bill (18 Oct '26 hunt): the food is
   // refunded first and the tip last, as the cash-up and Tips & payouts take it
   // off — a bill refunded tip and all still read its tip here.
-  const tips = week.reduce((a, o) => { const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0, tip = o.tip || 0;
-    return a + tip - Math.min(tip, Math.max(0, (o.refundedTotal || 0) - Math.max(0, gt - tip))); }, 0);
+  const tips = week.reduce((a, o) => { const tip = o.tip || 0;
+    return a + tip - Math.min(tip, refundPartsSum(refundParts(o)).tip); }, 0);
   return {
     venue: data.settings.ticketHeader || 'Watermans',
     at: now,
@@ -29023,17 +29078,35 @@ function salesOrdersPicked() {
 // is never discounted, carries no tax and is refunded after the meal, so a
 // refunded $32 cocktail beside a $100 voucher still read $24 sold, and half
 // off the meal read as a quarter off the voucher too. `i` is the line.
+// …and each share loses what the refunds took from IT (19 Oct '26): a
+// voucher handed back first leaves the meal sold. refundPartsTotal is the
+// server's refundParts, line for line: a refund's own `parts`, or an older one
+// replayed meal → voucher → tip.
+function refundPartsTotal(o) {
+  const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0;
+  const food = Math.max(0, gt - (o.tip || 0));
+  const v = Math.min(food, (o.items || []).reduce((a, x) => a + (x.giftcardSale ? x.price * (x.qty || 1) : 0), 0));
+  const pots = { meal: food - v, voucher: v, tip: Math.max(0, gt - food) }, used = { meal: 0, voucher: 0, tip: 0 };
+  const rs = Array.isArray(o.refunds) && o.refunds.length ? o.refunds : (o.refundedTotal ? [{ amount: o.refundedTotal }] : []);
+  rs.forEach(r => {
+    if (r.parts) { ['meal', 'voucher', 'tip'].forEach(k => { used[k] += +r.parts[k] || 0; }); return; }
+    let left = r.amount || 0;
+    ['meal', 'voucher', 'tip'].forEach(k => { const t = Math.max(0, Math.min(left, pots[k] - used[k])); used[k] += t; left -= t; });
+    if (left > 0) used.tip += left;
+  });
+  return used;
+}
 function keptShare(o, i) {
   const items = o.items || [];
   const sub = o.subtotal || items.reduce((a, x) => a + x.price * x.qty, 0);
   const total = (o.total !== undefined ? o.total : sub) || 0;
   const vs = items.reduce((a, x) => a + (x.giftcardSale ? x.price * (x.qty || 1) : 0), 0);
-  const ref = o.refundedTotal || 0, mealTot = Math.max(0, total - vs);
-  if (i && i.giftcardSale) return vs > 0 ? Math.max(0, 1 - Math.min(vs, Math.max(0, ref - mealTot)) / vs) : 1;
+  const back = refundPartsTotal(o), mealTot = Math.max(0, total - vs);
+  if (i && i.giftcardSale) return vs > 0 ? Math.max(0, 1 - Math.min(vs, back.voucher) / vs) : 1;
   const mealSub = sub - vs;
   if (!(mealSub > 0) || !(mealTot > 0)) return mealSub > 0 ? 0 : 1;
   const preTax = ((state.settings.tax || {}).mode === 'exclusive') ? mealTot - (o.tax || 0) : mealTot;
-  return Math.max(0, preTax / mealSub) * Math.max(0, 1 - Math.min(ref, mealTot) / mealTot);
+  return Math.max(0, preTax / mealSub) * Math.max(0, 1 - Math.min(back.meal, mealTot) / mealTot);
 }
 function computeSalesByCategory() {
   const totals = {}; // categoryId|'uncategorized' -> amount
@@ -32827,6 +32900,12 @@ function renderGiftCardsSettingsAdmin() {
     ${numSettingRow('Points for $1 off', 'loyaltyPointsPerDollar', loyaltyPointsPerDollar(), 'pts', 1, 10000)}
   </div>
   <div class="settings-card">
+    <div class="th">Voucher refunds</div>
+    <div class="pay-options">
+      ${togglePill(!!state.settings.voucherRefunds, 'set-voucher-refunds')}
+    </div>
+  </div>
+  <div class="settings-card">
     <div class="th">Gift cards</div>
     <div style="display:flex;justify-content:flex-end;margin-bottom:14px;"><button class="btn-add inline" data-act="issue-gift-card">+ Gift card</button></div>
     ${state.giftCards.length === 0 ? `<div class="ts">No gift cards issued yet.</div>` : state.giftCards.map(g => `
@@ -33129,6 +33208,9 @@ function renderRefundModal() {
       <h2>Refund order #${m.orderId}</h2>
       <div class="sub">Up to ${money(m.remaining)} remaining to refund.</div>
       ${state.adminError ? `<div class="login-error">${state.adminError}</div>` : ''}
+      ${(m.vouchers || []).length ? `
+      ${optionPair(m.part, 'refund-part', [['meal', 'Meal'], ['voucher', 'Voucher']])}
+      <div class="ts">${esc(refundVoucherNote(m))}</div>` : ''}
       <label>Amount</label>
       <input id="refund-amount-input" type="number" min="0" max="${m.remaining}" step="0.01" value="${m.amount}" placeholder="0.00">
       <label>Reason (optional)</label>
@@ -46026,14 +46108,42 @@ async function confirmVoidModal() {
   state.voidModal = null;
 }
 
-function openRefundModal(orderId) {
+// VOUCHER REFUNDS (owner, 19 Oct '26 — a venue setting, off unless switched
+// on): a bill that sold a voucher still holding money offers Meal | Voucher.
+// The cards are fetched BEFORE the popup opens, so the choice never lands in
+// it a moment later and moves the keys.
+async function openRefundModal(orderId) {
   const o = state.orders.find(x => x.id === orderId);
   if (!o) return;
   const grandTotal = o.grandTotal !== undefined ? o.grandTotal : o.total;
   const remaining = grandTotal - (o.refundedTotal || 0);
-  state.refundModal = { orderId, amount: remaining.toFixed(2), reason: '', remaining };
+  let vouchers = [];
+  if (state.settings.voucherRefunds && (o.items || []).some(i => i.giftcardSale)) {
+    try { vouchers = (await api('/api/gift-cards')).filter(g => g.soldOnOrder === orderId && g.active !== false && (g.balance || 0) > 0.005)
+      .map(g => ({ code: g.code, balance: g.balance })); } catch (e) {}
+  }
+  state.refundModal = { orderId, amount: remaining.toFixed(2), reason: '', remaining, part: 'meal', vouchers };
   state.adminError = '';
   render();
+}
+function refundVoucherLeft(m) { return Math.min(m.remaining, (m.vouchers || []).reduce((a, v) => a + v.balance, 0)); }
+function setRefundPart(part) {
+  const m = state.refundModal;
+  if (!m) return;
+  m.part = part === 'voucher' ? 'voucher' : 'meal';
+  m.amount = (m.part === 'voucher' ? refundVoucherLeft(m) : m.remaining).toFixed(2);
+  state.adminError = '';
+  render();
+}
+// "Cancels voucher ABCD…XY" — the code cut short; a smaller amount only takes
+// that much off. Meal says its order, so the line is there either way and
+// picking never moves the keys under the next finger.
+function refundVoucherNote(m) {
+  if (m.part !== 'voucher') return 'Meal first, then voucher';
+  const vs = m.vouchers || [], amt = parseFloat(m.amount) || 0;
+  const c = vs.length === 1 ? String(vs[0].code).replace(/[^A-Za-z0-9]/g, '') : '';
+  const which = vs.length === 1 ? `voucher ${c.slice(0, 4)}…${c.slice(-2)}` : `${vs.length} vouchers`;
+  return amt + 0.005 >= refundVoucherLeft(m) ? `Cancels ${which}` : `Takes ${money(amt)} off ${which}`;
 }
 function closeRefundModal() { state.refundModal = null; state.adminError = ''; render(); }
 async function confirmRefundModal() {
@@ -46051,7 +46161,7 @@ async function confirmRefundModal() {
     const order = await api(`/api/orders/${m.orderId}/refund`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount: value, reason: m.reason.trim(), refundKey: m.key, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+      body: JSON.stringify({ amount: value, reason: m.reason.trim(), refundKey: m.key, part: m.part === 'voucher' ? 'voucher' : 'meal', staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
     });
     await refreshOrders();
     state.refundModal = null;
@@ -50109,6 +50219,7 @@ function handleActClick(el, e) {
       else if (act === 'open-refund') { openRefundModal(parseInt(el.dataset.id)); }
       else if (act === 'close-refund-modal') { closeRefundModal(); }
       else if (act === 'confirm-refund-modal') { confirmRefundModal(); }
+      else if (act === 'refund-part') { setRefundPart(el.dataset.val); }
       else if (act === 'open-add-tip') { state.addTipModal = { orderId: parseInt(el.dataset.id), amount: '' }; state.adminError = ''; render(); }
       else if (act === 'close-add-tip-modal') { state.addTipModal = null; state.adminError = ''; render(); }
       else if (act === 'confirm-add-tip') { confirmAddTip(); }
@@ -51007,6 +51118,7 @@ function handleActClick(el, e) {
       else if (act === 'clear-table-selection') { clearTableSelection(); }
       else if (act === 'admin-floorplan-tab') { state.adminFloorPlanId = el.dataset.id; state.selectedAdminTableId = null; state.selectedAdminTableIds = []; render(); }
       else if (act === 'set-warn-over-seats') { saveTicketSetting({ warnOverSeats: el.dataset.val === 'true' }); }
+      else if (act === 'set-voucher-refunds') { saveTicketSetting({ voucherRefunds: el.dataset.val === 'true' }); }
       else if (act === 'set-covers-enabled') { saveTicketSetting({ coversEnabled: el.dataset.val === 'true' }); }
       else if (act === 'set-seatnumbers-enabled') { setSeatNumbersEnabled(el.dataset.val === 'true'); }
       else if (act === 'set-qtypad-enabled') { setQtyPadEnabled(el.dataset.val === 'true'); }

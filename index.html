@@ -9269,15 +9269,24 @@ const SAFE_IMAGE_RE = /^(\/uploads\/[\w.-]+|data:image\/[\w.+-]+;base64,[A-Za-z0
 // The client's api() wrapper attaches this header on every mutating request,
 // so every endpoint can log "who did it" without every call site needing to
 // pass staff info through its own request body.
+// THE NAME RIDES ENCODED (20 Oct '26 hunt): a header carries only Western
+// European letters, so a waiter called Akın, Łukasz or Nguyễn signed in and
+// then every save from their till failed as "No connection — not saved". The
+// till sends it encoded; a plain name (a probe, another app) reads as it is.
+function staffHeader(req) {
+  const v = req.get('X-Staff-Name');
+  if (!v) return v;
+  try { return decodeURIComponent(v); } catch (e) { return v; }
+}
 function staffFromReq(req) {
-  return req.get('X-Staff-Name') || 'Unknown';
+  return staffHeader(req) || 'Unknown';
 }
 // A TRAINEE NEVER TOUCHES A REAL TABLE, nor a real waiter a practice one
 // (4 Oct '26): the trainee was refused the table but could still call its
 // course away from the Pass — a real slip at the kitchen — and print its bill.
 // Judged on who sent it: the staff id in the body, else the till's name.
 function practiceRefused(req, data, order) {
-  const id = req.body && req.body.staffId, name = req.get('X-Staff-Name');
+  const id = req.body && req.body.staffId, name = staffHeader(req);
   const sender = (data.staff || []).find(x => (id && x.id === id) || (!id && name && x.name === name));
   if (!sender || !!sender.trainee === !!order.practice) return null;
   return order.practice ? 'That is a practice table' : order.table != null ? `Table ${order.table} is in real service` : 'That bill is in real service';
@@ -11928,6 +11937,15 @@ app.get('/api/staff/:id/pin', (req, res) => {
   res.json({ pin: staff.pin });
 });
 
+// ONE NAME, ONE PERSON (20 Oct '26 hunt). Staff sign in by tapping their
+// name, and a Call away, a bill or a part is judged trainee-or-real by the
+// name the till sends — so a trainee "Jamie" beside the real Jamie called a
+// real table's course to the kitchen. A second person with a name in use is
+// refused; tell them apart ("Jamie R").
+function staffNameTaken(data, name, exceptId) {
+  const n = String(name || '').trim().toLowerCase();
+  return !!n && (data.staff || []).some(s => s.id !== exceptId && String(s.name || '').trim().toLowerCase() === n);
+}
 app.post('/api/staff', (req, res) => {
   const data = readData();
   if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can add staff' });
@@ -11938,7 +11956,8 @@ app.post('/api/staff', (req, res) => {
   if (data.staff.some(s => s.pin === pin)) {
     return res.status(400).json({ error: 'That PIN is already in use by another staff member' });
   }
-  const newStaff = { id: 'st' + Date.now(), name, pin, role: roleOk(data, role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0), trainee: !!req.body.trainee };
+  if (staffNameTaken(data, name)) return res.status(400).json({ error: 'Someone on the team already has that name' });
+  const newStaff = { id: 'st' + Date.now(), name: String(name).trim(), pin, role: roleOk(data, role) ? role : 'staff', tipShare: ['full', 'three-quarter', 'half', 'none'].includes(req.body.tipShare) ? req.body.tipShare : 'full', payRate: Math.max(0, parseFloat(req.body.payRate) || 0), trainee: !!req.body.trainee };
   data.staff.push(newStaff);
   logAudit(data, staffFromReq(req), `Added staff member: ${newStaff.name} (${newStaff.role})`);
   writeData(data);
@@ -11965,6 +11984,7 @@ app.put('/api/staff/:id', (req, res) => {
     staff.pin = pin;
     changes.push('PIN');
   }
+  if (name && name !== staff.name && staffNameTaken(data, name, staff.id)) return res.status(400).json({ error: 'Someone on the team already has that name' });
   if (name && name !== staff.name) { changes.push(`name to "${name}"`); staff.name = name; }
   if (role && role !== staff.role) {
     if (staff.role === 'manager' && !data.staff.some(s => s.id !== staff.id && s.role === 'manager')) {
@@ -12847,10 +12867,14 @@ app.post('/api/orders/:id/print-receipt', (req, res) => {
   res.json({ ok: true });
 });
 
+// A printer address: an IP (port 9100), IP:port for a printer box on its own
+// port — a port that can exist, 1 to 65535 — or a COM port. ":70000" was kept
+// and every docket to it failed.
+const PRINTER_ADDR_RE = /^(\d{1,3}(\.\d{1,3}){3}(:(6553[0-5]|655[0-2]\d|65[0-4]\d\d|6[0-4]\d{3}|[1-5]\d{4}|[1-9]\d{0,3}))?|COM\d+)$/i;
 // Send a test page straight to an IP so setup can be verified in seconds.
 app.post('/api/printers/test', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
-  if (!/^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
+  if (!PRINTER_ADDR_RE.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address or COM port' });
   try {
     let buf = printing.testPage(readData().settings);
     if (req.body && req.body.kind === 'impact') buf = printing.impactify(buf);
@@ -12892,7 +12916,8 @@ app.post('/api/printers/print-sample', (req, res) => {
 // ink/76mm suggested automatically; anything unrecognised stays manual.
 app.post('/api/printers/probe', async (req, res) => {
   const ip = String((req.body && req.body.ip) || '').trim();
-  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address' });
+  // The same addresses a station takes — IP, or IP:port for a printer box on its own port.
+  if (!PRINTER_ADDR_RE.test(ip) || /^COM/i.test(ip)) return res.status(400).json({ error: 'Enter a valid printer IP address' });
   const info = await printing.probePrinter(ip);
   if (!info) return res.status(502).json({ error: 'Could not reach the printer' });
   const model = info.model || '';
@@ -12921,7 +12946,7 @@ app.post('/api/printer-stations', (req, res) => {
   const data = readData();
   const { name, categories, ip, ips, backupIp, receipts, labels } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Station name is required' });
-  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i; // IP, or IP:port for a printer box on its own port
+  const IP_RE = PRINTER_ADDR_RE;
   const cleanIps = (Array.isArray(ips) ? ips : [ip]).map(x => String(x || '').trim()).filter(Boolean);
   if (cleanIps.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
   const cleanBackup = String(backupIp || '').trim();
@@ -12947,7 +12972,7 @@ app.put('/api/printer-stations/:id', (req, res) => {
   if (Array.isArray(req.body.subcategoryIds)) {
     station.subcategoryIds = req.body.subcategoryIds.filter(id => (data.subcategories || []).some(s => s.id === id));
   }
-  const IP_RE = /^(\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?|COM\d+)$/i; // IP, or IP:port for a printer box on its own port
+  const IP_RE = PRINTER_ADDR_RE;
   if (Array.isArray(ips)) {
     const clean = ips.map(x => String(x || '').trim()).filter(Boolean);
     if (clean.some(x => !IP_RE.test(x))) return res.status(400).json({ error: 'One of the printer IP addresses does not look right' });
@@ -15322,9 +15347,15 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // bill unrefundable, and "refund at most $X" refused $X).
   const used = refundPartsSum(refundParts(order, soldValue));
   const pots0 = refundPots(order, soldValue);
-  const pots = { ...pots0, voucher: Math.min(pots0.voucher, used.voucher + sold.reduce((a, g) => a + (g.balance || 0), 0)) };
+  // …and a PICKED card is the only voucher handed back (20 Oct '26 am hunt):
+  // the guest's $50 card and their $21 meal refunded as $71 took the $21 off
+  // the friend's card, since the pot held both — the rest goes to the meal.
+  const picked = pick && part === 'voucher' ? sold.filter(g => String(g.code).toLowerCase() === pick) : [];
+  const pots = { ...pots0, voucher: Math.min(pots0.voucher, used.voucher + (picked.length ? picked : sold).reduce((a, g) => a + (g.balance || 0), 0)) };
   const most = r2(['meal', 'voucher', 'tip'].reduce((a, k) => a + Math.max(0, pots[k] - used[k]), 0));
-  if (value > most + 0.005) return res.status(400).json({ error: `A gift card sold on this ticket has been spent — refund at most $${most.toFixed(2)}` });
+  if (value > most + 0.005) return res.status(400).json({ error: picked.length && picked.length < sold.length
+    ? `That voucher and the meal come to $${most.toFixed(2)} — refund the other voucher on its own`
+    : `A gift card sold on this ticket has been spent — refund at most $${most.toFixed(2)}` });
   const parts = takeRefundParts(pots, used, value, part, true);
   const intoVouchers = parts.voucher;
   if (intoVouchers > 0.005) {
@@ -15995,7 +16026,13 @@ app.post('/api/register/paidout', (req, res) => {
   const reason = String((req.body && req.body.reason) || '').trim().slice(0, 60);
   if (!(amount > 0) || amount > 10000) return res.status(400).json({ error: 'Enter the amount taken out' });
   if (!reason) return res.status(400).json({ error: 'Say what it was for' });
-  const rec = { id: Date.now().toString(36), ts: Date.now(), amount: Math.round(amount * 100) / 100, reason, by: req.header('X-Staff-Name') || '' };
+  // PAID OUT ONCE (20 Oct '26 am hunt): a double tap on Save, or a retry after
+  // a lost reply, logged the $20 lime run twice and the drawer read $20 Over.
+  // The form's key comes back with the paid-out it already made.
+  const key = String((req.body || {}).paidoutKey || '').slice(0, 64) || null;
+  const dup = key && (data.paidOuts || []).find(p => p.key === key);
+  if (dup) return res.json(dup);
+  const rec = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 5), ts: Date.now(), amount: Math.round(amount * 100) / 100, reason, by: staffHeader(req) || '', key };
   data.paidOuts = [...(data.paidOuts || []), rec];
   logAudit(data, rec.by, `Paid out ${rec.amount.toFixed(2)} — ${reason}`);
   writeData(data);
@@ -16007,7 +16044,7 @@ app.delete('/api/register/paidout/:id', (req, res) => {
   const rec = (data.paidOuts || []).find(p => p.id === req.params.id);
   if (!rec) return res.status(404).json({ error: 'Not found' });
   data.paidOuts = data.paidOuts.filter(p => p.id !== req.params.id);
-  logAudit(data, req.header('X-Staff-Name') || '', `Removed paid-out ${rec.amount.toFixed(2)} — ${rec.reason}`);
+  logAudit(data, staffHeader(req) || '', `Removed paid-out ${rec.amount.toFixed(2)} — ${rec.reason}`);
   writeData(data);
   res.json({ ok: true });
 });
@@ -16134,7 +16171,7 @@ app.post('/api/register/xread', (req, res) => {
   const summary = computePeriodSummary(data, fromTs, Date.now());
   if (!(data.printerStations || []).some(s2 => s2.receipts)) return res.status(400).json({ error: 'No station is marked for receipts' });
   printing.printZReport(data, { ...summary, periodStart: fromTs }, 'x');
-  logAudit(data, req.header('X-Staff-Name') || '', 'Printed X read');
+  logAudit(data, staffHeader(req) || '', 'Printed X read');
   writeData(data);
   res.json({ ok: true });
 });
@@ -16154,7 +16191,7 @@ app.put('/api/register/float', (req, res) => {
   const amount = parseFloat(req.body && req.body.amount);
   if (isNaN(amount) || amount < 0 || amount > 100000) return res.status(400).json({ error: 'Enter the float amount' });
   data.registerFloat = Math.round(amount * 100) / 100;
-  logAudit(data, req.header('X-Staff-Name') || '', `Set float to ${data.registerFloat.toFixed(2)}`);
+  logAudit(data, staffHeader(req) || '', `Set float to ${data.registerFloat.toFixed(2)}`);
   writeData(data);
   res.json({ float: data.registerFloat });
 });
@@ -18739,7 +18776,9 @@ async function api(path, opts) {
   opts = opts || {};
   if (opts.method === 'DELETE') opts.headers = Object.assign({}, opts.headers, { 'X-Undo-Batch': _undoDev + ':' + _tapSeq });
   if (state.currentStaff && opts.method && opts.method !== 'GET') {
-    opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Name': state.currentStaff.name });
+    // Encoded: a name like Akın or Nguyễn cannot ride a header as it is (the
+    // browser refuses, and every save read "No connection"). The server decodes.
+    opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Name': encodeURIComponent(state.currentStaff.name) });
   }
   if (state.staffPin) opts.headers = Object.assign({}, opts.headers, { 'X-Staff-Pin': state.staffPin });
   let res;
@@ -22435,14 +22474,26 @@ function cascadeAutoCourses(openOrder) {
   if (state.activeCourseFiled && map[state.activeCourseFiled]) state.activeCourse = map[state.activeCourseFiled];
 }
 // §§ Adding to the docket
+// WHERE AUTO SLID IT IS WHERE MORE OF IT GOES (20 Oct '26 hunt). A first
+// round of mains alone slides into the first empty food course and is called
+// as it goes; the slide is frozen once sent, so another main rung later filed
+// under its own course — held, behind a Call away nobody knew to make. A dish
+// filed under a course the table already sent lands where those dishes went.
+function autoLandingCourse(filed) {
+  if (!autoCourseOn()) return filed;
+  const o = activeOpenOrder();
+  const twin = o && (o.items || []).find(i => i.qty > 0 && i.filedCourse === filed && !i.courseByHand);
+  return twin ? (twin.course || filed) : filed;
+}
 function pushCartLine(item, variant, modifiers, seat, qty, note) {
-  const course = nearestAllowedCourse(itemDefaultCourse(item) || state.activeCourse, item);
+  const filed = nearestAllowedCourse(itemDefaultCourse(item) || state.activeCourse, item);
+  const course = autoLandingCourse(filed);
   // The highlighted tab (and the docket page, when paged) FOLLOWS the dish
   // just added, so what you rang up is always the course on screen. With
   // course pages this is not optional: the paged docket shows ONLY the active
   // course, so an item landing on another course would vanish on add.
   if (autoCourseOn() || state.settings.coursePagedDocket === true) state.activeCourse = course;
-  state.activeCourseFiled = autoCourseOn() ? course : null;
+  state.activeCourseFiled = autoCourseOn() ? filed : null;
   const modList = modifiers || [];
   const variantId = variant ? variant.id : null;
   const modSelections = {};
@@ -22458,18 +22509,40 @@ function pushCartLine(item, variant, modifiers, seat, qty, note) {
     // 'later' groups start empty — added from the line editor.
   });
   const composed = composeCartLine(item, variantId, modSelections);
-  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, menuPrice: composed.price, qty, course, filedCourse: course, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
+  const line = { lineKey: mintLineKey(), id: composed.id, menuItemId: item.id, name: composed.name, price: composed.price, menuPrice: composed.price, qty, course, filedCourse: filed, seat: seat || null, note: (note || '').trim(), variantId, modSelections, removed: [] };
   // A noted line never merges into a differently-noted one — the note is
   // part of what the kitchen reads. Under Auto the same dish meets itself by
   // the course it was FILED under, since the slide may have moved the first.
-  const sameCourse = c => autoCourseOn() && !c.courseByHand ? (c.filedCourse || c.course) === course : c.course === course;
+  const sameCourse = c => autoCourseOn() && !c.courseByHand ? (c.filedCourse || c.course) === filed : c.course === course;
   // …and never into a line whose price was changed: a second Sirloin tapped
   // after the first was comped joined it at $0 (Sep '26).
   const existing = state.cart.find(c => c.id === line.id && sameCourse(c) && c.seat === line.seat && (c.note || '') === line.note && removedSig(c) === removedSig(line) && c.price === line.price);
   // A line that already went out (sentQty) is never grown — the server would
   // skip its key and the extra would vanish. The extra becomes its own line.
-  if (existing && existing.sentQty == null) existing.qty += qty;
+  // What the table's allergies said about this dish when it was rung — the
+  // add warned about exactly these, so Send only speaks up about news.
+  line.algnSeen = allergySigs(item, line.seat);
+  if (existing && existing.sentQty == null) { existing.qty += qty; existing.algnSeen = [...new Set([...(existing.algnSeen || []), ...line.algnSeen])]; }
   else state.cart.push(line);
+}
+// AN ALLERGY TOLD AFTER THE DISH WAS RUNG STILL STOPS THE SEND (20 Oct '26
+// hunt). Rung first, the Labneh met no allergy; Dairy went on seat 2 a minute
+// later — or the Pita was moved to the gluten-free guest's seat in the line
+// editor — and Send rang it with not a word, where ringing it now would have
+// stopped. Send asks once, with the same popup, about any clash the waiter
+// has not already been warned about.
+function allergySigs(item, seat) {
+  return item ? allergenMatches(item, seat != null ? seat : null).map(h => (h.seat == null ? '' : h.seat) + '|' + h.allergy) : [];
+}
+function cartAllergyNews() {
+  for (const l of state.cart || []) {
+    if (l.sentQty != null) continue;
+    const mi = (state.menu || []).find(m => m.id === l.menuItemId);
+    const now = allergySigs(mi, l.seat);
+    if (!l.algnSeen) { l.algnSeen = now; continue; } // rung through a door that warned on its own
+    if (now.some(k => !l.algnSeen.includes(k))) return { itemId: mi.id, hits: allergenMatches(mi, l.seat != null ? l.seat : null), resume: 'send' };
+  }
+  return null;
 }
 // Growing a line that already went out splits the extra into a new line with
 // its own key (see sentQty above). Shrinking is allowed as it always was.
@@ -23746,7 +23819,11 @@ function openCheckout() {
   }
   // ONE pay key per visit to the pay screen: a second Confirm that slips past
   // the guard is recognised by the server as the same payment.
-  state.payKey = 'pay-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+  // …unless the terminal already CHARGED this bill under the key and the close
+  // never landed (20 Oct '26 am hunt): back out of Pay, Pay again, Confirm, and
+  // a fresh key forgot the approval — the guest's card went through twice.
+  const chargedHere = state._terminalPaidKey && state._terminalPaidKey === state.payKey && state._terminalPaidOrder === (state.openOrderId || null);
+  if (!chargedHere) state.payKey = 'pay-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
   // A dine-in bill needs a table — prompt for one first.
   if (state.orderType === 'dine-in' && !state.table) { openTablePicker(); return; }
   keepMobileDrawer();
@@ -23840,7 +23917,7 @@ function renderAllergenWarnModal() {
       <div style="margin-top:10px;">${allergenChipRow(item, m.hits.map(h => String(h.allergy || '').replace(/\s*\(.*\)$/, '').trim().toLowerCase()))}</div>
       <div class="pane-actions">
         <button class="icon-action neutral" data-act="close-allergen-warn">${ACT_CROSS_SVG}<span class="ia-label">Cancel</span></button>
-        <button class="icon-action send" data-act="allergen-warn-add">${ACT_TICK_SVG}<span class="ia-label">Add anyway</span></button>
+        <button class="icon-action send" data-act="allergen-warn-add">${ACT_TICK_SVG}<span class="ia-label">${m.resume === 'send' ? 'Send anyway' : 'Add anyway'}</span></button>
       </div>
     </div>
   </div>`;
@@ -24154,8 +24231,18 @@ function seatsFedInCourse(course) {
   const fed = new Set();
   const take = (l, inCourse) => { if (!l || !(l.qty > 0) || !inCourse(l) || l.seat == null || l.seat === 'all') return;
     String(l.seat).split(',').forEach(s => { const n = parseInt(s, 10); if (n > 0) fed.add(n); }); };
+  // Once the table has sent, nothing slides any more: every line is matched
+  // by the course it is really on, against where this dish will LAND (20 Oct
+  // '26 hunt: mains rung alone slid into the first food course, and the pad
+  // looked for them under the course they were filed under — so the seat
+  // already eating showed empty).
   const o = activeOpenOrder();
-  if (o) (o.items || []).forEach(l => take(l, x => (x.course || 1) === course));
+  if (o) {
+    const at = autoLandingCourse(course);
+    (o.items || []).forEach(l => take(l, x => (x.course || 1) === at));
+    (state.cart || []).forEach(l => take(l, c => (c.course || 1) === at));
+    return fed;
+  }
   (state.cart || []).forEach(l => take(l, c => autoCourseOn() && !c.courseByHand ? (c.filedCourse || c.course || 1) === course : (c.course || 1) === course));
   return fed;
 }
@@ -24561,6 +24648,7 @@ async function sendToKitchen() {
     if (mis.length) { state.stockWarnModal = mis; render(); return; }
   }
   state._stockWarnAck = false;
+  { const news = cartAllergyNews(); if (news) { state.allergenWarnModal = news; render(); return; } }
   repriceUntouchedCart();
   // ONE key per attempt at THIS cart names the ticket a retry belongs to; and
   // EVERY LINE carries its own key (mintLineKey), which is what the server
@@ -24890,6 +24978,7 @@ async function confirmPaymentInner() {
       if (!ok) return;
       state._terminalPaidKey = state.payKey;
       state._terminalPaidAmt = grandTotal;
+      state._terminalPaidOrder = state.openOrderId || null;
     }
     state._terminalApproved = true;
     try { await confirmPaymentNow(); } finally { state._terminalApproved = false; }
@@ -24918,6 +25007,7 @@ async function confirmPaymentInner() {
           expectItems: activeOpenOrder() ? activeOpenOrder().items.reduce((a, i) => a + i.price * i.qty, 0) : undefined }),
       });
       state.openOrderId = null;
+      state._terminalPaidKey = null; state._terminalPaidAmt = 0; // that charge is on a closed bill now
       state.cart = [];
       state.cardAmount = '';
       state.cardTip = 0;
@@ -24957,6 +25047,15 @@ async function confirmPaymentInner() {
       armToastTimer(TOAST_LONG);
     } catch (e) {
       state.toast = toastFail(e.message || 'Could not close the order — check the server.');
+      // THE CARD WAS CHARGED AND THE TILL SAID NO (20 Oct '26 am hunt): another
+      // till took the table while the guest tapped their card, the close was
+      // refused, and the charge was recorded nowhere — the toast only said the
+      // tab was not open. A part already says this; the whole bill says it too.
+      if (e.status && e.status !== 409 && state._terminalPaidKey === state.payKey && state._terminalPaidAmt > 0) {
+        state.toast = toastFail(`Card charged ${money(state._terminalPaidAmt)} but not recorded — ${e.message || 'refused'}. Refund it on the terminal.`);
+        state._terminalPaidKey = null; state._terminalPaidAmt = 0;
+        await refreshOrders().catch(() => {});
+      }
       if (e.status === 409) await refreshOrders().catch(() => {}); // the bill changed: show the one that is really there
       render();
     }
@@ -24985,6 +25084,7 @@ async function confirmPaymentInner() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    state._terminalPaidKey = null; state._terminalPaidAmt = 0; // that charge is on a paid ticket now
     state.cart = [];
     state.covers = (findTableById(state.table) || {}).covers || 0;
   state.notes = (findTableById(state.table) || {}).notes || [];
@@ -39263,28 +39363,21 @@ function renderMotdModal() {
 }
 function renderAccountMiddle() {
   const attached = state.customers.find(c => c.id === state.attachedCustomerId);
-  // EACH SECOND LINE IS A FACT ABOUT THIS TABLE, OR NOTHING (owner, 19 Oct
-  // '26: "Tools say this table"). It mixed three kinds — a value, a dash, a
-  // description ("read or reprint", "2 sent") — so the eye read every tile to
-  // find the two that said something. Covers keeps its number, Auto course
-  // its On/Off, Customer the guest's name, and Call away names the course it
-  // would send: the next held one, the Pass's own "next".
-  const o = activeOpenOrder();
-  const held = o ? passCells(o, [...new Set(courseLines(o.items || []).filter(i => i.qty > 0).map(i => i.course || 1))].sort((a, b) => a - b)).find(c => c.next) : null;
+  const sentCount = (() => { const o = state.orders.find(o => o.id === state.openOrderId); return o ? (o.items || []).length : 0; })();
   // NO TABLE TILE (owner, Sep '26: "do we need this as there is a swipe
   // feature now"). Four doors led to the floor — this tile, the docket head's
   // table key, the floor dot on the bar and a swipe (gone, 1 Oct '26). The
   // tile was the one nobody needed: the number it showed is already on the
   // bar and on the docket head.
   const sc = [
-    ['open-covers-pad', DKT_USER_SVG, 'Covers', state.settings.coversEnabled && state.covers ? String(state.covers) : ''],
+    ['open-covers-pad', DKT_USER_SVG, 'Covers', state.settings.coversEnabled ? (state.covers ? String(state.covers) : '—') : ''],
     ['toggle-notes-panel', DKT_POSTIT_SVG, 'Order notes', ''],
     ['toggle-quick-note', DKT_BOLT_SVG, 'Quick note', ''],
-    ['toggle-callaway', DKT_FLAME_SVG, 'Call away', held ? `${courseInfo(held.n).name} next` : ''],
+    ['toggle-callaway', DKT_FLAME_SVG, 'Call away', ''],
     ['toggle-auto-course-order', DKT_AUTO_SVG, 'Auto course', autoCourseOn() ? 'On' : 'Off'],
-    ['open-customer-pane', DKT_CUSTOMER_SVG, 'Customer', attached ? attached.name : ''],
-    ['dockets', SYS_PRINTER_SVG, 'Dockets', ''],
-    ['open-move-items', SYS_SWAP_SVG, 'Move items', ''],
+    ['open-customer-pane', DKT_CUSTOMER_SVG, 'Customer', attached ? attached.name : '—'],
+    ['dockets', SYS_PRINTER_SVG, 'Dockets', sentCount ? 'read or reprint' : 'nothing sent'],
+    ['open-move-items', SYS_SWAP_SVG, 'Move items', sentCount ? `${sentCount} sent` : 'nothing sent'],
   ];
   return `
   <div class="middle-view">
@@ -46604,7 +46697,7 @@ async function renameStaffInline(id, name) {
     state.staffList = await api('/api/staff');
     render();
   } catch (e) {
-    state.toast = toastFail('Could not rename that staff member.');
+    state.toast = toastFail(e.message && e.message !== 'Request failed' ? e.message : 'Could not rename that staff member.');
     render();
   }
 }
@@ -50221,6 +50314,7 @@ function handleActClick(el, e) {
           else if (m.resume === 'another') { state._allergenAck = false; const go = _anotherGo; _anotherGo = null; if (go) go(); }
           else if (m.resume === 'io-rest' && state.itemOptions) { _seatHoldFired = false; ioAssignRestTo(m.seat); }
           else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
+          else if (m.resume === 'send') { state._allergenAck = false; (state.cart || []).forEach(l => { l.algnSeen = allergySigs((state.menu || []).find(x => x.id === l.menuItemId), l.seat); }); sendToKitchen(); }
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
         }
       }
@@ -51987,17 +52081,23 @@ function handleActClick(el, e) {
         state.registerDenoms = Object.assign({}, state.registerDenoms, { [k]: Math.max(0, n) });
         state.registerCashCounted = ''; render();
       }
-      else if (act === 'open-paidout') { state.paidoutOpen = !state.paidoutOpen; render(); const i = document.getElementById('paidout-amount'); if (i) i.focus(); }
+      else if (act === 'open-paidout') { state.paidoutOpen = !state.paidoutOpen; state.paidoutKey = 'po-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); render(); const i = document.getElementById('paidout-amount'); if (i) i.focus(); }
       else if (act === 'save-paidout') {
         const amt = parseFloat((document.getElementById('paidout-amount') || {}).value);
         const reason = ((document.getElementById('paidout-reason') || {}).value || '').trim();
+        // One press, one paid-out: a second tap while the first is on its way
+        // is ignored here, and the form's key makes the server ignore it too.
+        if (state.paidoutBusy) return;
+        state.paidoutBusy = true;
         (async () => {
           try {
             await api('/api/register/paidout', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ amount: amt, reason }) });
+              body: JSON.stringify({ amount: amt, reason, paidoutKey: state.paidoutKey }) });
             state.paidoutOpen = false;
+            state.paidoutKey = null;
             await loadRegisterData(true); render();
           } catch (e2) { state.toast = toastFail(e2.message || 'Could not save the paid-out.'); render(); armToastTimer(TOAST_SHORT); }
+          finally { state.paidoutBusy = false; }
         })();
       }
       else if (act === 'del-paidout') {

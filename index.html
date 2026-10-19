@@ -9272,9 +9272,13 @@ function managerFromReq(req, data) {
     // in that header made every typed managerPin guess free — the guard never
     // tripped and a script found the manager's PIN. Count the typed guess on
     // its own; the till's header only counts when it alone matches nobody.
-    const guess = req.body && req.body.managerPin;
+    // …AND THE HEADER IS COUNTED BESIDE A TYPED PIN (19 Oct '26 pm hunt): a
+    // waiter's own PIN typed as managerPin matched somebody, so it was not
+    // counted — and because one was typed, the header was not either. The
+    // guess rode in the header for free. Each PIN that matches nobody counts.
+    const guess = req.body && req.body.managerPin, hdr = req.get('X-Staff-Pin');
     if (guess && !data.staff.some(s => s.pin === guess)) pinRecordFailure(req, 'm:' + guess);
-    else if (!guess && !data.staff.some(s => pins.includes(s.pin))) pinRecordFailure(req, pins.join('|'));
+    if (hdr && !data.staff.some(s => s.pin === hdr)) pinRecordFailure(req, hdr);
   }
   return m;
 }
@@ -9442,10 +9446,16 @@ app.get('/api/audit-log', (req, res) => {
   // sign-in, and a waiter spends it on a part — yet "Issued gift card ABCD…"
   // sat in full on the open log. Everyone else reads that a card moved, not
   // which one.
-  const mask = s => String(s)
+  // …by the CODES THEMSELVES, not by their shape (19 Oct '26 pm hunt): only a
+  // code of six letters or more was hidden, so a money-off voucher a manager
+  // called "VIP-20" or "FREE5" read in full. Every code the venue holds is
+  // hidden wherever it sits, longest first; the shape still catches a code
+  // since deleted.
+  const codes = [...(data.giftCards || []), ...(data.vouchers || [])].map(x => x && String(x.code || '')).filter(Boolean).sort((a, b) => b.length - a.length);
+  const mask = s => codes.reduce((t, c) => t.split(c).join('••••'), String(s))
     .replace(/(gift card|gift voucher|voucher) [A-Z0-9]{6,}/gi, '$1 ••••')
     .replace(/pay rate to [^,]*/g, 'pay rate');
-  res.json(log.map(e => e && /pay rate to |gift card |gift voucher |voucher [A-Z0-9]/i.test(e.action || '') ? { ...e, action: mask(e.action) } : e));
+  res.json(log.map(e => e && /pay rate to |gift card |gift voucher |voucher /i.test(e.action || '') ? { ...e, action: mask(e.action) } : e));
 });
 
 // ---------- House log: wastage / comps / staff meals ----------
@@ -13708,7 +13718,17 @@ app.get('/api/orders', (req, res) => {
   const data = readData();
   // most recent first
   const orders = [...data.orders].sort((a, b) => b.createdAt - a.createdAt);
-  res.json({ orders, nextTicket: data.ticketCounter });
+  // A VOUCHER OR GIFT CARD CODE IS A MANAGER'S HERE TOO (19 Oct '26 pm hunt):
+  // the log hid them, but every paid bill still carried the vouchers it sold
+  // and the card that paid it, to any device with no PIN at all. The till that
+  // takes the money gets the codes in that reply; the list says only "••••".
+  if (req.get('X-Staff-Pin') && managerFromReq(req, data)) return res.json({ orders, nextTicket: data.ticketCounter });
+  const hide = c => c ? '••••' + String(c).slice(-2) : c;
+  const safe = orders.map(o => ((o.voucherCodes || []).length || o.giftCardCode || (o.splitPaid || []).some(p => p.giftCardCode)) ? {
+    ...o, voucherCodes: (o.voucherCodes || []).length ? o.voucherCodes.map(hide) : o.voucherCodes, giftCardCode: hide(o.giftCardCode),
+    splitPaid: (o.splitPaid || []).map(p => p.giftCardCode ? { ...p, giftCardCode: hide(p.giftCardCode), label: 'Gift card ' + hide(p.giftCardCode) } : p),
+  } : o);
+  res.json({ orders: safe, nextTicket: data.ticketCounter });
 });
 
 function csvEscape(value) {
@@ -13738,7 +13758,11 @@ app.get('/api/table-locks', (req, res) => {
 const forcedFree = new Map(); // tableId -> { device, at }
 const FORCED_FREE_MS = 2 * 60 * 1000;
 app.post('/api/table-locks/claim', (req, res) => {
-  const { tableId, staff, staffId, device, force, retake } = req.body || {};
+  const { tableId, staff, staffId, device, retake } = req.body || {};
+  // FORCE IS A MANAGER'S (19 Oct '26 pm hunt): the floor offers Unlock only
+  // to a manager, but the server took `force` from any device with no PIN, so
+  // a waiter's script freed or seized a table from under another till.
+  const force = !!(req.body && req.body.force) && !!managerFromReq(req, readData());
   if (!tableId || !device) return res.status(400).json({ error: 'tableId and device required' });
   // NOBODY HOLDS A TABLE FOR SOMEONE OFF THE TEAM (18 Oct '26 hunt): a locked
   // iPad kept claiming its table under a removed waiter's name, and every
@@ -13762,7 +13786,8 @@ app.post('/api/table-locks/claim', (req, res) => {
   res.json({ ok: true });
 });
 app.post('/api/table-locks/release', (req, res) => {
-  const { tableId, device, force } = req.body || {};
+  const { tableId, device } = req.body || {};
+  const force = !!(req.body && req.body.force) && !!managerFromReq(req, readData());
   const cur = tableLocks.get(String(tableId));
   // A manager can force a release regardless of which till holds the lock.
   if (cur && (force || cur.device === String(device))) {
@@ -15236,8 +15261,15 @@ app.post('/api/orders/:id/refund', (req, res) => {
   // tip counted as "the rest of the bill", so the meal and the voucher handed
   // back with the tip left to staff left the voucher live for the tip's worth.
   // Each refund keeps what it took from each pot (refundParts).
-  const pots = refundPots(order, soldValue);
+  // …and a voucher the guest has SPENT is not money the venue can give back:
+  // its spent part is a hole in the voucher pot, never a wall in front of the
+  // tip (19 Oct '26 pm hunt — $30 of a $100 voucher spent left the tip on that
+  // bill unrefundable, and "refund at most $X" refused $X).
   const used = refundPartsSum(refundParts(order, soldValue));
+  const pots0 = refundPots(order, soldValue);
+  const pots = { ...pots0, voucher: Math.min(pots0.voucher, used.voucher + sold.reduce((a, g) => a + (g.balance || 0), 0)) };
+  const most = r2(['meal', 'voucher', 'tip'].reduce((a, k) => a + Math.max(0, pots[k] - used[k]), 0));
+  if (value > most + 0.005) return res.status(400).json({ error: `A gift card sold on this ticket has been spent — refund at most $${most.toFixed(2)}` });
   const parts = takeRefundParts(pots, used, value, part, true);
   const intoVouchers = parts.voucher;
   if (intoVouchers > 0.005) {
@@ -15545,14 +15577,10 @@ app.get('/api/summary', (req, res) => {
   const tipsToday = todaysOrders.reduce((s, o) => s + (o.tip || 0) - lateOf(o), 0)
     + data.orders.filter(o => o.status === 'paid' && !o.practice)
       .reduce((s, o) => s + (o.lateTips || []).reduce((a, t) => a + ((t.at || 0) >= todayFrom ? (t.amount || 0) : 0), 0), 0)
-    // …less any tip a refund handed back today (food refunded first, tip last).
-    - data.orders.filter(o => o.status === 'paid' && !o.practice).reduce((s, o) => {
-      const food = Math.max(0, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - (o.tip || 0));
-      const rs = o.refunds || [];
-      const before = rs.reduce((a, r) => a + ((r.timestamp || periodAt(o)) < todayFrom ? (r.amount || 0) : 0), 0);
-      const all = rs.reduce((a, r) => a + (r.amount || 0), 0);
-      return s + Math.max(0, all - food) - Math.max(0, before - food);
-    }, 0);
+    // …less any tip a refund handed back today — by the parts each refund
+    // took (refundParts), as the cash-up reads them.
+    - data.orders.filter(o => o.status === 'paid' && !o.practice).reduce((s, o) =>
+      s + refundParts(o).reduce((a, p) => a + ((p.r.timestamp || periodAt(o)) >= todayFrom ? p.tip : 0), 0), 0);
   // Refunds by when they were GIVEN, as on the Z (Sep '26).
   const refundsToday = data.orders.filter(o => o.status === 'paid' && !o.practice)
     .reduce((s, o) => s + (o.refunds || []).reduce((a, r) => a + ((r.timestamp || periodAt(o)) >= todayFrom ? (r.amount || 0) : 0), 0), 0);
@@ -20919,6 +20947,7 @@ function syncFiredCourses() {
 // The open ticket is the truth; with no ticket yet, the booking that was on
 // this table at the last look is.
 let _sitWas = null;
+let _sitAtWas = null; // the sitting this till holds (followMovedParty): its start, as the floor stamped it
 // The booking this till seated by itself on a tap. A stray tap on a booked
 // table seated it for good: "Close table" cleared the table but the booking
 // stayed seated, and when the party really came the table asked for covers
@@ -20985,6 +21014,7 @@ async function refreshTableSittings() {
     const x = srv.get(t.id);
     if (!x || (t._savedAt && t._savedAt > asked - 3000)) return;
     const was = { covers: t.covers || 0, notes: t.notes || [], discount: t.discount || null };
+    if (t.id === state.table && t.sitAt) _sitAtWas = { table: t.id, at: t.sitAt }; // the sitting in hand, before this answer moves it (followMovedParty)
     t.covers = x.covers || 0; t.notes = x.notes || []; t.discount = x.discount || null; t.sitAt = x.sitAt; t.sitMoved = x.sitMoved;
     // …and the table this till has OPEN follows too, where the waiter has not
     // changed it here: the desk made the party 6, the open table kept 4 and
@@ -21026,18 +21056,31 @@ async function followMovedParty() {
     const at = b && seatedOn(b);
     if (at && at !== state.table) to = findTableById(at) || null;
   }
+  // …AND THE ROUND IN HAND FOLLOWS A PARTY MOVED WITH NO TICKET (19 Oct '26 pm
+  // hunt): the phone slept in the apron on 13 with the first round rung, its
+  // hold lapsed, the bar till moved the couple to 14 — and the phone woke on
+  // the empty 13, where Send opened their bill. The table they left says
+  // where they went (sitMoved), when it is this sitting that went.
+  let shift = 0, by = 'the desk';
+  if (!to && !o && here.sitMoved && _sitAtWas && _sitAtWas.table === state.table && _sitAtWas.at && here.sitMoved.at >= _sitAtWas.at) {
+    const t2 = findTableById(here.sitMoved.to);
+    if (t2 && t2.id !== state.table) { to = t2; shift = here.sitMoved.shift || 0; by = 'another till'; }
+  }
   if (to && to.id !== state.table) {
     const dest = findTableById(to.id) || to;
+    if (shift) state.cart = state.cart.map(l => ({ ...l, seat: seatShifted(l.seat, shift) }));
     releaseTableLock(state.table);
     claimTableLock(dest.id).catch(() => {});
     draftsMove(state.table, dest.id);
     state.table = dest.id;
     state.covers = dest.covers || 0; state.notes = (dest.notes || []).slice(); state.discount = dest.discount || null;
-    state.toast = `Moved to ${tableDisplayLabel(dest.id)} by the desk`;
+    state.toast = `Moved to ${tableDisplayLabel(dest.id)} by ${by}`;
     armToastTimer(TOAST_SHORT);
   }
   const b = (state.reservations || []).find(r => seatedOn(r) === state.table);
   _sitWas = b ? { table: state.table, id: b.id } : null;
+  const sa = (findTableById(state.table) || {}).sitAt;
+  _sitAtWas = sa ? { table: state.table, at: sa } : (_sitAtWas && _sitAtWas.table === state.table ? _sitAtWas : null);
 }
 async function refreshSummary() {
   state.summary = await api('/api/summary');
@@ -24291,6 +24334,7 @@ function draftsMine() {
       }
       if (at !== tid) {
         if (by) d.cart = d.cart.map(l => ({ ...l, seat: seatShifted(l.seat, by) }));
+        d.sitAt = (findTableById(at) || {}).sitAt || null; // the sitting it joined
         const there = mine[at];
         mine[at] = there ? { ...there, cart: [...there.cart, ...d.cart] } : d;
         delete mine[tid]; changed = true; continue;
@@ -24302,6 +24346,12 @@ function draftsMine() {
     // that party had paid and left, their draft landed on the next party.
     if (!d.openOrderId) {
       const tb = allTables().find(x => x.id === tid);
+      // …but only while the PARTY it was rung for still sits there (19 Oct '26
+      // pm hunt): a couple who left before anything went — the desk marked
+      // them left, the table was cleared — left their drinks waiting, and the
+      // walk-in sat there next got them on their bill. The floor stamps each
+      // sitting when it starts; a draft belongs to the one it was rung in.
+      if (tb && d.sitAt && tb.sitAt !== d.sitAt) { delete mine[tid]; changed = true; continue; }
       const next = tb && (state.orders || []).filter(o => o.orderType === 'dine-in' && String(o.table) === String(tb.label) && (o.createdAt || 0) >= (d.since || d.ts || 0))
         .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
       if (!next) continue;
@@ -24342,6 +24392,7 @@ function draftStash(tableId) {
   mine[tableId] = { cart: there ? [...there.cart, ...state.cart] : state.cart, activeCourse: state.activeCourse, openOrderId: state.openOrderId,
     sendKey: state.sendKey, sendFailed: state.sendFailed, stagedCallAway: state.stagedCallAway,
     quickNote: state.quickNote, quickNoteStation: state.quickNoteStation, ts: Date.now(), since: (there && there.since) || Date.now(),
+    sitAt: there ? there.sitAt || null : (findTableById(tableId) || {}).sitAt || null, // the sitting it was rung in (draftsMine)
     seatBase: ((state.orders || []).find(o => o.id === state.openOrderId) || {}).seatBase || 0 }; // where its ticket's seats stood (draftsMine)
   draftsWrite();
   state.cart = []; clearSendState();
@@ -24380,6 +24431,7 @@ function draftsMove(fromId, toId, seatShift) {
   const bump = l => seatShift ? { ...l, seat: seatShifted(l.seat, seatShift) } : l;
   for (const who of Object.keys(all)) {
     let d = all[who][fromId]; if (!d) continue;
+    d = { ...d, sitAt: null }; // its new table's sitting is not known here yet
     if (seatShift) d = { ...d, cart: d.cart.map(bump), seatBase: (d.seatBase || 0) + seatShift };
     const there = all[who][toId];
     all[who][toId] = there ? { ...there, cart: [...there.cart, ...d.cart], ts: Date.now() } : d;
@@ -27246,8 +27298,12 @@ function openEditSent(el) {
 let _anotherGo = null;
 function askAnother(lines, go, outOk, from) {
   const dish = l => state.menu.find(x => x.id === l.menuItemId);
-  const off = outOk ? [] : [...new Set(lines.map(dish).filter(mi => mi && mi.disabled).map(mi => mi.name))];
-  const out = outOk ? [] : [...new Set(lines.map(dish).filter(mi => mi && mi.out && !mi.disabled).map(mi => mi.name))];
+  // …and one whose SECTION is switched Off is off too (19 Oct '26 pm hunt):
+  // the beer section off for the night took every beer tile away, and Same
+  // again still rang two lagers with no word.
+  const isOff = mi => mi.disabled || (state.categories || []).some(c => c.disabled && c.name === mi.category);
+  const off = outOk ? [] : [...new Set(lines.map(dish).filter(mi => mi && isOff(mi)).map(mi => mi.name))];
+  const out = outOk ? [] : [...new Set(lines.map(dish).filter(mi => mi && mi.out && !isOff(mi)).map(mi => mi.name))];
   if (off.length || out.length) {
     const says = [off.length ? `${off.join(', ')} ${off.length === 1 ? 'is' : 'are'} off the menu` : '', out.length ? `${out.join(', ')} ${out.length === 1 ? 'has' : 'have'} none left` : ''].filter(Boolean).join('; ');
     openConfirm({ message: `${says} — order anyway?`, confirmLabel: 'Order' }, () => askAnother(lines, go, true)); return;
@@ -29082,19 +29138,26 @@ function salesOrdersPicked() {
 // voucher handed back first leaves the meal sold. refundPartsTotal is the
 // server's refundParts, line for line: a refund's own `parts`, or an older one
 // replayed meal → voucher → tip.
-function refundPartsTotal(o) {
+function refundPartsList(o) {
   const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0;
   const food = Math.max(0, gt - (o.tip || 0));
   const v = Math.min(food, (o.items || []).reduce((a, x) => a + (x.giftcardSale ? x.price * (x.qty || 1) : 0), 0));
   const pots = { meal: food - v, voucher: v, tip: Math.max(0, gt - food) }, used = { meal: 0, voucher: 0, tip: 0 };
-  const rs = Array.isArray(o.refunds) && o.refunds.length ? o.refunds : (o.refundedTotal ? [{ amount: o.refundedTotal }] : []);
-  rs.forEach(r => {
-    if (r.parts) { ['meal', 'voucher', 'tip'].forEach(k => { used[k] += +r.parts[k] || 0; }); return; }
-    let left = r.amount || 0;
-    ['meal', 'voucher', 'tip'].forEach(k => { const t = Math.max(0, Math.min(left, pots[k] - used[k])); used[k] += t; left -= t; });
-    if (left > 0) used.tip += left;
+  const rs = Array.isArray(o.refunds) && o.refunds.length ? o.refunds : (o.refundedTotal ? [{ amount: o.refundedTotal, timestamp: o.closedAt || o.createdAt }] : []);
+  return rs.map(r => {
+    const got = { r, meal: 0, voucher: 0, tip: 0 };
+    if (r.parts) ['meal', 'voucher', 'tip'].forEach(k => { got[k] = +r.parts[k] || 0; });
+    else {
+      let left = r.amount || 0;
+      ['meal', 'voucher', 'tip'].forEach(k => { const t = Math.max(0, Math.min(left, pots[k] - used[k])); got[k] = t; left -= t; });
+      if (left > 0) got.tip += left;
+    }
+    ['meal', 'voucher', 'tip'].forEach(k => { used[k] += got[k]; });
+    return got;
   });
-  return used;
+}
+function refundPartsTotal(o) {
+  return refundPartsList(o).reduce((a, p) => ({ meal: a.meal + p.meal, voucher: a.voucher + p.voucher, tip: a.tip + p.tip }), { meal: 0, voucher: 0, tip: 0 });
 }
 function keptShare(o, i) {
   const items = o.items || [];
@@ -32911,7 +32974,7 @@ function renderGiftCardsSettingsAdmin() {
     ${state.giftCards.length === 0 ? `<div class="ts">No gift cards issued yet.</div>` : state.giftCards.map(g => `
       <div class="order-row">
         <div class="order-info">
-          <div class="t1">${g.code}</div>
+          <div class="t1">${esc(g.code)}</div>
           <div class="t2">Balance ${money(g.balance)} of ${money(g.initialValue)}</div>
         </div>
         ${activeChip(!!g.active, 'toggle-gift-card', `data-id="${g.id}"`)}
@@ -32927,7 +32990,7 @@ function renderGiftCardsSettingsAdmin() {
       <div class="order-row ${v.used ? '' : 'sel-head'}${(state.selectedVoucherIds || []).includes(v.id) ? ' selected' : ''}" ${v.used ? '' : `data-sellist="voucher" data-selkey="${v.id}"`}>
         ${v.used ? '' : `<input type="checkbox" class="menu-item-select-cb" data-act="sel-cb" data-list="voucher" data-key="${v.id}" ${(state.selectedVoucherIds || []).includes(v.id) ? 'checked' : ''}>`}
         <div class="order-info">
-          <div class="t1">${v.code} <span class="status-chip ${v.used ? 'void' : 'paid'}">${v.used ? 'Used' : 'Active'}</span></div>
+          <div class="t1">${esc(v.code)} <span class="status-chip ${v.used ? 'void' : 'paid'}">${v.used ? 'Used' : 'Active'}</span></div>
           <div class="t2">${v.type === 'percent' ? v.value + '% off' : money(v.value) + ' off'}</div>
         </div>
       </div>
@@ -34188,15 +34251,11 @@ function tipsCollected(period) {
       return s + ((o.closedAt || o.createdAt || 0) >= start ? (o.tip || 0) - late : 0) + lateIn - tipRefundedSince(o, start);
     }, 0);
 }
-// The tip a refund handed back, from `start` on. The food is refunded first,
-// the tip last: a full refund of a $100 bill with a $15 tip still paid the $15
-// out to staff the venue no longer held (2 Oct '26). The cash-up does the same.
+// The tip a refund handed back, from `start` on: a full refund of a $100 bill
+// with a $15 tip still paid the $15 out to staff the venue no longer held
+// (2 Oct '26). Each refund by the parts it took, as the cash-up reads them.
 function tipRefundedSince(o, start) {
-  const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0, food = Math.max(0, gt - (o.tip || 0));
-  const rs = Array.isArray(o.refunds) && o.refunds.length ? o.refunds : (o.refundedTotal ? [{ amount: o.refundedTotal, timestamp: o.closedAt || o.createdAt }] : []);
-  const before = rs.reduce((a, r) => a + ((r.timestamp || 0) < start ? (r.amount || 0) : 0), 0);
-  const all = rs.reduce((a, r) => a + (r.amount || 0), 0);
-  return Math.max(0, all - food) - Math.max(0, before - food);
+  return refundPartsList(o).reduce((a, p) => a + ((p.r.timestamp || 0) >= start ? p.tip : 0), 0);
 }
 function renderTipsSettingsAdmin() {
   const period = state.tipPayoutPeriod || 'today';

@@ -9195,6 +9195,15 @@ app.post('/api/undo', (req, res) => {
   if (!_undoSnap || Date.now() - _undoSnapAt > UNDO_TTL) { _undoSnap = null; return res.status(404).json({ error: 'Nothing to undo' }); }
   const d = readData();
   if (_undoByManager && !managerFromReq(req, d)) return res.status(403).json({ error: 'Only a manager can undo that' });
+  // ONE PIN, ONE PERSON — UNDO TOO (21 Oct '26 hunt): a removed waiter's PIN
+  // was free to give a new hire, and Undo then put the old one back beside
+  // them — two people on one PIN, and the PIN pad signed in whoever came
+  // first. A person whose PIN or name is someone else's now stays removed.
+  if (_undoKeys.has('staff')) {
+    const nowStaff = d.staff || [], nowIds = new Set(nowStaff.map(s => s.id));
+    const clash = (_undoSnap.staff || []).find(s => !nowIds.has(s.id) && nowStaff.some(x => (s.pin && x.pin === s.pin) || staffNameTaken({ staff: [x] }, s.name)));
+    if (clash) return res.status(409).json({ error: `Could not put ${clash.name} back — their PIN or name is someone else's now` });
+  }
   const live = new Map((d.menu || []).map(m => [m.id, m]));
   // ONLY WHAT THE DELETE TOUCHED COMES BACK (Sep '26): Undo wrote the whole
   // setup back, so covers and an allergy another till put on a table in those
@@ -9543,7 +9552,13 @@ app.get('/api/void-pattern', (req, res) => {
 });
 app.post('/api/house-log', (req, res) => {
   const data = readData();
-  const { reason, item, qty, value, staff } = req.body || {};
+  // A COMP IS A MANAGER'S, UNDER THEIR OWN NAME (21 Oct '26 hunt): any
+  // request logged one, under whatever name it typed — a $28 comp could be
+  // put down to a manager who never rang it. Admin is a manager's page, so
+  // the till's manager PIN names who logged it.
+  const m = managerFromReq(req, data);
+  if (!m) return res.status(403).json({ error: 'Only a manager can log that' });
+  const { reason, item, qty, value } = req.body || {}, staff = m.name;
   if (!reason || !item) return res.status(400).json({ error: 'A reason and an item name are needed.' });
   const q = Math.max(1, parseInt(qty, 10) || 1);
   const v = Math.round((parseFloat(value) || 0) * 100) / 100;
@@ -11579,6 +11594,24 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
   res.json(table);
 });
 
+// A TABLE'S NOTES ARE CLEANED ON EVERY DOOR IN (21 Oct '26 hunt): the
+// sitting's move stored whatever it was handed, and one empty slot in the
+// list stopped every till drawing that table's docket.
+function cleanTableNotes(notes) {
+  return (Array.isArray(notes) ? notes : []).slice(0, 50)
+    .filter(n => n && n.text && String(n.text).trim())
+    .map(n => ({
+      seat: (n.seat === null || n.seat === undefined || n.seat === '') ? null : parseInt(n.seat),
+      categoryId: n.categoryId ? String(n.categoryId).slice(0, 60) : null,
+      text: String(n.text).trim().slice(0, 200),
+      // The one line of words that rides with the picks — an allergy entry
+      // has carried one for months; every note type has one now.
+      note: String((n && n.note) || '').trim().slice(0, 200),
+      // A note may ride with a course ("Birthday — candle" with Dessert): it
+      // stays off the kitchen's head until that course is called away.
+      ...(parseInt(n.course) > 0 ? { course: parseInt(n.course) } : {}),
+    }));
+}
 app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   const data = readData();
   const floorPlan = data.floorPlans.find(f => f.id === req.params.fpId);
@@ -11665,21 +11698,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
           ...(d.voucherCode ? { voucherCode: String(d.voucherCode).slice(0, 40) } : {}),
           ...(parseInt(d.loyaltyPoints, 10) > 0 ? { loyaltyPoints: parseInt(d.loyaltyPoints, 10), customerId: d.customerId ? String(d.customerId).slice(0, 60) : null } : {}) } : null;
   }
-  if (Array.isArray(notes)) {
-    table.notes = notes.slice(0, 50)
-      .filter(n => n && n.text && String(n.text).trim())
-      .map(n => ({
-        seat: (n.seat === null || n.seat === undefined || n.seat === '') ? null : parseInt(n.seat),
-        categoryId: n.categoryId ? String(n.categoryId).slice(0, 60) : null,
-        text: String(n.text).trim().slice(0, 200),
-        // The one line of words that rides with the picks — an allergy entry
-        // has carried one for months; every note type has one now.
-        note: String((n && n.note) || '').trim().slice(0, 200),
-        // A note may ride with a course ("Birthday — candle" with Dessert): it
-        // stays off the kitchen's head until that course is called away.
-        ...(parseInt(n.course) > 0 ? { course: parseInt(n.course) } : {}),
-      }));
-  }
+  if (Array.isArray(notes)) table.notes = cleanTableNotes(notes);
   if (mergedInto !== undefined) table.mergedInto = mergedInto || null;
   writeData(data);
   res.json(traded ? { ...table, traded } : table);
@@ -11706,14 +11725,23 @@ app.post('/api/tables/move-sitting', (req, res) => {
     const t = (fp.tables || []).find(x => x.id === id); if (t) return t; } return null; };
   const from = find(fromId), to = find(toId);
   if (!to) return res.status(404).json({ error: 'Table not found' });
+  // A PAID PARTY STILL EATING TAKES ITS BILL ALONG (21 Oct '26 hunt): paid on
+  // 12, they moved to the lounge for dessert — and their held dessert could be
+  // called from nowhere: 12 was empty, the lounge had no bill, and the server
+  // refused the call. Onto an empty table the bill and the sitting's start go
+  // with them, so the lounge's row on the Pass calls it.
+  const paidEating = from && from !== to && !combine && !(to.covers > 0)
+    && !(data.orders || []).some(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(to.label))
+    ? (data.orders || []).find(o => String(o.table) === String(from.label) && paidStillSeated(data, o)) : null;
   const covers = Math.max(0, parseInt(req.body.covers) || 0);
-  const notes = Array.isArray(req.body.notes) ? req.body.notes.slice(0, 50) : (from ? (from.notes || []) : []);
+  const notes = Array.isArray(req.body.notes) ? cleanTableNotes(req.body.notes) : (from ? (from.notes || []) : []);
   to.covers = combine ? (to.covers || 0) + covers : covers;
   to.notes = combine ? [...(to.notes || []), ...notes].slice(0, 50) : notes; // the notes go with the party (Sep '26)
   // …and so does the party's discount. It stayed on the old table, so the
   // next party sat there got it and the party that moved lost it (Sep '26).
   // Onto a table with a discount of its own, that one stands.
   if (from && from !== to && from.discount && !to.discount) to.discount = from.discount;
+  if (paidEating) { paidEating.table = to.label; if (from.sitAt > 0) to.sitAt = from.sitAt; }
   if (from && from !== to) { from.covers = 0; from.notes = []; from.discount = null; tillMovesSitting(data, from.id, to.id); sitMovedTo(from, to, req.body.seatShift); }
   // …and the bill already on that table seats them too: a seated party with
   // nothing ordered pulled onto a tab left the bill on the tab's old count —
@@ -12496,14 +12524,23 @@ function payAtTableBill(data, o) {
   // '26: a 10% automatic surcharge — $30.80 on the paper, $28 on the terminal).
   // A public-holiday rule is the till's calendar, not the server's: left off.
   const asked = { covers: o.covers, subtotal: sub, orderType: o.orderType, table: o.table };
-  const auto = !(t && t.discount) && (data.discountPresets || []).find(p => p.auto && p.enabled !== false && p.field !== 'holiday' && autoRuleFits(p, asked, new Date()));
   // A voucher or points spent elsewhere since they were put on take nothing off.
-  const own = t && t.discount && !checkDiscountExtras(data, t.discount) ? t.discount : null;
-  const off = own || (auto ? { type: auto.type, value: auto.value, reason: auto.name, kind: auto.kind, auto: true, ruleId: auto.id } : null);
+  // …and money off nobody okayed takes nothing off either (21 Oct '26 hunt):
+  // the table's own discount is saved unchecked and judged where it is spent
+  // — the till's Pay judged it, the terminal did not, so a waiter's 90% off
+  // closed a $38 bill on $3.80. The terminal asks what a waiter's Pay may.
+  const own = t && t.discount && !checkDiscountExtras(data, t.discount, undefined, o)
+    && !moneyOffRefused({ get: () => undefined, body: {} }, data, t.discount, { ...asked, appOff: appOffOf(o) }) ? t.discount : null;
+  const auto = !(t && t.discount) && (data.discountPresets || []).find(p => p.auto && p.enabled !== false && p.field !== 'holiday' && autoRuleFits(p, asked, new Date()));
+  // …and a bill already part paid under an automatic rule keeps it, as the
+  // till's Pay does (partOff): happy hour ended between two shares and the
+  // terminal asked the second guest for the full-price rest.
+  const kept = !own && (o.splitPaid || []).length && o.partOff && o.partOff.auto ? o.partOff : null;
+  const off = own || kept || (auto ? { type: auto.type, value: auto.value, reason: auto.name, kind: auto.kind, auto: true, ruleId: auto.id } : null);
   const { discountRecord, discountAmount } = computeDiscount(sub, off, o.items, data);
   const tx = computeTax(data, sub - discountAmount - voucherSaleTotal(o.items || []));
   const bill = Math.round((sub - discountAmount + tx.add) * 100) / 100;
-  return { sub, bill, discountRecord, tax: tx.tax, due: Math.max(0, Math.round((bill - splitPaidNet(o)) * 100) / 100) };
+  return { sub, bill, off, discountRecord, tax: tx.tax, due: Math.max(0, Math.round((bill - splitPaidNet(o)) * 100) / 100) };
 }
 async function doshiiPayAtTableOnce() {
   if (doshiiPayBusy) return;
@@ -12567,6 +12604,9 @@ async function doshiiPayAtTableOnce() {
           if (due > 0 && fresh > 0.005 && fresh - freshTip < due - 0.005) {
             const now = Date.now();
             order.splitPaid = order.splitPaid || [];
+            // The automatic rule this FIRST share was sized with stays for the
+            // bill, as a share taken at the till keeps it (see split-part).
+            if (!order.splitPaid.length) order.partOff = partOffOf(pb.off);
             order.splitPaid.push({ key: 'terminal-' + now, label: 'Pay at table', amount: fresh, method: 'card', giftCardCode: null, cardType: null, tip: freshTip, at: now, staffName: 'EFTPOS terminal', terminal: true });
             order.doshiiSyncHash = null; // the terminal shows what is left
             logAudit(data, 'EFTPOS terminal', `Took Pay at table ($${fresh.toFixed(2)}, card) on Ticket #${order.id}`);
@@ -14174,12 +14214,14 @@ function parsePayments(payments, grandTotal) {
 // A voucher or loyalty points ride on the discount and are spent HERE, when
 // the money is taken — not when Apply was tapped (Sep '26: Cancel after Apply
 // left the voucher "already used" and the points gone, with nothing paid).
-function checkDiscountExtras(data, discount, billCustomerId) {
+// `order`: a bill part paid under this voucher or these points already holds
+// them (see holdDiscountExtras) — they are its own, not spent elsewhere.
+function checkDiscountExtras(data, discount, billCustomerId, order) {
   if (!discount) return null;
   if (discount.voucherCode) {
     const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
     if (!v) return 'That voucher no longer exists';
-    if (v.used) return 'This voucher has already been used';
+    if (v.used && !(order && v.heldBy === order.id)) return 'This voucher has already been used';
   }
   if (discount.loyaltyPoints && discount.customerId) {
     // POINTS ARE A WHOLE NUMBER, SPENT ON MONEY OFF (9 Oct '26): -100000
@@ -14191,9 +14233,26 @@ function checkDiscountExtras(data, discount, billCustomerId) {
     if (!c) return 'That customer no longer exists';
     // …and they are the points of the guest ON THIS BILL (10 Oct '26).
     if (billCustomerId !== undefined && String(billCustomerId || '') !== String(discount.customerId)) return 'Those points belong to another guest';
-    if ((c.points || 0) < pts) return 'Not enough loyalty points';
+    const held = order && order.pointsHeld && String(order.pointsHeld.customerId) === String(discount.customerId) ? order.pointsHeld.points : 0;
+    if ((c.points || 0) + held < pts) return 'Not enough loyalty points';
   }
   return null;
+}
+// A VOUCHER OR POINTS THAT SIZED A BILL'S FIRST PART ARE TAKEN THERE (21 Oct
+// '26 hunt): they were spent only at the close, so another table used the
+// same one-use code meanwhile — two bills $10 off, and the part-paid one was
+// then refused on every part and at the close, stuck half paid.
+function holdDiscountExtras(data, order, discount, staffName) {
+  if (!discount || order.practice) return;
+  if (discount.voucherCode) {
+    const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
+    if (v && !v.used) { v.used = true; v.usedAt = Date.now(); v.heldBy = order.id; logAudit(data, staffName, `Voucher ${v.code} taken by a part on Ticket #${order.id}`); }
+  }
+  if (discount.loyaltyPoints && discount.customerId) {
+    const c = (data.customers || []).find(x => x.id === discount.customerId);
+    const pts = parseInt(discount.loyaltyPoints, 10) || 0;
+    if (c && pts > 0) { c.points = (c.points || 0) - pts; order.pointsHeld = { customerId: discount.customerId, points: pts }; }
+  }
 }
 // MONEY OFF IS A MANAGER'S (owner, Sep '26: "every money move — refunds,
 // the drawer, voids, discounts — is a manager's") — held HERE, not only in
@@ -14307,6 +14366,16 @@ function priceFloorRefused(req, data, items, order, back) {
   return null;
 }
 function spendDiscountExtras(data, order, discount, staffName) {
+  // What a part already took (holdDiscountExtras) is spent once: what the
+  // close carries is charged less it, and anything it no longer carries goes back.
+  const heldV = (data.vouchers || []).find(x => x.heldBy === order.id);
+  const heldP = order.pointsHeld || null;
+  if (heldV) delete heldV.heldBy;
+  order.pointsHeld = null;
+  const sameV = heldV && discount && discount.voucherCode && heldV.code.toLowerCase() === String(discount.voucherCode).toLowerCase();
+  if (heldV && !sameV) { heldV.used = false; heldV.usedAt = null; }
+  const sameP = heldP && discount && discount.loyaltyPoints && String(discount.customerId) === String(heldP.customerId);
+  if (heldP && !sameP) { const c0 = (data.customers || []).find(x => x.id === heldP.customerId); if (c0) c0.points = (c0.points || 0) + heldP.points; }
   if (!discount || order.practice) return;
   if (discount.voucherCode) {
     const v = (data.vouchers || []).find(x => x.code.toLowerCase() === String(discount.voucherCode).toLowerCase());
@@ -14314,7 +14383,7 @@ function spendDiscountExtras(data, order, discount, staffName) {
   }
   if (discount.loyaltyPoints && discount.customerId) {
     const c = (data.customers || []).find(x => x.id === discount.customerId);
-    if (c) { c.points = (c.points || 0) - discount.loyaltyPoints; logAudit(data, staffName, `Redeemed ${discount.loyaltyPoints} loyalty points on Ticket #${order.id} for ${c.name}`); }
+    if (c) { c.points = (c.points || 0) - discount.loyaltyPoints + (sameP ? heldP.points : 0); logAudit(data, staffName, `Redeemed ${discount.loyaltyPoints} loyalty points on Ticket #${order.id} for ${c.name}`); }
   }
 }
 function redeemGiftCardForOrder(data, paymentMethod, giftCardCode, grandTotal, practice) {
@@ -14578,7 +14647,15 @@ function carryCallAways(dest, src, courses, isFood, heldThere) {
   // …but only when FOOD came over. Two drinks moved from the bar to an empty
   // table stamped "first food went" on the new ticket, so its own first
   // starter was never called: Held on the Pass, hidden on the cook's screen.
-  if (src.firstFoodCalled && (!courses || !isFood || courses.some(isFood))) dest.firstFoodCalled = true;
+  // …and only when food that WENT came over (21 Oct '26 hunt): a held main
+  // moved to an empty table kept that table's own first starter held for
+  // good. Held food still keeps the ticket paced, so the main stays held, but
+  // the table's first food is called the moment it is sent, as anywhere else.
+  if (src.firstFoodCalled && (!courses || !isFood || courses.some(isFood))) {
+    const wentOver = !courses || !isFood || courses.some(c => isFood(c) && fired[c] > 0);
+    if (wentOver) dest.firstFoodCalled = true;
+    else if (!dest.firstFoodCalled) dest.firstFoodCalled = 'held';
+  }
 }
 // A CALLED COURSE WITH NOTHING LEFT IN IT IS NOT AWAY (3 Oct '26): its only
 // dish taken off or moved, the stamp stayed, so the Timeline ran the empty
@@ -14606,7 +14683,7 @@ function lineUid(i) { return String(i.lineKey || ('u' + Date.now().toString(36) 
 // take-back, or held mains moved onto this ticket, must never be called by
 // the next round of drinks (3 Oct '26). Dine-in only; takeaway has no pacing.
 function callFirstFood(data, order, roundItems, at) {
-  if (order.orderType !== 'dine-in' || order.firstFoodCalled) return;
+  if (order.orderType !== 'dine-in' || order.firstFoodCalled === true) return; // 'held': only held food came over
   const courses = (data.settings && data.settings.courses) || [];
   const isFood = n => courseKind(courses[n - 1] || { name: '' }) === 'food';
   const first = [...new Set((roundItems || []).filter(i => i.qty > 0 && !i.giftcardSale).map(i => i.course || 1))]
@@ -15045,7 +15122,7 @@ app.post('/api/orders/:id/close', (req, res) => {
     if (result.error) return res.status(400).json({ error: result.error });
     splitPayments = result.payments;
   }
-  const extrasError = checkDiscountExtras(data, discount, customerId !== undefined ? customerId : order.customerId);
+  const extrasError = checkDiscountExtras(data, discount, customerId !== undefined ? customerId : order.customerId, order);
   if (extrasError) return res.status(400).json({ error: extrasError });
   const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order), partOff: (order.splitPaid || []).length ? order.partOff : null });
   if (offRefused) return res.status(403).json({ error: offRefused });
@@ -15179,6 +15256,14 @@ app.post('/api/orders/:id/split-plan', (req, res) => {
   res.json(order);
 });
 
+// The automatic rule a bill's FIRST part was sized with — kept for the rest
+// of the bill, whichever door took that part (see moneyOffRefused). A
+// SURCHARGE TOO (21 Oct '26 hunt): the late-night 10% ended at midnight
+// between two shares, guest 1 paid it, guest 2 was asked their half without
+// it, and the bill closed recording no surcharge at all.
+function partOffOf(d) {
+  return d && d.auto ? { type: d.type === 'fixed' ? 'fixed' : 'percent', value: parseFloat(d.value) || 0, reason: String(d.reason || '').slice(0, 60), kind: d.kind === 'surcharge' ? 'surcharge' : 'discount', auto: true, ruleId: d.ruleId ? String(d.ruleId).slice(0, 40) : null } : null;
+}
 // One part settled. The parts are frozen on the first payment so a later
 // round cannot move money that has already been taken.
 app.post('/api/orders/:id/split-part', (req, res) => {
@@ -15207,7 +15292,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // the close refuses them — not after the guests have paid (8 Oct '26: a
   // used voucher sized both shares, both cards were charged, and the close
   // then said no).
-  const partExtras = checkDiscountExtras(data, (req.body || {}).discount, order.customerId);
+  const partExtras = checkDiscountExtras(data, (req.body || {}).discount, order.customerId, order);
   if (partExtras) return res.status(400).json({ error: partExtras });
   const { discountAmount } = computeDiscount(itemsTotal, (req.body || {}).discount, order.items, data);
   const billNow = Math.round((itemsTotal - discountAmount
@@ -15252,10 +15337,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   }
   const by = String(staffName || 'Unknown').slice(0, 40);
   // The automatic rule the FIRST part was sized with (see moneyOffRefused).
-  if (!order.splitPaid.length) {
-    const d = (req.body || {}).discount;
-    order.partOff = d && d.auto && d.kind !== 'surcharge' ? { type: d.type === 'fixed' ? 'fixed' : 'percent', value: parseFloat(d.value) || 0, reason: String(d.reason || '').slice(0, 60), kind: 'discount', auto: true, ruleId: d.ruleId ? String(d.ruleId).slice(0, 40) : null } : null;
-  }
+  if (!order.splitPaid.length) { order.partOff = partOffOf((req.body || {}).discount); holdDiscountExtras(data, order, (req.body || {}).discount, by); }
   if (gcard) gcard.balance = Math.round((gcard.balance - amt) * 100) / 100;
   order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
     giftCardCode: gcard ? gcard.code : null,
@@ -15516,10 +15598,13 @@ app.post('/api/orders/:id/transfer', (req, res) => {
   // on another till as a draft moves up by the same (draftsMine, 18 Oct '26).
   if (shift) order.seatBase = (order.seatBase || 0) + shift;
   if (dest) {
+    // What the table is still HOLDING for its own guests stays held when a
+    // whole party joins it, as when dishes are moved (21 Oct '26 hunt).
+    const heldThere = new Set((dest.items || []).filter(i => i.qty > 0 && !((dest.firedCourses || {})[i.course || 1] > 0)).map(i => i.course || 1));
     dest.items = [...(dest.items || []), ...(order.items || []).map(bump)];
     const base = nextRoundId(dest) - 1;
     dest.rounds = [...(dest.rounds || []), ...(order.rounds || []).map((r, k) => ({ ...r, id: base + k + 1, items: (r.items || []).map(bump) }))];
-    carryCallAways(dest, order);
+    carryCallAways(dest, order, null, null, heldThere);
     // The loyalty guest comes too, or the combined bill earns them nothing.
     if (!dest.customerId && order.customerId) dest.customerId = order.customerId;
     if (order.covers) dest.covers = (dest.covers || 0) + order.covers;
@@ -15656,7 +15741,10 @@ app.post('/api/orders/:id/move-items', (req, res) => {
       orderType: 'dine-in',
       table: targetTable,
       customerName: null,
-      covers: null,
+      // A SEATED TABLE'S NEW BILL SEATS ITS PARTY (21 Oct '26 hunt): dishes
+      // moved onto six seated guests opened a bill with no covers — Bills, the
+      // Pass, per-head spend and a covers rule all read none, for good.
+      covers: (() => { for (const fp of data.floorPlans || []) { const t = (fp.tables || []).find(x => x.type !== 'decor' && String(x.label) === String(targetTable)); if (t) return (t.covers || 0) > 0 ? t.covers : null; } return null; })(),
       items: moving,
       rounds: [{ id: 1, sentAt: Date.now(), color: null, items: moving, moved: true, from: order.id }],
       subtotal: 0, discount: null, tax: 0, total: 0, tip: 0, grandTotal: 0,
@@ -16281,8 +16369,12 @@ app.get('/api/register/closes', (req, res) => {
 
 app.post('/api/register/close', (req, res) => {
   const data = readData();
-  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can close the register' });
-  const { cashCounted, staffName } = req.body;
+  const mgr = managerFromReq(req, data);
+  if (!mgr) return res.status(403).json({ error: 'Only a manager can close the register' });
+  // SIGNED BY THE PIN THAT DID IT (21 Oct '26 hunt): the cash-up took
+  // whatever name the request typed, so a Z — Short and all — could be put
+  // down to another manager. The manager whose PIN closed it is who closed it.
+  const { cashCounted } = req.body, staffName = mgr.name;
   const closes = data.registerCloses || [];
   const fromTs = closes.length ? closes[closes.length - 1].periodEnd : 0;
   // ONE CASH-UP PER PERIOD (Oct '26 hunt): a double tap, a retry or a second
@@ -22953,7 +23045,7 @@ async function undoLastAdminDelete() {
     state.toast = 'Put back';
     armToastTimer(TOAST_SHORT);
   } catch (e) {
-    state.toast = toastFail('Could not undo that.');
+    state.toast = toastFail(e.status === 409 && e.message ? e.message : 'Could not undo that.');
   }
   render();
 }
@@ -24970,7 +25062,13 @@ async function runTerminalPurchase(amount) {
     const { sessionId } = await api('/api/terminal/purchase', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ amount }) });
     for (;;) {
       await new Promise(r => setTimeout(r, 1200));
-      const s = await api(`/api/terminal/purchase/${sessionId}`);
+      // A LOST "APPROVED YET?" IS NOT A DECLINE (21 Oct '26 hunt): one wifi
+      // blip while the guest tapped made the till give up, the terminal went
+      // on to approve, and the next Confirm charged the card a second time.
+      // The terminal is still with the guest — ask again.
+      let s;
+      try { s = await api(`/api/terminal/purchase/${sessionId}`); }
+      catch (e) { if (e.status) throw e; if (state.terminalPending) { state.terminalPending.message = 'Reconnecting…'; render(); } continue; }
       if (s.status === 'approved') { state.terminalPending = null; return true; }
       if (s.status !== 'pending') {
         state.terminalPending = null;
@@ -27095,7 +27193,10 @@ function repaintFloorFind() {
 function mobSearchHitsHTML() {
   const q = (state.search || '').trim().toLowerCase();
   if (!q) return '';
-  return (state.menu || []).filter(m => m.price > 0 && !m.out && m.name.toLowerCase().includes(q)).slice(0, 4)
+  // …never a dish switched Off, or one in a section switched Off (21 Oct '26
+  // hunt): its tile and the hub's search had let it go, and these rows still sold it.
+  const offCats = new Set((state.categories || []).filter(c => c.disabled).map(c => c.name));
+  return (state.menu || []).filter(m => m.price > 0 && !m.out && !m.disabled && !offCats.has(m.category) && m.name.toLowerCase().includes(q)).slice(0, 4)
     .map(m => `<button type="button" class="mob-hit" data-act="add" data-id="${m.id}"><span class="mh-name">${esc(m.name)}</span><span class="mh-price">${money(m.price)}</span></button>`).join('');
 }
 // Order type lives in the top bar. The guest name for takeaway/delivery sits in
@@ -28739,7 +28840,7 @@ function noteSeatChip(m, act, typeId) {
   // light key family (the Bill key's) — it was a 24-tall tag under the words
   // line reading "Covers" (owner's walk, Sep '26). It reads the seat word:
   // the prefix until a pick, then the seat, or All for the whole table.
-  const label = m.wholeTable ? (state.settings.sharedSeatLabel || 'All')
+  const label = m.wholeTable ? esc(state.settings.sharedSeatLabel || 'All')
     : (m.seats && m.seats.length) ? esc(seatText(m.seats[0]))
     : esc((state.settings.seatPrefix != null ? state.settings.seatPrefix : 'Seat').trim() || 'Seat');
   return `<button type="button" class="icon-action bill" data-act="${act}">${DKT_USER_SVG}<span class="ia-label">${label}</span></button>`;
@@ -29831,7 +29932,7 @@ function renderRegisterAdmin() {
   ${state.registerCloses.length === 0 ? `<div class="empty-hist">No closes yet.</div>` : state.registerCloses.map(c => `
     <div class="order-row">
       <div class="order-info">
-        <div class="t1">${fmtDate(c.closedAt)} ${fmtTime(c.closedAt)} — ${c.closedBy}</div>
+        <div class="t1">${fmtDate(c.closedAt)} ${fmtTime(c.closedAt)} — ${esc(c.closedBy)}</div>
         <div class="t2">${c.orderCount} orders · net ${money(c.netTotal)}${c.cashDiff !== null ? ` · cash ${c.cashDiff >= 0 ? '+' : ''}${money(c.cashDiff)}` : ''}</div>
       </div>
       <button class="icon-sq" data-act="reprint-z" data-id="${c.id}" aria-label="Reprint totals">${SYS_PRINTER_SVG}</button>
@@ -52641,7 +52742,10 @@ setInterval(() => {
             if (Array.isArray(rest[9])) {
               state.staffList = rest[9];
               const me = state.currentStaff && rest[9].find(x => x.id === state.currentStaff.id);
-              if (me) state.currentStaff.trainee = !!me.trainee;
+              // …and their NAME (21 Oct '26 hunt): renamed at the office, the
+              // till kept sending the old one, the server knew nobody by it, and
+              // a renamed trainee called a real table's course to the kitchen.
+              if (me) { state.currentStaff.trainee = !!me.trainee; if (me.name) state.currentStaff.name = me.name; }
               // REMOVED IS SIGNED OFF (16 Oct '26 hunt): a person taken off the
               // team kept their iPad and took cash on their tables until they
               // chose to log off. The round they were on stays as a draft, for

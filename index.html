@@ -9132,6 +9132,11 @@ app.use((req, res, next) => {
 const UNDO_KEEP = ['menu', 'categories', 'subcategories', 'salesCategories', 'modifierGroups', 'combos', 'staff', 'floorPlans', 'theme', 'settings', 'quickNotePresets', 'sizePresets', 'noteCategories', 'discountPresets', 'voidReasons', 'happyHours', 'printerStations', 'reservations', 'vouchers', 'suppliers', 'docketDesigns', 'cardTypes', 'roster', 'timeOff', 'inventoryItems'];
 const UNDO_TTL = 10 * 60 * 1000;
 let _undoSnap = null, _undoSnapAt = 0, _undoBatch = '', _undoKeys = new Set(), _undoByManager = false, _undoEdited = {};
+// A WHOLE NEW STORE ENDS THE UNDO (20 Oct '26 hunt): a delete's snapshot
+// outlived a data file loaded or a backup restored after it, and Undo then
+// put back every dish, person (PIN and all) and table the OLD data had that
+// the loaded one did not.
+function forgetUndo() { _undoSnap = null; _undoKeys = new Set(); _undoEdited = {}; _undoBatch = ''; }
 app.use((req, res, next) => {
   if (req.method === 'DELETE' && req.path.indexOf('/api/') === 0) {
     // A bulk delete is many DELETEs in a burst. Snapshot before the FIRST of
@@ -9261,6 +9266,10 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
 // the next till that opened the floor. Only #rgb, #rrggbb or #rrggbbaa is kept.
 const COLOUR_RE = /^#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/;
 const cleanColour = v => (typeof v === 'string' && COLOUR_RE.test(v.trim())) ? v.trim() : null;
+// AN ICON IS AN EMOJI OR A FEW LETTERS, NEVER MARKUP (20 Oct '26 hunt): a
+// floor object's icon was painted straight onto every till's floor, so a bare
+// request made one that ran page code on the next waiter to sign in.
+const cleanIcon = v => (typeof v === 'string' && v.trim() && v.length <= 16 && !/[<>"'&`\\]/.test(v)) ? v.trim() : null;
 // A picture is an uploaded file, an inline image or a plain web address — the
 // same three the till draws (IMG_OK in app.js), nothing that can close a quote.
 // A pasted address was dropped here without a word while a dish kept it (18 Oct '26).
@@ -9539,7 +9548,11 @@ app.post('/api/house-log', (req, res) => {
   const q = Math.max(1, parseInt(qty, 10) || 1);
   const v = Math.round((parseFloat(value) || 0) * 100) / 100;
   data.houseLog = data.houseLog || [];
-  const entry = { at: Date.now(), staff: String(staff || 'Unknown'), reason: String(reason).slice(0, 40), item: String(item).slice(0, 60), qty: q, value: v, ticket: null };
+  // LOGGED ONCE (20 Oct '26 pm hunt): a double tap logged the comp twice.
+  const key = String((req.body || {}).houseKey || '').slice(0, 64) || null;
+  const dup = key && data.houseLog.find(e => e.key === key);
+  if (dup) return res.json(dup);
+  const entry = { key, at: Date.now(), staff: String(staff || 'Unknown'), reason: String(reason).slice(0, 40), item: String(item).slice(0, 60), qty: q, value: v, ticket: null };
   data.houseLog.push(entry);
   if (data.houseLog.length > 5000) data.houseLog.splice(0, data.houseLog.length - 5000);
   logAudit(data, entry.staff, `House log: ${q}× ${entry.item} — ${entry.reason} ($${v.toFixed(2)})`);
@@ -9901,7 +9914,7 @@ app.post('/api/categories', (req, res) => {
   if (data.categories.some(c => c.name.toLowerCase() === name.trim().toLowerCase())) {
     return res.status(400).json({ error: 'That category already exists' });
   }
-  const cat = { id: 'cat' + Date.now(), name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
+  const cat = { id: 'cat' + Date.now(), name: name.trim(), color: cleanColour(color), icon: cleanIcon(icon), iconEnabled: iconEnabled !== false };
   // A copy keeps how it is shown and where it cooks (16 Oct '26 hunt).
   if (req.body.view === 'list') cat.view = 'list';
   if (req.body.defaultCourse) cat.defaultCourse = Math.max(1, parseInt(req.body.defaultCourse) || 0) || null;
@@ -9944,7 +9957,7 @@ app.put('/api/categories/:id', (req, res) => {
   }
   cat.name = name.trim();
   if (color !== undefined) { cat.color = cleanColour(color); }
-  if (icon !== undefined) cat.icon = icon || null;
+  if (icon !== undefined) cat.icon = cleanIcon(icon);
   if (iconEnabled !== undefined) cat.iconEnabled = !!iconEnabled;
   // Keep menu items pointed at the right category after a rename.
   data.menu.forEach(m => { if (m.category === oldName) m.category = cat.name; });
@@ -11038,7 +11051,7 @@ app.post('/api/subcategories', (req, res) => {
     if (!parent) return res.status(400).json({ error: 'Parent subsection not found' });
     rootCategoryId = parent.categoryId;
   }
-  const sub = { id: 'sub' + Date.now(), categoryId: rootCategoryId, parentSubcategoryId: parentId, name: name.trim(), color: cleanColour(color), icon: icon || null, iconEnabled: iconEnabled !== false };
+  const sub = { id: 'sub' + Date.now(), categoryId: rootCategoryId, parentSubcategoryId: parentId, name: name.trim(), color: cleanColour(color), icon: cleanIcon(icon), iconEnabled: iconEnabled !== false };
   data.subcategories.push(sub);
   logAudit(data, staffFromReq(req), `Added subcategory: ${sub.name}`);
   writeData(data);
@@ -11108,7 +11121,7 @@ app.put('/api/subcategories/:id', (req, res) => {
   if (color !== undefined) { sub.color = cleanColour(color); }
   if (image !== undefined) sub.image = (typeof image === 'string' && image) || null;
   if (req.body.defaultCourse !== undefined) sub.defaultCourse = req.body.defaultCourse ? Math.max(1, parseInt(req.body.defaultCourse) || 0) || null : null;
-  if (icon !== undefined) sub.icon = icon || null;
+  if (icon !== undefined) sub.icon = cleanIcon(icon);
   if (iconEnabled !== undefined) sub.iconEnabled = !!iconEnabled;
   logAudit(data, staffFromReq(req), `Renamed subcategory "${oldName}" to "${sub.name}"`);
   writeData(data);
@@ -11190,7 +11203,7 @@ app.post('/api/menu', (req, res) => {
     stockCount: trackStock ? Math.max(0, Math.round((parseFloat(stockCount) || 0) * 100) / 100) : 0,
     lowStockThreshold: Math.max(0, parseInt(lowStockThreshold) || 5),
     color: cleanColour(color),
-    icon: icon || null,
+    icon: cleanIcon(icon),
     iconEnabled: !!iconEnabled,
     sequence: (sequence !== undefined && sequence !== null && sequence !== '') ? parseInt(sequence) : null,
     allergens: Array.isArray(req.body.allergens) ? normAllergens(req.body.allergens) : [],
@@ -11264,7 +11277,7 @@ app.put('/api/menu/:id', (req, res) => {
   if (lowStockThreshold !== undefined) item.lowStockThreshold = Math.max(0, parseInt(lowStockThreshold) || 0);
   if (item.trackStock) item.out = item.stockCount <= 0;
   if (color !== undefined) { item.color = cleanColour(color); }
-  if (icon !== undefined) item.icon = icon || null;
+  if (icon !== undefined) item.icon = cleanIcon(icon);
   if (iconEnabled !== undefined) item.iconEnabled = !!iconEnabled;
   if (req.body.rowBreak !== undefined) item.rowBreak = !!req.body.rowBreak;
   // Which printer station this item's docket line goes to (null = follow its
@@ -11556,7 +11569,7 @@ app.post('/api/floorplans/:fpId/tables', (req, res) => {
     seats: seats !== undefined ? seats : 4,
     type: type === 'decor' ? 'decor' : 'table',
     decorType: decorType || null,
-    icon: icon || null,
+    icon: cleanIcon(icon),
     rotation: rotation || 0,
     color: cleanColour(color),
   };
@@ -11624,7 +11637,7 @@ app.put('/api/floorplans/:fpId/tables/:id', (req, res) => {
   if (rotation !== undefined) table.rotation = ((rotation % 360) + 360) % 360;
   if (color !== undefined) table.color = cleanColour(color);
   if (decorType !== undefined && table.type === 'decor') table.decorType = decorType;
-  if (icon !== undefined && table.type === 'decor') table.icon = icon || null;
+  if (icon !== undefined && table.type === 'decor') table.icon = cleanIcon(icon);
   const hadCovers = (table.covers || 0) > 0;
   if (covers !== undefined) table.covers = Math.max(0, parseInt(covers) || 0);
   // A party that sat, ordered nothing and was closed on the till has ended its
@@ -12077,6 +12090,9 @@ app.put('/api/customers/:id', (req, res) => {
 
 app.delete('/api/customers/:id', (req, res) => {
   const data = readData();
+  // A GUEST'S POINTS ARE MONEY, so taking the guest off is a manager's (20 Oct
+  // '26 pm hunt): a waiter's till, or any device with no PIN, wiped them.
+  if (!managerFromReq(req, data)) return res.status(403).json({ error: 'Only a manager can delete a guest' });
   const customer = (data.customers || []).find(c => c.id === req.params.id);
   data.customers = (data.customers || []).filter(c => c.id !== req.params.id);
   if (customer) logAudit(data, staffFromReq(req), `Deleted customer: ${customer.name}`);
@@ -12678,6 +12694,7 @@ app.post('/api/backups/restore', (req, res) => {
   if (!managerFromReq(req, readData())) return res.status(403).json({ error: 'Only a manager can restore a backup' });
   try {
     backups.restore(String((req.body && req.body.file) || ''));
+    forgetUndo();
     const data = readData();
     logAudit(data, staffFromReq(req), `Restored data from backup ${req.body.file}`);
     writeData(data);
@@ -13213,8 +13230,14 @@ app.post('/api/expenses', (req, res) => {
   const { date, category, amount, note, staffName } = req.body;
   const value = parseFloat(amount);
   if (isNaN(value) || value <= 0) return res.status(400).json({ error: 'Amount must be greater than 0' });
+  // LOGGED ONCE (20 Oct '26 pm hunt): a double tap on + Expense logged the
+  // $42 twice. The form's key comes back with the expense it already made.
+  const key = String((req.body || {}).expenseKey || '').slice(0, 64) || null;
+  const dup = key && (data.expenses || []).find(e => e.key === key);
+  if (dup) return res.json(dup);
   const expense = {
-    id: 'ex' + Date.now(),
+    id: 'ex' + Date.now() + Math.random().toString(36).slice(2, 5),
+    key,
     date: date || localDayKey(new Date()),
     category: String(category || 'Other').trim(),
     amount: value,
@@ -13742,6 +13765,9 @@ app.post('/api/combos', (req, res) => {
   if (!name || price === undefined || isNaN(parseFloat(price)) || !Array.isArray(groups) || groups.length === 0) {
     return res.status(400).json({ error: 'Name, price, and at least one group are required' });
   }
+  // A SET MENU'S PRICE IS NOTHING OR MORE, as a dish's is (20 Oct '26 hunt): it
+  // saved at -$20 and then every sale of it was refused on the floor.
+  if (parseFloat(price) < 0) return res.status(400).json({ error: 'A price cannot be below 0' });
   const combo = {
     id: 'c' + Date.now(),
     name,
@@ -13765,6 +13791,7 @@ app.put('/api/combos/:id', (req, res) => {
   const combo = data.combos.find(c => c.id === req.params.id);
   if (!combo) return res.status(404).json({ error: 'Combo not found' });
   const { name, price, groups, color, category } = req.body;
+  if (price !== undefined && parseFloat(price) < 0) return res.status(400).json({ error: 'A price cannot be below 0' });
   if (name) combo.name = name;
   if (price !== undefined && !isNaN(parseFloat(price))) combo.price = parseFloat(price);
   if (color !== undefined) { combo.color = cleanColour(color); }
@@ -13923,6 +13950,7 @@ app.post('/api/import', (req, res) => {
   if (!Number.isInteger(incoming.ticketCounter) || incoming.ticketCounter < 1) incoming.ticketCounter = current.ticketCounter;
   for (const k of ['auditLog', 'customers', 'giftCards', 'vouchers', 'registerCloses', 'shifts', 'inventoryItems']) if (!Array.isArray(incoming[k])) incoming[k] = current[k] || [];
   writeData(incoming);
+  forgetUndo();
   res.json({ ok: true });
 });
 
@@ -14120,6 +14148,17 @@ function roundColorFor(data, roundNumber) {
 // Validates a split-payment tender list against the amount actually due.
 // Callers only invoke this when a non-empty `payments` array was sent, and
 // otherwise fall back to the plain single paymentMethod path unchanged.
+// A BILL IS PAID A WAY THE CASH-UP KNOWS (20 Oct '26 hunt): the close took
+// any word as the way of paying, and a bill "paid by Cash" (capital C) or
+// "cassh" counted as sales but sat in no money line — the drawer's expected
+// cash never saw it, so that cash could leave in a pocket and still balance.
+// Tenders (a split) are cleaned by parsePayments; one way must be one of these.
+const PAY_WAYS = ['cash', 'card', 'giftcard'];
+function payWayRefused(paymentMethod, payments) {
+  if (Array.isArray(payments) && payments.length) return null;
+  if (paymentMethod === undefined || paymentMethod === null || paymentMethod === '') return null;
+  return PAY_WAYS.includes(paymentMethod) ? null : 'Pick cash, card or a gift card';
+}
 function parsePayments(payments, grandTotal) {
   const cleaned = payments
     .map(p => ({ method: p.method === 'cash' ? 'cash' : 'card', amount: parseFloat(p.amount) }))
@@ -14213,6 +14252,13 @@ function moneyOffRefused(req, data, discount, bill) {
     if (parseFloat(discount.value) <= (parseInt(discount.loyaltyPoints, 10) || 0) / per + 0.005) return null;
   }
   if (discount.auto && (data.discountPresets || []).some(p => p.auto && p.enabled !== false && p.kind !== 'surcharge' && (!discount.ruleId || p.id === discount.ruleId) && same(p) && autoRuleFits(p, bill, new Date()))) return null;
+  // A RULE THE BILL STARTED PAYING UNDER STAYS FOR THE BILL (20 Oct '26 pm
+  // hunt): happy hour ended between two guests' shares, and the second share
+  // was refused on a waiter's till — the table stuck open. The first part
+  // recorded the rule it was sized with; the rest of the parts and the close
+  // may carry the same one.
+  const po = bill && bill.partOff;
+  if (discount.auto && po && po.auto && String(po.ruleId || '') === String(discount.ruleId || '') && same(po)) return null;
   if (typeOf(discount.type) === 'percent' && (data.happyHours || []).some(h => h.enabled && h.name === discount.reason && Math.abs((parseFloat(h.discountPercent) || 0) - parseFloat(discount.value)) < 0.005)) return null;
   // What the ordering app took off, as the app order arrived with it.
   if (bill && bill.appOff > 0 && typeOf(discount.type) === 'fixed' && Math.abs(parseFloat(discount.value) - bill.appOff) < 0.005) return null;
@@ -14323,6 +14369,7 @@ app.post('/api/orders', (req, res) => {
   if (orderType === 'dine-in') for (const fp of data.floorPlans || []) { const t = (fp.tables || []).find(x => x.type !== 'decor' && String(x.label) === String(table)); if (t) { if ((t.covers || 0) > 0) coversNow = t.covers; break; } }
   let rawItems = sentItems;
   { const gone = staffGone(data, staffId); if (gone) return res.status(403).json({ error: gone }); }
+  { const way = payWayRefused(paymentMethod, payments); if (way) return res.status(400).json({ error: way }); }
   {
     const underPrice = priceFloorRefused(req, data, rawItems, null);
     if (underPrice) return res.status(403).json({ error: underPrice });
@@ -14516,10 +14563,13 @@ function nextRoundId(order) { return (order.rounds || []).reduce((m, r) => Math.
 // Courses already called away go with the dishes: a combined ticket forgot
 // them, so the pass offered to call the mains a second time (Sep '26).
 // The earliest call stands; only the courses given (or all) are carried.
-function carryCallAways(dest, src, courses, isFood) {
+function carryCallAways(dest, src, courses, isFood, heldThere) {
   const fired = src.firedCourses || {};
   Object.keys(fired).forEach(c => {
     if (courses && !courses.includes(parseInt(c, 10))) return;
+    // A course the table is still HOLDING for its own guests stays held: one
+    // cooking main moved over called the whole table's mains (20 Oct '26 pm).
+    if (heldThere && heldThere.has(parseInt(c, 10))) return;
     dest.firedCourses = dest.firedCourses || {};
     if (!dest.firedCourses[c] || fired[c] < dest.firedCourses[c]) dest.firedCourses[c] = fired[c];
   });
@@ -14841,7 +14891,10 @@ app.post('/api/orders/:id/modify-item', (req, res) => {
     const course = (newCourse === undefined) ? undefined : parseInt(newCourse, 10);
     let n = 0;
     const note = (newNote === undefined) ? undefined : String(newNote || '').trim().slice(0, 120);
-    const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined) i.course = course; if (note !== undefined) i.note = note; };
+    // A course set by hand is that dish's own: Auto never reads it as where
+    // more of the dish goes (20 Oct '26 pm hunt — seat 3's main followed seat
+    // 1's main, held back a course for that guest alone).
+    const apply = (i) => { if (seat !== undefined) i.seat = seat; if (course !== undefined && course !== (i.course || 1)) { i.course = course; i.courseByHand = true; } if (note !== undefined) i.note = note; };
     // …but a NOTE is about the dish (15 Oct '26): "no chilli" typed on a sent
     // Pita showed on the till and never reached the cook. The changed line
     // goes to its station again, under the note banner the quick note uses.
@@ -14964,6 +15017,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   // …nor does someone taken off the team (18 Oct '26 hunt): the sign-off rides
   // the poll, which sleeps while Pay is open, so their Confirm took the cash.
   { const gone = staffGone(data, req.body.staffId); if (gone) return res.status(403).json({ error: gone }); }
+  { const way = payWayRefused(paymentMethod, payments); if (way) return res.status(400).json({ error: way }); }
   // A TRAINEE NEVER TAKES REAL MONEY (12 Oct '26): Bills opened a real
   // takeaway's Pay for a trainee and their Confirm closed it as paid.
   { const no = practiceRefused(req, data, order); if (no) return res.status(400).json({ error: no }); }
@@ -14993,7 +15047,7 @@ app.post('/api/orders/:id/close', (req, res) => {
   }
   const extrasError = checkDiscountExtras(data, discount, customerId !== undefined ? customerId : order.customerId);
   if (extrasError) return res.status(400).json({ error: extrasError });
-  const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order) });
+  const offRefused = moneyOffRefused(req, data, discount, { covers: order.covers, subtotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order), partOff: (order.splitPaid || []).length ? order.partOff : null });
   if (offRefused) return res.status(403).json({ error: offRefused });
   // A bill in parts closes only when every part has been taken — otherwise a
   // stray Pay would charge the table for money it has already handed over.
@@ -15147,7 +15201,7 @@ app.post('/api/orders/:id/split-part', (req, res) => {
   // refused on its last part and could never close (Sep '26).
   const itemsTotal = order.items.reduce((sum, i) => sum + i.price * i.qty, 0);
   // The discount that sizes a part is held to the same rule as the close's.
-  const partOff = moneyOffRefused(req, data, (req.body || {}).discount, { covers: order.covers, subtotal: itemsTotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order) });
+  const partOff = moneyOffRefused(req, data, (req.body || {}).discount, { covers: order.covers, subtotal: itemsTotal, orderType: order.orderType, table: order.table, appOff: appOffOf(order), partOff: order.splitPaid.length ? order.partOff : null });
   if (partOff) return res.status(403).json({ error: partOff });
   // A voucher or points spent elsewhere are refused at the FIRST part, the way
   // the close refuses them — not after the guests have paid (8 Oct '26: a
@@ -15197,6 +15251,11 @@ app.post('/api/orders/:id/split-part', (req, res) => {
     if (gcard.balance + 0.005 < amt) return res.status(400).json({ error: `Only $${gcard.balance.toFixed(2)} left on that gift card` });
   }
   const by = String(staffName || 'Unknown').slice(0, 40);
+  // The automatic rule the FIRST part was sized with (see moneyOffRefused).
+  if (!order.splitPaid.length) {
+    const d = (req.body || {}).discount;
+    order.partOff = d && d.auto && d.kind !== 'surcharge' ? { type: d.type === 'fixed' ? 'fixed' : 'percent', value: parseFloat(d.value) || 0, reason: String(d.reason || '').slice(0, 60), kind: 'discount', auto: true, ruleId: d.ruleId ? String(d.ruleId).slice(0, 40) : null } : null;
+  }
   if (gcard) gcard.balance = Math.round((gcard.balance - amt) * 100) / 100;
   order.splitPaid.push({ key: k, label: String(label || k).slice(0, 60), amount: amt, method: m,
     giftCardCode: gcard ? gcard.code : null,
@@ -15256,7 +15315,9 @@ app.post('/api/orders/:id/void', (req, res) => {
   const wasOpen = order.status === 'open';
   order.voidedAt = Date.now();
   order.status = 'void';
-  order.voidedBy = req.body.staffName || 'Unknown';
+  // A NAME IS TEXT (20 Oct '26 hunt): the receipt in Sales painted it raw, so a
+  // bare void of an empty ticket planted page code on the manager's till.
+  order.voidedBy = String(req.body.staffName || staffHeader(req) || 'Unknown').slice(0, 60);
   order.voidReason = reason || null;
   order.voidNote = note || '';
   if (!order.practice) adjustStockForItems(data, order.items, 1, `Void #${order.id}`);
@@ -15570,6 +15631,10 @@ app.post('/api/orders/:id/move-items', (req, res) => {
     const at = i.sentAt || r.sentAt;
     moving.forEach(m => { if (keyOf(m) === keyOf(i) && !m.sentAt && at) m.sentAt = at; });
   }));
+  // A MOVED DISH TAKES NOBODY'S SEAT (20 Oct '26 pm hunt): seat 2 at the old
+  // table is not seat 2 at the new one — the Labneh landed on the dairy guest's
+  // seat there, and Split by seat billed them for it. It is the table's dish.
+  moving.forEach(m => { if (m.seat != null) m.seat = null; });
   order.items = order.items.filter(i => !ids.includes(keyOf(i)));
   order.rounds = (order.rounds || [])
     .map(r => ({ ...r, items: (r.items || []).filter(i => !ids.includes(keyOf(i))) }))
@@ -15578,9 +15643,10 @@ app.post('/api/orders/:id/move-items', (req, res) => {
   retotal(order);
   let dest = data.orders.find(o => o.status === 'open' && o.orderType === 'dine-in' && String(o.table) === String(targetTable));
   if (dest) {
+    const heldThere = new Set((dest.items || []).filter(i => i.qty > 0 && !((dest.firedCourses || {})[i.course || 1] > 0)).map(i => i.course || 1));
     dest.items = (dest.items || []).concat(moving);
     dest.rounds = [...(dest.rounds || []), { id: nextRoundId(dest), sentAt: Date.now(), color: null, items: moving, moved: true, from: order.id }];
-    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))], movedFood);
+    carryCallAways(dest, order, [...new Set(moving.map(i => i.course || 1))], movedFood, heldThere);
     retotal(dest);
     dest.billPrinted = false; // its printed bill no longer holds these dishes
   } else {
@@ -16116,15 +16182,19 @@ function computeReportsOverview(data) {
   const monthFrom = (() => { const d2 = new Date(now); d2.setDate(1); d2.setHours(0, 0, 0, 0); return d2.getTime(); })();
   const month = paidIn(monthFrom, now);
   // How the money arrived, over the week.
+  // …the way the CASH-UP reads it (20 Oct '26 pm hunt): a tip added after the
+  // bill is card money, and a refund goes back the way it came, food first,
+  // tip last (refundByWay). A late tip on a cash bill read as Cash, and a
+  // refunded split bill kept cash here that the drawer had handed back.
   const methods = { cash: 0, card: 0, giftcard: 0 };
+  const addWay = (k, v) => { methods[k] = (methods[k] || 0) + v; };
   for (const o of week) {
-    const gt = (o.grandTotal !== undefined ? o.grandTotal : o.total) - (o.refundedTotal || 0);
-    if (o.paymentMethod === 'split' && Array.isArray(o.payments)) {
-      // A refund comes off every way it was paid, in proportion (Sep '26).
-      const full = (o.grandTotal !== undefined ? o.grandTotal : o.total) || 0;
-      const keep = full > 0 ? gt / full : 1;
-      for (const pm of o.payments) methods[pm.method] = (methods[pm.method] || 0) + pm.amount * keep;
-    } else methods[o.paymentMethod] = (methods[o.paymentMethod] || 0) + gt;
+    const late = (o.lateTips || []).reduce((a, t) => a + (t.amount || 0), 0);
+    if (o.paymentMethod === 'split' && Array.isArray(o.payments)) o.payments.forEach(pm => addWay(pm.method, pm.amount || 0));
+    else addWay(o.paymentMethod, ((o.grandTotal !== undefined ? o.grandTotal : o.total) || 0) - late);
+    if (late > 0) addWay('card', late);
+    const back = refundPartsSum(refundParts(o));
+    refundByWay(o, back.meal + back.voucher, back.tip).forEach(w => addWay(w.method, -w.amount));
   }
   // …less a tip handed back with its bill (18 Oct '26 hunt): the food is
   // refunded first and the tip last, as the cash-up and Tips & payouts take it
@@ -19454,7 +19524,7 @@ function renderIconPopoverPanel(icon, enabled, kind, id) {
       <div class="icon-popover-grid">
         ${(kind === 'mark' ? MARK_ICONS : PRESET_ICONS).map(ic => `<button type="button" class="icon-swatch ${icon === ic ? 'selected' : ''}" data-act="pick-popover-icon" data-icon="${ic}">${ic}</button>`).join('')}
       </div>
-      <input type="text" class="icon-popover-custom" id="icon-popover-custom-input" value="${icon || ''}" placeholder="or paste an emoji" maxlength="4">
+      <input type="text" class="icon-popover-custom" id="icon-popover-custom-input" value="${esc(icon || '')}" placeholder="or paste an emoji" maxlength="4">
     ` : ''}
     <div class="qp-row qp-actions" style="display:flex;justify-content:flex-end;margin-top:2px;"><button type="button" class="icon-action neutral" data-act="toggle-icon-popover" data-kind="${kind}" data-id="${id}" style="flex:0 0 76px;width:76px;min-width:0;padding:0;" aria-label="Close">${ACT_CROSS_SVG}</button></div>
   </div>`;
@@ -21213,14 +21283,22 @@ async function addHouseLogEntry() {
   const value = (document.getElementById('house-value') || {}).value || '';
   const reason = houseReason();
   if (!item.trim()) { state.toast = toastFail('Type an item name'); render(); armToastTimer(TOAST_SHORT); return; }
+  // ONE PRESS, ONE ENTRY (20 Oct '26 pm hunt): a double tap logged the $28
+  // comp twice. A second tap on its way is ignored; the key makes the server
+  // answer a retry with the entry it already made.
+  if (state.houseBusy) return;
+  state.houseBusy = true;
+  state._houseKey = state._houseKey || ('hl-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
   try {
     await api('/api/house-log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ item: item.trim(), qty, value, reason, staff: state.currentStaff ? state.currentStaff.name : 'Unknown' }) });
+      body: JSON.stringify({ item: item.trim(), qty, value, reason, staff: state.currentStaff ? state.currentStaff.name : 'Unknown', houseKey: state._houseKey }) });
+    state._houseKey = null;
     state.houseDraft = { item: '', qty: '1', value: '', reason };
     await loadHouseLog();
     state.toast = 'Logged';
     armToastTimer(TOAST_SHORT);
-  } catch (e) { state.toast = toastFail('Could not add'); render(); }
+  } catch (e) { if (e.status) state._houseKey = null; state.toast = toastFail('Could not add'); render(); }
+  finally { state.houseBusy = false; }
 }
 
 // keepCount: a paid-out or the float changed mid-count. The notes and coins
@@ -22054,6 +22132,8 @@ function doSameAgain(n, asked) {
     const line = { lineKey: mintLineKey(), id: item.id, menuItemId: item.menuItemId, name: item.name, price: item.origPrice !== undefined ? item.origPrice : item.price, qty: item.qty || 1,
       course: item.course || 1, seat: item.seat != null ? item.seat : null, note: item.note || '',
       variantId: item.variantId, modSelections: item.modSelections, removed: (item.removed || []).slice() };
+    // What the allergies said when it was rung: one told after it still stops Send.
+    line.algnSeen = allergySigs((state.menu || []).find(m => m.id === line.menuItemId), line.seat);
     // …and never into a line at another price: a lager comped to $0 took the
     // whole round free (the menu add and Add another already check it).
     const twin = state.cart.find(c => c.sentQty == null && c.id === line.id && c.course === line.course
@@ -22540,7 +22620,7 @@ function cartAllergyNews() {
     const mi = (state.menu || []).find(m => m.id === l.menuItemId);
     const now = allergySigs(mi, l.seat);
     if (!l.algnSeen) { l.algnSeen = now; continue; } // rung through a door that warned on its own
-    if (now.some(k => !l.algnSeen.includes(k))) return { itemId: mi.id, hits: allergenMatches(mi, l.seat != null ? l.seat : null), resume: 'send' };
+    if (now.some(k => !l.algnSeen.includes(k))) return { itemId: mi.id, hits: allergenMatches(mi, l.seat != null ? l.seat : null), resume: 'send', lineKey: l.lineKey };
   }
   return null;
 }
@@ -23790,6 +23870,12 @@ function maybeApplyAutoSurcharge() {
   // again, so 10% off a $120 bill stayed on after a dish came off and the bill
   // was $60 (Sep '26). A hand-made discount is still never touched.
   if (state.discount && state.discount.auto) state.discount = null;
+  // …EXCEPT ON A BILL ALREADY PART PAID UNDER IT (20 Oct '26 pm hunt): happy
+  // hour ended between two guests' shares, the rule was asked again, and the
+  // second guest paid full price on a bill split at the happy-hour price.
+  const ao = activeOpenOrder();
+  const kept = ao && (ao.splitPaid || []).length && ao.partOff && ao.partOff.auto ? ao.partOff : null;
+  if (kept && !state.discount) { state.discount = Object.assign({}, kept); return; }
   if (state.discount) return;
   const r = matchingAutoPreset();
   // …AND NEVER UNDER WHAT HAS BEEN PAID, like every other door (9 Oct '26): a
@@ -27418,7 +27504,8 @@ async function saveEditSent(asked) {
         // comes too.
         if (it && it.comboRef) setDishSays();
         else if (it) state.cart.push({ lineKey: mintLineKey(), id: it.id, menuItemId: it.menuItemId, name: it.name, price: d.price !== agg.price ? d.price : (it.origPrice !== undefined ? it.origPrice : it.price), qty: up,
-          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections, removed: (it.removed || []).slice(), ...(it.giftcardSale ? { giftcardSale: true } : {}) });
+          course: it.course || 1, seat: it.seat != null ? it.seat : null, note: it.note || '', variantId: it.variantId, modSelections: it.modSelections, removed: (it.removed || []).slice(), ...(it.giftcardSale ? { giftcardSale: true } : {}),
+          algnSeen: allergySigs((state.menu || []).find(m => m.id === it.menuItemId), it.seat != null ? it.seat : null) });
       }
       if (d.price !== agg.price && state.editSent) { const c = lineOffChoice(d.off); await doRepriceSent(state.editSent, d.price, c ? c.label : ''); }
     }
@@ -27504,6 +27591,7 @@ function doAddServing(match, asked) {
     // …and another voucher is a VOUCHER (18 Oct '26 hunt): it went as a plain
     // $100 line — paid for, never made, taxed as food.
     ...(item.giftcardSale ? { giftcardSale: true } : {}) };
+  line.algnSeen = allergySigs((state.menu || []).find(m => m.id === line.menuItemId), line.seat);
   // ANOTHER ONE IS ANOTHER ONE, NOT ANOTHER LINE (owner, Sep '26: "adding a
   // second quantity to an item in docket bar creates a separate item …
   // clicking the quantity a second time"). This pushed a raw line every tap.
@@ -29583,7 +29671,7 @@ function histRowsHtml() {
       <div class="order-badge">#${o.id}</div>
       <div class="order-info">
         <div class="t1">${who}${alsoName}${o.discount ? ` <span class="status-chip course">${o.discount.kind === 'surcharge' ? 'Surcharge' : 'Discount'}</span>` : ''}</div>
-        <div class="t2">${paidLabel} · ${(() => { const n = o.items.reduce((s, i) => s + i.qty, 0); return n + (n === 1 ? ' item' : ' items'); })()}${o.covers ? ' · ' + o.covers + (o.covers === 1 ? ' cover' : ' covers') : ''} · ${o.paymentMethod || 'unpaid'} · ${esc(o.staffName || 'Unknown')}</div>
+        <div class="t2">${paidLabel} · ${(() => { const n = o.items.reduce((s, i) => s + i.qty, 0); return n + (n === 1 ? ' item' : ' items'); })()}${o.covers ? ' · ' + o.covers + (o.covers === 1 ? ' cover' : ' covers') : ''} · ${esc(o.paymentMethod || 'unpaid')} · ${esc(o.staffName || 'Unknown')}</div>
       </div>
       <span class="status-chip ${o.status === 'void' ? 'void' : o.status === 'open' ? 'course' : 'paid'}">${o.status === 'open' ? 'open' : o.status}</span>
       <div class="order-total">${money(o.grandTotal !== undefined ? o.grandTotal : o.total)}${o.tip ? `<div class="ts" style="font-size:var(--fs-md);">+${money(o.tip)} tip</div>` : ''}</div>
@@ -30639,18 +30727,25 @@ async function submitExpense() {
   const f = state.expenseForm;
   const amount = parseFloat(f.amount);
   if (isNaN(amount) || amount <= 0) { state.toast = toastFail('Enter a valid amount.'); render(); return; }
+  // ONE PRESS, ONE EXPENSE (20 Oct '26 pm hunt), as the paid-out beside it: a
+  // second tap while the first is on its way is ignored, and the form's key
+  // makes the server answer a retry with the expense it already logged.
+  if (state.expenseBusy) return;
+  state.expenseBusy = true;
+  f.key = f.key || ('ex-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
   try {
     await api('/api/expenses', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: f.date || rosterDateKey(new Date()), category: f.category || 'Other', amount, note: f.note, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown' }),
+      body: JSON.stringify({ date: f.date || rosterDateKey(new Date()), category: f.category || 'Other', amount, note: f.note, staffName: state.currentStaff ? state.currentStaff.name : 'Unknown', expenseKey: f.key }),
     });
     state.expenses = await api('/api/expenses');
     state.expenseForm = { date: '', category: '', amount: '', note: '' };
     render();
   } catch (e) {
+    if (e.status) f.key = null; // a refusal is an answer: the next try is a new expense
     state.toast = toastFail(e.message || 'Could not save the expense.');
     render();
-  }
+  } finally { state.expenseBusy = false; }
 }
 async function deleteExpenseAction(id) {
   try { await api(`/api/expenses/${id}`, { method: 'DELETE' }); state.expenses = await api('/api/expenses'); render(); }
@@ -33461,10 +33556,10 @@ function renderDetailModal() {
       ${o.tax ? `<div class="detail-line"><span>${esc(taxLabel())}</span><span>${money(o.tax)}</span></div>` : ''}
       <div class="detail-line" style="${o.tip ? '' : 'font-weight:700;font-size:15px;'}"><span>Total</span><span>${money(o.total)}</span></div>
       ${o.tip ? `<div class="detail-line"><span>Tip</span><span>${money(o.tip)}</span></div><div class="detail-line" style="font-weight:700;font-size:15px;"><span>Total incl. tip</span><span>${money(o.grandTotal)}</span></div>` : ''}
-      ${o.paymentMethod === 'split' && Array.isArray(o.payments) ? o.payments.map(p => `<div class="detail-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="detail-line"><span>Payment</span><span>${o.paymentMethod || 'unpaid — open tab'}</span></div>`}
+      ${o.paymentMethod === 'split' && Array.isArray(o.payments) ? o.payments.map(p => `<div class="detail-line"><span>Payment (${esc(p.method)})</span><span>${money(p.amount)}</span></div>`).join('') : `<div class="detail-line"><span>Payment</span><span>${esc(o.paymentMethod || 'unpaid — open tab')}</span></div>`}
       <div class="detail-line"><span>Taken by</span><span>${esc(o.staffName || 'Unknown')}</span></div>
       <div class="detail-line"><span>Status</span><span>${o.status}</span></div>
-      ${o.status === 'void' && o.voidedBy ? `<div class="detail-line"><span>Voided by</span><span>${o.voidedBy}</span></div>` : ''}
+      ${o.status === 'void' && o.voidedBy ? `<div class="detail-line"><span>Voided by</span><span>${esc(o.voidedBy)}</span></div>` : ''}
       ${o.status === 'void' && o.voidReason ? `<div class="detail-line"><span>Void reason</span><span>${esc(o.voidReason)}${o.voidNote ? ' — ' + esc(o.voidNote) : ''}</span></div>` : ''}
       ${(o.refunds || []).map(r => `<div class="detail-line"><span>Refund${r.reason ? ' (' + esc(r.reason) + ')' : ''} — ${esc(r.staffName)}</span><span>-${money(r.amount)}</span></div>`).join('')}
       ${refundedTotal > 0 ? `<div class="detail-line" style="font-weight:700;"><span>Net total</span><span>${money(remaining)}</span></div>` : ''}
@@ -36539,7 +36634,7 @@ function renderSubcategoryModal() {
         ${togglePill(!!m.iconEnabled, 'subcategory-icon-enabled')}
       </div>
       ${m.iconEnabled ? `
-        <input id="subcategory-icon-input" type="text" value="${m.icon || ''}" placeholder="default" maxlength="4" style="width:70px;text-align:center;font-size:var(--fs-xl);">
+        <input id="subcategory-icon-input" type="text" value="${esc(m.icon || '')}" placeholder="default" maxlength="4" style="width:70px;text-align:center;font-size:var(--fs-xl);">
         ${renderIconPresets('subcategory-icon-input')}
       ` : ''}
       <div class="modal-actions">
@@ -37678,7 +37773,7 @@ function renderCategoryModal() {
         ${togglePill(!!m.iconEnabled, 'category-icon-enabled')}
       </div>
       ${m.iconEnabled ? `
-        <input id="category-icon-input" type="text" value="${m.icon || ''}" placeholder="default" maxlength="4" style="width:70px;text-align:center;font-size:var(--fs-xl);">
+        <input id="category-icon-input" type="text" value="${esc(m.icon || '')}" placeholder="default" maxlength="4" style="width:70px;text-align:center;font-size:var(--fs-xl);">
         ${renderIconPresets('category-icon-input')}
       ` : ''}
       <div class="modal-actions">
@@ -39119,7 +39214,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
     if (t.decorType === 'text') return `<span class="fl-text">${esc(t.label || '')}</span>`;
     const art = DECOR_ART[t.decorType];
     if (art) return `<span style="width:86%;height:86%;display:flex;align-items:center;justify-content:center;">${art}</span>`;
-    return t.icon ? `<span style="font-size:clamp(14px,96cqmin,480px);line-height:1;">${t.icon}</span>` : '';
+    return t.icon ? `<span style="font-size:clamp(14px,96cqmin,480px);line-height:1;">${esc(t.icon)}</span>` : '';
   }
   // The marker may be rotated (shapeStyle), but a table's number must stay upright
   // and readable, so counter-rotate the label content by the negative angle.
@@ -39866,6 +39961,7 @@ function billDiscount(o, t, sub) {
   if (state.discount && activeOpenOrder() && activeOpenOrder().id === o.id) return state.discount;
   if (t && t.discount) return t.discount;
   if (o.status === 'open' && o.source === 'doshii' && o.discount && o.discount.app) return o.discount; // what the app took off
+  if (o.status === 'open' && (o.splitPaid || []).length && o.partOff && o.partOff.auto) return o.partOff; // the rule its parts were paid under, as Pay keeps it
   const s = sub !== undefined ? sub : (o.items || []).filter(i => i.qty > 0).reduce((a, i) => a + i.price * i.qty, 0);
   const r = matchingAutoPreset({ covers: o.covers || (t && t.covers) || 0, subtotal: s, orderType: o.orderType, table: t ? t.id : '' });
   // …and the rule Pay leaves off, they leave off: one that would take the bill
@@ -41994,6 +42090,7 @@ function addComboToCart() {
         course: g.course || it.defaultCourse || state.activeCourse,
         comboRef: combo.id,
         comboStamp: stamp,
+        algnSeen: allergySigs(it, null),
       });
       priced = true;
     });
@@ -50314,7 +50411,9 @@ function handleActClick(el, e) {
           else if (m.resume === 'another') { state._allergenAck = false; const go = _anotherGo; _anotherGo = null; if (go) go(); }
           else if (m.resume === 'io-rest' && state.itemOptions) { _seatHoldFired = false; ioAssignRestTo(m.seat); }
           else if (m.resume === 'combo' && state.comboBuilder) addComboToCart();
-          else if (m.resume === 'send') { state._allergenAck = false; (state.cart || []).forEach(l => { l.algnSeen = allergySigs((state.menu || []).find(x => x.id === l.menuItemId), l.seat); }); sendToKitchen(); }
+          // Send anyway answers for the dish it SHOWED — another clash on the
+          // docket is shown next, not sent unseen (20 Oct '26 pm hunt).
+          else if (m.resume === 'send') { state._allergenAck = false; (state.cart || []).forEach(l => { if (l.lineKey === m.lineKey) l.algnSeen = allergySigs((state.menu || []).find(x => x.id === l.menuItemId), l.seat); }); sendToKitchen(); }
           else { const it = state.menu.find(x => x.id === m.itemId); if (it) addToCart(it, m.variant, m.modifiers, m.seat); else state._allergenAck = false; }
         }
       }

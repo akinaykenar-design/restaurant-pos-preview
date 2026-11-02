@@ -10277,7 +10277,8 @@ app.put('/api/settings', (req, res) => {
   if (req.body.floorControls !== undefined) data.settings.floorControls = req.body.floorControls === 'float' ? 'float' : 'band';
   if (req.body.floorPillEnabled !== undefined) data.settings.floorPillEnabled = !!req.body.floorPillEnabled;
   // Each pill clock keeps its own two minutes.
-  for (const k of ['seatedWarnMinutes', 'drinkWarnMinutes', 'drinkLateMinutes']) {
+  // ...and the bill clock (2 Nov '26): minutes a printed bill may wait, 0 off.
+  for (const k of ['seatedWarnMinutes', 'drinkWarnMinutes', 'drinkLateMinutes', 'billClockMins']) {
     if (req.body[k] !== undefined) { const n = parseInt(req.body[k], 10); if (!isNaN(n)) data.settings[k] = Math.max(0, Math.min(600, n)); }
   }
   // The floor's lens menu, in the venue's own order. Only the lenses the app
@@ -31721,6 +31722,20 @@ function missedOn(tableId) {
   });
 }
 function missedBadgeHtml(t) { return missedOn(t.id).length ? `<span class="tbl-cpill tbl-missed"><b>Not printed</b></span>` : ''; }
+// §§ Bill clock: a bill waiting too long says so on its table
+// (owner yes, 2 Nov '26 — borrowed from basketball's shot clock). A bill
+// printed and not paid for longer than the venue's minutes (10 out of the
+// box, 0 switches it off) wears the Not-sent pill reading "Bill 12m", live.
+// Same pill, same red: one alarm, one look. It goes the moment the bill is
+// paid or un-printed. The table's order already carries when it printed.
+function billClockMins() { const n = parseInt(state.settings.billClockMins, 10); return isNaN(n) ? 10 : Math.max(0, n); }
+function billClockBadgeHtml(t) {
+  const after = billClockMins(); if (!after) return '';
+  const o = tableOpenOrder(t.label);
+  if (!o || !o.billPrinted || !o.billPrintedAt) return '';
+  const mins = Math.floor((Date.now() - o.billPrintedAt) / 60000);
+  return mins >= after ? `<span class="tbl-cpill tbl-missed"><b>Bill ${pillDur(mins)}</b></span>` : '';
+}
 const ACT_PRINTER_SVG = SYS_PRINTER_SVG.replace(' class="sys-i"', '');
 function renderMissedPop() {
   const mp = state.missedPop; if (!mp) return '';
@@ -37805,6 +37820,16 @@ function renderTableStatusAdmin() {
             ${activeChip(lv.on, 'set-course-pill-on', `data-key="${lv.n}"`)}
           </div>`).join('')}`}
         </div>`; }).join('')}
+        ${/* THE BILL CLOCK (owner yes, 2 Nov '26): one number, the same box
+              as the clocks above. 0 switches it off. */ ''}
+        <div class="ts-clock">
+          <div style="font-weight:700;font-size:var(--fs-md);">Bill</div>
+          <div class="ts" style="margin-bottom:10px;">Since the bill printed. 0 is off.</div>
+          <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">
+            <label class="field-label" style="margin:0;flex:1;">Bill waiting after</label>
+            <input type="number" min="0" max="600" step="1" value="${billClockMins()}" class="num-field" onblur="if (isNaN(parseInt(this.value,10))) { this.value = '${billClockMins()}'; return; } saveTicketSetting({ billClockMins: Math.max(0, parseInt(this.value,10)||0) })"><span class="ts">min</span>
+          </div>
+        </div>
         ${/* GUESTS SITS WITH THEM (owner, Sep '26: "guests go on the options
               panel, simple, just make it similar to the others"). One row per
               note type, the same row as Spend and the courses. */ ''}
@@ -39338,7 +39363,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // own corner, so it turned with a turned table, lay over the number and
   // clipped the name to "Jam…" (owner's walk, Sep '26).
   const lockHtml = opts.lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(opts.lock.staff)}</span>` : '';
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock || !state.floorStatusView || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + billClockBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return (loud || landingBadgeHtml(t)) + (opts.lock || !state.floorStatusView || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
 }
 
 // EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
@@ -40807,7 +40832,7 @@ function renderTablePickerMiddle() {
                    down above the button. The booking countdown sits INSIDE
                    the button here: under it, it landed on the next row. */ ''}
               ${!lock && state.floorStatusView && state.floorStatusView !== 'booked' ? tableResChip(t) : ''}
-              ${uprightBadges({ ...t, rotation: 0 }, (() => { const loud = missedBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return loud || (!lock ? landingBadgeHtml(t) : ''); })())}
+              ${uprightBadges({ ...t, rotation: 0 }, (() => { const loud = missedBadgeHtml(t) + billClockBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return loud || (!lock ? landingBadgeHtml(t) : ''); })())}
               ${transferFxHtml(t)}
             </div>`;
           }).join('')}

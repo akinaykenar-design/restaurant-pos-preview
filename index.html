@@ -3938,7 +3938,7 @@ body{ --pad-drop:min(250px, calc(50dvh - 8px)); --num-key-w:84px; --num-key-h:74
    over the name of the waiter holding it — Sep '26). */
 .tbl-badges > .tbl-stack{ position:absolute; left:50%; top:calc(100% + var(--pill-out, 0%)); transform:translate(-50%, 2px);
   display:flex; flex-direction:column; align-items:center; gap:2px; }
-.tbl-stack > .tbl-lock, .tbl-stack > .tbl-cpill, .tbl-stack > .tbl-res{ position:static; left:auto; top:auto; right:auto; bottom:auto; transform:none; }
+.tbl-stack > .tbl-lock, .tbl-stack > .tbl-cpill{ position:static; left:auto; top:auto; right:auto; bottom:auto; transform:none; }
 /* No room below (a table on the room's last row) and the stack wears itself
    above instead — fitFloorBadges() measures it after every render. Reversed,
    so the badge nearest the table stays nearest the table. */
@@ -6173,7 +6173,7 @@ body[data-theme="dark"] .decor-chip-block{ border-color:rgba(255,255,255,.38); }
    table opened the covers pad). It is drawn by the floor's own code, so it
    carries the floor's own handlers — the taps stop here. */
 .ts-pill-box{ position:relative; min-height:44px; display:flex; align-items:center; justify-content:center; pointer-events:none; }
-.ts-pill-box .tbl-cpill, .ts-pill-box .tbl-res{ position:static; transform:none; }
+.ts-pill-box .tbl-cpill{ position:static; transform:none; }
 /* TRUE TO THE FLOOR: the map wears the picker's own pill rules (12 on the
    number), so the preview wears them too — it read a size bigger otherwise
    (owner, Sep '26: "are these size accurate previews"). */
@@ -37416,7 +37416,12 @@ function renderScreenAdmin() {
 // SPEND LEFT THE FLOOR FOR BILLS (owner, 9 Oct '26: "incorporate the spend
 // filter into the bills view ... and remove that filter"): a big bill is a
 // green card on Bills, and Bills sorts by Spend.
-const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Order notes'], ['course', 'Course'], ['drinks', 'Drinks']];
+// TWO KEYS (owner, 4 Nov '26: "just the filters... too much noise"). Course
+// and Drinks were keys that repainted every table to answer a question; the
+// one answer a waiter must act on — a LATE course — is red on its own now,
+// with nothing picked, so neither key earned its place. Booked and Order
+// notes stay: they say something the plain floor cannot.
+const FLOOR_LENSES = [['booked', 'Booked'], ['guests', 'Order notes']];
 // TIME AT TABLE IS GONE (owner, Sep '26: "delete seated status"). It counted
 // from the moment the party sat down — but the table already SAYS somebody is
 // sitting there, in colour, with nothing picked at all. What a waiter actually
@@ -37518,30 +37523,6 @@ function pillSamplesFor(lens) {
   // yellow and the red live in the Pill card's own rows.
   // The COURSE lens is the exception: it draws a different pill per course, so
   // it shows one per course that is on (owner, Sep '26).
-  // ALL THREE WAITS, NOT JUST THE FIRST (owner, Sep '26: "should show what
-  // long and late look like"). Every sample used to sit at half the first
-  // threshold, so the legend only ever drew the short one and the two colours
-  // a venue is most likely to change were the two it could not see. Off
-  // levels drop out, the same as they do on the floor.
-  const waits = (key) => {
-    const { warn, over } = pillClockMins(key);
-    return [['short', Math.max(1, Math.round(warn * 0.5))], ['long', warn], ['late', over]]
-      .filter(([lv]) => !pillLevelIsOff(key, lv));
-  };
-  if (lens === 'course') {
-    const on = coursePillLevels().filter(l => l.on);
-    const mins = Math.max(1, Math.round(pillClockMins('course').warn * 0.5));
-    const per = on.map(l => ({ name: l.name, mins, courseN: l.n }));
-    // ...and one course carried through the waits, so the three colours show
-    // without drawing every course three times over.
-    const first = on[0];
-    const rest = first ? waits('course').filter(([lv]) => lv !== 'short')
-      .map(([lv, m]) => ({ name: lv === 'long' ? 'Long' : 'Late', mins: m, courseN: first.n })) : [];
-    return per.concat(rest);
-  }
-  const clock = PILL_CLOCKS.find(c => c.key === lens);
-  if (clock) return waits(lens).map(([lv, m]) => ({
-    name: lv === 'short' ? 'Short' : lv === 'long' ? 'Long' : 'Late', mins: m }));
   // Guests is the lens that carries the marks: the VIP star and the allergy !
   // ride the corners there, and the pill names the allergy (owner, Sep '26:
   // "booked should only show booked pills, guests should show VIPs and
@@ -37647,7 +37628,7 @@ function renderTableStatusPreview() {
       s.res ? [{ id: 'sample-res', tableId: t.id, time: new Date(now + 30 * 60000).toISOString(), status: 'booked' }] : [],
       () => {
         state.settings.floorPillEnabled = true;
-        if (s.res) return tableResChip(t);
+        if (s.res) return floorPillHtml(t, null);
         // A mark draws itself: the pill when the reading spells it out, the
         // corner glyph when it does not (symbols, and VIP either way).
         if (s.markKey) return floorPillHtml(t, null) || tableMarksHtml(t);
@@ -38698,16 +38679,6 @@ function upcomingBookingFor(tableId, aheadMin) {
 // without a filter attached"): the "in 44m" booking chip sat under tables
 // on the plain floor. It shows only while a floor key is lit; the Booked key's
 // own pill already says it.
-function tableResChip(t) {
-  if (t.type === 'decor') return '';
-  const r = upcomingBookingFor(t.id, 180);
-  if (!r) return '';
-  const at = new Date(r.time).getTime(), day = new Date(at).toDateString();
-  const more = (state.reservations || []).filter(x => x !== r && x.tableId === t.id && (!x.status || x.status === 'booked')
-    && new Date(x.time).getTime() > at && new Date(x.time).toDateString() === day).length;
-  const mins = Math.round((at - Date.now()) / 60000);
-  return `<span class="tbl-res">${mins > 0 ? `in ${pillDur(mins)}` : 'now'}${more ? `<span class="tbl-res-more">+${more}</span>` : ''}</span>`;
-}
 // Two-tier status grammar (owner-picked, Aug 2026): a GLOW HALO means "this
 // table needs a human" — locked, bill printed, ignored past the cap, over
 // time. The table keeps its finish and the halo radiates around it (gentle
@@ -38792,25 +38763,6 @@ function tableStatusFx(t, cs, lock) {
   // key asks about. So the floor is never grey, and there is never a reading
   // on top of a reading. It used to go blank with nothing picked, which is
   // why the floor had to open already asking a question nobody asked it.
-  // THE READING YOU PICKED IS THE COLOUR ON THE TABLE (owner, Sep '26: "the
-  // colour should change the table colour when I select the status in
-  // floating bar"). Courses first. The pill already named the course in small
-  // letters; now the whole table wears it, so a room can be read from the
-  // door instead of leaned into. A course the venue switched off paints
-  // nothing, exactly as its pill says nothing.
-  if (state.floorStatusView === 'course') {
-    if (!cs || !cs.courseN || coursePillOff(cs.courseN)) return none;
-    return wash(cs.color || 'var(--teal)');
-  }
-  // Drinks: red past the late minutes, gold past the long ones, and a table
-  // that is fine stays plain — the colour is for the tables to go to.
-  if (state.floorStatusView === 'drinks') {
-    const od = tableOpenOrder(t.label);
-    if (!od) return none;
-    const lv = pillClockLevel(drinkMins(od), 'drinks');
-    if (lv === 'short' || pillLevelIsOff('drinks', lv)) return none;
-    return wash(lv === 'late' ? statusColor('pillDanger', '#FF3B30') : statusColor('pillWarn', '#FFCC00'));
-  }
   // Notes, the same way: the table wears the colour the venue painted that
   // note type in admin, so the floor and the setup card never disagree.
   if (state.floorStatusView === 'guests') {
@@ -38963,10 +38915,7 @@ function pillDur(mins) {
 // they shared one pair of numbers, with Idle's fixed at 15 in the code.
 const PILL_CLOCKS = [
   { key: 'course', name: 'Course', what: 'Since the kitchen was told to fire.', warn: 'pillWarnMinutes', over: 'courseWaitMinutes', warnDef: 10, overDef: 15 },
-  { key: 'drinks', name: 'Drinks', what: 'Since the last drink went out.', warn: 'drinkWarnMinutes', over: 'drinkLateMinutes', warnDef: 20, overDef: 30 },
 ];
-// When the table's last drink went out: the newest round carrying anything
-// from a drinks course — or, with none yet, when the party sat down.
 const courseIsDrinks = n => !courseInKitchen(n);
 // A GIFT VOUCHER IS NOT A COURSE. Sold at the table it had no course, so it
 // read as course 1 everywhere: a held Drinks course on the Pass with a Call
@@ -38976,11 +38925,6 @@ const courseLines = items => (items || []).filter(i => !i.giftcardSale);
 // A ticket with nothing live on it — every dish voided, or only a note sent —
 // is a table SEATED, not a row of empty squares (Sep '26).
 const nothingSent = o => !o || !courseLines(o.items).some(i => i.qty > 0);
-function lastDrinkAt(o) {
-  const at = (o.rounds || []).filter(r => courseLines(r.items).some(i => i.qty > 0 && courseIsDrinks(i.course || 1))).map(r => r.sentAt || 0);
-  return at.length ? Math.max(...at) : (o.createdAt || Date.now());
-}
-const drinkMins = o => Math.max(0, Math.floor((Date.now() - lastDrinkAt(o)) / 60000));
 function pillClockMins(key) {
   const c = PILL_CLOCKS.find(c => c.key === key);
   const n = (v, d) => { const x = parseInt(v, 10); return isNaN(x) ? d : x; };
@@ -39130,21 +39074,25 @@ function floorPillHtml(t, cs) {
   };
   const pill = (style, inner, title) => `<span class="tbl-cpill" style="${style}">${inner}</span>`;
   const lens = state.floorStatusView;
-  // NOTHING PICKED, NOTHING SAID. Every branch below is a lens, and the last
-  // one is the course — so a floor with nothing picked would have fallen
-  // through to it and gone on talking.
-  if (!lens) return '';
   const o = tableOpenOrder(t.label);
-  // ONLY TROUBLE LIGHTS UP (owner, Sep '26 — an airliner's "dark cockpit":
-  // when everything is normal, no lights are on). Sixteen clocks ran on a busy
-  // floor, six red, every one saying "3rd", tables with the bill out still
-  // counting. Now a table speaks only when a course is running LONG or LATE —
-  // naming THAT course — and a late one still outranks every lens.
-  const tr = lens !== 'booked' && lens !== 'drinks' ? floorCourseTrouble(o) : null;
-  if (tr && tr.kind !== 'call' && !coursePillOff(tr.n) && !pillLevelIsOff('course', tr.kind)) {
+  // THE LATE COURSE IS ALWAYS RED (owner, 4 Nov '26: "just the filters").
+  // It used to speak only under the Course key, so a floor with nothing
+  // picked — the way the floor opens — never said the one thing a waiter has
+  // to act on. Now a course past its late minutes is red with no key lit and
+  // under every key; it is the floor's one alarm about food. Long (yellow) is
+  // the Pass's to show — only trouble lights up on the floor (the airliner's
+  // dark cockpit, Sep '26). A table with a course done and the next one held
+  // says "Call 2nd": that is an action too.
+  const tr = floorCourseTrouble(o);
+  if (tr && tr.kind === 'late' && !coursePillOff(tr.n) && !pillLevelIsOff('course', 'late')) {
     const nm = esc(String(courseInfo(tr.n).name || '').slice(0, 8));
-    return pill(sevAt(tr.mins, 'course'), `<i style="background:${coursePillColor(tr.n) || 'var(--teal)'};"></i><b>${nm}${tr.kind === 'late' ? ' late' : ''} · ${pillDur(tr.mins)}</b>`, tr.kind === 'late' ? 'Chase the kitchen' : 'Running long');
+    return pill(sevAt(tr.mins, 'course'), `<i style="background:${coursePillColor(tr.n) || 'var(--teal)'};"></i><b>${nm} late · ${pillDur(tr.mins)}</b>`, 'Chase the kitchen');
   }
+  if (tr && tr.kind === 'call' && !coursePillOff(tr.n)) {
+    return pill('background:var(--surface);color:var(--text-primary);', `<b>Call ${esc(String(courseInfo(tr.n).name || '').slice(0, 8))}</b>`, 'Nothing on its way');
+  }
+  // NOTHING PICKED, NOTHING MORE SAID. Every branch below is a key.
+  if (!lens) return '';
   if (lens === 'guests') {
     // The pill spells the note whatever the format: nothing rides on the table itself (4 Nov '26).
     // ONE CHOICE, TWO PLACES: the same mark the wash paints (tableNoteMark)
@@ -39159,12 +39107,6 @@ function floorPillHtml(t, cs) {
     const n = notesOfType(g.id, t.notes).find(x => String(x.text || '').trim());
     return pill(tint(guestMarkColor(g)), `<b>${esc(String(n.text).slice(0, 18))}</b>`, g.name);
   }
-  if (lens === 'drinks') {
-    if (!o) return '';
-    const mins = drinkMins(o);
-    if (pillLevelIsOff('drinks', pillClockLevel(mins, 'drinks'))) return '';
-    return pill(sevAt(mins, 'drinks'), `<b>Drink · ${pillDur(mins)}</b>`, 'Since the last drink');
-  }
   if (lens === 'booked') {
     const r = upcomingBookingFor(t.id, 180);
     if (!r) return '';
@@ -39172,18 +39114,6 @@ function floorPillHtml(t, cs) {
     const mins = Math.round((d.getTime() - Date.now()) / 60000);
     const rel = mins <= 0 ? 'now' : 'in ' + pillDur(mins);
     return pill('background:var(--orange);color:#fff;', `<b>${hh}:${mm} · ${rel}</b>`, `${esc(r.name)} · ${r.partySize}`);
-  }
-  // Course lens: the course's own dot + a danger-scaled wait.
-  // NO COURSE, NOTHING TO SAY (owner, Sep '26: "why is this purple?"). A round
-  // with nothing on it that belongs to a course — a gift voucher was the one
-  // they caught — left courseN empty, and the dot borrowed the ROUND's own
-  // colour instead, so a table read as a course nobody had sent. The WASH has
-  // always wanted a real course here; the pill did not, so the two disagreed
-  // on the same table. Same rule now, one reading.
-  // …and the one other thing worth saying: nothing is on its way and the
-  // next course is still held — "Call 3rd". A table that is fine says nothing.
-  if (tr && tr.kind === 'call' && !coursePillOff(tr.n)) {
-    return pill('background:var(--surface);color:var(--text-primary);', `<b>Call ${esc(String(courseInfo(tr.n).name || '').slice(0, 8))}</b>`, 'Nothing on its way');
   }
   return '';
 }
@@ -39268,7 +39198,7 @@ function floorMarkerInner(t, canvasHeightPx, opts) {
   // own corner, so it turned with a turned table, lay over the number and
   // clipped the name to "Jam…" (owner's walk, Sep '26).
   const lockHtml = opts.lock ? `<span class="tbl-lock">${SYS_LOCK_SVG} ${esc(opts.lock.staff)}</span>` : '';
-  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + billClockBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return loud + (opts.lock || !state.floorStatusView || state.floorStatusView === 'booked' ? '' : tableResChip(t)); })())}`;
+  return `${up0}<span class="fm-num">${esc(t.label)}</span>${up1}${uprightBadges(t, (() => { const loud = lockHtml + missedBadgeHtml(t) + billClockBadgeHtml(t) + draftBadgeHtml(t) + floorPillHtml(t, cs); return loud; })())}`;
 }
 
 // EVERY BADGE READS HORIZONTALLY, WHATEVER THE TABLE IS DOING (owner, Aug '26:
@@ -40736,7 +40666,6 @@ function renderTablePickerMiddle() {
                    badges do too — a turned plan table hung its stack upside
                    down above the button. The booking countdown sits INSIDE
                    the button here: under it, it landed on the next row. */ ''}
-              ${!lock && state.floorStatusView && state.floorStatusView !== 'booked' ? tableResChip(t) : ''}
               ${uprightBadges({ ...t, rotation: 0 }, (() => { const loud = missedBadgeHtml(t) + billClockBadgeHtml(t) + draftBadgeHtml(t) + (!lock ? floorPillHtml(t, cs) : ''); return loud; })())}
               ${transferFxHtml(t)}
             </div>`;

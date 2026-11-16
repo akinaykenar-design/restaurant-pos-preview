@@ -800,6 +800,15 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
   body[data-simple="on"] .course-tabs.dkt-courses{ display:none; } /* the docket's course keys only: the split's ways and the seat row wear the same chip and stay */
   body[data-simple="on"] .course-group{ border-radius:var(--radius); overflow:hidden; }
   body[data-simple="on"] .course-group .tl-qty{ background:none; }
+  /* Courses, added as needed: a course's NAME is its key (a halo makes it a
+     finger's size), the lit one says so in the accent, and "+ Course" is an
+     empty slot — dashed, like every slot waiting to be filled. */
+  .cg-pick{ position:relative; cursor:pointer; }
+  .cg-pick::before{ content:''; position:absolute; inset:-8px 0; }
+  .cg-here{ display:inline-flex; align-items:center; gap:4px; margin-left:8px; font-size:var(--fs-chip); font-weight:700; color:var(--blue); }
+  .cg-here i{ width:8px; height:8px; border-radius:50%; background:currentColor; }
+  .cg-none{ height:var(--sq-ctl); display:flex; align-items:center; padding:0 16px; background:var(--surface); border-radius:var(--radius); font-size:var(--fs-md); color:var(--charcoal-soft); }
+  .cg-add{ display:flex; align-items:center; justify-content:center; height:var(--sq-ctl); margin:12px 8px 0; width:calc(100% - 16px); box-sizing:border-box; background:none; border:1px dashed var(--steel-300); border-radius:var(--radius); font:inherit; font-size:var(--fs-md); font-weight:700; color:var(--charcoal-soft); cursor:pointer; }
   /* The money row: words, one dark key for Pay, green for Send. */
   body[data-simple="on"] .action-icons{ display:flex; gap:8px; }
   body[data-simple="on"] .action-icons .icon-action{ flex:1 1 0; min-width:0; height:52px; flex-direction:row; background:var(--surface); color:var(--text-primary); border-radius:var(--btn-radius); }
@@ -28660,8 +28669,25 @@ function renderTicketPanel() {
         const cartByCourse = {};
         state.cart.forEach((c, idx) => { (cartByCourse[c.course] = cartByCourse[c.course] || []).push({ ...c, idx }); });
         let coursesToShow = courseNumbers.filter(n => (sentByCourse[n] && Object.keys(sentByCourse[n]).length) || (cartByCourse[n] && cartByCourse[n].length));
+        // COURSES, ADDED AS YOU NEED THEM — SIMPLE (owner, 16 Nov '26, from
+        // Lightspeed: "lets you add courses as needed"; drawn, then "Yes build
+        // it"). Simple has no row of course keys. A course NAME is its key: a
+        // tap lights it ("Adding here") and the next dishes land on it; a
+        // second tap lets it go and dishes file by their section again. Under
+        // the order "+ Course" lights the next course along, empty until
+        // something is rung. One mechanism: the lit course IS the active
+        // course the Classic keys set, taken by hand the same way.
+        const simple = simpleOn() && !state.showCheckout;
+        const litCourse = simple && !autoCourseOn() ? state.activeCourse : null;
+        const addCourseKey = () => {
+          if (!simple) return '';
+          const top = Math.max(0, litCourse || 0, ...coursesToShow);
+          const next = courseNumbers.find(n => n > top && courseInfo(n).enabled !== false);
+          return next ? `<button type="button" class="cg-add" data-act="simple-course" data-val="${next}">+ Course</button>` : '';
+        };
+        if (simple && litCourse && !coursesToShow.includes(litCourse)) coursesToShow = [...coursesToShow, litCourse].sort((a, b) => a - b);
         if (coursesToShow.length === 0) {
-          return `<div class="empty-ticket"></div>`;
+          return `<div class="empty-ticket"></div>${addCourseKey()}`;
         }
         // Course pages (Settings → Courses): the docket shows only the active
         // course; the course tabs are the pages.
@@ -28762,19 +28788,21 @@ function renderTicketPanel() {
           // course"). Under All the tab says "All" and names nothing, so with
           // one course in play the lines arrived with no course on them at
           // all — and the whole point of All is reading the ticket grouped.
-          const soloCourse = coursesToShow.length === 1 && !state.docketShowAll;
+          const soloCourse = coursesToShow.length === 1 && !state.docketShowAll && !simple; // Simple always names the course: the name is its key
           const head = (soloCourse && !fired) ? '' : `
-            <div class="course-group-head">
+            <div class="course-group-head${simple ? ' cg-pick' : ''}"${simple ? ` data-act="simple-course" data-val="${n}" role="button" aria-pressed="${litCourse === n}"` : ''}>
               <span>${soloCourse ? '' : esc(info.name)}</span>
+              ${litCourse === n ? `<span class="cg-here"><i></i>Adding here</span>` : ''}
               ${courseClockHtml(openOrder, n, fired)}
             </div>`;
           return `
-          <div class="course-group">
+          <div class="course-group${simple && !orderedKeys.length ? ' cg-empty' : ''}">
             ${head}
             ${orderedKeys.map(k => lineHtml(merged.get(k))).join('')}
-            ${sameAgainKey(n)}
+            ${simple && !orderedKeys.length ? `<div class="cg-none">The next dishes land here</div>` : ''}
+            ${simple ? '' /* Same again rests in Simple (owner, 16 Nov '26: "Same again is bs") */ : sameAgainKey(n)}
           </div>`;
-        }).join('');
+        }).join('') + addCourseKey();
       })()}
     </div>
     ${(() => {
@@ -51134,6 +51162,13 @@ function handleActClick(el, e) {
       // §§ router: menu items on and off
       else if (act === 'menu-out-toggle') { state.menuModal.out = !state.menuModal.out; render(); }
       else if (act === 'remove-variant') { removeVariantRow(parseInt(el.dataset.vidx)); }
+      else if (act === 'simple-course') {
+        // Simple's course name and its "+ Course": light it by hand, or — on
+        // the lit one — let it go and file by section again.
+        const n = parseInt(el.dataset.val, 10);
+        if (!autoCourseOn() && state.activeCourse === n && state.settings.autoCourse !== false) { state.autoCourseOverride = null; state.activeCourseFiled = null; render(); }
+        else { if (autoCourseOn()) state.autoCourseOverride = false; setActiveCourse(n); }
+      }
       else if (act === 'set-course') {
         if (_courseHoldFired) { _courseHoldFired = false; return; }
         // Tapping a course while Auto is on takes manual control right there —

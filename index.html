@@ -824,6 +824,17 @@ body[data-theme="dark"] .practice-bar{background:color-mix(in srgb, var(--gold) 
   body[data-simple="on"] .action-icons.ai-pay .icon-action.send, body[data-simple="on"] .action-icons.ai-pay .icon-action.discard{ display:none; }
   body[data-simple="on"] .action-icons.pay-pair{ grid-template-columns:repeat(2, minmax(0,1fr)); grid-template-rows:60px; }
   body[data-simple="on"] .action-icons.pay-pair .icon-action{ background:var(--surface); color:var(--text-primary); }
+  /* THE ORDER IS A RECEIPT (owner, 16 Nov '26): white paper, one line per
+     dish with a hairline under it — no box round each line, no block behind
+     the count, no cross. A line not sent yet is taken off by a swipe left
+     (it shows Remove behind it); a tap still opens it. */
+  body[data-simple="on"] .main > :last-child{ background:var(--surface); }
+  body[data-simple="on"] .course-group{ margin:0 var(--hub-edge) 8px; border-radius:0; overflow:hidden; }
+  body[data-simple="on"] .course-group :is(.new, .sent){ border:none; border-bottom:1px solid var(--steel-200); border-radius:0; background:none; margin:0; padding:0; min-height:var(--sq-ctl); overflow:visible; touch-action:pan-y; }
+  body[data-simple="on"] .course-group .tl-qty{ background:none; border:none; min-width:28px; padding:0; justify-content:flex-start; color:inherit; }
+  body[data-simple="on"] .course-group .tl-remove{ display:none; }
+  body[data-simple="on"] .course-group .cg-none{ background:none; border-bottom:1px solid var(--steel-200); border-radius:0; }
+  body[data-simple="on"] .course-group .new.sw::after{ content:'Remove'; position:absolute; left:100%; top:0; bottom:0; width:96px; display:flex; align-items:center; justify-content:center; background:var(--alarm); color:#fff; font-size:var(--fs-md); font-weight:700; }
   /* THE TABLE'S CORNER: its number, its guests, how long. The number opens
      its tools — six words dropped over its own order — and the guests open
      the covers pad. The deck's Tools key and the docket's shortcut row rest:
@@ -28493,6 +28504,33 @@ const SYS_BOLT_SVG = DKT_BOLT_SVG.replace('act-i', 'sys-i');
 const SYS_DOLLAR_SVG = ACT_PAY_SVG.replace('<svg ', '<svg class="sys-i" ');
 // Set by an account-tile hold so the tap that follows doesn't also fire it.
 let _suppressLineTap = false;
+// SIMPLE: SWIPE A LINE LEFT TO TAKE IT OFF (owner, 16 Nov '26, from Mail's
+// swipe to delete: "the order is a receipt" — no cross on every line). Only a
+// line not sent yet: it follows the finger, shows Remove behind it, and past
+// SWIPE_OFF it goes through the cross's own removeLine. A sent line is the
+// kitchen's and still opens its editor. Passive listeners, pointer events:
+// nothing here stops a scroll.
+const SWIPE_REACH = 96, SWIPE_OFF = 64;
+let _swipe = null;
+document.addEventListener('pointerdown', (e) => {
+  const ln = simpleOn() && e.target.closest ? e.target.closest('.course-group .new[data-act="edit-line"]') : null;
+  _swipe = ln ? { ln, x: e.clientX, y: e.clientY, idx: parseInt(ln.dataset.idx, 10), dx: 0, on: false } : null;
+}, { passive: true });
+document.addEventListener('pointermove', (e) => {
+  if (!_swipe) return;
+  const dx = e.clientX - _swipe.x, dy = e.clientY - _swipe.y;
+  if (!_swipe.on && (Math.abs(dy) > 12 || dx > 8)) { _swipe = null; return; } // a scroll, or the other way
+  if (dx < -8) { _swipe.on = true; _swipe.dx = Math.max(-SWIPE_REACH, dx); _swipe.ln.style.transform = `translateX(${_swipe.dx}px)`; _swipe.ln.classList.add('sw'); }
+}, { passive: true });
+function swipeEnd() {
+  const s = _swipe; _swipe = null;
+  if (!s || !s.on) return;
+  _suppressLineTap = true; setTimeout(() => { _suppressLineTap = false; }, 350);
+  if (s.dx <= -SWIPE_OFF && !isNaN(s.idx)) removeLine(s.idx);
+  else { s.ln.style.transform = ''; s.ln.classList.remove('sw'); }
+}
+document.addEventListener('pointerup', swipeEnd, { passive: true });
+document.addEventListener('pointercancel', swipeEnd, { passive: true });
 // Docket shortcut icons: most default ON, a few are opt-in. "Pinned" == shown
 // on the docket head row. Holding a tile in the table account toggles it.
 const DOCKET_DEFAULT_ON = ['table', 'covers', 'notes', 'quickNote', 'callAway'];
@@ -50500,7 +50538,7 @@ function handleActClick(el, e) {
       }
       else if (act === 'qty-inc') { changeQty(parseInt(el.dataset.idx), 1); }
       else if (act === 'remove') { removeLine(parseInt(el.dataset.idx)); }
-      else if (act === 'edit-line') { openLineEdit(parseInt(el.dataset.idx)); }
+      else if (act === 'edit-line') { if (_suppressLineTap) { _suppressLineTap = false; return; } openLineEdit(parseInt(el.dataset.idx)); } // a swipe took it off — don't also open it
       else if (act === 'close-line-edit') {
         // Save: a line counted down to 0 comes off the docket here.
         const i = state.editLine ? state.editLine.idx : -1;
